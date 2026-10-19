@@ -1,0 +1,6 @@
+# 低堆上限夹具：用于验证 arena 真的回收了内存（1MB 上限，4MB 分配量）
+[core]
+multicore = true
+
+[memory]
+heap_limit_mb = 1

@@ -195,8 +195,42 @@ def test_single_core():
             rc, stdout, stderr = r
             ok("单核降级结果不变") if rc == 0 and stdout.strip() == b"11519999978" \
                 else bad(f"单核降级错误 rc={rc} out={stdout[:80]!r}")
+
+        # spawn 在单核配置下必须退化为同步执行，结果不变
+        shutil.copy(os.path.join(ROOT, "tests/t13_spawn.ros"), tmp)
+        src2 = os.path.join(tmp, "t13_spawn.ros")
+        out2 = os.path.join(ROOT, "build", "win_spawn_1c.exe")
+        build(src2, out2)
+        r = run(out2)
+        if r is not None:
+            rc, stdout, _ = r
+            ok("spawn 单核降级结果不变") if rc == 0 and \
+                stdout == b"6765\n81\n110\nspawn ok\n" \
+                else bad(f"spawn 单核降级错误 rc={rc} out={stdout[:80]!r}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_arena():
+    """arena 必须真的回卷 bump 指针：1MB 上限下完成 ~4MB 分配量。"""
+    out = os.path.join(ROOT, "build", "win_arena.exe")
+    build(os.path.join(ROOT, "tests/arena_lowheap/arena.ros"), out)
+    r = run(out, timeout=300)
+    if r is None:
+        skip("arena：非 Windows 平台，跳过执行")
+        return
+    rc, stdout, stderr = r
+    ok("arena：1MB 上限下 4MB 分配量跑完（回收生效）") if rc == 0 \
+        else bad(f"arena rc={rc} stderr={stderr[-160:]!r}")
+    ok("arena 输出正确") if stdout == b"arena ok\n200000\n" \
+        else bad(f"arena 输出 {stdout!r}")
+
+    out2 = os.path.join(ROOT, "build", "win_no_arena.exe")
+    build(os.path.join(ROOT, "tests/arena_lowheap/no_arena.ros"), out2)
+    r = run(out2, timeout=300)
+    rc, _stdout, stderr = r
+    ok("无 arena 时 1MB 堆上限 fail-fast") if rc != 0 and b"heap_limit_mb" in stderr \
+        else bad(f"无 arena 未 OOM rc={rc} stderr={stderr[:120]!r}")
 
 
 def test_assert_fail():
@@ -275,9 +309,13 @@ def main():
     case_selfcheck("prime_parallel", "examples/prime_parallel.ros")
     case_selfcheck("game_loop", "examples/game_loop.ros")
     case_selfcheck("t10", "tests/t10.ros")
+    case_output("spawn", "tests/t13_spawn.ros", ["6765", "81", "110", "spawn ok"])
 
     print("== [5] 单核降级（Rosoto.toml multicore=false） ==")
     test_single_core()
+
+    print("== [5b] arena 帧级回收（1MB 堆上限 / 4MB 分配量） ==")
+    test_arena()
 
     print("== [6] 失败路径（assert） ==")
     test_assert_fail()

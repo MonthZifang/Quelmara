@@ -159,6 +159,28 @@ fn main() {
 3. 抢占点在安全位置（无锁临界区不切），游戏主循环可选 `@no_preempt`
 4. 绑核/亲和性可配置；容器场景自动识别 cgroup CPU 配额
 
+### 4.1 v0.4 已落地子集（明确边界）
+
+```rosoto
+fn tick(n: int) -> int { return n * 2 }
+
+fn main() {
+    let a = spawn tick(21)     // 任务句柄（int64）
+    let b = spawn tick(20)
+    assert(join(a) == 42, "task a")
+    assert(join(b) == 40, "task b")
+}
+```
+
+- ✅ `spawn f(args)`：任务并行，Linux `clone` / Windows `CreateThread` / C `pthread`；
+  `join(h)` 等待并返回结果（void 任务返回 0）。
+- ✅ `[core] multicore = false`：`spawn` 编译期退化为同步调用，`join` 恒等返回结果。
+- ⚠️ v0.4 约束：实参/返回值仅标量（int/bool/str）；结构体/枚举按值跨线程明确报错；
+  并行 `spawn` 目前只支持 x86_64（AArch64 待发射层）；句柄漏回收（bump 无 free），
+  批量任务建议用 `arena { spawn ...; join ... }` 包住。
+- 🚧 `h.join()` 方法式语法、`chan[T]`、work-stealing 调度器仍待实现（当前
+  `spawn` 是每任务一线程，`parfor` 是静态分块）。
+
 ---
 
 ## 5. 网络模型（原生 IO）
@@ -229,6 +251,16 @@ fn frame(world: &mut World) {
 - **确定性**：同输入同调度策略下帧耗时可复现，性能回归可 CI 化
 - **嵌入 C ABI**：所有公开函数可 `@extern("C")` 导出，C/C++ 引擎直接调用；反向可 `@import_c("lib.h")`
 - **编译速度**：模块级并行编译 + 增量缓存（工程级 monorepo 友好）
+
+### 6.1 `arena { }` 的 v0.4 实现与边界
+
+- **native（Linux/Windows）**：真实回卷 bump 分配器 —— 进入块时记下偏移，
+  块末整体释放；用 `Rosoto.toml [memory] heap_limit_mb` 可证伪验证
+  （`tests/arena_lowheap`：1MB 上限、4MB 分配量，有 arena 通过、无 arena OOM）。
+- **C 后端**：字符串走轮转静态缓冲、无堆分配，`arena` 编译为纯作用域。
+- **约束**：块内分配的对象**不得逃逸**；块内 `break/continue/return` 会跳过释放；
+  bump 分配器非线程安全 —— 不要把分配放进并行 worker。
+- 🚧 `[memory] arena_default = true`（顶层默认 arena）尚未接线。
 
 ---
 
@@ -301,13 +333,13 @@ rosoto build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF
 | 后端 | 路径 | 状态 |
 |---|---|---|
 | **自研 x86_64 Linux** | Rosoto → RosIR → 自研 x86_64 编码器 → 裸 ELF64（无 libc） | ✅ v0.1，执行级 |
-| **自研 x86_64 Windows** | 同一 RosIR/编码器 → PE32+/COFF（无 CRT，kernel32 导入） | ✅ v0.3，本机 41 项 |
+| **自研 x86_64 Windows** | 同一 RosIR/编码器 → PE32+/COFF（无 CRT，kernel32 导入） | ✅ v0.3，本机 47 项 |
 | **自研 AArch64 Linux** | 同一条 RosIR，只换发射层 → ELF64 | 🟡 模拟器执行级，待真机 |
 | C 后端 | Rosoto → C99 → 任意 C 编译器（移植/bootstrapping/网络 demo） | ✅ v0.1 |
 
 各后端对同一 `.ros` 源码交叉验证输出，互为 oracle。
 
-已实现（v0.2 / v0.3）：
+已实现（v0.2 / v0.3 / v0.4）：
 
 | 特性 | 状态 |
 |---|---|
@@ -327,14 +359,16 @@ rosoto build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF
 | **Windows PE32+/COFF 写出 / kernel32 导入 / DIR64 重定位** | ✅ v0.3 |
 | `test "名字" { ... }` 内建测试块 | ✅ `rosoto test` |
 | `assert(cond, "msg")` | ✅ 全部后端（含 Windows stderr + 退出码 1） |
+| **`spawn f(args)` + `join(h)`（Linux clone / Windows CreateThread / C pthread）** | ✅ v0.4，x86_64 + C；标量参数/返回值，单核同步降级 |
+| **`arena { }` 帧级分配（native 真实回卷 bump；C 为作用域）** | ✅ v0.4（1MB 上限下 4MB 分配量的可证伪回归） |
 | `option`/`result` + `?`、`map`/`[N]T`/`[]T` 运算 | 🚧 下一轮 |
-| `arena { }` / `spawn` / `join` / `chan[T]` 语法 | 🚧 运行时已备（rosoto_mem.py / rosoto_mt.py），缺语法与降级 |
+| `chan[T]`、`h.join()` 方法式语法 | 🚧 运行时已备 C 版队列；native 降级待做 |
 | 泛型 / interface / 所有权借用检查 / `@extern("C")` | 🚧 规范已定 |
 | Windows IOCP/AFD 网络、Mach-O/kqueue、wasm、SIMD 向量化 | 🚧 路线图（PLATFORM.md / BACKEND.md）|
 
-回归：`tests/run_native_tests.sh`（自研 Linux 35 项，含 AArch64 模拟器）+
-`tests/run_win_tests.py`（Windows PE 41 项）+ `tests/run_tests.sh`（C 16 项）
-+ `tests/test_corelib.sh`（34 项）+ `tests/test_uring.sh`（26 项）= **152 项全绿**。
+回归：`tests/run_native_tests.sh`（自研 Linux 42 项，含 AArch64 模拟器）+
+`tests/run_win_tests.py`（Windows PE 47 项）+ `tests/run_tests.sh`（C 16 项）
++ `tests/test_corelib.sh`（34 项）+ `tests/test_uring.sh`（26 项）= **165 项全绿**。
 
 实现状态、未完成清单、阻塞项与下一步排期见 `HANDOVER.md`。
 

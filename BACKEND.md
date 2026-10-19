@@ -3,6 +3,8 @@
 > 决策：**自研后端**，不走 LLVM、不走 C 中转。平台优先与游戏定位**两条线并行推进**，优化持续加深。
 > 现状：v0.1 已实现 x86_64 全链路 —— Rosoto → RosIR → 优化 passes → 线性扫描寄存器分配 → 自研指令编码器 → **裸 ELF64 可执行文件**（无 libc、无 gcc、无外部依赖）。
 > v0.3 新增 **Windows x86_64 PE/COFF 写出器 + kernel32 导入 + CreateThread 多核**（无 CRT，产物 6–26 KB）。
+> v0.4 新增 **spawn/join 任务并行**（`spawn_child` IR + Linux clone / Windows CreateThread / C pthread）
+> 与 **arena 帧级回收**（native 回卷 bump 指针；C 后端为作用域）。
 > AArch64 ELF 发射层已实现（模拟器执行级验证），待真机。
 
 ---
@@ -50,6 +52,9 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | PE 绝对地址 | 每个 `movabs` 生成一条 DIR64 重定位 | ASLR 打开也正确；`fnaddr`（线程入口）同样重定位 |
 | Windows 堆 | `MEM_RESERVE` + 1MB 粒度 `MEM_COMMIT` | 512MB 上限只占虚拟地址；真正写多少提交多少 |
 | Windows 多核 | `CreateThread` + 共享归约 + `WaitForSingleObject` + `CloseHandle` | 与 Linux `clone()` 语义一致；单核配置编译期串行化 |
+| 任务并行（v0.4） | `spawn f(args)` + `join(h)`；句柄 = `[线程句柄, 参数块]`，参数块首字存返回值 | 每任务一线程（非 work-stealing）；标量参数/返回值 |
+| Linux 子线程入口 | `spawn_child`：`rdi = [rsp-8]` → `call worker` → `exit(0)` | 参数块指针放新栈顶，避开父栈溢出槽竞争 |
+| arena（v0.4） | `__arena_mark/__arena_release` 回卷 bump 偏移 | 块内分配一次性回收；对象不得逃逸 |
 
 ---
 
@@ -103,7 +108,7 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | 目标 | 后端方案 | 状态 |
 |---|---|---|
 | Linux x86_64 | 自研编码器 + ELF 写出器 | ✅ v0.1 |
-| Windows x86_64 | 自研 PE/COFF 写出器 + kernel32 导入 + CreateThread | ✅ v0.3（本机执行级 41 项） |
+| Windows x86_64 | 自研 PE/COFF 写出器 + kernel32 导入 + CreateThread | ✅ v0.3（本机执行级 47 项） |
 | Linux aarch64 | 自研 ARM64 编码器（RosIR 架构无关，只换发射层） | 🟡 模拟器执行级，待真机 |
 | Windows 网络（IOCP/AFD） | 导入 WSA*/IOCP 或 AFD 设备 | 🚧 下一格（PLATFORM.md 候选 A） |
 | macOS / iOS (arm64) | Mach-O 写出器 + libSystem + kqueue 运行时 | 🚧 需 Mac 真机/CI |
@@ -154,7 +159,7 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | game_loop（结构体帧循环） | 20480 B | — | 自校验通过 |
 
 回归：`python tests/run_win_tests.py`（结构自检 + 执行级 + 单核降级 + assert 失败路径
-+ 与 Linux ELF 逐字节交叉验证，共 41 项）。
++ 与 Linux ELF 逐字节交叉验证，共 47 项）。
 
 ---
 
@@ -181,3 +186,16 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 10. **优化器不认识新 IR 指令**：复制传播漏掉 `winapi` 的操作数替换（字符串指针没被绑定），
     调度器没把 `winapi` 当副作用屏障（`WaitForSingleObject` 被排到归约读取之后，多核结果静默变 0）。
     → 新增指令必须同时更新 `vreg_mentions / _subst_vregs / _map_ins / _LAT / _EFF / call_sites`。
+
+### v0.4（spawn / arena，全部有回归覆盖）
+
+11. **字符串条件分支比的是指针**：`if s == "x"` 走 `Lower.branch()`，旧实现对 `==` 直接
+    发 `jcc`（指针比较），条件永远为假；表达式路径 `__str_eq` 是对的。
+    → `branch()` 对 str 的 `==`/`!=` 走 `__str_eq`。
+12. **子线程从父栈溢出槽取参数会踩父线程**：`clone` 后子线程继续用父 `rbp` 取 spill 槽，
+    父线程并发复用同一槽 → 参数随机错误。→ 新增 `spawn_child`：参数块指针放新栈顶
+    `[rsp-8]`，子线程用 `rsp` 直接取，不经过任何 vreg。
+13. **arena 的 `release` 可能被跳过**：块内 `break/continue/return` 直接跳走 → 内存不复位。
+    → v0.4 明确为约定式语义并写进 SPEC；后续用作用域清理栈统一处理。
+14. **bump 分配器非线程安全**：并行 worker 里分配会竞争 `bump_gid`。
+    → 文档约束：spawn 的参数块在父线程分配；worker 内不要分配。

@@ -76,7 +76,8 @@ def load_config(src_path):
 
 KEYWORDS = {"fn", "let", "mut", "if", "else", "while", "for", "parfor",
             "return", "module", "import", "true", "false", "test",
-            "break", "continue", "struct", "enum", "match"}
+            "break", "continue", "struct", "enum", "match",
+            "arena", "spawn"}
 
 TWO_CHAR = {"->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "..", "=>"}
 ONE_CHAR = "(){}[],:.=<>+-*/%!?"
@@ -178,11 +179,12 @@ def tokenize(src, keep_comments=False):
 #      stmt: ('let',mut,name,expr) ('assign',name,op,expr)
 #            ('assign_field',lhs,op,expr) ('if',cond,then,else)
 #            ('while',cond,body) ('for'|'parfor',var,lo,hi,body)
-#            ('return',expr|None) ('expr',expr) ('break',) ('continue',)
+#            ('arena', body) ('return',expr|None) ('expr',expr)
+#            ('break',) ('continue',)
 #      expr: ('num',v) ('str',s) ('bool',v) ('name',n) ('path',[..])
 #            ('call',path,args) ('method',obj,name,args) ('binop',op,l,r)
 #            ('unop',op,x) ('structlit',path,fields) ('try',expr)
-#            ('field',obj,name)
+#            ('field',obj,name) ('spawn', call_expr)
 #
 # 路径消歧：`a.b.c` 在表达式位置解析为 ('path',['a','b','c'])。
 # 降级时若 a 是当前作用域的变量，则整条链是【字段访问链】；
@@ -382,6 +384,10 @@ class Parser:
             return ("continue",)
         if t.kind == "match":
             return ("match_stmt", self.parse_match())
+        if t.kind == "arena":
+            # arena { ... }：块内分配在块结束整体回收（SPEC §6 帧级 arena）
+            self.next()
+            return ("arena", self.parse_block())
         if t.kind == "enum":
             raise SyntaxError(f"line {t.line}: enum 声明只能在顶层")
         # 赋值 / 表达式语句
@@ -558,6 +564,13 @@ class Parser:
         if self.at("SYM", "-"):
             self.next()
             return ("unop", "-", self.parse_unary())
+        if self.at("spawn"):
+            # spawn f(args) -> 线程句柄（int64）；语义见 SPEC §4
+            t = self.next()
+            target = self.parse_postfix()
+            if not (isinstance(target, tuple) and target[0] == "call"):
+                raise SyntaxError(f"line {t.line}: spawn 后面必须是函数调用，如 spawn work(x)")
+            return ("spawn", target)
         return self.parse_postfix()
 
     def parse_postfix(self):
@@ -758,7 +771,7 @@ def with_test_runner(fns_ast, tests):
 # 3. 类型推断（原型子集）
 # ---------------------------------------------------------------------------
 
-BUILTIN_RETS = {"print": "void", "cores": "int", "assert": "void"}
+BUILTIN_RETS = {"print": "void", "cores": "int", "assert": "void", "join": "int64_t"}
 
 CTYPE = {
     "int": "int64_t", "i64": "int64_t", "i32": "int32_t", "u64": "uint64_t",
@@ -817,6 +830,8 @@ class Infer:
         if k == "call":
             name = e[1][-1]
             return self.fn_ret(name)
+        if k == "spawn":
+            return "int64_t"
         if k == "method":
             obj_t = self.expr(e[1], env)
             m = e[2]
@@ -927,6 +942,19 @@ static void rosoto_assert(bool cond, const char *msg) {
         fflush(stdout);
         exit(1);
     }
+}
+
+/* spawn/join 任务句柄：rec[0] = 线程（0 = 单核同步执行），
+   rec[1] = 参数块（块首字是返回值）。join 负责回收两块内存。 */
+static int64_t rosoto_join(int64_t h) {
+    if (h == 0) return 0;
+    int64_t *rec = (int64_t *)(intptr_t)h;
+    if (rec[0] != 0) pthread_join((pthread_t)(uintptr_t)rec[0], NULL);
+    int64_t *blk = (int64_t *)(intptr_t)rec[1];
+    int64_t r = blk[0];
+    free(blk);
+    free(rec);
+    return r;
 }
 """
 
@@ -1093,6 +1121,7 @@ class Codegen:
         self.helpers = []      # parfor worker 等辅助定义
         self.uses_net = False
         self.pf_id = 0
+        self.spawn_id = 0
         self.mid = 0           # match 临时变量计数
         self.threads = cfg["core"]["threads"] or os.cpu_count() or 1
         self.multicore = bool(cfg["core"]["multicore"]) and self.threads > 1
@@ -1207,8 +1236,15 @@ class Codegen:
                 if len(e[2]) > 1 and e[2][1][0] == "str":
                     msg = e[2][1][1]
                 return (f'rosoto_assert(({ccode}), "{msg}")', "void")
+            if name == "join" and name not in self.infer.fns:
+                if len(e[2]) != 1:
+                    raise SyntaxError("join(handle) 需要且只需要一个句柄")
+                hcode, _ = self.gen_expr(e[2][0], env)
+                return f"rosoto_join({hcode})", "int64_t"
             args = ", ".join(self.gen_expr(a, env)[0] for a in e[2])
             return f"{name}({args})", self.infer.fn_ret(name)
+        if k == "spawn":
+            return self.gen_spawn(e[1], env)
         if k == "method":
             obj, m, args = e[1], e[2], e[3]
             ocode, otype = self.gen_expr(obj, env)
@@ -1429,6 +1465,12 @@ class Codegen:
         if k == "match_stmt":
             inner, _res, _rt = self.gen_match(s[1], env, ind, ret_t, as_expr=False)
             return "\n".join([f"{pad}{{", *inner, f"{pad}}}"])
+        if k == "arena":
+            # C 后端的字符串走轮转静态缓冲，没有堆分配；arena 在这里是纯作用域。
+            # 语义说明见 SPEC §6：native 后端会真正回卷 bump 指针。
+            return "\n".join([f"{pad}{{ /* arena: 块内分配随块结束回收 */",
+                              self.gen_block(s[1], dict(env), ind + 1, ret_t),
+                              f"{pad}}}"])
         if k == "if":
             cond, _ = self.gen_expr(s[1], env)
             out = [f"{pad}if ({cond}) {{",
@@ -1611,6 +1653,73 @@ class Codegen:
                 f"{pad}}}"]
         return "\n".join(out)
 
+    # ---- spawn / join（任务并行，SPEC §4）----
+    def gen_spawn(self, call, env):
+        """`spawn f(args)` -> 任务句柄（int64）。
+
+        v0.4 约束（明确报错，不静默降级）：
+          - 目标必须是用户函数，实参/返回值只支持 int / bool / str 标量；
+          - 结构体/枚举按值跨线程涉及生命周期，留到 arena/所有权落地后再开；
+          - `[core] multicore = false` 时同步执行（句柄 rec[0]=0，join 直接取结果）。
+        """
+        name = call[1][-1]
+        if name not in self.infer.fns:
+            raise SyntaxError(f"spawn 的目标必须是用户函数：{name}")
+        fn = self.infer.fns[name]
+        ret = fn["ret"]
+        if ret[0] == "named" and (ret[1] in self.structs or ret[1] in self.enums):
+            raise SyntaxError("spawn 暂不支持结构体/枚举返回值")
+        if not (ret[1] in ("void", "bool", "int", "i64", "i32", "u64",
+                           "u32", "i16", "u16", "i8", "u8")):
+            raise SyntaxError(f"spawn 返回值暂支持 int/bool/void，得到 {ret[1]}")
+        params = fn["params"]
+        args = call[2]
+        if len(args) != len(params):
+            raise SyntaxError(f"{name} 需要 {len(params)} 个实参，spawn 给了 {len(args)}")
+        for pname, ptype in params:
+            if ptype[0] == "named" and (ptype[1] in self.structs or ptype[1] in self.enums):
+                raise SyntaxError(f"spawn 实参 {pname} 暂不支持结构体/枚举")
+
+        sid = self.spawn_id
+        self.spawn_id += 1
+        tname = f"sp{sid}"
+        ctypes_ = [self.ctype(t) for _n, t in params]
+        fields = "; ".join(f"    {ct} a{i};" for i, ct in enumerate(ctypes_))
+        sig = ", ".join(f"{ct} p{i}" for i, ct in enumerate(ctypes_)) or "void"
+        names = ", ".join(f"a->a{i}" for i in range(len(ctypes_)))
+        if ret == ("named", "void"):
+            body = f"    {name}({names});\n    a->res = 0;"
+        else:
+            body = f"    a->res = (int64_t)({name}({names}));"
+        h = [f"/* spawn#{sid}: {name} */",
+             f"typedef struct {{ int64_t res; {fields} }} {tname}_args;",
+             f"static void *{tname}_worker(void *p) {{",
+             f"    {tname}_args *a = ({tname}_args *)p;",
+             body,
+             "    return NULL;",
+             "}",
+             f"static int64_t {tname}({sig}) {{",
+             f"    {tname}_args *a = ({tname}_args *)malloc(sizeof({tname}_args));",
+             "    a->res = 0;"]
+        for i, (_n, pt) in enumerate(params):
+            arg_code, _ = self.gen_expr(args[i], env)
+            h.append(f"    a->a{i} = {arg_code};")
+        h += ["    int64_t *rec = (int64_t *)malloc(2 * sizeof(int64_t));",
+              "    rec[1] = (int64_t)(intptr_t)a;",
+              "#if ROSOTO_MULTICORE",
+              "    pthread_t t;",
+              f"    pthread_create(&t, NULL, {tname}_worker, a);",
+              "    rec[0] = (int64_t)t;",
+              "#else",
+              f"    {tname}_worker(a);",
+              "    rec[0] = 0;",
+              "#endif",
+              "    return (int64_t)(intptr_t)rec;",
+              "}"]
+        self.helpers.append("\n".join(h))
+        arg_codes = [self.gen_expr(a, env)[0] for a in args]
+        return f"{tname}({', '.join(arg_codes)})", "int64_t"
+
     def _assign_op(self, stmts, name):
         for s in stmts:
             if s[0] == "assign" and s[1] == name:
@@ -1638,6 +1747,7 @@ class Codegen:
         lines = ["/* Generated by Rosoto transpiler v0.1 */",
                  "#define _GNU_SOURCE",
                  f"#define ROSOTO_THREADS {self.threads}",
+                 f"#define ROSOTO_MULTICORE {1 if self.multicore else 0}",
                  f"#define ROSOTO_NET_MAX_CONNS {int(self.cfg['net']['max_conns'])}",
                  f"#define ROSOTO_RECV_BUF {int(self.cfg['net']['recv_buffer'])}",
                  "#include <unistd.h>",
@@ -1713,6 +1823,8 @@ def walk_expr(e, declared, assigned, referenced):
         walk_expr(e[2], declared, assigned, referenced)
     elif k == "try":
         walk_expr(e[1], declared, assigned, referenced)
+    elif k == "spawn":
+        walk_expr(e[1], declared, assigned, referenced)
     elif k == "structlit":
         referenced.update(e[1])
         for v in e[2].values():
@@ -1765,6 +1877,8 @@ def walk_stmts(stmts, declared, assigned, referenced):
             pass
         elif k == "match_stmt":
             walk_expr(s[1], declared, assigned, referenced)
+        elif k == "arena":
+            walk_stmts(s[1], declared, assigned, referenced)
         elif k == "if":
             walk_expr(s[1], declared, assigned, referenced)
             walk_stmts(s[2], declared, assigned, referenced)

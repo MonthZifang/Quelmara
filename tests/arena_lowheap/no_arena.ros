@@ -1,0 +1,15 @@
+// 负向对照：同样的分配循环，但没有 arena 包裹。
+// 1MB 堆上限下应在中途 fail-fast（退出码非 0）——证明 arena 的回收是真生效的。
+fn main() {
+    let mut i = 0
+    let mut hits = 0
+    while i < 200000 {
+        let s = "v" + i.to_str()
+        if s == "v0" {
+            hits += 1
+        }
+        i += 1
+    }
+    assert(hits == 1, "no arena hits")
+    print("no arena ok")
+}

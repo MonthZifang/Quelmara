@@ -93,6 +93,28 @@ for t in tests/t9.ros tests/t11.ros; do
     && ok "a64 $n 与 x86 输出全等" || bad "a64 $n 不一致"
 done
 
+echo "[11] v0.4：spawn/join 任务并行 + arena 帧级回收"
+$NAT build tests/t13_spawn.ros -o build/nat_spawn >/dev/null 2>&1
+out=$(./build/nat_spawn); rc=$?
+[ $rc -eq 0 ] && ok "spawn 退出码 0" || bad "spawn 退出码 $rc"
+[ "$out" = "$(printf '6765\n81\n110\nspawn ok')" ] && ok "spawn 结果正确（fib/square/void 任务）" || bad "spawn 输出 [$out]"
+$CBE run tests/t13_spawn.ros 2>/dev/null | grep -v '^\[rosoto' > build/.spawn_c
+[ "$out" = "$(cat build/.spawn_c)" ] && ok "spawn 自研后端 == C 后端" || bad "spawn 双后端不一致"
+
+cp tests/t13_spawn.ros tests/single_core/
+$NAT build tests/single_core/t13_spawn.ros -o build/nat_spawn_1c >/dev/null 2>&1
+out1=$(./build/nat_spawn_1c); rc=$?
+[ $rc -eq 0 ] && [ "$out1" = "$out" ] && ok "spawn 单核降级结果不变" || bad "spawn 单核降级 rc=$rc [$out1]"
+
+$NAT build tests/arena_lowheap/arena.ros -o build/nat_arena >/dev/null 2>&1
+out=$(./build/nat_arena); rc=$?
+[ $rc -eq 0 ] && ok "arena：1MB 上限下 4MB 分配量跑完（回收生效）" || bad "arena rc=$rc [$out]"
+[ "$out" = "$(printf 'arena ok\n200000')" ] && ok "arena 输出正确" || bad "arena 输出 [$out]"
+
+$NAT build tests/arena_lowheap/no_arena.ros -o build/nat_noarena >/dev/null 2>&1
+./build/nat_noarena >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && ok "无 arena 时 1MB 堆上限 fail-fast" || bad "无 arena 竟然没有 OOM"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

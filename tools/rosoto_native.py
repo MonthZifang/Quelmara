@@ -376,6 +376,7 @@ class Lower:
         self.out = []
         self.globals = []          # bytes 列表
         self.gid_of_str = {}
+        self.spawn_id = 0
         if platform == "windows":
             # WriteFile 的 lpNumberOfBytesWritten 落点（Win32 必须给非空指针）
             self.written_gid = self.intern_array(1)
@@ -658,6 +659,11 @@ class Lower:
                      ("imm", MAP_PRIVATE_ANON), ("imm", -1), ("imm", 0)])
         return d
 
+    def is_serial(self):
+        """Rosoto.toml 是否要求单核/单线程（spawn/parfor 编译期降级）"""
+        return (not self.cfg["core"]["multicore"]) or \
+            int(self.cfg["core"]["threads"] or 0) == 1
+
     # ---- 表达式：返回 ('imm',n) | ('ga',gid) | vreg ----
     def eval(self, e, fn, env):
         k = e[0]
@@ -673,6 +679,8 @@ class Lower:
             return env[e[1]]
         if k == "call":
             return self.lower_call(e, fn, env)
+        if k == "spawn":
+            return self.lower_spawn(e[1], fn, env)
         if k == "unop":
             a = self.eval(e[2], fn, env)
             if e[1] == "-":
@@ -851,6 +859,114 @@ class Lower:
         fn.emit("bin", op, d, a, b)
         return d
 
+    def lower_spawn(self, call, fn, env):
+        """spawn f(args) -> 任务句柄（v0.4）。
+
+        并行路径：参数拷贝进 __alloc 参数块 -> 新建栈/CreateThread ->
+        worker 调目标函数并把返回值写回参数块首字 -> join 等待并取结果。
+        约束：实参/返回值仅支持标量（int/bool/str 指针）；结构体/枚举按值跨线程
+        涉及生命周期，留到所有权/借用落地后再开（明确报错，不静默降级）。
+        """
+        name = call[1][-1]
+        if name not in self.fns_ast:
+            raise SyntaxError(f"spawn 的目标必须是用户函数：{name}")
+        target = self.fns_ast[name]
+        ret = target["ret"]
+        if ret[0] == "named" and self.is_agg(ret[1]):
+            raise SyntaxError("spawn 暂不支持结构体/枚举返回值")
+        if ret[0] == "slice" or ret == ("named", "str"):
+            raise SyntaxError("spawn 返回值暂支持 int/bool/void（不支持 str/slice）")
+        params = target["params"]
+        args = call[2]
+        if len(args) != len(params):
+            raise SyntaxError(f"{name} 需要 {len(params)} 个实参，spawn 给了 {len(args)}")
+        for pn, pt in params:
+            if pt[0] == "slice" or (pt[0] == "named" and self.is_agg(pt[1])):
+                raise SyntaxError(f"spawn 实参 {pn} 暂不支持结构体/枚举/slice")
+        vals = [self.eval(a, fn, env) for a in args]
+
+        if self.is_serial():
+            if ret == ("named", "void"):
+                fn.emit("call", None, name, vals)
+                return ("imm", 0)
+            d = fn.new_v()
+            fn.emit("call", d, name, vals)
+            return d
+        if self.arch != "x86_64":
+            raise SyntaxError("spawn（并行）目前仅支持 x86_64 后端")
+
+        # 参数块：字 0 = 返回值，字 1.. = 实参
+        n = len(vals)
+        blk = fn.new_v()
+        fn.emit("call", blk, "__alloc", [("imm", 8 * (1 + n))])
+        for i, v in enumerate(vals):
+            fn.emit("store", blk, ("imm", 1 + i), v)
+
+        wname = f"__spawn_{fn.name}_{self.spawn_id}"
+        self.spawn_id += 1
+        w = Fn(wname)
+        w.no_inline = True          # 跑在另一个栈上（与 parfor worker 同理）
+        wp = w.new_v()
+        w.emit("args", [wp])
+        av = []
+        for i, (pn, pt) in enumerate(params):
+            v = w.new_v()
+            w.emit("load", v, wp, ("imm", 1 + i))
+            if pt == ("named", "str"):
+                self._mark_str(w, v)
+            elif pt == ("named", "bool"):
+                self._mark_bool(w, v)
+            av.append(v)
+        if ret == ("named", "void"):
+            w.emit("call", None, name, av)
+            w.emit("store", wp, ("imm", 0), ("imm", 0))
+        else:
+            rv = w.new_v()
+            w.emit("call", rv, name, av)
+            w.emit("store", wp, ("imm", 0), rv)
+        w.emit("ret", ("imm", 0))
+        self.out.append(w)
+
+        if self.platform == "windows":
+            wrap = Fn(wname + "__entry")
+            wrap.win_thread = True
+            xp = wrap.new_v()
+            wrap.emit("winargs", [xp])
+            wrap.emit("call", None, wname, [xp])
+            wrap.emit("ret", ("imm", 0))
+            self.out.append(wrap)
+            tid = fn.new_v()
+            fn.emit("winapi", tid, "CreateThread",
+                    [("imm", 0), ("imm", 0), ("fnaddr", wrap.name),
+                     blk, ("imm", 0), ("imm", 0)])
+        else:
+            st = fn.new_v()
+            fn.emit("syscall", st, self.sc["mmap"],
+                    [("imm", 0), ("imm", STACK_SZ), ("imm", PROT_RW),
+                     ("imm", MAP_PRIVATE_ANON), ("imm", -1), ("imm", 0)])
+            top = fn.new_v()
+            fn.emit("bin", "add", top, st, ("imm", STACK_SZ - 256))
+            # 参数块指针放在新栈顶下方 8 字节；子线程用 spawn_child 从 [rsp-8] 取。
+            # （不能依赖寄存器/父栈溢出槽：子线程和父线程并发执行，父栈槽会被复用）
+            fn.emit("store", st, ("imm", (STACK_SZ - 264) // 8), blk)
+            pid = fn.new_v()
+            fn.emit("syscall", pid, self.sc["clone"],
+                    [("imm", CLONE_FLAGS), top, ("imm", 0),
+                     ("imm", 0), ("imm", 0), ("imm", 0)])
+            l_child, l_after = fn.label("spchild"), fn.label("spafter")
+            fn.emit("jz", pid, l_child)
+            fn.emit("jmp", l_after)
+            fn.emit("label", l_child)
+            fn.emit("spawn_child", wname)
+            fn.emit("label", l_after)
+            tid = pid
+
+        rec = fn.new_v()
+        fn.emit("call", rec, "__alloc", [("imm", 16)])
+        fn.emit("store", rec, ("imm", 0), tid)
+        fn.emit("store", rec, ("imm", 1), blk)
+        return rec
+
     def lower_logic(self, op, a, b, fn, env):
         """短路求值 -> 0/1"""
         d = fn.new_v()
@@ -906,6 +1022,17 @@ class Lower:
             self.emit_exit(fn, 1)
             fn.emit("label", l_ok)
             return ("imm", 0)
+        if name == "join" and name not in self.fns_ast:
+            if len(e[2]) != 1:
+                raise SyntaxError("join(handle) 需要且只需要一个句柄")
+            hv = self.eval(e[2][0], fn, env)
+            d = fn.new_v()
+            if self.is_serial():
+                # 单核降级：spawn 已同步执行并直接返回结果，join 就是恒等
+                fn.emit("mov", d, hv)
+            else:
+                fn.emit("call", d, "__join", [hv])
+            return d
         if name not in self.fns_ast:
             raise SyntaxError(f"未定义函数 {name}")
         args = [self.eval(a, fn, env) for a in e[2]]
@@ -934,6 +1061,14 @@ class Lower:
         if k == "binop" and e[1] in ("==", "!=", "<", "<=", ">", ">="):
             a = self.eval(e[2], fn, env)
             b = self.eval(e[3], fn, env)
+            # str 是内容相等（不是指针比较）：条件分支必须走 __str_eq，
+            # 否则 `if s == "x"` 永远为假（表达式路径早就正确，分支路径曾漏掉）。
+            if e[1] in ("==", "!=") and (self._is_str(fn, a) or self._is_str(fn, b)):
+                eq = fn.new_v()
+                fn.emit("call", eq, "__str_eq", [a, b])
+                fn.emit("jnz" if e[1] == "==" else "jz", eq, l_true)
+                fn.emit("jmp", l_false)
+                return
             cc = {"==": "e", "!=": "ne", "<": "l", "<=": "le", ">": "g", ">=": "ge"}[e[1]]
             fn.emit("jcc", cc, a, b, l_true)
             fn.emit("jmp", l_false)
@@ -1054,6 +1189,14 @@ class Lower:
             return
         if k == "match_stmt":
             self.lower_match(s[1], fn, env, as_expr=False)
+            return
+        if k == "arena":
+            # 块内 __alloc 的 bump 偏移在块末整体回卷（帧级 arena）。
+            # 限制：块内 break/continue/return 会跳过 release；块内对象不得逃逸。
+            mark = fn.new_v()
+            fn.emit("call", mark, "__arena_mark", [])
+            self.block(s[1], fn, dict(env))
+            fn.emit("call", None, "__arena_release", [mark])
             return
         if k == "assign_field":
             self.lower_assign_field(s, fn, env)
@@ -1516,6 +1659,49 @@ class Lower:
         r = f.new_v()
         f.emit("bin", "add", r, h, off)
         f.emit("ret", r)
+        self.out.append(f)
+
+        # ---- arena / 任务运行时（v0.4）----
+        # __arena_mark() -> 当前 bump 偏移；__arena_release(mark) 整体回卷。
+        # 语义：arena 块内用 __alloc 分配的对象（当前主要是字符串）在块末一次性回收；
+        #       块内分配的对象不得逃逸到块外（无借用检查，约定式语义）。
+        f = Fn("__arena_mark")
+        f.emit("args", [])
+        am = f.new_v()
+        f.emit("load", am, ("ga", self.bump_gid), ("imm", 0))
+        f.emit("ret", am)
+        self.out.append(f)
+
+        f = Fn("__arena_release")
+        amark = f.new_v()
+        f.emit("args", [amark])
+        f.emit("store", ("ga", self.bump_gid), ("imm", 0), amark)
+        f.emit("ret", ("imm", 0))
+        self.out.append(f)
+
+        # __join(h) -> int：h 指向 16 字节记录 [原生线程句柄, 参数块]，
+        # 参数块首字是任务返回值。等待线程结束后取结果。
+        f = Fn("__join")
+        h = f.new_v()
+        f.emit("args", [h])
+        l_zero = f.label("jzero")
+        f.emit("jz", h, l_zero)
+        tid = f.new_v()
+        f.emit("load", tid, h, ("imm", 0))
+        blk = f.new_v()
+        f.emit("load", blk, h, ("imm", 1))
+        if self.platform == "windows":
+            f.emit("winapi", None, "WaitForSingleObject", [tid, ("imm", -1)])
+            f.emit("winapi", None, "CloseHandle", [tid])
+        else:
+            f.emit("syscall", None, self.sc["wait4"],
+                   [tid, ("imm", 0), ("imm", 0),
+                    ("imm", 0), ("imm", 0), ("imm", 0)])
+        jr = f.new_v()
+        f.emit("load", jr, blk, ("imm", 0))
+        f.emit("ret", jr)
+        f.emit("label", l_zero)
+        f.emit("ret", ("imm", 0))
         self.out.append(f)
 
         # __str_len(p) -> int
@@ -2215,6 +2401,15 @@ class Codegen:
             self.enc.lea(target, RBP, disp)
             if kind == "m":
                 self.enc.mov_mr(RBP, 4, 0, -val, SCRATCH)
+        elif op == "spawn_child":
+            # 子线程起始点（clone 返回 0 后跳到这里）：
+            # 参数块指针由父线程写在【新栈顶 - 8】，这里直接用 rsp 取，
+            # 不经过任何 vreg/父栈溢出槽，避免与并发执行的父线程抢槽位。
+            enc.mov_rm(RDI, RSP, 4, 0, -8)
+            enc.call(ins[1])
+            enc.mov_ri(RDI, 0)
+            enc.mov_ri(ACC, 60)          # exit(0)
+            enc.syscall()
         elif op == "syscall":
             dst, num, args = ins[1], ins[2], ins[3]
             fixed = [RDI, RSI, RDX, R10, R8, R9]
