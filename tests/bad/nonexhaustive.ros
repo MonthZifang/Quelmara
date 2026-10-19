@@ -1,0 +1,17 @@
+// 负向：match 不穷尽，编译必须报错
+module bad
+
+enum Color {
+    Red
+    Green
+    Blue
+}
+
+fn main() {
+    let c = Color.Red
+    let n = match c {
+        Color.Red => 1
+        Color.Green => 2
+    }
+    print(n)
+}

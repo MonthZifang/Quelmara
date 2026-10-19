@@ -1,0 +1,3 @@
+[core]
+multicore = false        # 显式禁用多核：parfor 编译期降级为串行
+threads   = 1

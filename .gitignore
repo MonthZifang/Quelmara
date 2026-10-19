@@ -1,0 +1,12 @@
+# Rosoto 编译产物（测试脚本会重新生成）
+build/
+
+# Python
+__pycache__/
+*.pyc
+
+# 开发期 scratch / 历史调试目录
+.openclaw/
+
+# 基准基线（需要时再用 --update-baseline 生成并单独提交）
+bench_baseline.json

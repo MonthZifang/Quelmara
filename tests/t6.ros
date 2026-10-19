@@ -1,0 +1,7 @@
+module t6
+fn work(n: int) -> int {
+    return (n * 7) % 13
+}
+fn main() {
+    print(work(20))
+}

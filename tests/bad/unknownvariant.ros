@@ -1,0 +1,15 @@
+// 负向：未知变体，编译必须报错
+module bad
+
+enum Color {
+    Red
+}
+
+fn main() {
+    let c = Color.Red
+    let n = match c {
+        Color.Purple => 1
+        _ => 0
+    }
+    print(n)
+}

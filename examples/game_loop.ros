@@ -1,0 +1,72 @@
+module game_loop
+
+// 游戏帧循环：结构体世界状态 + 整数物理积分 + 帧预算提前退出 + 多核能量归约
+// 展示：struct 嵌套 / 字段复合赋值 / while / for / break / continue / parfor 归约
+
+struct Vec3 {
+    x: int
+    y: int
+    z: int
+}
+
+struct Body {
+    pos: Vec3
+    vel: Vec3
+    mass: int
+}
+
+// 结构体按值传参：函数内改的是副本，调用方不变（与 C 语义一致）
+fn nudge(b: Body, dx: int) {
+    b.pos.x = b.pos.x + dx
+    b.vel.x = b.vel.x * 2
+}
+
+fn main() {
+    let mut body = Body {
+        pos: Vec3 { x: 0, y: 0, z: 0 }
+        vel: Vec3 { x: 3, y: -2, z: 1 }
+        mass: 10
+    }
+
+    // ---- 帧循环：dt = 1，最多 100 帧；每 3 帧跳过一次统计，统计满 60 次就提前收工 ----
+    let mut frame = 0
+    let mut rendered = 0
+    while frame < 100 {
+        frame += 1
+        body.pos.x += body.vel.x
+        body.pos.y += body.vel.y
+        body.pos.z += body.vel.z
+        if frame % 3 == 0 {
+            continue
+        }
+        rendered += 1
+        if rendered > 60 {
+            break
+        }
+    }
+    print(frame)
+    print(rendered)
+    print(body.pos.x)
+    print(body.pos.y)
+    print(body.pos.z)
+
+    // ---- 多核：粒子动能归约（parfor 自动分块 + 跨核合并）----
+    let mut energy = 0
+    parfor i in 0..1000000 {
+        energy += (i * i) % 1000
+    }
+    print(energy)
+
+    // ---- 值语义：nudge 改的是副本，body 不受影响 ----
+    nudge(body, 100)
+    print(body.pos.x)
+    print(body.vel.x)
+
+    assert(rendered == 61, "渲染帧计数")
+    assert(frame == 91, "帧循环提前退出")
+    assert(body.pos.x == 273, "位置积分 x")
+    assert(body.pos.y == -182, "位置积分 y")
+    assert(body.pos.z == 91, "位置积分 z")
+    assert(body.vel.x == 3, "速度未被 nudge 污染")
+    assert(energy == 461500000, "并行能量归约")
+}

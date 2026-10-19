@@ -1,0 +1,7 @@
+module t3
+fn work(n: int) -> int {
+    return n + 1
+}
+fn main() {
+    print(work(41))
+}

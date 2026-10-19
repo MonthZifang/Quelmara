@@ -1,0 +1,80 @@
+// t14.ros：结构体/枚举返回值 + match 聚合结果（三后端交叉验证）
+// 覆盖：函数返回结构体/枚举、隐藏出参 ABI 值语义、match 求值式是调用、
+//       match 各臂返回结构体、返回值的字段链
+module t14
+
+enum Color {
+    Red
+    Green
+    Blue
+}
+
+struct Vec3 {
+    x: int
+    y: int
+    z: int
+}
+
+fn make(i: int) -> Vec3 {
+    return Vec3 { x: i, y: i + 1, z: i + 2 }
+}
+
+fn opposite(c: Color) -> Color {
+    return match c {
+        Color.Red => Color.Green
+        Color.Green => Color.Red
+        Color.Blue => Color.Blue
+    }
+}
+
+fn bigger(a: Vec3, b: Vec3) -> Vec3 {
+    if a.x >= b.x {
+        return a
+    }
+    return b
+}
+
+fn main() {
+    let v = make(10)
+    assert(v.x == 10, "make x")
+    assert(v.y == 11, "make y")
+    assert(v.z == 12, "make z")
+    print(v.x)
+    print(v.y)
+    print(v.z)
+
+    // 返回值直接进 match 求值式
+    let c = opposite(Color.Red)
+    let n = match opposite(c) {
+        Color.Red => 1
+        Color.Green => 2
+        Color.Blue => 3
+    }
+    assert(n == 1, "opposite roundtrip")
+    print(n)
+
+    // 结构体返回值的值语义
+    let a = make(5)
+    let b = make(9)
+    let w = bigger(a, b)
+    assert(w.x == 9, "bigger picks 9")
+    let w2 = bigger(make(3), make(2))
+    assert(w2.x == 3, "bigger picks 3")
+    print(w.x)
+    print(w2.x)
+
+    // match 各臂返回结构体（聚合结果）
+    let picked = match c {
+        Color.Red => make(100)
+        Color.Green => make(200)
+        Color.Blue => make(300)
+    }
+    assert(picked.x == 200, "match agg result")
+    assert(picked.z == 202, "match agg result z")
+    print(picked.x)
+    print(picked.z)
+
+    // 返回值字段链
+    assert(make(7).y == 8, "field chain on return")
+    print(make(7).y)
+}

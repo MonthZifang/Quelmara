@@ -1,0 +1,50 @@
+module t11
+
+struct Vec3 {
+    x: int
+    y: int
+    z: int
+}
+
+struct Body {
+    pos: Vec3
+    mass: int
+}
+
+fn main() {
+    let mut a = Vec3 { x: 1, y: 2, z: 3 }
+    print(a.x)
+    print(a.y + a.z)
+
+    a.x = 10
+    a.y += 5
+    print(a.x + a.y + a.z)
+
+    let mut b = a
+    b.x = 99
+    print(a.x)
+    print(b.x)
+
+    let mut body = Body { pos: a, mass: 7 }
+    print(body.mass)
+    print(body.pos.z)
+    body.pos.y = 42
+    print(body.pos.y)
+    print(a.y)
+
+    print(b.x)
+    print(b.y)
+    print(b.z)
+    print(a.x)
+    print(body.pos.x)
+
+    // 布局回归：字段偏移与结构体拷贝必须与 C 后端逐字节一致
+    assert(b.x == 99, "b.x")
+    assert(b.y == 7, "b.y")
+    assert(b.z == 3, "b.z")
+    assert(a.x == 10, "a.x")
+    assert(body.pos.x == 10, "body.pos.x")
+    assert(body.pos.y == 42, "body.pos.y")
+    assert(body.pos.z == 3, "body.pos.z")
+    assert(body.mass == 7, "body.mass")
+}

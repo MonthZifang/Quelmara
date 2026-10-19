@@ -1,0 +1,4 @@
+module t1
+fn main() {
+    print(1)
+}

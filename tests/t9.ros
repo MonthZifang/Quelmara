@@ -1,0 +1,45 @@
+module t9
+
+// 结构体：声明 / 字面量 / 字段读写 / 按值拷贝 / 嵌套（双后端）
+
+struct Vec3 {
+    x: int
+    y: int
+    z: int
+}
+
+struct Body {
+    pos: Vec3
+    mass: int
+}
+
+fn main() {
+    let mut a = Vec3 { x: 1, y: 2, z: 3 }
+    print(a.x)
+    print(a.y + a.z)
+
+    a.x = 10
+    a.y += 5
+    print(a.x + a.y + a.z)
+
+    // 按值拷贝：b 是副本，改 b 不影响 a
+    let mut b = a
+    b.x = 99
+    print(a.x)
+    print(b.x)
+
+    // 嵌套结构体
+    let mut body = Body { pos: a, mass: 7 }
+    print(body.mass)
+    print(body.pos.z)
+    body.pos.y = 42
+    print(body.pos.y)
+    print(a.y)
+
+    assert(a.x == 10, "字段写入")
+    assert(a.y == 7, "字段复合赋值")
+    assert(b.x == 99, "按值拷贝：b 是副本")
+    assert(body.mass == 7, "嵌套结构体字面量")
+    assert(body.pos.y == 42, "嵌套字段写入")
+    assert(a.y == 7, "副本写入不影响原值")
+}

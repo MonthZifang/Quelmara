@@ -1,0 +1,33 @@
+// selftest.ros — 内建测试框架演示（SPEC §8 `rosoto test`）
+module selftest
+
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+fn fib(n: int) -> int {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+test "加法恒等" {
+    assert(add(2, 3) == 5, "2+3 应该等于 5")
+    assert(add(0, 0) == 0)
+    assert(add(-4, 4) == 0, "相反数相加为 0")
+}
+
+test "递归 fib" {
+    assert(fib(10) == 55, "fib(10) 应为 55")
+    assert(fib(0) == 0, "fib(0) 应为 0")
+    assert(fib(1) == 1, "fib(1) 应为 1")
+}
+
+test "循环与归约" {
+    let mut acc = 0
+    for i in 0..10 {
+        acc = acc + i
+    }
+    assert(acc == 45, "0..10 求和应为 45")
+}

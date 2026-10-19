@@ -1,0 +1,39 @@
+module collatz
+
+// Collatz 猜想热循环基准：找 [1, n) 里最长的链
+// 展示：递归函数 / while / break / continue / 64 位整数热循环（性能基准）
+
+fn chain_len(n: int) -> int {
+    // 迭代版链长（避免递归对深链的栈压力）
+    let mut x = n
+    let mut steps = 0
+    while x != 1 {
+        steps += 1
+        if x % 2 == 0 {
+            x = x / 2
+            continue
+        }
+        x = 3 * x + 1
+    }
+    return steps
+}
+
+fn main() {
+    let mut best = 0
+    let mut best_n = 0
+    for n in 1..100000 {
+        let len = chain_len(n)
+        if len <= best {
+            continue
+        }
+        best = len
+        best_n = n
+    }
+    print(best_n)
+    print(best)
+    print(chain_len(27))
+
+    assert(best_n == 77031, "[1,100000) 最长链起点")
+    assert(best == 350, "[1,100000) 最长链长")
+    assert(chain_len(27) == 111, "27 的链长")
+}

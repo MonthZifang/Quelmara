@@ -1,0 +1,11 @@
+// 负向：载荷字段缺失，编译必须报错
+module bad
+
+enum Shape {
+    Circle(radius: int)
+}
+
+fn main() {
+    let s = Shape.Circle()
+    print(1)
+}

@@ -1,0 +1,16 @@
+// 负向：`_` 通配臂不是最后一臂，编译必须报错
+module bad
+
+enum Color {
+    Red
+    Green
+}
+
+fn main() {
+    let c = Color.Red
+    let n = match c {
+        _ => 0
+        Color.Red => 1
+    }
+    print(n)
+}

@@ -1,0 +1,69 @@
+module inventory
+
+// 工程数据建模：结构体 + 嵌套字段更新 + 值语义传参 + 循环控制
+// 场景：库存装箱 —— 装箱清单、破损跳过、按值传参不外泄副作用
+
+struct Item {
+    id: int
+    weight: int
+    value: int
+}
+
+struct Crate {
+    item: Item
+    count: int
+}
+
+// 结构体按值传参：函数内改动不影响调用方（与 C 一致）
+fn rebalance(it: Item, factor: int) {
+    it.value = it.value * factor
+    it.weight = it.weight + factor
+}
+
+fn main() {
+    let mut apple = Item { id: 1, weight: 3, value: 30 }
+    let mut crate = Crate { item: apple, count: 12 }
+
+    // 嵌套字段写入
+    crate.item.value = 35
+    print(crate.item.value)
+    print(apple.value)
+
+    // 按值传参：副作用不外泄
+    rebalance(apple, 10)
+    print(apple.value)
+    print(apple.weight)
+
+    // 累计：装满 crate，第 6 箱破损跳过
+    let mut total_weight = 0
+    let mut total_value = 0
+    for i in 0..crate.count {
+        if i == 5 {
+            continue
+        }
+        total_weight += crate.item.weight
+        total_value += crate.item.value
+    }
+    print(total_weight)
+    print(total_value)
+
+    // 找第一个「价值超过 34」的箱位号
+    let mut found = -1
+    let mut k = 0
+    while k < crate.count {
+        k += 1
+        if crate.item.value <= 34 {
+            continue
+        }
+        found = k
+        break
+    }
+    print(found)
+
+    assert(apple.value == 30, "值语义：rebalance 不外泄")
+    assert(apple.weight == 3, "值语义：重量不外泄")
+    assert(crate.item.value == 35, "嵌套字段写入")
+    assert(total_weight == 33, "总重量（11 箱 × 3）")
+    assert(total_value == 385, "总价值（11 箱 × 35）")
+    assert(found == 1, "首个命中箱位")
+}

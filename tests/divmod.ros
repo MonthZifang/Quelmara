@@ -1,0 +1,14 @@
+// divmod.ros — 除法/取模语义回归（正负数、边界；双后端交叉验证）
+module divmod
+
+fn main() {
+    let mut i = 0
+    while i < 40 {
+        let mut x = (i * 7919) % 4001 - 2000
+        print(x / 13)
+        print(x % 13)
+        print(x / 7)
+        print(x % 7)
+        i = i + 1
+    }
+}

@@ -1,0 +1,34 @@
+module t8
+
+// break / continue：循环控制语句（双后端）
+
+fn main() {
+    let mut sum = 0
+    for i in 0..10 {
+        if i == 3 {
+            continue
+        }
+        if i == 8 {
+            break
+        }
+        sum += i
+    }
+    print(sum)
+
+    let mut n = 0
+    let mut hits = 0
+    while n < 100 {
+        n += 1
+        if n % 2 == 0 {
+            continue
+        }
+        if n > 9 {
+            break
+        }
+        hits += 1
+    }
+    print(hits)
+
+    assert(sum == 25, "for + break/continue")
+    assert(hits == 5, "while + break/continue")
+}

@@ -1,0 +1,36 @@
+module t10
+
+// 回归：结构体帧槽 + parfor 归约同函数共存
+// 背景：opt_inline 曾把 parfor worker（clone 到另一个栈上执行）内联进父函数，
+//       子线程的溢出槽落到父栈帧上，砸坏父线程活跃值 -> 归约结果错乱。
+//       本用例两后端交叉验证，防止回归。
+
+struct Vec3 {
+    x: int
+    y: int
+    z: int
+}
+
+fn main() {
+    let mut v = Vec3 { x: 1, y: 2, z: 3 }
+    v.x += 10
+    print(v.x)
+
+    let mut s = 0
+    parfor i in 0..1000 {
+        s += (i * i) % 1000
+    }
+    print(s)
+
+    let mut w = 0
+    parfor i in 0..1000 {
+        w += i
+    }
+    print(w)
+    print(v.z)
+
+    assert(v.x == 11, "字段复合赋值")
+    assert(s == 461500, "parfor 归约（含取模热循环）")
+    assert(w == 499500, "parfor 归约（简单累加）")
+    assert(v.z == 3, "结构体帧槽未被并行段破坏")
+}
