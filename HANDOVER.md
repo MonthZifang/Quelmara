@@ -1,10 +1,17 @@
 # Rosoto 交接文档（HANDOVER）
 
-> 本轮：**v0.7 用户定义 Result + `?` 错误传播 + 自研优化器范围证明**
+> 本轮：**v0.8 `option[T]` 受控单态化**（合成枚举 `__opt_<T>` + `Option.Some/None` match 解构）
 > 交接时间：2026-10-19（GMT+8）
-> 状态：**183 项回归全绿**（Windows 55 / 自研 Linux 52 / C 16 / corelib 34 / io_uring 26）
-> 代码总量：`tools/` 12.1k 行 Python + `tests/` 1.4k 行
-> 之前已提交：v0.5 `3e9b8c0`、v0.6 `ff8f830`；本轮 v0.7 尚待提交
+> 状态：**187 项回归全绿**（Windows 57 / 自研 Linux 54 / C 16 / corelib 34 / io_uring 26）
+> 代码总量：`tools/` 12.3k 行 Python + `tests/` 1.5k 行
+> 已提交：v0.5 `3e9b8c0`、v0.6 `ff8f830`、v0.7 `d38c359`；本轮 v0.8 待提交
+>
+> ### v0.8 一句话
+> `option[T]`（T ∈ int/bool/str）现可跨 native / Windows PE / C 三链使用：
+> `option[int].some(x)` / `.none()` 构造，`Option.Some(v)` / `Option.None` match 解构，
+> 函数可返回 `option[T]`（复用枚举聚合返回 ABI）。实现 = 按 T 现场合成真枚举 `__opt_<T>{Some(value:T),None}`
+> （前端单态化，类型元组坍缩为 `("named","__opt_<T>")`）+ 构造脱糖为 `enumlit` + `Option.X` 模式
+> 按求值式真实枚举名改写（`resolve_option_patterns`）。**后端零改动**，完全复用既有 enum 布局 / match / 聚合 ABI。
 
 ---
 
@@ -91,14 +98,15 @@ parfor/spawn worker 的独立栈和寄存器压力敏感，继续保留 `Fn.no_i
 新增：
 
 - `tests/t17_result.ros`；
-- native 回归 [12]：Result native + C 传播；
-- Windows 回归：Result PE 自校验。
+- `tests/t19_option.ros`（v0.8）；
+- native 回归 [12]：Result native + C 传播；[13]：option native + C；
+- Windows 回归：Result / option PE 自校验 + PE×ELF 交叉验证。
 
 当前总量：
 
 ```
-Windows PE 55 ✅  |  自研 Linux 52 ✅  |  C 16 ✅  |  corelib 34 ✅  |  io_uring 26 ✅
-总计 183 项
+Windows PE 57 ✅  |  自研 Linux 54 ✅  |  C 16 ✅  |  corelib 34 ✅  |  io_uring 26 ✅
+总计 187 项（v0.7 的 183 + v0.8 option 4 项）
 ```
 
 ---
@@ -109,7 +117,8 @@ Windows PE 55 ✅  |  自研 Linux 52 ✅  |  C 16 ✅  |  corelib 34 ✅  |  io
 
 | 特性 | 状态 | 优先级 |
 |---|---|---|
-| 泛型 `option[T]` / `result[T,E]` | ❌ 尚未自动展开 | 高 |
+| `option[T]` 单态化 | ✅ v0.8 合成枚举 + match 解构（int/bool/str） | — |
+| 泛型 `result[T,E]` | ❌ 尚未自动展开 | 高 |
 | `[]T` 切片（指针+长度） | ❌ 只有类型语法，数组不能作参数 | 高 |
 | `map[K]V` | ❌ 未实现 | 高 |
 | 数组作函数参数/返回值 | ❌ `[N]T` v0.6 边界明确报错 | 高 |
@@ -232,10 +241,11 @@ python tools/rosoto_pe.py build tests/t17_result.ros -o build/x.exe --dump-ir --
 
 ## 7. 版本控制 / 远端
 
-- 本轮待提交：`v0.7: Result propagation and conservative range analysis (183 tests green)`。
+- 本轮待提交：`v0.8: option[T] monomorphization via synthesized enums (187 tests green)`。
 - 已有提交：
   - `3e9b8c0` v0.5 chan
   - `ff8f830` v0.6 arrays
+  - `d38c359` v0.7 Result `?`
 - **仍没有 git remote**。请提供 URL，或执行：
   ```bash
   git remote add origin <URL>
@@ -258,6 +268,15 @@ python tools/rosoto_pe.py build tests/t17_result.ros -o build/x.exe --dump-ir --
 新增：
   tests/t17_result.ros     Result Ok/Err、错误传播、反向 tag 顺序
 
+v0.8 本轮改动（option[T]）：
+修改：
+  tools/rosoto.py          KEYWORDS+option、ensure_option_enum 单态化、parse_type/parse_primary 构造、
+                           resolve_option_patterns、C gen_match 求值式先行 + Option 改写
+  tools/rosoto_native.py   lower_match 求值式先行 + Option 模式改写（PE/AArch64 零改动）
+  tests/run_native_tests.sh / tests/run_win_tests.py   登记 t19（native [13] + PE + 交叉验证）
+新增：
+  tests/t19_option.ros     option[int]/option[str] 构造、函数返回、Option.Some/None 解构
+
 测试：
-  Windows 55 ✅ | native Linux 52 ✅ | C 16 ✅ | corelib 34 ✅ | io_uring 26 ✅
+  Windows 57 ✅ | native Linux 54 ✅ | C 16 ✅ | corelib 34 ✅ | io_uring 26 ✅（总 187）
 ```

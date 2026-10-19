@@ -141,6 +141,10 @@ echo "[12] Result 枚举错误传播（?）"
 $NAT run tests/t17_result.ros >/dev/null 2>&1 && ok "native Result/ ? 传播正确" || bad "native Result/ ? 失败"
 $CBE run tests/t17_result.ros >/dev/null 2>&1 && ok "C Result/ ? 传播正确" || bad "C Result/ ? 失败"
 
+echo "[13] option[T] 单态化 + match 解构"
+$NAT run tests/t19_option.ros >/dev/null 2>&1 && ok "native option 构造/match 正确" || bad "native option 失败"
+$CBE run tests/t19_option.ros >/dev/null 2>&1 && ok "C option 构造/match 正确" || bad "C option 失败"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

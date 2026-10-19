@@ -27,7 +27,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rosoto import (tokenize, Parser, load_config, walk_stmts,  # noqa: E402
-                    parse_source, with_test_runner, validate_match)
+                    parse_source, with_test_runner, validate_match,
+                    resolve_option_patterns)
 
 # ---------------------------------------------------------------------------
 # x86-64 寄存器编号
@@ -548,9 +549,10 @@ class Lower:
     def lower_match(self, e, fn, env, as_expr):
         """match -> tag 比较链 + 每臂载荷绑定（不新增 RosIR 指令，纯现有指令降级）"""
         _m, scrut, arms = e
-        ename, plain, _wild = validate_match(arms, self.enums)
         addr = self.eval(scrut, fn, env)
         sname = self._struct_of(fn, addr)
+        arms = resolve_option_patterns(arms, sname)
+        ename, plain, _wild = validate_match(arms, self.enums)
         if sname not in self.enums:
             raise SyntaxError("match 的求值式必须是枚举类型")
         if ename is not None and ename != sname:

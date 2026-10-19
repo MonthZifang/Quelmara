@@ -1,0 +1,46 @@
+// t19_option.ros：option[T] 受控单态化（合成枚举 __opt_<T> + match 解构）
+// 覆盖：some/none 构造、函数返回 option[T]（聚合 ABI）、Option.Some/None 解构、
+//       int 与 str 两种载荷、Some/None 两条分支。
+module t19_option
+
+fn find(x: int) -> option[int] {
+    if x > 0 {
+        return option[int].some(x)
+    }
+    return option[int].none()
+}
+
+fn greet(has: bool) -> option[str] {
+    if has {
+        return option[str].some("hello")
+    }
+    return option[str].none()
+}
+
+fn main() {
+    let a = find(42)
+    match a {
+        Option.Some(v) => assert(v == 42, "int some value")
+        Option.None => assert(false, "should be some")
+    }
+
+    let b = find(-1)
+    match b {
+        Option.Some(v) => assert(false, "should be none")
+        Option.None => assert(true, "int none ok")
+    }
+
+    let s = greet(true)
+    match s {
+        Option.Some(v) => assert(v == "hello", "str some value")
+        Option.None => assert(false, "str should be some")
+    }
+
+    let n = greet(false)
+    match n {
+        Option.Some(v) => assert(false, "str should be none")
+        Option.None => assert(true, "str none ok")
+    }
+
+    print("option ok")
+}

@@ -78,7 +78,7 @@ def load_config(src_path):
 KEYWORDS = {"fn", "let", "mut", "if", "else", "while", "for", "parfor",
             "return", "module", "import", "true", "false", "test",
             "break", "continue", "struct", "enum", "match",
-            "arena", "spawn", "chan"}
+            "arena", "spawn", "chan", "option"}
 
 TWO_CHAR = {"->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "..", "=>"}
 ONE_CHAR = "(){}[],:.=<>+-*/%!?"
@@ -323,6 +323,12 @@ class Parser:
             et = self.parse_type()
             self.eat("SYM", "]")
             return ("chan", et)
+        if self.at("option"):
+            self.next()
+            self.eat("SYM", "[")
+            tt = self.parse_type()
+            self.eat("SYM", "]")
+            return ("named", self.ensure_option_enum(tt, self.peek().line))
         name = self.eat("NAME").val
         while self.at("SYM", "."):
             self.next()
@@ -511,6 +517,18 @@ class Parser:
             out = [(vfields[i][0], a) for i, a in enumerate(args)]
         return ("enumlit", path, out)
 
+    def ensure_option_enum(self, tt, line):
+        """option[T] 受控单态化：按标量 T 现场合成具名枚举 __opt_<T>{Some(value:T),None}。
+        类型元组直接坍缩为 ("named","__opt_<T>")，下游 enum 布局/match/聚合返回 ABI 全部复用。"""
+        if not (tt and tt[0] == "named" and tt[1] in ("int", "i64", "i32", "i16", "i8",
+                                                      "u64", "u32", "u16", "u8", "bool", "str")):
+            raise SyntaxError(f"line {line}: option[T] 的 T 暂只支持整数/bool/str 标量")
+        name = "__opt_" + tt[1]
+        if name not in self.enums:
+            self.enums[name] = [("Some", [("value", tt)]), ("None", [])]
+            self.decl_order.append(("enum", name))
+        return name
+
     def parse_if(self):
         self.eat("if")
         cond = self.parse_expr()
@@ -650,6 +668,22 @@ class Parser:
             self.eat("SYM", "(")
             args = self.parse_args()      # parse_args 已吃掉右括号
             return ("chanopen", et, args)
+        if t.kind == "option":
+            # option[T].some(x) / option[T].none() -> 合成枚举构造（脱糖为 enumlit）
+            self.next()
+            self.eat("SYM", "[")
+            tt = self.parse_type()
+            self.eat("SYM", "]")
+            name = self.ensure_option_enum(tt, t.line)
+            self.eat("SYM", ".")
+            meth = self.eat("NAME").val
+            self.eat("SYM", "(")
+            args = self.parse_args()
+            if meth == "some" and len(args) == 1:
+                return ("enumlit", [name, "Some"], [("value", args[0])])
+            if meth == "none" and len(args) == 0:
+                return ("enumlit", [name, "None"], [])
+            raise SyntaxError(f"line {t.line}: option[T].{meth} 用法无效（仅 some(x)/none()）")
         if t.kind == "SYM" and t.val == "[":
             # 定长数组字面量：[1, 2, 3]（v0.6 只支持数值元素）
             self.next()
@@ -737,6 +771,20 @@ class Parser:
 def parse_source(src):
     """解析源码 -> (module, imports, fns, tests, structs, enums, decl_order)"""
     return Parser(tokenize(src)).parse_program()
+
+
+def resolve_option_patterns(arms, scrut_ename):
+    """把 `Option.Some/None` 模式路径首段改写为求值式真实合成枚举名 __opt_*（受控单态化）。
+    仅当求值式确为 option 合成枚举时改写；其余原样返回。"""
+    if not scrut_ename or not str(scrut_ename).startswith("__opt_"):
+        return arms
+    out = []
+    for pat, body in arms:
+        if pat and pat[0] == "pat" and pat[1] and pat[1][0] == "Option":
+            out.append((("pat", [scrut_ename] + list(pat[1][1:]), pat[2]), body))
+        else:
+            out.append((pat, body))
+    return out
 
 
 def validate_match(arms, enums, line=None):
@@ -1514,9 +1562,10 @@ class Codegen:
         """match 降级：tag 比较链 + 每臂载荷绑定。
         返回 (内部行列表, 结果变量|None, 结果类型)；调用方负责外层括号/花括号。"""
         _, scrut, arms = e
-        ename, plain, _wild = validate_match(arms, self.enums)
         scode, stype = self.gen_expr(scrut, env)
         sname = Infer.struct_of(stype)
+        arms = resolve_option_patterns(arms, sname)
+        ename, plain, _wild = validate_match(arms, self.enums)
         if sname not in self.enums:
             raise SyntaxError("match 的求值式必须是枚举类型")
         if ename is not None and ename != sname:
