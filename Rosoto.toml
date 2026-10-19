@@ -25,3 +25,4 @@ heap_limit_mb = 512
 opt     = "speed"
 lto     = true
 target  = "native"
+bounds_check = true      # false = 去掉定长数组的越界检查（更快，但越界即 UB）

@@ -222,6 +222,20 @@ def test_single_core():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_array_bounds():
+    """越界必须 fail-fast（stderr + 非 0 退出码），不能静默读到相邻内存。"""
+    out = os.path.join(ROOT, "build", "win_array_bounds.exe")
+    build(os.path.join(ROOT, "tests/array_bounds.ros"), out)
+    r = run(out)
+    if r is None:
+        skip("数组越界：非 Windows 平台")
+        return
+    rc, _stdout, stderr = r
+    ok("数组越界 fail-fast（退出码非 0）") if rc != 0 else bad(f"数组越界未失败 rc={rc}")
+    ok("数组越界消息写入 stderr") if b"index out of bounds" in stderr \
+        else bad(f"stderr={stderr[:120]!r}")
+
+
 def test_arena():
     """arena 必须真的回卷 bump 指针：1MB 上限下完成 ~4MB 分配量。"""
     out = os.path.join(ROOT, "build", "win_arena.exe")
@@ -314,6 +328,10 @@ def main():
     for t in ("tests/t8.ros", "tests/t9.ros", "tests/t11.ros", "tests/t12.ros"):
         case_selfcheck(os.path.splitext(os.path.basename(t))[0], t)
     case_selfcheck("traffic_light", "examples/traffic_light.ros")
+
+    print("== [3b] 定长数组 [N]T（v0.6） ==")
+    case_output("arrays", "tests/t16_arrays.ros", ["33", "arrays ok"])
+    test_array_bounds()
 
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.ros", ["11519999978"])

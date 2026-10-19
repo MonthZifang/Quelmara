@@ -31,7 +31,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 
 # ---------------------------------------------------------------------------

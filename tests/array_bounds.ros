@@ -1,0 +1,6 @@
+// 越界负向用例：下标 3 访问长度 3 的数组 -> fail-fast（退出码 1）
+fn main() {
+    let a = [1, 2, 3]
+    let i = 3
+    print(a[i])
+}

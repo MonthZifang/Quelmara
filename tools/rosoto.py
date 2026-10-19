@@ -35,7 +35,8 @@ DEFAULT_CONFIG = {
             "recv_buffer": 4096, "send_buffer": 4096, "tcp_nodelay": True,
             "reuse_port": True, "backpressure": "drop"},
     "memory": {"arena_default": False, "heap_limit_mb": 512},
-    "build": {"opt": "speed", "lto": True, "target": "native"},
+    "build": {"opt": "speed", "lto": True, "target": "native",
+              "bounds_check": True},
 }
 
 
@@ -409,6 +410,8 @@ class Parser:
                 return ("assign", expr[1], op, rhs)
             if isinstance(expr, tuple) and expr[0] in ("path", "field"):
                 return ("assign_field", expr, op, rhs)
+            if isinstance(expr, tuple) and expr[0] == "index":
+                return ("assign_index", expr[1], expr[2], op, rhs)
             raise SyntaxError(f"line {t.line}: 赋值目标不是可赋值的左值")
         return ("expr", expr)
 
@@ -609,6 +612,12 @@ class Parser:
                     else:
                         # 调用结果 / 括号表达式上的 .field -> 字段访问
                         e = ("field", e, name)
+            elif self.at("SYM", "["):
+                # 定长数组下标：a[i]
+                self.next()
+                idx = self.parse_expr()
+                self.eat("SYM", "]")
+                e = ("index", e, idx)
             elif self.at("SYM", "?"):
                 self.next()
                 e = ("try", e)
@@ -641,6 +650,18 @@ class Parser:
             self.eat("SYM", "(")
             args = self.parse_args()      # parse_args 已吃掉右括号
             return ("chanopen", et, args)
+        if t.kind == "SYM" and t.val == "[":
+            # 定长数组字面量：[1, 2, 3]（v0.6 只支持数值元素）
+            self.next()
+            elems = []
+            while not self.at("SYM", "]"):
+                elems.append(self.parse_expr())
+                if self.at("SYM", ","):
+                    self.next()
+            self.eat("SYM", "]")
+            if not elems:
+                raise SyntaxError(f"line {t.line}: 空数组字面量暂不支持")
+            return ("arraylit", elems)
         if t.kind == "INT":
             self.next()
             return ("num", t.val)
@@ -792,7 +813,8 @@ def with_test_runner(fns_ast, tests):
 # 3. 类型推断（原型子集）
 # ---------------------------------------------------------------------------
 
-BUILTIN_RETS = {"print": "void", "cores": "int", "assert": "void", "join": "int64_t"}
+BUILTIN_RETS = {"print": "void", "cores": "int", "assert": "void",
+                "join": "int64_t", "len": "int64_t"}
 
 CTYPE = {
     "int": "int64_t", "i64": "int64_t", "i32": "int32_t", "u64": "uint64_t",
@@ -818,6 +840,11 @@ class Infer:
     def _env_type(self, t):
         if t[0] == "chan":
             return "int64_t"
+        if t[0] == "array":
+            if not (t[2][0] == "named" and t[2][1] in
+                    ("int", "i64", "i32", "u64", "u32", "i16", "u16", "i8", "u8", "bool")):
+                raise SyntaxError("定长数组暂只支持数值元素")
+            return f"arr:{t[1]}"
         if t[0] == "named" and t[1] in self.structs:
             return "struct:" + t[1]
         if t[0] == "named" and t[1] in self.enums:
@@ -856,6 +883,20 @@ class Infer:
         if k == "spawn":
             return "int64_t"
         if k == "chanopen":
+            return "int64_t"
+        if k == "arraylit":
+            for el in e[1]:
+                et = self.expr(el, env)
+                if et in ("const char *", "void", "RosotoBuf") or \
+                        (isinstance(et, str) and (et.startswith("struct:") or
+                                                  et.startswith("enum:") or
+                                                  et.startswith("arr:"))):
+                    raise SyntaxError("数组字面量暂只支持数值元素")
+            return f"arr:{len(e[1])}"
+        if k == "index":
+            ot = self.expr(e[1], env)
+            if not (isinstance(ot, str) and ot.startswith("arr:")):
+                raise SyntaxError("下标只能用于定长数组")
             return "int64_t"
         if k == "method":
             obj_t = self.expr(e[1], env)
@@ -966,6 +1007,15 @@ static bool rosoto_str_eq(const char *a, const char *b) {
 static void rosoto_assert(bool cond, const char *msg) {
     if (!cond) {
         fprintf(stderr, "assert failed: %s\n", msg ? msg : "(no message)");
+        fflush(stdout);
+        exit(1);
+    }
+}
+
+/* 定长数组越界：fail-fast（可在 Rosoto.toml [build] bounds_check=false 关闭） */
+static void rosoto_bounds(int64_t i, int64_t n) {
+    if (i < 0 || i >= n) {
+        fprintf(stderr, "rosoto: index out of bounds (fail-fast)\n");
         fflush(stdout);
         exit(1);
     }
@@ -1193,11 +1243,15 @@ class Codegen:
         self.pf_id = 0
         self.spawn_id = 0
         self.mid = 0           # match 临时变量计数
+        self.tmp_id = 0        # 数组越界检查临时变量计数
         self.threads = cfg["core"]["threads"] or os.cpu_count() or 1
         self.multicore = bool(cfg["core"]["multicore"]) and self.threads > 1
+        self.bounds = bool(cfg["build"].get("bounds_check", True))
 
     # ---- 工具 ----
     def ctype(self, t):
+        if t[0] == "array":
+            raise SyntaxError("定长数组暂不支持作函数参数/返回值（v0.6 边界）")
         if t[0] == "chan":
             return "int64_t"
         if t[0] == "slice":
@@ -1308,6 +1362,13 @@ class Codegen:
                 if len(e[2]) > 1 and e[2][1][0] == "str":
                     msg = e[2][1][1]
                 return (f'rosoto_assert(({ccode}), "{msg}")', "void")
+            if name == "len" and name not in self.infer.fns:
+                if len(e[2]) != 1:
+                    raise SyntaxError("len(x) 需要且只需要一个实参")
+                arg = e[2][0]
+                if arg[0] != "name" or not str(env.get(arg[1], "")).startswith("arr:"):
+                    raise SyntaxError("len() 目前只支持定长数组变量")
+                return str(int(env[arg[1]][4:])), "int64_t"
             if name == "join" and name not in self.infer.fns:
                 if len(e[2]) != 1:
                     raise SyntaxError("join(handle) 需要且只需要一个句柄")
@@ -1317,6 +1378,20 @@ class Codegen:
             return f"{name}({args})", self.infer.fn_ret(name)
         if k == "spawn":
             return self.gen_spawn(e[1], env)
+        if k == "index":
+            ocode, otype = self.gen_expr(e[1], env)
+            if not (isinstance(otype, str) and otype.startswith("arr:")):
+                raise SyntaxError("下标只能用于定长数组")
+            n = int(otype[4:])
+            icode, _ = self.gen_expr(e[2], env)
+            if self.bounds:
+                self.tmp_id += 1
+                tmp = f"_bi{self.tmp_id}"
+                return (f"({{ int64_t {tmp} = (int64_t)({icode}); "
+                        f"rosoto_bounds({tmp}, {n}); ({ocode})[{tmp}]; }})", "int64_t")
+            return f"({ocode})[({icode})]", "int64_t"
+        if k == "arraylit":
+            raise SyntaxError("数组字面量只能直接用于 let（v0.6 边界）")
         if k == "chanopen":
             if len(e[2]) != 1:
                 raise SyntaxError("chan[T].open(cap) 需要且只需要一个容量实参")
@@ -1527,7 +1602,29 @@ class Codegen:
             if lit[0] == "structlit" and self.struct_name_of(lit[1]) is None:
                 # net.TcpServer { ... }：字段展开为局部变量
                 return self.gen_struct_let(s, env, ind)
+            if lit[0] == "arraylit":
+                # 定长数组字面量：int64_t a[N] = { ... };
+                n = len(lit[1])
+                codes = []
+                for el in lit[1]:
+                    c, et = self.gen_expr(el, env)
+                    if et in ("const char *", "void", "RosotoBuf") or (
+                            isinstance(et, str) and (et.startswith("struct:") or
+                                                     et.startswith("enum:") or
+                                                     et.startswith("arr:"))):
+                        raise SyntaxError("数组字面量暂只支持数值元素")
+                    codes.append(c)
+                env[s[2]] = f"arr:{n}"
+                return f"{pad}int64_t {s[2]}[{n}] = {{ {', '.join(codes)} }};"
             code, t = self.gen_expr(lit, env)
+            if isinstance(t, str) and t.startswith("arr:"):
+                # 定长数组值语义拷贝
+                n = int(t[4:])
+                if lit[0] != "name":
+                    raise SyntaxError("数组只能从另一个数组变量拷贝")
+                env[s[2]] = t
+                return (f"{pad}int64_t {s[2]}[{n}]; "
+                        f"memcpy({s[2]}, {code}, sizeof({s[2]}));")
             if t.startswith("struct:"):
                 t = t[7:]
             if t.startswith("enum:"):
@@ -1540,8 +1637,37 @@ class Codegen:
                 env["__chan__" + s[2]] = True
             return f"{pad}{decl} {s[2]} = {code};"
         if k == "assign":
+            atype = str(env.get(s[1], ""))
+            if atype.startswith("arr:"):
+                n = int(atype[4:])
+                if s[2] != "=":
+                    raise SyntaxError("数组只支持 = 整体赋值")
+                if s[3][0] != "name":
+                    raise SyntaxError("数组只能从另一个数组变量赋值")
+                code, rt = self.gen_expr(s[3], env)
+                if rt != atype:
+                    raise SyntaxError("数组赋值两侧长度不一致")
+                return f"{pad}memcpy({s[1]}, {code}, sizeof({s[1]}));"
             code, t = self.gen_expr(s[3], env)
             return f"{pad}{s[1]} {s[2]} {code};"
+        if k == "assign_index":
+            base, idxe, op, rhs = s[1], s[2], s[3], s[4]
+            bcode, btype = self.gen_expr(base, env)
+            if not (isinstance(btype, str) and btype.startswith("arr:")):
+                raise SyntaxError("下标赋值只能用于定长数组")
+            n = int(btype[4:])
+            icode, _ = self.gen_expr(idxe, env)
+            rcode, _ = self.gen_expr(rhs, env)
+            if not self.bounds:
+                return f"{pad}({bcode})[({icode})] {op} {rcode};"
+            self.tmp_id += 1
+            tmp = f"_bi{self.tmp_id}"
+            return "\n".join([
+                f"{pad}{{",
+                f"{pad}    int64_t {tmp} = (int64_t)({icode});",
+                f"{pad}    rosoto_bounds({tmp}, {n});",
+                f"{pad}    ({bcode})[{tmp}] {op} {rcode};",
+                f"{pad}}}"])
         if k == "assign_field":
             lhs, op = s[1], s[2]
             lcode, ltype = self.gen_expr(lhs, env)
@@ -1941,6 +2067,12 @@ def walk_expr(e, declared, assigned, referenced):
                 walk_stmts(body[1], declared, assigned, referenced)
     elif k == "field":
         walk_expr(e[1], declared, assigned, referenced)
+    elif k == "index":
+        walk_expr(e[1], declared, assigned, referenced)
+        walk_expr(e[2], declared, assigned, referenced)
+    elif k == "arraylit":
+        for el in e[1]:
+            walk_expr(el, declared, assigned, referenced)
 
 
 def lvalue_head(e):
@@ -1967,6 +2099,14 @@ def walk_stmts(stmts, declared, assigned, referenced):
         elif k == "assign_field":
             walk_expr(s[1], declared, assigned, referenced)
             walk_expr(s[3], declared, assigned, referenced)
+            head = lvalue_head(s[1])
+            if head:
+                assigned.add(head)
+                referenced.add(head)
+        elif k == "assign_index":
+            walk_expr(s[1], declared, assigned, referenced)
+            walk_expr(s[2], declared, assigned, referenced)
+            walk_expr(s[4], declared, assigned, referenced)
             head = lvalue_head(s[1])
             if head:
                 assigned.add(head)

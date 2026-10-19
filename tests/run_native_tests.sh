@@ -126,6 +126,17 @@ $NAT build tests/single_core/t15_chan_seq.ros -o build/nat_chan_seq >/dev/null 2
 out=$(timeout 60 ./build/nat_chan_seq); rc=$?
 [ $rc -eq 0 ] && [ "$out" = "chan seq ok" ] && ok "chan 单核降级 FIFO 正确" || bad "chan 单核降级 rc=$rc [$out]"
 
+$NAT build tests/t16_arrays.ros -o build/nat_arrays >/dev/null 2>&1
+out=$(timeout 60 ./build/nat_arrays); rc=$?
+[ $rc -eq 0 ] && ok "数组退出码 0" || bad "数组退出码 $rc"
+[ "$out" = "$(printf '33\narrays ok')" ] && ok "数组：len/读写/复合赋值/值拷贝/循环求和正确" || bad "数组输出 [$out]"
+$CBE run tests/t16_arrays.ros 2>/dev/null | grep -v '^\[rosoto' > build/.arr_c
+[ "$out" = "$(cat build/.arr_c)" ] && ok "数组自研后端 == C 后端" || bad "数组双后端不一致"
+
+$NAT build tests/array_bounds.ros -o build/nat_ab >/dev/null 2>&1
+timeout 30 ./build/nat_ab >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && ok "数组越界 fail-fast（退出码非 0）" || bad "数组越界未失败"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

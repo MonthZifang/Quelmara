@@ -388,6 +388,7 @@ class Lower:
         self.uses_chan = False
         self.uses_arena = False
         self.uses_join = False
+        self.uses_bounds = False
         if platform == "windows":
             # WriteFile 的 lpNumberOfBytesWritten 落点（Win32 必须给非空指针）
             self.written_gid = self.intern_array(1)
@@ -464,6 +465,44 @@ class Lower:
         addr = fn.new_v()
         fn.emit("frameaddr", addr, base)
         return self._mark_struct(fn, addr, sname)
+
+    # ---- 定长数组（v0.6）：帧槽 N 字 + 值语义拷贝 ----
+    @staticmethod
+    def _mark_arr(fn, v, n):
+        if isinstance(v, int):
+            if not hasattr(fn, "arrv"):
+                fn.arrv = {}
+            fn.arrv[v] = n
+        return v
+
+    @staticmethod
+    def _arr_of(fn, v):
+        return getattr(fn, "arrv", {}).get(v) if isinstance(v, int) else None
+
+    def alloc_array(self, fn, n):
+        base = fn.new_struct_slot(n)
+        addr = fn.new_v()
+        fn.emit("frameaddr", addr, base)
+        return self._mark_arr(fn, addr, n)
+
+    def array_copy(self, fn, dst, src, n):
+        for i in range(n):
+            t = fn.new_v()
+            fn.emit("load", t, src, ("imm", i))
+            fn.emit("store", dst, ("imm", i), t)
+
+    def emit_bounds(self, fn, idx, n):
+        """越界 fail-fast（Rosoto.toml [build] bounds_check 可关闭）"""
+        if not self.cfg["build"].get("bounds_check", True):
+            return
+        self.uses_bounds = True
+        l_ok = fn.label("bok")
+        l_fail = fn.label("bfail")
+        fn.emit("jcc", "ge", idx, ("imm", n), l_fail)
+        fn.emit("jcc", "ge", idx, ("imm", 0), l_ok)
+        fn.emit("label", l_fail)
+        fn.emit("call", None, "__bounds_fail", [])
+        fn.emit("label", l_ok)
 
     def lower_struct_lit(self, sname, fields, fn, env):
         addr = self.alloc_struct(fn, sname)
@@ -699,6 +738,25 @@ class Lower:
             return env[e[1]]
         if k == "call":
             return self.lower_call(e, fn, env)
+        if k == "arraylit":
+            n = len(e[1])
+            addr = self.alloc_array(fn, n)
+            for i, el in enumerate(e[1]):
+                v = self.eval(el, fn, env)
+                if self._struct_of(fn, v) is not None or self._is_str(fn, v):
+                    raise SyntaxError("数组元素暂只支持数值（v0.6 边界）")
+                fn.emit("store", addr, ("imm", i), v)
+            return addr
+        if k == "index":
+            obj = self.eval(e[1], fn, env)
+            n = self._arr_of(fn, obj)
+            if n is None:
+                raise SyntaxError("下标只能用于定长数组")
+            idx = self.eval(e[2], fn, env)
+            self.emit_bounds(fn, idx, n)
+            d = fn.new_v()
+            fn.emit("load", d, obj, idx)
+            return d
         if k == "spawn":
             return self.lower_spawn(e[1], fn, env)
         if k == "chanopen":
@@ -1075,9 +1133,22 @@ class Lower:
                 self.uses_join = True
                 fn.emit("call", d, "__join", [hv])
             return d
+        if name == "len" and name not in self.fns_ast:
+            if len(e[2]) != 1:
+                raise SyntaxError("len(x) 需要且只需要一个实参")
+            a = e[2][0]
+            if a[0] != "name" or a[1] not in env:
+                raise SyntaxError("len() 目前只支持定长数组变量")
+            n = self._arr_of(fn, env[a[1]])
+            if n is None:
+                raise SyntaxError("len() 目前只支持定长数组变量")
+            return ("imm", n)
         if name not in self.fns_ast:
             raise SyntaxError(f"未定义函数 {name}")
         args = [self.eval(a, fn, env) for a in e[2]]
+        for a in args:
+            if self._arr_of(fn, a) is not None:
+                raise SyntaxError("定长数组暂不支持作函数实参（v0.6 边界）")
         # 结构体实参：拷贝到临时帧槽再传地址 -> 值语义与 C 后端一致（callee 改不到 caller）
         for i, a in enumerate(args):
             sname = self._struct_of(fn, a)
@@ -1139,6 +1210,16 @@ class Lower:
         k = s[0]
         if k == "let":
             spec = self.eval(s[3], fn, env)
+            n = self._arr_of(fn, spec)
+            if n is not None:
+                if s[3][0] == "arraylit":
+                    # 字面量已经是在帧上新建的数组，直接绑定，不再多拷一次
+                    env[s[2]] = spec
+                    return
+                dst = self.alloc_array(fn, n)
+                self.array_copy(fn, dst, spec, n)
+                env[s[2]] = dst
+                return
             sname = self._struct_of(fn, spec)
             if sname is not None:
                 # 结构体：值语义 -> 拷贝到新的帧槽
@@ -1162,6 +1243,15 @@ class Lower:
             if s[1] not in env:
                 raise SyntaxError(f"未定义变量 {s[1]}")
             cur = env[s[1]]
+            n = self._arr_of(fn, cur)
+            if n is not None:
+                if s[2] != "=":
+                    raise SyntaxError("数组只支持 = 整体赋值")
+                spec = self.eval(s[3], fn, env)
+                if self._arr_of(fn, spec) != n:
+                    raise SyntaxError("数组赋值两侧长度不一致")
+                self.array_copy(fn, cur, spec, n)
+                return
             sname = self._struct_of(fn, cur)
             if sname is not None:
                 if s[2] != "=":
@@ -1210,6 +1300,8 @@ class Lower:
             self.lower_for(s, fn, env, parallel=(k == "parfor"))
             return
         if k == "return":
+            if self.fn_ret[0] == "array":
+                raise SyntaxError("定长数组暂不支持作返回值（v0.6 边界）")
             if self.fn_ret_agg:
                 if s[1] is None:
                     raise SyntaxError("聚合（结构体/枚举）返回值函数必须 return 一个值")
@@ -1243,6 +1335,9 @@ class Lower:
             return
         if k == "assign_field":
             self.lower_assign_field(s, fn, env)
+            return
+        if k == "assign_index":
+            self.lower_assign_index(s, fn, env)
             return
         if k == "break":
             if not self.loop_stack:
@@ -1294,6 +1389,26 @@ class Lower:
         fn.emit("load", cur, addr, ("imm", off))
         fn.emit("bin", binop, cur, cur, spec)
         fn.emit("store", addr, ("imm", off), cur)
+
+    def lower_assign_index(self, s, fn, env):
+        """a[i] = v / a[i] += v（越界 fail-fast）"""
+        base, idxe, op, rhs = s[1], s[2], s[3], s[4]
+        obj = self.eval(base, fn, env)
+        n = self._arr_of(fn, obj)
+        if n is None:
+            raise SyntaxError("下标赋值只能用于定长数组")
+        idx = self.eval(idxe, fn, env)
+        self.emit_bounds(fn, idx, n)
+        val = self.eval(rhs, fn, env)
+        if op == "=":
+            fn.emit("store", obj, idx, val)
+            return
+        binop = {"+=": "add", "-=": "sub", "*=": "mul",
+                 "/=": "div", "%=": "mod"}[op]
+        cur = fn.new_v()
+        fn.emit("load", cur, obj, idx)
+        fn.emit("bin", binop, cur, cur, val)
+        fn.emit("store", obj, idx, cur)
 
     def block(self, stmts, fn, env):
         for s in stmts:
@@ -1522,6 +1637,8 @@ class Lower:
                 fn.strv.add(params[i])
             elif ty[0] == "chan":
                 self._mark_chan(fn, params[i])
+            elif ty[0] == "array":
+                self._mark_arr(fn, params[i], ty[1])
             elif ty[0] == "named" and self.is_agg(ty[1]):
                 # 聚合形参：实参侧传入的是【副本地址】，值语义成立
                 self._mark_struct(fn, params[i], ty[1])
@@ -1708,6 +1825,18 @@ class Lower:
 
         # ---- arena / 任务运行时（v0.4）----
         # 只发射真正用到的部分：hello 这种程序不会带 __join / __chan_*（省体积/导入）。
+        if self.uses_bounds:
+            msg = "rosoto: index out of bounds (fail-fast)\n"
+            gid_b = self.intern_str(msg)
+            f = Fn("__bounds_fail")
+            f.emit("args", [])
+            bp = f.new_v()
+            f.emit("movaddr", bp, gid_b)
+            self.emit_write(f, 2, bp, ("imm", len(msg.encode("utf-8"))))
+            self.emit_exit(f, 1)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
         if self.uses_arena:
             # __arena_mark() -> 当前 bump 偏移；__arena_release(mark) 整体回卷。
             # 语义：arena 块内用 __alloc 分配的对象（当前主要是字符串）在块末一次性回收；

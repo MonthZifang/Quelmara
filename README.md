@@ -37,8 +37,8 @@ Rosoto/
 │   └── rosoto_uring.py    # io_uring 网络后端运行时发射器
 └── tests/
     ├── run_tests.sh         # C 后端回归（16 项）
-    ├── run_native_tests.sh  # 自研后端回归（46 项，含 AArch64 模拟器执行级验证）
-    ├── run_win_tests.py     # Windows PE 回归（50 项：结构/执行/多核/chan/arena/交叉验证）
+    ├── run_native_tests.sh  # 自研后端回归（50 项，含 AArch64 模拟器执行级验证）
+    ├── run_win_tests.py     # Windows PE 回归（54 项：结构/执行/多核/chan/arena/数组/交叉验证）
     ├── test_corelib.sh      # mem/mt/store 运行时回归（34 项）
     ├── test_uring.sh        # io_uring 网络回归（26 项）
     └── single_core/         # multicore=false 单核降级测试夹具
@@ -53,7 +53,7 @@ python3 tools/rosoto_native.py run examples/parfor_sum.ros   # 多核：raw clon
 
 # Windows：Rosoto -> PE32+（无 CRT，kernel32 导入）
 python tools/rosoto_cli.py run examples/hello.ros --target win     # 产出 build/hello.exe
-python tests/run_win_tests.py                                     # Windows 50 项回归
+python tests/run_win_tests.py                                     # Windows 54 项回归
 
 # C 后端：Rosoto -> C99 -> 原生编译
 python3 tools/rosoto.py run examples/hello.ros
@@ -63,12 +63,12 @@ python3 tools/rosoto.py run examples/parallel_sum.ros
 python3 tools/rosoto.py build examples/echo_server.ros --cc
 ./build/echo_server
 
-# 回归测试（五套，共 172 项）
-bash tests/run_native_tests.sh   # 自研后端 46 项（含 AArch64 模拟器执行级）
+# 回归测试（五套，共 180 项）
+bash tests/run_native_tests.sh   # 自研后端 50 项（含 AArch64 模拟器执行级）
 bash tests/run_tests.sh          # C 后端 16 项
 bash tests/test_corelib.sh       # mem/mt/store 运行时 34 项
 bash tests/test_uring.sh         # io_uring 网络 26 项
-python tests/run_win_tests.py    # Windows PE 50 项（需在 Windows 上执行）
+python tests/run_win_tests.py    # Windows PE 54 项（需在 Windows 上执行）
 ```
 
 ## 核心机制速览
@@ -146,7 +146,27 @@ fn frame() {
 
 非 chan 程序不会带上通道运行库与 `SwitchToThread` 导入（按需发射，省体积）。
 
-**6. 无 CRT 的 Windows 原生产物**：入口即 `main`，
+**6. 定长数组 `[N]T`（v0.6）**：
+
+```rosoto
+let mut a = [1, 2, 3, 4]
+a[1] = 20
+a[2] += 5
+assert(len(a) == 4, "len")
+
+let b = a          // 值语义拷贝：改 b[0] 不影响 a
+b[0] = 100
+print(a[0])        // 1
+
+let i = 4
+print(a[i])        // 越界：fail-fast（退出码 1，stderr 报错）
+```
+
+- 数值元素、栈上帧槽、值语义拷贝；下标支持动态变量与复合赋值。
+- 越界默认 fail-fast（`Rosoto.toml [build] bounds_check = false` 可关闭）。
+- `[N]T` 目前只支持函数内局部数组；作函数参数/返回值会**明确报错**（v0.6 边界）。
+
+**7. 无 CRT 的 Windows 原生产物**：入口即 `main`，
 导入仅 kernel32（`GetStdHandle/WriteFile/ExitProcess/VirtualAlloc/CreateThread/...`），
 堆按 1MB 粒度提交，hello 仅 **7 KB 级**。
 
@@ -172,11 +192,13 @@ fn frame() {
 | prime_parallel（10 万内素数） | 15872 B | 18.7 ms |
 | t13_spawn（4 个任务） | 13824 B | — |
 | t15_chan（2 生产者 + 有界通道） | 11264 B | — |
+| t16_arrays（数组 + 越界检查） | 9216 B | — |
 
-回归测试：**172 项全绿**（Windows 50 / 自研 Linux 46 / C 16 / corelib 34 / io_uring 26）。
-Windows 的 50 项包含：PE 结构自检（仅 kernel32、无 CRT）、执行级语义、多核归约、
-`spawn`/`join` 任务、`chan` 有界通道、arena 真实回收（1MB 上限）、单核降级、
-assert 失败路径，以及与 Linux ELF 逐字节交叉验证。
+回归测试：**180 项全绿**（Windows 54 / 自研 Linux 50 / C 16 / corelib 34 / io_uring 26）。
+Windows 的 54 项包含：PE 结构自检（仅 kernel32、无 CRT）、执行级语义、多核归约、
+`spawn`/`join` 任务、`chan` 有界通道、`[N]T` 数组与越界 fail-fast、
+arena 真实回收（1MB 上限）、单核降级、assert 失败路径，
+以及与 Linux ELF 逐字节交叉验证。
 
 > 未完成项、阻塞项、下一步排期见 **`HANDOVER.md`**；
 > 全平台矩阵与讨论见 **`PLATFORM.md`**。
@@ -189,6 +211,7 @@ assert 失败路径，以及与 Linux ELF 逐字节交叉验证。
 | v0.2 | `break`/`continue`/`struct`（值语义/嵌套/字段读写）+ `frameaddr` + 内联/LICM/CSE/展开/调度 + ARM64 发射器 + `enum`/`match` ✅ |
 | v0.3 | **Windows x86_64 PE/COFF 后端（无 CRT）** + kernel32 导入 + DIR64 重定位 + CreateThread 多核 + 1MB 粒度提交 + Windows 回归 ✅ |
 | v0.4 | **`spawn`/`join` 任务并行 + `arena { }` 帧级回收**（Linux/Windows/C 三链）✅ |
-| **v0.5（当前）** | **`chan[T]` 有界 MPMC 通道**（自旋锁 `xchg` + yield / C 条件变量）+ 运行库按需发射 + 内联标签冲突修复 ✅ |
-| v0.6 | `option`/`result` + `?`；`[N]T` / `[]T` / `map`；Windows IOCP 网络；SIMD 自动向量化；macOS Mach-O/kqueue |
-| v0.7 | wasm64 + 全平台矩阵收尾 + LTO + 热重载 + 主机平台适配层 |
+| v0.5 | **`chan[T]` 有界 MPMC 通道**（自旋锁 `xchg` + yield / C 条件变量）+ 运行库按需发射 + 内联标签冲突修复 ✅ |
+| **v0.6（当前）** | **定长数组 `[N]T`**：字面量/索引/复合赋值/`len`/值语义拷贝/越界 fail-fast（三链）✅ |
+| v0.7 | `option`/`result` + `?`；`[]T` / `map`；Windows IOCP 网络；SIMD 自动向量化；macOS Mach-O/kqueue |
+| v0.8 | wasm64 + 全平台矩阵收尾 + LTO + 热重载 + 主机平台适配层 |

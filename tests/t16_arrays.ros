@@ -1,0 +1,31 @@
+// t16_arrays.ros：定长数组 [N]T（v0.6）
+// 覆盖：字面量、len、读/写/复合赋值、动态下标循环、值语义拷贝、越界检查
+module t16
+
+fn main() {
+    let mut a = [1, 2, 3, 4]
+    assert(len(a) == 4, "len")
+    assert(a[0] == 1, "read a0")
+    assert(a[3] == 4, "read a3")
+
+    a[1] = 20
+    a[2] += 5
+    assert(a[1] == 20, "write a1")
+    assert(a[2] == 8, "compound a2")
+
+    // 值语义：拷贝后互不影响
+    let b = a
+    b[0] = 100
+    assert(a[0] == 1, "copy keeps original")
+    assert(b[0] == 100, "copy is independent")
+
+    let mut sum = 0
+    let mut i = 0
+    while i < len(a) {
+        sum += a[i]
+        i += 1
+    }
+    assert(sum == 33, "array sum")
+    print(sum)
+    print("arrays ok")
+}

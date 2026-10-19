@@ -45,11 +45,26 @@ float   默认 64 位浮点          f32 f64
 bool    true | false
 str     UTF-8 不可变字符串（长度内联）
 []T     切片（指针+长度，零拷贝传递）
-[N]T    定长数组（栈上）
+[N]T    定长数组（栈上；v0.6 已实现：数值元素、索引、len、值语义拷贝、越界 fail-fast）
 map[K]V 开放寻址哈希表（可指定 arena 分配）
 option[T]   可空（无 null 指针）
 result[T, E] 显式错误（配合 `?` 传播）
 ```
+
+定长数组（v0.6 子集）：
+
+```rosoto
+let mut a = [1, 2, 3, 4]
+a[1] = 20
+a[2] += 5
+assert(len(a) == 4, "len")
+let b = a              // 值语义拷贝，b[0] 与 a[0] 独立
+```
+
+- 元素只支持数值类型（int/bool 家族）；`[N]T` 目前只能作函数内局部变量，
+  作函数参数/返回值会明确报错。
+- 下标支持动态表达式；越界默认 fail-fast，可用
+  `Rosoto.toml [build] bounds_check = false` 关闭（越界即 UB）。
 
 自定义类型：
 
@@ -322,6 +337,7 @@ heap_limit_mb = 512      # 硬上限，超限 OOM fail-fast（不 swap 不膨胀
 opt        = "speed"     # speed | size | balanced
 lto        = true
 target     = "native"    # native | x86_64-unknown-linux-gnu | aarch64-apple-darwin ...
+bounds_check = true      # 定长数组越界检查；false = 更快但越界即 UB
 ```
 
 **示例：禁用多核（单核/单线程模式）**
@@ -362,13 +378,13 @@ rosoto build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF
 | 后端 | 路径 | 状态 |
 |---|---|---|
 | **自研 x86_64 Linux** | Rosoto → RosIR → 自研 x86_64 编码器 → 裸 ELF64（无 libc） | ✅ v0.1，执行级 |
-| **自研 x86_64 Windows** | 同一 RosIR/编码器 → PE32+/COFF（无 CRT，kernel32 导入） | ✅ v0.3，本机 50 项 |
+| **自研 x86_64 Windows** | 同一 RosIR/编码器 → PE32+/COFF（无 CRT，kernel32 导入） | ✅ v0.3，本机 54 项 |
 | **自研 AArch64 Linux** | 同一条 RosIR，只换发射层 → ELF64 | 🟡 模拟器执行级，待真机 |
 | C 后端 | Rosoto → C99 → 任意 C 编译器（移植/bootstrapping/网络 demo） | ✅ v0.1 |
 
 各后端对同一 `.ros` 源码交叉验证输出，互为 oracle。
 
-已实现（v0.2 / v0.3 / v0.4）：
+已实现（v0.2 / v0.3 / v0.4 / v0.5 / v0.6）：
 
 | 特性 | 状态 |
 |---|---|
@@ -391,14 +407,15 @@ rosoto build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF
 | **`spawn f(args)` + `join(h)`（Linux clone / Windows CreateThread / C pthread）** | ✅ v0.4，x86_64 + C；标量参数/返回值，单核同步降级 |
 | **`arena { }` 帧级分配（native 真实回卷 bump；C 为作用域）** | ✅ v0.4（1MB 上限下 4MB 分配量的可证伪回归） |
 | **`chan[T]` 有界 MPMC（send/recv 阻塞、FIFO）** | ✅ v0.5，x86_64 自研 + C；载荷 8 字节 |
-| `option`/`result` + `?`、`map`/`[N]T`/`[]T` 运算 | 🚧 下一轮 |
+| **`[N]T` 定长数组（字面量/索引/复合赋值/`len`/值语义拷贝/越界 fail-fast）** | ✅ v0.6，数值元素；局部数组；三链一致 |
+| `option`/`result` + `?`、`map`/`[]T` 运算 | 🚧 下一轮 |
 | `h.join()` 方法式语法、`chan.close()` / `select` | 🚧 |
 | 泛型 / interface / 所有权借用检查 / `@extern("C")` | 🚧 规范已定 |
 | Windows IOCP/AFD 网络、Mach-O/kqueue、wasm、SIMD 向量化 | 🚧 路线图（PLATFORM.md / BACKEND.md）|
 
-回归：`tests/run_native_tests.sh`（自研 Linux 46 项，含 AArch64 模拟器）+
-`tests/run_win_tests.py`（Windows PE 50 项）+ `tests/run_tests.sh`（C 16 项）
-+ `tests/test_corelib.sh`（34 项）+ `tests/test_uring.sh`（26 项）= **172 项全绿**。
+回归：`tests/run_native_tests.sh`（自研 Linux 50 项，含 AArch64 模拟器）+
+`tests/run_win_tests.py`（Windows PE 54 项）+ `tests/run_tests.sh`（C 16 项）
++ `tests/test_corelib.sh`（34 项）+ `tests/test_uring.sh`（26 项）= **180 项全绿**。
 
 实现状态、未完成清单、阻塞项与下一步排期见 `HANDOVER.md`。
 

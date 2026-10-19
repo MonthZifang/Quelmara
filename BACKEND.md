@@ -7,6 +7,7 @@
 > 与 **arena 帧级回收**（native 回卷 bump 指针；C 后端为作用域）。
 > v0.5 新增 **chan[T] 有界 MPMC 通道**（`xchg` 原子自旋锁 + yield；C 后端条件变量），
 > 并改为**运行库按需发射**（只用到的 arena/join/chan 才进产物）。
+> v0.6 新增 **定长数组 `[N]T`**（帧槽 N 字、动态下标、值语义拷贝、越界 fail-fast）。
 > AArch64 ELF 发射层已实现（模拟器执行级验证），待真机。
 
 ---
@@ -58,6 +59,8 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | Linux 子线程入口 | `spawn_child`：`rdi = [rsp-8]` → `call worker` → `exit(0)` | 参数块指针放新栈顶，避开父栈溢出槽竞争 |
 | arena（v0.4） | `__arena_mark/__arena_release` 回卷 bump 偏移 | 块内分配一次性回收；对象不得逃逸 |
 | chan[T]（v0.5） | 48字节控制块 `[cap,head,tail,count,lock,buf]` + `xchg` 自旋锁 + yield | 有界 MPMC、阻塞 send/recv；C 后端用 pthread 条件变量 |
+| `[N]T`（v0.6） | 帧上连续 N 个 8 字节槽；`load/store base,idx` 直接寻址；`frameaddr` 取首地址 | 值语义拷贝；数组作实参/返回值明确报错 |
+| 越界 fail-fast（v0.6） | `bounds_check` 编译期开关；读/写前两次 `jcc` + `__bounds_fail` | 默认开启；关闭后越界即 UB |
 | 运行库按需发射 | 先降级用户函数收集 `uses_arena/uses_join/uses_chan`，再发射运行库 | 非 chan 程序不带 SwitchToThread/通道代码，省体积与导入 |
 
 ---
@@ -112,7 +115,7 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | 目标 | 后端方案 | 状态 |
 |---|---|---|
 | Linux x86_64 | 自研编码器 + ELF 写出器 | ✅ v0.1 |
-| Windows x86_64 | 自研 PE/COFF 写出器 + kernel32 导入 + CreateThread | ✅ v0.3（本机执行级 50 项） |
+| Windows x86_64 | 自研 PE/COFF 写出器 + kernel32 导入 + CreateThread | ✅ v0.3（本机执行级 54 项） |
 | Linux aarch64 | 自研 ARM64 编码器（RosIR 架构无关，只换发射层） | 🟡 模拟器执行级，待真机 |
 | Windows 网络（IOCP/AFD） | 导入 WSA*/IOCP 或 AFD 设备 | 🚧 下一格（PLATFORM.md 候选 A） |
 | macOS / iOS (arm64) | Mach-O 写出器 + libSystem + kqueue 运行时 | 🚧 需 Mac 真机/CI |
@@ -163,7 +166,7 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | game_loop（结构体帧循环） | 20480 B | — | 自校验通过 |
 
 回归：`python tests/run_win_tests.py`（结构自检 + 执行级 + 单核降级 + assert 失败路径
-+ 与 Linux ELF 逐字节交叉验证，共 50 项）。
++ 与 Linux ELF 逐字节交叉验证，共 54 项）。
 
 ---
 
