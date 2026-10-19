@@ -86,6 +86,8 @@ def vreg_mentions(ins):
         return list(ins[1]), []
     if op == "spawn_child":
         return [], []
+    if op == "xchg":
+        return [ins[1]], ints([ins[2], ins[3]])
     raise SyntaxError(f"未知指令 {ins!r}")
 
 
@@ -543,13 +545,13 @@ def opt_strength_reduce(fn, rounds=3):
 _LAT = {"mov": 1, "neg": 1, "not": 1, "cmpset": 2,
         "load": 5, "load8": 5, "store": 1, "store8": 1,
         "movaddr": 1, "call": 6, "syscall": 20, "winapi": 12, "args": 1,
-        "winargs": 1, "spawn_child": 8}
+        "winargs": 1, "spawn_child": 8, "xchg": 6}
 _BIN_LAT = {"add": 1, "sub": 1, "and": 1, "or": 1, "xor": 1,
             "shl": 1, "shr": 1, "sar": 1,
             "mul": 3, "umulhi": 5, "div": 25, "mod": 25}
 # 有副作用/访存的指令：必须保持原有相对顺序
 # （winapi 是系统调用：CreateThread/WaitForSingleObject 与访存绝不能重排）
-_EFF = ("call", "syscall", "winapi", "spawn_child", "ret",
+_EFF = ("call", "syscall", "winapi", "spawn_child", "xchg", "ret",
         "store", "store8", "load", "load8")
 # 基本块终止符。注意 args 必须独占一块：它从硬件参数寄存器（rdi/rsi/rdx/
 # rcx/r8/r9）搬值进 vreg，而变量移位量会用掉 rcx——一旦被调度到它后面
@@ -820,6 +822,8 @@ def _subst_vregs(ins, sub):
         return ("args", [sub(x) for x in ins[1]])
     if op == "winargs":
         return ("winargs", [sub(x) for x in ins[1]])
+    if op == "xchg":
+        return ("xchg", sub(ins[1]), S(ins[2]), S(ins[3]))
     return ins
 
 

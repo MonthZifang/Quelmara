@@ -178,8 +178,37 @@ fn main() {
 - ⚠️ v0.4 约束：实参/返回值仅标量（int/bool/str）；结构体/枚举按值跨线程明确报错；
   并行 `spawn` 目前只支持 x86_64（AArch64 待发射层）；句柄漏回收（bump 无 free），
   批量任务建议用 `arena { spawn ...; join ... }` 包住。
-- 🚧 `h.join()` 方法式语法、`chan[T]`、work-stealing 调度器仍待实现（当前
+- 🚧 `h.join()` 方法式语法、work-stealing 调度器仍待实现（当前
   `spawn` 是每任务一线程，`parfor` 是静态分块）。
+
+### 4.2 `chan[T]`（v0.5 已落地子集）
+
+```rosoto
+fn producer(ch: chan[int], n: int) {
+    let mut i = 0
+    while i < n { ch.send(i)  i += 1 }
+}
+
+fn main() {
+    let ch = chan[int].open(64)     // 容量 64 的有界通道
+    let h = spawn producer(ch, 1000)
+    let mut sum = 0
+    let mut i = 0
+    while i < 1000 { sum += ch.recv()  i += 1 }
+    join(h)
+    assert(sum == 499500, "channel sum")
+}
+```
+
+- ✅ 有界 MPMC、FIFO、阻塞式 `send`/`recv`（满则等空位，空则等消息）。
+- ✅ 自研后端：`xchg` 原子自旋锁 + `sched_yield`/`SwitchToThread`；
+  C 后端：`pthread_mutex` + 条件变量。
+- ⚠️ 载荷按 8 字节槽传递：支持 int/bool/str（指针），结构体/枚举按值暂不支持。
+- ⚠️ `chan` 运行时目前只在 x86_64 发射（AArch64 需 `ldaxr/stxr` 版本）。
+- ⚠️ 自旋锁非公平；bump 分配器非线程安全，`chan.open` 请在启动阶段完成。
+- ⚠️ 单核配置下 `spawn` 同步执行：若生产者发送量 > 容量且没有消费者并发，
+  会按阻塞语义一直等待（这是预期行为，不是 bug）。
+- 🚧 `chan.close()`、`select`、无界通道、work-stealing 调度器尚未实现。
 
 ---
 
@@ -333,7 +362,7 @@ rosoto build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF
 | 后端 | 路径 | 状态 |
 |---|---|---|
 | **自研 x86_64 Linux** | Rosoto → RosIR → 自研 x86_64 编码器 → 裸 ELF64（无 libc） | ✅ v0.1，执行级 |
-| **自研 x86_64 Windows** | 同一 RosIR/编码器 → PE32+/COFF（无 CRT，kernel32 导入） | ✅ v0.3，本机 47 项 |
+| **自研 x86_64 Windows** | 同一 RosIR/编码器 → PE32+/COFF（无 CRT，kernel32 导入） | ✅ v0.3，本机 50 项 |
 | **自研 AArch64 Linux** | 同一条 RosIR，只换发射层 → ELF64 | 🟡 模拟器执行级，待真机 |
 | C 后端 | Rosoto → C99 → 任意 C 编译器（移植/bootstrapping/网络 demo） | ✅ v0.1 |
 
@@ -361,14 +390,15 @@ rosoto build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF
 | `assert(cond, "msg")` | ✅ 全部后端（含 Windows stderr + 退出码 1） |
 | **`spawn f(args)` + `join(h)`（Linux clone / Windows CreateThread / C pthread）** | ✅ v0.4，x86_64 + C；标量参数/返回值，单核同步降级 |
 | **`arena { }` 帧级分配（native 真实回卷 bump；C 为作用域）** | ✅ v0.4（1MB 上限下 4MB 分配量的可证伪回归） |
+| **`chan[T]` 有界 MPMC（send/recv 阻塞、FIFO）** | ✅ v0.5，x86_64 自研 + C；载荷 8 字节 |
 | `option`/`result` + `?`、`map`/`[N]T`/`[]T` 运算 | 🚧 下一轮 |
-| `chan[T]`、`h.join()` 方法式语法 | 🚧 运行时已备 C 版队列；native 降级待做 |
+| `h.join()` 方法式语法、`chan.close()` / `select` | 🚧 |
 | 泛型 / interface / 所有权借用检查 / `@extern("C")` | 🚧 规范已定 |
 | Windows IOCP/AFD 网络、Mach-O/kqueue、wasm、SIMD 向量化 | 🚧 路线图（PLATFORM.md / BACKEND.md）|
 
-回归：`tests/run_native_tests.sh`（自研 Linux 42 项，含 AArch64 模拟器）+
-`tests/run_win_tests.py`（Windows PE 47 项）+ `tests/run_tests.sh`（C 16 项）
-+ `tests/test_corelib.sh`（34 项）+ `tests/test_uring.sh`（26 项）= **165 项全绿**。
+回归：`tests/run_native_tests.sh`（自研 Linux 46 项，含 AArch64 模拟器）+
+`tests/run_win_tests.py`（Windows PE 50 项）+ `tests/run_tests.sh`（C 16 项）
++ `tests/test_corelib.sh`（34 项）+ `tests/test_uring.sh`（26 项）= **172 项全绿**。
 
 实现状态、未完成清单、阻塞项与下一步排期见 `HANDOVER.md`。
 

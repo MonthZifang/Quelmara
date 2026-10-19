@@ -5,6 +5,8 @@
 > v0.3 新增 **Windows x86_64 PE/COFF 写出器 + kernel32 导入 + CreateThread 多核**（无 CRT，产物 6–26 KB）。
 > v0.4 新增 **spawn/join 任务并行**（`spawn_child` IR + Linux clone / Windows CreateThread / C pthread）
 > 与 **arena 帧级回收**（native 回卷 bump 指针；C 后端为作用域）。
+> v0.5 新增 **chan[T] 有界 MPMC 通道**（`xchg` 原子自旋锁 + yield；C 后端条件变量），
+> 并改为**运行库按需发射**（只用到的 arena/join/chan 才进产物）。
 > AArch64 ELF 发射层已实现（模拟器执行级验证），待真机。
 
 ---
@@ -55,6 +57,8 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | 任务并行（v0.4） | `spawn f(args)` + `join(h)`；句柄 = `[线程句柄, 参数块]`，参数块首字存返回值 | 每任务一线程（非 work-stealing）；标量参数/返回值 |
 | Linux 子线程入口 | `spawn_child`：`rdi = [rsp-8]` → `call worker` → `exit(0)` | 参数块指针放新栈顶，避开父栈溢出槽竞争 |
 | arena（v0.4） | `__arena_mark/__arena_release` 回卷 bump 偏移 | 块内分配一次性回收；对象不得逃逸 |
+| chan[T]（v0.5） | 48字节控制块 `[cap,head,tail,count,lock,buf]` + `xchg` 自旋锁 + yield | 有界 MPMC、阻塞 send/recv；C 后端用 pthread 条件变量 |
+| 运行库按需发射 | 先降级用户函数收集 `uses_arena/uses_join/uses_chan`，再发射运行库 | 非 chan 程序不带 SwitchToThread/通道代码，省体积与导入 |
 
 ---
 
@@ -108,7 +112,7 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | 目标 | 后端方案 | 状态 |
 |---|---|---|
 | Linux x86_64 | 自研编码器 + ELF 写出器 | ✅ v0.1 |
-| Windows x86_64 | 自研 PE/COFF 写出器 + kernel32 导入 + CreateThread | ✅ v0.3（本机执行级 47 项） |
+| Windows x86_64 | 自研 PE/COFF 写出器 + kernel32 导入 + CreateThread | ✅ v0.3（本机执行级 50 项） |
 | Linux aarch64 | 自研 ARM64 编码器（RosIR 架构无关，只换发射层） | 🟡 模拟器执行级，待真机 |
 | Windows 网络（IOCP/AFD） | 导入 WSA*/IOCP 或 AFD 设备 | 🚧 下一格（PLATFORM.md 候选 A） |
 | macOS / iOS (arm64) | Mach-O 写出器 + libSystem + kqueue 运行时 | 🚧 需 Mac 真机/CI |
@@ -159,7 +163,7 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | game_loop（结构体帧循环） | 20480 B | — | 自校验通过 |
 
 回归：`python tests/run_win_tests.py`（结构自检 + 执行级 + 单核降级 + assert 失败路径
-+ 与 Linux ELF 逐字节交叉验证，共 47 项）。
++ 与 Linux ELF 逐字节交叉验证，共 50 项）。
 
 ---
 
@@ -199,3 +203,16 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
     → v0.4 明确为约定式语义并写进 SPEC；后续用作用域清理栈统一处理。
 14. **bump 分配器非线程安全**：并行 worker 里分配会竞争 `bump_gid`。
     → 文档约束：spawn 的参数块在父线程分配；worker 内不要分配。
+
+### v0.5（chan / 运行库按需发射，全部有回归覆盖）
+
+15. **内联标签只用 `caller.nv` 做后缀 → 跨函数同名**：两个函数的 nv 相同、都内联同一个
+    callee 时生成相同标签，后发射的覆盖前者；早先函数里的跳转因此跳进**另一个函数体内**。
+    症状极隐蔽：`assert(1 == 2)` 失败路径静默变成正常退出（exit 0）。
+    → 后缀改为 `.inl_{caller_name}_{base}`。
+16. **C 后端 spawn helper 误用调用点变量名**：helper 里写 `a->a0 = ch;`（调用者作用域的名字），
+    编译报 undeclared。→ helper 只使用形参 `p0..`，实参表达式只在调用点求值一次。
+17. **运行库全量发射**：即使程序不用通道，也会带上 `__chan_*` 与 `SwitchToThread` 导入。
+    → `Lower.run` 先降级用户函数收集 uses_* 标志，再按需发射 arena/join/chan。
+18. **自旋锁的释放必须用有序存储**：x86 TSO 下普通 `mov [lock],0` 在计数更新之后即可；
+    AArch64 需要 `stlr`（当前 chan 未上 AArch64，已在 SPEC 标注）。

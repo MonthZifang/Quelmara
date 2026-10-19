@@ -77,7 +77,7 @@ def load_config(src_path):
 KEYWORDS = {"fn", "let", "mut", "if", "else", "while", "for", "parfor",
             "return", "module", "import", "true", "false", "test",
             "break", "continue", "struct", "enum", "match",
-            "arena", "spawn"}
+            "arena", "spawn", "chan"}
 
 TWO_CHAR = {"->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "..", "=>"}
 ONE_CHAR = "(){}[],:.=<>+-*/%!?"
@@ -310,8 +310,18 @@ class Parser:
     def parse_type(self):
         if self.at("SYM", "["):
             self.next()
+            if self.at("SYM", "]"):
+                self.next()
+                return ("slice", self.parse_type())
+            n = self.eat("INT").val
             self.eat("SYM", "]")
-            return ("slice", self.parse_type())
+            return ("array", n, self.parse_type())
+        if self.at("chan"):
+            self.next()
+            self.eat("SYM", "[")
+            et = self.parse_type()
+            self.eat("SYM", "]")
+            return ("chan", et)
         name = self.eat("NAME").val
         while self.at("SYM", "."):
             self.next()
@@ -620,6 +630,17 @@ class Parser:
         t = self.peek()
         if t.kind == "match":
             return self.parse_match()
+        if t.kind == "chan":
+            # chan[T].open(cap) -> 有界通道句柄（SPEC §4）
+            self.next()
+            self.eat("SYM", "[")
+            et = self.parse_type()
+            self.eat("SYM", "]")
+            self.eat("SYM", ".")
+            self.eat("NAME", "open")
+            self.eat("SYM", "(")
+            args = self.parse_args()      # parse_args 已吃掉右括号
+            return ("chanopen", et, args)
         if t.kind == "INT":
             self.next()
             return ("num", t.val)
@@ -795,6 +816,8 @@ class Infer:
         return name in self.structs or name in self.enums
 
     def _env_type(self, t):
+        if t[0] == "chan":
+            return "int64_t"
         if t[0] == "named" and t[1] in self.structs:
             return "struct:" + t[1]
         if t[0] == "named" and t[1] in self.enums:
@@ -832,9 +855,13 @@ class Infer:
             return self.fn_ret(name)
         if k == "spawn":
             return "int64_t"
+        if k == "chanopen":
+            return "int64_t"
         if k == "method":
             obj_t = self.expr(e[1], env)
             m = e[2]
+            if m in ("send", "recv"):
+                return "int64_t"
             if m == "to_str":
                 return "const char *"
             if m == "write":
@@ -955,6 +982,49 @@ static int64_t rosoto_join(int64_t h) {
     free(blk);
     free(rec);
     return r;
+}
+
+/* 有界 MPMC 通道：固定容量、阻塞式 send/recv（SPEC §4） */
+typedef struct {
+    pthread_mutex_t m;
+    pthread_cond_t not_empty, not_full;
+    int64_t cap, head, tail, count;
+    int64_t *buf;
+} RosotoChan;
+
+static int64_t rosoto_chan_open(int64_t cap) {
+    if (cap <= 0) cap = 1;
+    RosotoChan *c = (RosotoChan *)malloc(sizeof(RosotoChan));
+    pthread_mutex_init(&c->m, NULL);
+    pthread_cond_init(&c->not_empty, NULL);
+    pthread_cond_init(&c->not_full, NULL);
+    c->cap = cap; c->head = 0; c->tail = 0; c->count = 0;
+    c->buf = (int64_t *)malloc((size_t)cap * sizeof(int64_t));
+    return (int64_t)(intptr_t)c;
+}
+
+static int64_t rosoto_chan_send(int64_t h, int64_t v) {
+    RosotoChan *c = (RosotoChan *)(intptr_t)h;
+    pthread_mutex_lock(&c->m);
+    while (c->count == c->cap) pthread_cond_wait(&c->not_full, &c->m);
+    c->buf[c->tail] = v;
+    c->tail = (c->tail + 1) % c->cap;
+    c->count++;
+    pthread_cond_signal(&c->not_empty);
+    pthread_mutex_unlock(&c->m);
+    return 0;
+}
+
+static int64_t rosoto_chan_recv(int64_t h) {
+    RosotoChan *c = (RosotoChan *)(intptr_t)h;
+    pthread_mutex_lock(&c->m);
+    while (c->count == 0) pthread_cond_wait(&c->not_empty, &c->m);
+    int64_t v = c->buf[c->head];
+    c->head = (c->head + 1) % c->cap;
+    c->count--;
+    pthread_cond_signal(&c->not_full);
+    pthread_mutex_unlock(&c->m);
+    return v;
 }
 """
 
@@ -1128,6 +1198,8 @@ class Codegen:
 
     # ---- 工具 ----
     def ctype(self, t):
+        if t[0] == "chan":
+            return "int64_t"
         if t[0] == "slice":
             return "RosotoBuf" if t[1] == ("named", "byte") else "void *"
         name = t[1]
@@ -1245,9 +1317,23 @@ class Codegen:
             return f"{name}({args})", self.infer.fn_ret(name)
         if k == "spawn":
             return self.gen_spawn(e[1], env)
+        if k == "chanopen":
+            if len(e[2]) != 1:
+                raise SyntaxError("chan[T].open(cap) 需要且只需要一个容量实参")
+            cap, _ = self.gen_expr(e[2][0], env)
+            return f"rosoto_chan_open({cap})", "int64_t"
         if k == "method":
             obj, m, args = e[1], e[2], e[3]
             ocode, otype = self.gen_expr(obj, env)
+            if m in ("send", "recv"):
+                if not (obj[0] == "name" and env.get("__chan__" + obj[1])):
+                    raise SyntaxError(f".{m} 只能用于 chan 通道")
+                if m == "send":
+                    if len(args) != 1:
+                        raise SyntaxError("ch.send(v) 需要一个实参")
+                    acode, _ = self.gen_expr(args[0], env)
+                    return f"rosoto_chan_send({ocode}, {acode})", "int64_t"
+                return f"rosoto_chan_recv({ocode})", "int64_t"
             if m == "to_str":
                 if otype == "const char *":
                     return ocode, "const char *"
@@ -1395,6 +1481,8 @@ class Codegen:
 
     def env_type(self, t):
         """作用域里记录的类型标记：结构体 'struct:Name'、枚举 'enum:Name'，其余用 C 类型串"""
+        if t[0] == "chan":
+            return "int64_t"
         if t[0] == "named" and t[1] in self.structs:
             return "struct:" + t[1]
         if t[0] == "named" and t[1] in self.enums:
@@ -1446,6 +1534,10 @@ class Codegen:
                 t = t[5:]
             env[s[2]] = ("struct:" + t) if t in self.structs else (("enum:" + t) if t in self.enums else t)
             decl = t if t in self.structs or t in self.enums else t
+            if lit[0] == "chanopen":
+                env["__chan__" + s[2]] = True
+            elif lit[0] == "name" and env.get("__chan__" + lit[1]):
+                env["__chan__" + s[2]] = True
             return f"{pad}{decl} {s[2]} = {code};"
         if k == "assign":
             code, t = self.gen_expr(s[3], env)
@@ -1702,8 +1794,8 @@ class Codegen:
              f"    {tname}_args *a = ({tname}_args *)malloc(sizeof({tname}_args));",
              "    a->res = 0;"]
         for i, (_n, pt) in enumerate(params):
-            arg_code, _ = self.gen_expr(args[i], env)
-            h.append(f"    a->a{i} = {arg_code};")
+            # helper 内用的是形参 p0..；实参表达式只在调用点求值一次
+            h.append(f"    a->a{i} = p{i};")
         h += ["    int64_t *rec = (int64_t *)malloc(2 * sizeof(int64_t));",
               "    rec[1] = (int64_t)(intptr_t)a;",
               "#if ROSOTO_MULTICORE",
@@ -1772,6 +1864,9 @@ class Codegen:
         bodies = []
         for f in fns:
             env = {n: self.env_type(t) for n, t in f["params"]}
+            for n, t in f["params"]:
+                if t[0] == "chan":
+                    env["__chan__" + n] = True
             body = self.gen_block(f["body"], env, 1, f["ret"])
             params = ", ".join(f"{self.ctype(t)} {n}" for n, t in f["params"]) or "void"
             bodies.append(f"static {self.ctype(f['ret'])} {f['name']}({params}) {{\n{body}\n}}")
@@ -1825,6 +1920,9 @@ def walk_expr(e, declared, assigned, referenced):
         walk_expr(e[1], declared, assigned, referenced)
     elif k == "spawn":
         walk_expr(e[1], declared, assigned, referenced)
+    elif k == "chanopen":
+        for a in e[2]:
+            walk_expr(a, declared, assigned, referenced)
     elif k == "structlit":
         referenced.update(e[1])
         for v in e[2].values():

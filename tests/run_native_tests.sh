@@ -115,6 +115,17 @@ $NAT build tests/arena_lowheap/no_arena.ros -o build/nat_noarena >/dev/null 2>&1
 ./build/nat_noarena >/dev/null 2>&1; rc=$?
 [ $rc -ne 0 ] && ok "无 arena 时 1MB 堆上限 fail-fast" || bad "无 arena 竟然没有 OOM"
 
+$NAT build tests/t15_chan.ros -o build/nat_chan >/dev/null 2>&1
+out=$(timeout 120 ./build/nat_chan); rc=$?
+[ $rc -eq 0 ] && ok "chan 退出码 0" || bad "chan 退出码 $rc"
+[ "$out" = "$(printf '749500\nchan ok')" ] && ok "chan 多生产者 + FIFO 正确" || bad "chan 输出 [$out]"
+$CBE run tests/t15_chan.ros 2>/dev/null | grep -v '^\[rosoto' > build/.chan_c
+[ "$out" = "$(cat build/.chan_c)" ] && ok "chan 自研后端 == C 后端" || bad "chan 双后端不一致"
+
+$NAT build tests/single_core/t15_chan_seq.ros -o build/nat_chan_seq >/dev/null 2>&1
+out=$(timeout 60 ./build/nat_chan_seq); rc=$?
+[ $rc -eq 0 ] && [ "$out" = "chan seq ok" ] && ok "chan 单核降级 FIFO 正确" || bad "chan 单核降级 rc=$rc [$out]"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

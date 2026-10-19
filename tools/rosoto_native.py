@@ -301,6 +301,14 @@ class Enc:
                   bytes([(sc << 6) | ((index & 7) << 3) | (base & 7)]),
                   b"\x00")
 
+    def xchg_mr(self, base, index, scale, disp, src):
+        """原子交换：*[base+index*scale+disp] <-> src（x86 隐含 LOCK）
+
+        用于通道自旋锁：`xchg [lock], 1` 返回旧值，0 表示抢锁成功。
+        """
+        self.emit(rex(w=1, r=src, x=index, b=base), b"\x87",
+                  modrm_mem(src, base, index, scale, disp))
+
     def resolve(self):
         for patch, label in self.fixups:
             target = self.labels[label]
@@ -377,6 +385,9 @@ class Lower:
         self.globals = []          # bytes 列表
         self.gid_of_str = {}
         self.spawn_id = 0
+        self.uses_chan = False
+        self.uses_arena = False
+        self.uses_join = False
         if platform == "windows":
             # WriteFile 的 lpNumberOfBytesWritten 落点（Win32 必须给非空指针）
             self.written_gid = self.intern_array(1)
@@ -664,6 +675,15 @@ class Lower:
         return (not self.cfg["core"]["multicore"]) or \
             int(self.cfg["core"]["threads"] or 0) == 1
 
+    def emit_yield(self, fn):
+        """让出 CPU（自旋等待时避免把整核跑满）"""
+        if self.platform == "windows":
+            fn.emit("winapi", None, "SwitchToThread", [])
+        else:
+            fn.emit("syscall", None, self.sc["yield"],
+                    [("imm", 0), ("imm", 0), ("imm", 0),
+                     ("imm", 0), ("imm", 0), ("imm", 0)])
+
     # ---- 表达式：返回 ('imm',n) | ('ga',gid) | vreg ----
     def eval(self, e, fn, env):
         k = e[0]
@@ -681,6 +701,16 @@ class Lower:
             return self.lower_call(e, fn, env)
         if k == "spawn":
             return self.lower_spawn(e[1], fn, env)
+        if k == "chanopen":
+            if self.arch != "x86_64":
+                raise SyntaxError("chan[T] 目前仅支持 x86_64 后端")
+            if len(e[2]) != 1:
+                raise SyntaxError("chan[T].open(cap) 需要且只需要一个容量实参")
+            self.uses_chan = True
+            cap = self.eval(e[2][0], fn, env)
+            d = fn.new_v()
+            fn.emit("call", d, "__chan_open", [cap])
+            return self._mark_chan(fn, d)
         if k == "unop":
             a = self.eval(e[2], fn, env)
             if e[1] == "-":
@@ -699,6 +729,16 @@ class Lower:
             return self.lower_binop(e, fn, env)
         if k == "method":
             obj = self.eval(e[1], fn, env)
+            if e[2] in ("send", "recv") and self._is_chan(fn, obj):
+                d = fn.new_v()
+                if e[2] == "send":
+                    if len(e[3]) != 1:
+                        raise SyntaxError("ch.send(v) 需要一个实参")
+                    v = self.eval(e[3][0], fn, env)
+                    fn.emit("call", d, "__chan_send", [obj, v])
+                else:
+                    fn.emit("call", d, "__chan_recv", [obj])
+                return d
             if e[2] == "to_str":
                 if self._is_str(fn, obj):
                     return obj
@@ -894,6 +934,7 @@ class Lower:
             return d
         if self.arch != "x86_64":
             raise SyntaxError("spawn（并行）目前仅支持 x86_64 后端")
+        self.uses_join = True
 
         # 参数块：字 0 = 返回值，字 1.. = 实参
         n = len(vals)
@@ -1031,6 +1072,7 @@ class Lower:
                 # 单核降级：spawn 已同步执行并直接返回结果，join 就是恒等
                 fn.emit("mov", d, hv)
             else:
+                self.uses_join = True
                 fn.emit("call", d, "__join", [hv])
             return d
         if name not in self.fns_ast:
@@ -1193,6 +1235,7 @@ class Lower:
         if k == "arena":
             # 块内 __alloc 的 bump 偏移在块末整体回卷（帧级 arena）。
             # 限制：块内 break/continue/return 会跳过 release；块内对象不得逃逸。
+            self.uses_arena = True
             mark = fn.new_v()
             fn.emit("call", mark, "__arena_mark", [])
             self.block(s[1], fn, dict(env))
@@ -1477,6 +1520,8 @@ class Lower:
         for i, (name, ty) in enumerate(f["params"]):
             if ty == ("named", "str"):
                 fn.strv.add(params[i])
+            elif ty[0] == "chan":
+                self._mark_chan(fn, params[i])
             elif ty[0] == "named" and self.is_agg(ty[1]):
                 # 聚合形参：实参侧传入的是【副本地址】，值语义成立
                 self._mark_struct(fn, params[i], ty[1])
@@ -1662,47 +1707,158 @@ class Lower:
         self.out.append(f)
 
         # ---- arena / 任务运行时（v0.4）----
-        # __arena_mark() -> 当前 bump 偏移；__arena_release(mark) 整体回卷。
-        # 语义：arena 块内用 __alloc 分配的对象（当前主要是字符串）在块末一次性回收；
-        #       块内分配的对象不得逃逸到块外（无借用检查，约定式语义）。
-        f = Fn("__arena_mark")
-        f.emit("args", [])
-        am = f.new_v()
-        f.emit("load", am, ("ga", self.bump_gid), ("imm", 0))
-        f.emit("ret", am)
-        self.out.append(f)
+        # 只发射真正用到的部分：hello 这种程序不会带 __join / __chan_*（省体积/导入）。
+        if self.uses_arena:
+            # __arena_mark() -> 当前 bump 偏移；__arena_release(mark) 整体回卷。
+            # 语义：arena 块内用 __alloc 分配的对象（当前主要是字符串）在块末一次性回收；
+            #       块内分配的对象不得逃逸到块外（无借用检查，约定式语义）。
+            f = Fn("__arena_mark")
+            f.emit("args", [])
+            am = f.new_v()
+            f.emit("load", am, ("ga", self.bump_gid), ("imm", 0))
+            f.emit("ret", am)
+            self.out.append(f)
 
-        f = Fn("__arena_release")
-        amark = f.new_v()
-        f.emit("args", [amark])
-        f.emit("store", ("ga", self.bump_gid), ("imm", 0), amark)
-        f.emit("ret", ("imm", 0))
-        self.out.append(f)
+            f = Fn("__arena_release")
+            amark = f.new_v()
+            f.emit("args", [amark])
+            f.emit("store", ("ga", self.bump_gid), ("imm", 0), amark)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
 
-        # __join(h) -> int：h 指向 16 字节记录 [原生线程句柄, 参数块]，
-        # 参数块首字是任务返回值。等待线程结束后取结果。
-        f = Fn("__join")
-        h = f.new_v()
-        f.emit("args", [h])
-        l_zero = f.label("jzero")
-        f.emit("jz", h, l_zero)
-        tid = f.new_v()
-        f.emit("load", tid, h, ("imm", 0))
-        blk = f.new_v()
-        f.emit("load", blk, h, ("imm", 1))
-        if self.platform == "windows":
-            f.emit("winapi", None, "WaitForSingleObject", [tid, ("imm", -1)])
-            f.emit("winapi", None, "CloseHandle", [tid])
-        else:
-            f.emit("syscall", None, self.sc["wait4"],
-                   [tid, ("imm", 0), ("imm", 0),
-                    ("imm", 0), ("imm", 0), ("imm", 0)])
-        jr = f.new_v()
-        f.emit("load", jr, blk, ("imm", 0))
-        f.emit("ret", jr)
-        f.emit("label", l_zero)
-        f.emit("ret", ("imm", 0))
-        self.out.append(f)
+        if self.uses_join:
+            # __join(h) -> int：h 指向 16 字节记录 [原生线程句柄, 参数块]，
+            # 参数块首字是任务返回值。等待线程结束后取结果。
+            f = Fn("__join")
+            h = f.new_v()
+            f.emit("args", [h])
+            l_zero = f.label("jzero")
+            f.emit("jz", h, l_zero)
+            tid = f.new_v()
+            f.emit("load", tid, h, ("imm", 0))
+            blk = f.new_v()
+            f.emit("load", blk, h, ("imm", 1))
+            if self.platform == "windows":
+                f.emit("winapi", None, "WaitForSingleObject", [tid, ("imm", -1)])
+                f.emit("winapi", None, "CloseHandle", [tid])
+            else:
+                f.emit("syscall", None, self.sc["wait4"],
+                       [tid, ("imm", 0), ("imm", 0),
+                        ("imm", 0), ("imm", 0), ("imm", 0)])
+            jr = f.new_v()
+            f.emit("load", jr, blk, ("imm", 0))
+            f.emit("ret", jr)
+            f.emit("label", l_zero)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+        # ---- chan[T]（v0.5）：有界 MPMC 环形队列 + 自旋锁 + yield ----
+        # 布局（6 个 8 字节字）：[cap, head, tail, count, lock, buf]
+        # lock 用 xchg 原子抢锁；忙等时 yield，不把整核跑满。
+        # 只在 x86_64 发射（AArch64 需要 ldaxr/stxr 版本，后续补）。
+        if self.uses_chan and self.arch == "x86_64":
+            f = Fn("__chan_open")
+            cap = f.new_v()
+            f.emit("args", [cap])
+            l_ok = f.label("cok")
+            f.emit("jcc", "g", cap, ("imm", 0), l_ok)
+            f.emit("mov", cap, ("imm", 1))
+            f.emit("label", l_ok)
+            blk = f.new_v()
+            f.emit("call", blk, "__alloc", [("imm", 48)])
+            sz = f.new_v()
+            f.emit("bin", "mul", sz, cap, ("imm", 8))
+            buf = f.new_v()
+            f.emit("call", buf, "__alloc", [sz])
+            for i, val in enumerate([cap, ("imm", 0), ("imm", 0),
+                                     ("imm", 0), ("imm", 0), buf]):
+                f.emit("store", blk, ("imm", i), val)
+            f.emit("ret", blk)
+            self.out.append(f)
+
+            f = Fn("__chan_send")
+            h = f.new_v()
+            v = f.new_v()
+            f.emit("args", [h, v])
+            l_retry, l_locked = f.label("csretry"), f.label("cslock")
+            l_space, l_nowrap = f.label("csspace"), f.label("csnowrap")
+            f.emit("label", l_retry)
+            addr = f.new_v()
+            f.emit("bin", "add", addr, h, ("imm", 32))
+            old = f.new_v()
+            f.emit("xchg", old, addr, ("imm", 1))
+            f.emit("jz", old, l_locked)
+            self.emit_yield(f)
+            f.emit("jmp", l_retry)
+            f.emit("label", l_locked)
+            cnt = f.new_v()
+            f.emit("load", cnt, h, ("imm", 3))
+            cap2 = f.new_v()
+            f.emit("load", cap2, h, ("imm", 0))
+            f.emit("jcc", "ne", cnt, cap2, l_space)
+            f.emit("store", h, ("imm", 4), ("imm", 0))
+            self.emit_yield(f)
+            f.emit("jmp", l_retry)
+            f.emit("label", l_space)
+            tail = f.new_v()
+            f.emit("load", tail, h, ("imm", 2))
+            buf2 = f.new_v()
+            f.emit("load", buf2, h, ("imm", 5))
+            f.emit("store", buf2, tail, v)
+            t2 = f.new_v()
+            f.emit("bin", "add", t2, tail, ("imm", 1))
+            f.emit("jcc", "ne", t2, cap2, l_nowrap)
+            f.emit("mov", t2, ("imm", 0))
+            f.emit("label", l_nowrap)
+            f.emit("store", h, ("imm", 2), t2)
+            c2 = f.new_v()
+            f.emit("bin", "add", c2, cnt, ("imm", 1))
+            f.emit("store", h, ("imm", 3), c2)
+            f.emit("store", h, ("imm", 4), ("imm", 0))
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            f = Fn("__chan_recv")
+            h = f.new_v()
+            f.emit("args", [h])
+            l_retry, l_locked = f.label("crretry"), f.label("crlock")
+            l_data, l_nowrap = f.label("crdata"), f.label("crnowrap")
+            f.emit("label", l_retry)
+            addr = f.new_v()
+            f.emit("bin", "add", addr, h, ("imm", 32))
+            old = f.new_v()
+            f.emit("xchg", old, addr, ("imm", 1))
+            f.emit("jz", old, l_locked)
+            self.emit_yield(f)
+            f.emit("jmp", l_retry)
+            f.emit("label", l_locked)
+            cnt = f.new_v()
+            f.emit("load", cnt, h, ("imm", 3))
+            f.emit("jnz", cnt, l_data)
+            f.emit("store", h, ("imm", 4), ("imm", 0))
+            self.emit_yield(f)
+            f.emit("jmp", l_retry)
+            f.emit("label", l_data)
+            head = f.new_v()
+            f.emit("load", head, h, ("imm", 1))
+            buf2 = f.new_v()
+            f.emit("load", buf2, h, ("imm", 5))
+            v = f.new_v()
+            f.emit("load", v, buf2, head)
+            h2 = f.new_v()
+            f.emit("bin", "add", h2, head, ("imm", 1))
+            cap2 = f.new_v()
+            f.emit("load", cap2, h, ("imm", 0))
+            f.emit("jcc", "ne", h2, cap2, l_nowrap)
+            f.emit("mov", h2, ("imm", 0))
+            f.emit("label", l_nowrap)
+            f.emit("store", h, ("imm", 1), h2)
+            c2 = f.new_v()
+            f.emit("bin", "sub", c2, cnt, ("imm", 1))
+            f.emit("store", h, ("imm", 3), c2)
+            f.emit("store", h, ("imm", 4), ("imm", 0))
+            f.emit("ret", v)
+            self.out.append(f)
 
         # __str_len(p) -> int
         f = Fn("__str_len")
@@ -1859,10 +2015,24 @@ class Lower:
             fn.boolv.add(v)
         return v
 
+    @staticmethod
+    def _mark_chan(fn, v):
+        if isinstance(v, int):
+            if not hasattr(fn, "chanv"):
+                fn.chanv = set()
+            fn.chanv.add(v)
+        return v
+
+    @staticmethod
+    def _is_chan(fn, v):
+        return isinstance(v, int) and v in getattr(fn, "chanv", set())
+
     def run(self, fns_ast):
-        self.lower_runtime()
+        # 先降级用户函数，再按需发射运行库：只把真正用到的
+        # arena/join/chan 运行时塞进产物（省体积、省导入）。
         for f in fns_ast:
             self.lower_fn(f)
+        self.lower_runtime()
         return self.out
 
 
@@ -1922,6 +2092,8 @@ def _map_ins(ins, f):
         return ("syscall", V(ins[1]) if ins[1] is not None else None, ins[2], L(ins[3]))
     if op == "winapi":
         return ("winapi", V(ins[1]) if ins[1] is not None else None, ins[2], L(ins[3]))
+    if op == "xchg":
+        return ("xchg", V(ins[1]), S(ins[2]), S(ins[3]))
     if op == "args":
         return ("args", [V(x) for x in ins[1]])
     if op == "winargs":
@@ -1984,7 +2156,11 @@ def _inline_one(fn, callee, call_ins):
     # 帧上结构体区要整体搬迁到 caller 的区里，否则两边槽位重叠
     fbase = fn.frame_words
     fn.frame_words += callee.frame_words
-    suffix = f".inl{base}"
+    # ⚠ 标签后缀必须带【caller 名字】：只用 caller.nv 时，两个不同函数
+    # 可能在同一个 nv 上内联同一个 callee，生成同名标签；后发射的会覆盖
+    # 前者，导致 EARLIER 函数里的跳转跳到 LATER 函数体内（已踩坑：
+    # 断言失败路径静默变成正常退出）。
+    suffix = f".inl_{fn.name}_{base}"
     rlab = lambda L: L + suffix
     end = f"{callee.name}{suffix}.end"
     res = []
@@ -2137,8 +2313,10 @@ ENTRY_OFF = 0x78
 
 # 各架构 Linux 系统调用号（IR 层架构无关，发射层按表取用）
 SYSCALLS = {
-    "x86_64": {"write": 1, "exit": 60, "mmap": 9, "clone": 56, "wait4": 61},
-    "aarch64": {"write": 64, "exit": 93, "mmap": 222, "clone": 220, "wait4": 260},
+    "x86_64": {"write": 1, "exit": 60, "mmap": 9, "clone": 56, "wait4": 61,
+               "yield": 24},
+    "aarch64": {"write": 64, "exit": 93, "mmap": 222, "clone": 220, "wait4": 260,
+                "yield": 124},
 }
 
 
@@ -2401,6 +2579,16 @@ class Codegen:
             self.enc.lea(target, RBP, disp)
             if kind == "m":
                 self.enc.mov_mr(RBP, 4, 0, -val, SCRATCH)
+        elif op == "xchg":
+            # dst = *addr（旧值）；*addr = val（原子，x86 内存 xchg 隐含 LOCK）
+            dst, addr, val = ins[1], ins[2], ins[3]
+            ra = self.fetch(SCRATCH2, addr)
+            rv = self.fetch(ACC, val)
+            if rv != ACC:
+                self.enc.mov_rr(ACC, rv)
+            self.enc.xchg_mr(ra, 4, 0, 0, ACC)
+            if dst is not None:
+                self.commit(dst, ACC)
         elif op == "spawn_child":
             # 子线程起始点（clone 返回 0 后跳到这里）：
             # 参数块指针由父线程写在【新栈顶 - 8】，这里直接用 rsp 取，

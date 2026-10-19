@@ -135,7 +135,8 @@ def test_pe_structure(out):
     ok(f"导入 DLL = {dll.decode()}") if dll == b"kernel32.dll" else bad(f"导入 DLL 非 kernel32: {dll!r}")
     ok(f"导入 API {len(names)} 个，全部 kernel32: {', '.join(names)}") if all(
         n in {"GetStdHandle", "WriteFile", "ExitProcess", "VirtualAlloc",
-              "CreateThread", "WaitForSingleObject", "CloseHandle"} for n in names) \
+              "CreateThread", "WaitForSingleObject", "CloseHandle", "SwitchToThread"}
+        for n in names) \
         else bad(f"出现非预期导入: {names}")
     crt = [n for n in names if n.lower() in ("printf", "malloc", "exit", "memcpy", "puts")]
     ok("无 CRT 依赖（无 printf/malloc/exit）") if not crt else bad(f"CRT 依赖: {crt}")
@@ -207,6 +208,16 @@ def test_single_core():
             ok("spawn 单核降级结果不变") if rc == 0 and \
                 stdout == b"6765\n81\n110\nspawn ok\n" \
                 else bad(f"spawn 单核降级错误 rc={rc} out={stdout[:80]!r}")
+
+        # chan 在单核配置下不跨线程，FIFO 语义必须保持
+        shutil.copy(os.path.join(ROOT, "tests/single_core/t15_chan_seq.ros"), tmp)
+        out3 = os.path.join(ROOT, "build", "win_chan_seq.exe")
+        build(os.path.join(tmp, "t15_chan_seq.ros"), out3)
+        r = run(out3)
+        if r is not None:
+            rc, stdout, _ = r
+            ok("chan 单核降级 FIFO 正确") if rc == 0 and stdout == b"chan seq ok\n" \
+                else bad(f"chan 单核降级错误 rc={rc} out={stdout[:80]!r}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -310,6 +321,7 @@ def main():
     case_selfcheck("game_loop", "examples/game_loop.ros")
     case_selfcheck("t10", "tests/t10.ros")
     case_output("spawn", "tests/t13_spawn.ros", ["6765", "81", "110", "spawn ok"])
+    case_output("chan", "tests/t15_chan.ros", ["749500", "chan ok"])
 
     print("== [5] 单核降级（Rosoto.toml multicore=false） ==")
     test_single_core()
