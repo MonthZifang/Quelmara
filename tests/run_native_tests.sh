@@ -137,6 +137,10 @@ $NAT build tests/array_bounds.ros -o build/nat_ab >/dev/null 2>&1
 timeout 30 ./build/nat_ab >/dev/null 2>&1; rc=$?
 [ $rc -ne 0 ] && ok "数组越界 fail-fast（退出码非 0）" || bad "数组越界未失败"
 
+echo "[12] Result 枚举错误传播（?）"
+$NAT run tests/t17_result.ros >/dev/null 2>&1 && ok "native Result/ ? 传播正确" || bad "native Result/ ? 失败"
+$CBE run tests/t17_result.ros >/dev/null 2>&1 && ok "C Result/ ? 传播正确" || bad "C Result/ ? 失败"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

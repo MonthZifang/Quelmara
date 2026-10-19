@@ -651,31 +651,128 @@ _GROUND_OPS = ("mov", "cmpset")
 def analyze_nonneg(fn):
     """返回在所有执行路径上都 >= 0 的 vreg 集合（保守）。
 
-    只用**绝不会溢出**的传递规则，宁可漏掉也不错：
-      * 接地：常量 >= 0、cmpset 结果（0/1）、强度削减证明的归纳变量
-      * 传递：mov、算术右移（非负数右移仍非负）
-    add/mul/shl 一律不传递——两个非负 int64 相加/相乘会绕回负数，
-    不做边界证明就传递会把取模的符号修正错消掉。
+    只在有上界证明时传播算术范围。循环归纳变量由生成器提供的
+    ``i < hi`` 形状建立上界，之后可以安全证明 ``i*C``、``i+C`` 非负；
+    这正是长整数循环里消除有符号魔数除法修正链的关键。
     """
-    nn = set(getattr(fn, "nn", ()))
-    for _ in range(4):
+    limit = 2 ** 62
+    ranges = {}
+    def_count = {}
+    for p in fn.instrs:
+        for d in vreg_mentions(p)[0]:
+            def_count[d] = def_count.get(d, 0) + 1
+    for p in fn.instrs:
+        defs = vreg_mentions(p)[0]
+        if len(defs) != 1 or def_count.get(defs[0]) != 1:
+            continue
+        if p[0] == "mov" and isinstance(p[2], tuple) and p[2][0] == "imm":
+            v = p[2][1]
+            if 0 <= v < limit:
+                ranges[p[1]] = max(ranges.get(p[1], -1), v)
+        elif p[0] == "cmpset":
+            ranges[p[2]] = max(ranges.get(p[2], -1), 1)
+
+    def const_before(before, vreg):
+        for j in range(before - 1, max(-1, before - 257), -1):
+            p = fn.instrs[j]
+            if p[0] in BRANCHES or p[0] == "label":
+                return None
+            defs, _uses = vreg_mentions(p)
+            if vreg in defs:
+                if p[0] == "mov" and p[1] == vreg and _is_imm(p[2]):
+                    return j, p[2][1]
+                return None
+        return None
+
+    # 识别严格递增循环：只接受一个常量初始化、一个循环步进定义、
+    # 常量上界且无其他写入。上界和末次步进都纳入最大值，避免把循环后的
+    # 归纳变量错误地当成仅 <= hi-1。
+    for h, b, lab in loop_regions(fn):
+        shape = _loop_shape(fn, h, b, lab)
+        if shape is None:
+            continue
+        guard, body, step_ins, _exit, _while = shape
+        ivar, hi_spec = guard[2], guard[3]
+        if guard[1] != "l" or any(ivar in vreg_mentions(p)[0] for p in body):
+            continue
+        step = next((p[4][1] for p in step_ins
+                     if p[0] == "bin" and p[1] == "add"
+                     and _is_imm(p[4]) and p[3] == ivar), None)
+        if step is None or step <= 0:
+            continue
+        init = const_before(h, ivar)
+        if init is None:
+            continue
+        init_idx, lo = init
+        hi_def = None
+        if _is_imm(hi_spec):
+            hi = hi_spec[1]
+        else:
+            hi_def = const_before(h, hi_spec)
+            if hi_def is None:
+                continue
+            _hi_idx, hi = hi_def
+            if any(hi_spec in vreg_mentions(p)[0] for p in body + step_ins):
+                continue
+        all_defs = {i for i, p in enumerate(fn.instrs)
+                    if ivar in vreg_mentions(p)[0]}
+        step_defs = {i for i in range(h + 1, b)
+                     if ivar in vreg_mentions(fn.instrs[i])[0]}
+        if all_defs != ({init_idx} | step_defs) or len(step_defs) != 1:
+            continue
+        if any(ivar in vreg_mentions(p)[1] for p in fn.instrs[:init_idx]):
+            continue
+        if not (0 <= lo < hi <= limit):
+            continue
+        max_i = hi - 1 + step
+        if max_i >= limit or max_i >= 2 ** 63:
+            continue
+        ranges[ivar] = max(ranges.get(ivar, -1), max_i)
+
+    nn = set(getattr(fn, "nn", ())) | {v for v, mx in ranges.items() if mx >= 0}
+    for _ in range(12):
         changed = False
         for p in fn.instrs:
             op = p[0]
-            ok = False
+            defs = vreg_mentions(p)[0]
+            if len(defs) != 1 or def_count.get(defs[0]) != 1:
+                continue
             if op == "mov":
                 src = p[2]
-                ok = ((isinstance(src, tuple) and src[0] == "imm" and src[1] >= 0)
-                      or (isinstance(src, int) and src in nn))
+                if isinstance(src, int) and src in ranges:
+                    ranges[p[1]] = max(ranges.get(p[1], -1), ranges[src])
+                elif isinstance(src, tuple) and src[0] == "imm" and 0 <= src[1] < limit:
+                    ranges[p[1]] = max(ranges.get(p[1], -1), src[1])
             elif op == "cmpset":
-                ok = True                     # 结果恒为 0 / 1
+                ranges[p[2]] = max(ranges.get(p[2], -1), 1)
             elif op == "bin" and p[1] == "sar":
-                ok = isinstance(p[3], int) and p[3] in nn
-            if ok:
-                for d in vreg_mentions(p)[0]:
-                    if d not in nn:
-                        nn.add(d)
-                        changed = True
+                if isinstance(p[3], int) and p[3] in ranges and _is_imm(p[4]):
+                    mx = ranges[p[3]] >> (p[4][1] & 63)
+                    if mx < limit:
+                        ranges[p[2]] = max(ranges.get(p[2], -1), mx)
+            elif op == "bin" and p[1] in ("add", "mul", "shl", "umulhi"):
+                a, b = p[3], p[4]
+                mx = None
+                if isinstance(a, int) and a in ranges and _is_imm(b) and b[1] >= 0:
+                    c = b[1]
+                    if p[1] == "add":
+                        mx = ranges[a] + c
+                    elif p[1] == "mul":
+                        mx = ranges[a] * c
+                    elif p[1] == "shl":
+                        mx = ranges[a] << (c & 63)
+                    else:
+                        mx = (ranges[a] * c) >> 64
+                elif p[1] in ("add", "mul") and isinstance(b, int) and b in ranges \
+                        and _is_imm(a) and a[1] >= 0:
+                    c = a[1]
+                    mx = ranges[b] + c if p[1] == "add" else ranges[b] * c
+                if mx is not None and mx < limit:
+                    ranges[p[2]] = max(ranges.get(p[2], -1), mx)
+            for d in defs:
+                if d in ranges and ranges[d] >= 0 and d not in nn:
+                    nn.add(d)
+                    changed = True
         if not changed:
             break
     return nn

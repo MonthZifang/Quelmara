@@ -2,6 +2,8 @@
 
 > 目标一句话：**原生编译、多核默认、网络 IO 极致、全平台、代码结构干净、游戏/工程双强、省资源。**
 
+> **后端约束：产品构建必须使用 Rosoto 自研后端。** C99 后端只允许在显式指定时用于交叉验证、自举和移植；它不是产品默认后端，也不改变 native/PE/AArch64 自研链路的规范地位。
+
 ---
 
 ## 0. 设计原则
@@ -378,13 +380,13 @@ rosoto build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF
 | 后端 | 路径 | 状态 |
 |---|---|---|
 | **自研 x86_64 Linux** | Rosoto → RosIR → 自研 x86_64 编码器 → 裸 ELF64（无 libc） | ✅ v0.1，执行级 |
-| **自研 x86_64 Windows** | 同一 RosIR/编码器 → PE32+/COFF（无 CRT，kernel32 导入） | ✅ v0.3，本机 54 项 |
+| **自研 x86_64 Windows** | 同一 RosIR/编码器 → PE32+/COFF（无 CRT，kernel32 导入） | ✅ v0.3，本机 55 项 |
 | **自研 AArch64 Linux** | 同一条 RosIR，只换发射层 → ELF64 | 🟡 模拟器执行级，待真机 |
 | C 后端 | Rosoto → C99 → 任意 C 编译器（移植/bootstrapping/网络 demo） | ✅ v0.1 |
 
 各后端对同一 `.ros` 源码交叉验证输出，互为 oracle。
 
-已实现（v0.2 / v0.3 / v0.4 / v0.5 / v0.6）：
+已实现（v0.2 / v0.3 / v0.4 / v0.5 / v0.6 / v0.7）：
 
 | 特性 | 状态 |
 |---|---|
@@ -408,14 +410,15 @@ rosoto build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF
 | **`arena { }` 帧级分配（native 真实回卷 bump；C 为作用域）** | ✅ v0.4（1MB 上限下 4MB 分配量的可证伪回归） |
 | **`chan[T]` 有界 MPMC（send/recv 阻塞、FIFO）** | ✅ v0.5，x86_64 自研 + C；载荷 8 字节 |
 | **`[N]T` 定长数组（字面量/索引/复合赋值/`len`/值语义拷贝/越界 fail-fast）** | ✅ v0.6，数值元素；局部数组；三链一致 |
-| `option`/`result` + `?`、`map`/`[]T` 运算 | 🚧 下一轮 |
+| 用户定义 `Result { Ok(value) Err(error) }` + `?` | ✅ x86_64 native/PE/C；标量载荷 |
+| 泛型 `option[T]` / `result[T,E]`、`map`/`[]T` 运算 | 🚧 下一轮 |
 | `h.join()` 方法式语法、`chan.close()` / `select` | 🚧 |
 | 泛型 / interface / 所有权借用检查 / `@extern("C")` | 🚧 规范已定 |
 | Windows IOCP/AFD 网络、Mach-O/kqueue、wasm、SIMD 向量化 | 🚧 路线图（PLATFORM.md / BACKEND.md）|
 
-回归：`tests/run_native_tests.sh`（自研 Linux 50 项，含 AArch64 模拟器）+
-`tests/run_win_tests.py`（Windows PE 54 项）+ `tests/run_tests.sh`（C 16 项）
-+ `tests/test_corelib.sh`（34 项）+ `tests/test_uring.sh`（26 项）= **180 项全绿**。
+回归：`tests/run_native_tests.sh`（自研 Linux 52 项，含 AArch64 模拟器）+
+`tests/run_win_tests.py`（Windows PE 55 项）+ `tests/run_tests.sh`（C 16 项）
++ `tests/test_corelib.sh`（34 项）+ `tests/test_uring.sh`（26 项）= **183 项全绿**。
 
 实现状态、未完成清单、阻塞项与下一步排期见 `HANDOVER.md`。
 

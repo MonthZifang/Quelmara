@@ -1,0 +1,61 @@
+module t17_result
+
+enum Result {
+    Ok(value: int)
+    Err(error: str)
+}
+
+enum ReversedResult {
+    Err(error: str)
+    Ok(value: int)
+}
+
+fn parse(n: int) -> Result {
+    if n < 0 {
+        return Result.Err("negative")
+    }
+    return Result.Ok(n)
+}
+
+fn add_one(n: int) -> Result {
+    let value = parse(n)?
+    return Result.Ok(value + 1)
+}
+
+fn parse_reversed(n: int) -> ReversedResult {
+    if n < 0 {
+        return ReversedResult.Err("negative")
+    }
+    return ReversedResult.Ok(n)
+}
+
+fn add_reversed(n: int) -> ReversedResult {
+    let value = parse_reversed(n)?
+    return ReversedResult.Ok(value + 1)
+}
+
+fn main() {
+    let ok = add_one(41)
+    match ok {
+        Result.Ok(v) => assert(v == 42, "ok propagation")
+        Result.Err(e) => assert(false, e)
+    }
+
+    let err = add_one(-1)
+    match err {
+        Result.Ok(v) => assert(false, v.to_str())
+        Result.Err(e) => assert(e == "negative", "error propagation")
+    }
+
+    let reversed_ok = add_reversed(9)
+    match reversed_ok {
+        ReversedResult.Err(e) => assert(false, e)
+        ReversedResult.Ok(v) => assert(v == 10, "reversed ok tag")
+    }
+
+    let reversed_err = add_reversed(-1)
+    match reversed_err {
+        ReversedResult.Err(e) => assert(e == "negative", "reversed err tag")
+        ReversedResult.Ok(v) => assert(false, v.to_str())
+    }
+}

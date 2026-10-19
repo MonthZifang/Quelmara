@@ -3,15 +3,15 @@
 """
 Rosoto 统一命令行入口（SPEC §8）
 ================================
-  rosoto build <src>      编译（默认自研原生后端，产出裸 ELF64）
+  rosoto build <src>      编译（默认当前平台自研后端）
   rosoto run   <src>      编译并运行
-  rosoto test  [path]     运行 test "name" { } 内建测试（默认双后端交叉验证）
+  rosoto test  [path]     运行 test "name" { } 内建测试（默认当前平台自研后端）
   rosoto fmt   [path]     官方格式化器（--check 只检查）
   rosoto bench <src>      基准测试 + 回归对比（--baseline / --update-baseline）
   rosoto version          版本与后端能力
 
 通用选项：
-  --target native|c|arm64|both   代码生成后端（test 默认 both = 双后端交叉验证）
+  --target native|win|arm64|c|both   代码生成后端（默认当前平台自研后端）
   -o, --out PATH                 输出路径
   --dump-ir                      打印 RosIR
   --no-opt                       关闭优化管线
@@ -23,6 +23,7 @@ import argparse
 import glob
 import json
 import os
+import platform
 import shutil
 import statistics
 import subprocess
@@ -31,7 +32,25 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
+
+def _default_target():
+    """当前主机默认只选自研后端；不把 C99 当产品默认链路。"""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if system == "windows" and machine in ("amd64", "x86_64", "x64"):
+        return "win"
+    if system == "linux":
+        if machine in ("aarch64", "arm64"):
+            return "arm64"
+        if machine in ("amd64", "x86_64", "x64"):
+            return "native"
+    # Unsupported host: leave the default unset so an explicit --target c
+    # remains usable for bootstrap/migration workflows.
+    return None
+
+
+DEFAULT_TARGET = _default_target()
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +101,10 @@ BACKENDS = {
 }
 
 
-def build(src, target="native", out=None, dump_ir=False, optimize=True):
+def build(src, target=DEFAULT_TARGET, out=None, dump_ir=False, optimize=True):
     base = os.path.splitext(os.path.basename(src))[0]
+    if target is None:
+        raise RuntimeError("当前主机没有自研默认后端；请显式指定 --target c（仅交叉验证/自举）或安装受支持的目标工具链")
     if out is None:
         out = os.path.join("build", base + (".exe" if target == "win" else ""))
     fn = BACKENDS[target]
@@ -143,8 +164,8 @@ def cmd_test(args):
     elif args.target:
         targets = [args.target]
     else:
-        # 未指定：Windows 上默认测 PE 后端；POSIX 上默认双后端交叉验证
-        targets = ["win"] if os.name == "nt" else ["native", "c"]
+        # 默认回归只验证当前平台的自研后端；C 后端必须显式指定。
+        targets = [DEFAULT_TARGET]
     passed = failed = 0
     results = {}
     for f in files:
@@ -245,9 +266,9 @@ def cmd_bench(args):
 
 
 def cmd_version(args):
-    print(f"Rosoto {VERSION}  ——  原生编译 · 多核默认 · 网络原生 · 全平台")
+    print(f"Rosoto {VERSION}  ——  自研后端优先 · 多核默认 · 网络原生 · 全平台")
     print(f"  后端: native(x86_64 裸 ELF64) / win(x86_64 PE/COFF，无 CRT) / "
-          f"arm64(AArch64 ELF64) / c(C99 中转)")
+          f"arm64(AArch64 ELF64) / c(C99 交叉验证，不是产品后端)")
     print(f"  优化: 常量折叠 / 强度削减 / 魔数除法 / 内联 / CSE-GVN / LICM / 循环展开 / "
           f"DCE / 复制传播 / 线性扫描寄存器分配")
     print(f"  工具: build / run / test / fmt / bench")
@@ -269,9 +290,9 @@ def main(argv=None):
     def common(p, src=True):
         if src:
             p.add_argument("src")
-        p.add_argument("--target", default="native",
+        p.add_argument("--target", default=DEFAULT_TARGET,
                        choices=["native", "c", "arm64", "win", "both"],
-                       help="代码生成后端（test 默认 both = 双后端交叉验证）")
+                       help="代码生成后端（默认当前平台自研后端；c 仅用于显式交叉验证）")
         p.add_argument("-o", "--out", default=None)
         p.add_argument("--no-opt", action="store_true", help="关闭优化管线")
         p.add_argument("--dump-ir", action="store_true", help="打印 RosIR")

@@ -340,6 +340,7 @@ def main():
     case_selfcheck("t10", "tests/t10.ros")
     case_output("spawn", "tests/t13_spawn.ros", ["6765", "81", "110", "spawn ok"])
     case_output("chan", "tests/t15_chan.ros", ["749500", "chan ok"])
+    case_selfcheck("result", "tests/t17_result.ros")
 
     print("== [5] 单核降级（Rosoto.toml multicore=false） ==")
     test_single_core()

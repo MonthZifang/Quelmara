@@ -346,7 +346,6 @@ class Fn:
         self.frame_words = 0      # 结构体局部区占用的 8 字节字数
         self.structv = {}         # vreg -> 结构体名（该 vreg 持有结构体首地址）
         self.no_inline = False    # 禁止被内联（parfor worker 必须保留独立栈帧）
-
     def new_v(self):
         self.nv += 1
         return self.nv - 1
@@ -809,7 +808,40 @@ class Lower:
                 return self._mark_str(fn, d)
             raise SyntaxError(f"原生后端 v0.2 不支持方法 {e[2]}")
         if k == "try":
-            raise SyntaxError("原生后端 v0.1 不支持 ? 运算符")
+            spec = self.eval(e[1], fn, env)
+            sname = self._struct_of(fn, spec)
+            if sname is None or sname not in self.enums:
+                raise SyntaxError("? 只能用于带 Ok/Err 变体的枚举结果")
+            variants = self.enums[sname]
+            ok_idx = next((i for i, (vn, _fs) in enumerate(variants) if vn == "Ok"), None)
+            err_idx = next((i for i, (vn, _fs) in enumerate(variants) if vn == "Err"), None)
+            ok = variants[ok_idx][1] if ok_idx is not None else None
+            err = variants[err_idx][1] if err_idx is not None else None
+            if len(variants) != 2 or ok_idx is None or err_idx is None or not ok or not err \
+                    or len(ok) != 1 or len(err) != 1:
+                raise SyntaxError("结果枚举必须只有 Ok(value) 和 Err(error) 两个单载荷变体")
+            okt = ok[0][1]
+            if okt[0] != "named" or okt[1] not in (
+                    "int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8", "bool", "str"):
+                raise SyntaxError("? 的 Ok 载荷暂只支持整数/bool/str 标量")
+            if self.fn_ret_agg != sname:
+                raise SyntaxError("? 所在函数必须返回相同的结果枚举")
+            tag = fn.new_v()
+            fn.emit("load", tag, spec, ("imm", 0))
+            l_ok, l_err = fn.label("try_ok"), fn.label("try_err")
+            fn.emit("jcc", "e", tag, ("imm", ok_idx), l_ok)
+            fn.emit("jmp", l_err)
+            fn.emit("label", l_err)
+            self.struct_copy(fn, self.fn_ret_target, spec, sname)
+            fn.emit("ret", ("imm", 0))
+            fn.emit("label", l_ok)
+            value = fn.new_v()
+            fn.emit("load", value, spec, ("imm", 1))
+            if ok[0][1] == ("named", "str"):
+                self._mark_str(fn, value)
+            elif ok[0][1] == ("named", "bool"):
+                self._mark_bool(fn, value)
+            return value
         if k == "path":
             p = e[1]
             if p[0] in env:

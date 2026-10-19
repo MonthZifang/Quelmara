@@ -948,7 +948,14 @@ class Infer:
                             else CTYPE.get(ftype[1], "int64_t")
             return "int64_t"
         if k == "try":
-            return self.expr(e[1], env)
+            inner = self.expr(e[1], env)
+            if isinstance(inner, str) and inner.startswith("enum:"):
+                ename = inner[5:]
+                variants = self.enums.get(ename, [])
+                for vn, fields in variants:
+                    if vn == "Ok" and fields:
+                        return self._env_type(fields[0][1])
+            return inner
         return "int64_t"
 
     @staticmethod
@@ -1440,8 +1447,31 @@ class Codegen:
             code, t = self.gen_expr(e[2], env)
             return f"({e[1]}{code})", "bool" if e[1] == "!" else t
         if k == "try":
-            code, _ = self.gen_expr(e[1], env)
-            return code, "int"
+            code, inner_t = self.gen_expr(e[1], env)
+            if not (isinstance(inner_t, str) and inner_t.startswith("enum:")):
+                raise SyntaxError("? 只能用于带 Ok/Err 变体的枚举结果")
+            ename = inner_t[5:]
+            variants = self.enums.get(ename, [])
+            ok_index = next((i for i, (vn, _fs) in enumerate(variants) if vn == "Ok"), None)
+            err_index = next((i for i, (vn, _fs) in enumerate(variants) if vn == "Err"), None)
+            ok_fields = variants[ok_index][1] if ok_index is not None else None
+            err_fields = variants[err_index][1] if err_index is not None else None
+            if len(variants) != 2 or ok_index is None or err_index is None \
+                    or not ok_fields or not err_fields or len(ok_fields) != 1 or len(err_fields) != 1:
+                raise SyntaxError("结果枚举必须只有 Ok(value) 和 Err(error) 两个单载荷变体")
+            okt = ok_fields[0][1]
+            if okt[0] != "named" or okt[1] not in (
+                    "int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8", "bool", "str"):
+                raise SyntaxError("? 的 Ok 载荷暂只支持整数/bool/str 标量")
+            if getattr(self, "current_ret_t", None) is None or self.ctype(self.current_ret_t) != ename:
+                raise SyntaxError("? 所在函数必须返回相同的结果枚举")
+            self.tmp_id += 1
+            tmp = f"_try{self.tmp_id}"
+            payload = ok_fields[0][0]
+            ptype = self.env_type(ok_fields[0][1])
+            return (f"({{ {ename} {tmp} = {code}; "
+                    f"if ({tmp}.__tag != {ok_index}) return {tmp}; "
+                    f"({tmp}.u.Ok.{payload}); }})", ptype)
         if k == "structlit":
             sname = self.struct_name_of(e[1])
             if sname is None:
@@ -1989,6 +2019,7 @@ class Codegen:
 
         bodies = []
         for f in fns:
+            self.current_ret_t = f["ret"]
             env = {n: self.env_type(t) for n, t in f["params"]}
             for n, t in f["params"]:
                 if t[0] == "chan":

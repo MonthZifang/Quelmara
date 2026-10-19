@@ -4,6 +4,8 @@
 
 Rosoto 是一门从 0 到 1 设计的系统级编程语言。本仓库包含：
 
+> **后端约束：产品编译必须使用自研后端。** Linux 默认走自研 x86_64 ELF，Windows 默认走自研 x86_64 PE/COFF，AArch64 使用自研发射器。C99 后端只用于显式交叉验证、自举和测试，不是产品运行后端。
+
 ```
 Rosoto/
 ├── SPEC.md              # 语言规范（语法/类型/多核/网络/配置文件/工具链）
@@ -29,7 +31,7 @@ Rosoto/
 │   ├── rosoto_pe.py       # 自研 Windows：同一 RosIR -> PE32+/COFF（无 CRT，kernel32 导入）
 │   ├── rosoto_arm64.py    # 自研 AArch64：同一条 RosIR，只换发射层
 │   ├── rosoto_opt.py      # RosIR 优化器（后端/平台无关）
-│   ├── rosoto_cli.py      # 统一命令行：build/run/test/fmt/bench（--target native|win|arm64|c）
+│   ├── rosoto_cli.py      # 统一命令行：默认当前平台自研后端；C 仅显式交叉验证
 │   ├── rosoto_fmt.py      # 官方格式化器
 │   ├── rosoto_mt.py       # 多核任务运行时发射器（work-stealing）
 │   ├── rosoto_mem.py      # 内存/引用运行时发射器（arena/slab/稳定引用/视图）
@@ -37,8 +39,8 @@ Rosoto/
 │   └── rosoto_uring.py    # io_uring 网络后端运行时发射器
 └── tests/
     ├── run_tests.sh         # C 后端回归（16 项）
-    ├── run_native_tests.sh  # 自研后端回归（50 项，含 AArch64 模拟器执行级验证）
-    ├── run_win_tests.py     # Windows PE 回归（54 项：结构/执行/多核/chan/arena/数组/交叉验证）
+    ├── run_native_tests.sh  # 自研后端回归（52 项，含 AArch64 模拟器执行级验证）
+    ├── run_win_tests.py     # Windows PE 回归（55 项：结构/执行/多核/chan/arena/数组/交叉验证）
     ├── test_corelib.sh      # mem/mt/store 运行时回归（34 项）
     ├── test_uring.sh        # io_uring 网络回归（26 项）
     └── single_core/         # multicore=false 单核降级测试夹具
@@ -53,22 +55,22 @@ python3 tools/rosoto_native.py run examples/parfor_sum.ros   # 多核：raw clon
 
 # Windows：Rosoto -> PE32+（无 CRT，kernel32 导入）
 python tools/rosoto_cli.py run examples/hello.ros --target win     # 产出 build/hello.exe
-python tests/run_win_tests.py                                     # Windows 54 项回归
+python tests/run_win_tests.py                                     # Windows 55 项回归
 
-# C 后端：Rosoto -> C99 -> 原生编译
+# C 后端（仅显式交叉验证/自举，不是产品后端）
 python3 tools/rosoto.py run examples/hello.ros
 python3 tools/rosoto.py run examples/parallel_sum.ros
 
-# 网络 echo 服务器（C 后端，另开终端 nc localhost 9000）
+# 网络 echo 服务器（当前网络 intrinsic 仍在 C 后端，另开终端 nc localhost 9000）
 python3 tools/rosoto.py build examples/echo_server.ros --cc
 ./build/echo_server
 
-# 回归测试（五套，共 180 项）
-bash tests/run_native_tests.sh   # 自研后端 50 项（含 AArch64 模拟器执行级）
+# 回归测试（五套，共 183 项）
+bash tests/run_native_tests.sh   # 自研后端 52 项（含 AArch64 模拟器执行级）
 bash tests/run_tests.sh          # C 后端 16 项
 bash tests/test_corelib.sh       # mem/mt/store 运行时 34 项
 bash tests/test_uring.sh         # io_uring 网络 26 项
-python tests/run_win_tests.py    # Windows PE 54 项（需在 Windows 上执行）
+python tests/run_win_tests.py    # Windows PE 55 项（需在 Windows 上执行）
 ```
 
 ## 核心机制速览
@@ -194,8 +196,8 @@ print(a[i])        // 越界：fail-fast（退出码 1，stderr 报错）
 | t15_chan（2 生产者 + 有界通道） | 11264 B | — |
 | t16_arrays（数组 + 越界检查） | 9216 B | — |
 
-回归测试：**180 项全绿**（Windows 54 / 自研 Linux 50 / C 16 / corelib 34 / io_uring 26）。
-Windows 的 54 项包含：PE 结构自检（仅 kernel32、无 CRT）、执行级语义、多核归约、
+回归测试：**183 项全绿**（Windows 55 / 自研 Linux 52 / C 16 / corelib 34 / io_uring 26）。
+Windows 的 55 项包含：PE 结构自检（仅 kernel32、无 CRT）、执行级语义、多核归约、
 `spawn`/`join` 任务、`chan` 有界通道、`[N]T` 数组与越界 fail-fast、
 arena 真实回收（1MB 上限）、单核降级、assert 失败路径，
 以及与 Linux ELF 逐字节交叉验证。
@@ -212,6 +214,6 @@ arena 真实回收（1MB 上限）、单核降级、assert 失败路径，
 | v0.3 | **Windows x86_64 PE/COFF 后端（无 CRT）** + kernel32 导入 + DIR64 重定位 + CreateThread 多核 + 1MB 粒度提交 + Windows 回归 ✅ |
 | v0.4 | **`spawn`/`join` 任务并行 + `arena { }` 帧级回收**（Linux/Windows/C 三链）✅ |
 | v0.5 | **`chan[T]` 有界 MPMC 通道**（自旋锁 `xchg` + yield / C 条件变量）+ 运行库按需发射 + 内联标签冲突修复 ✅ |
-| **v0.6（当前）** | **定长数组 `[N]T`**：字面量/索引/复合赋值/`len`/值语义拷贝/越界 fail-fast（三链）✅ |
-| v0.7 | `option`/`result` + `?`；`[]T` / `map`；Windows IOCP 网络；SIMD 自动向量化；macOS Mach-O/kqueue |
-| v0.8 | wasm64 + 全平台矩阵收尾 + LTO + 热重载 + 主机平台适配层 |
+| v0.6 | **定长数组 `[N]T`**：字面量/索引/复合赋值/`len`/值语义拷贝/越界 fail-fast（三链）✅ |
+| **v0.7（当前）** | **用户定义 Result + `?` 错误传播**（native/PE/C）+ 严格范围证明 + worker 内联边界 + 产品默认自研后端 ✅ |
+| v0.8 | `[]T` / `map`；Windows IOCP 网络；SIMD 自动向量化；macOS Mach-O/kqueue；wasm64 |

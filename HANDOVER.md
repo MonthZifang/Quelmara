@@ -1,280 +1,263 @@
 # Rosoto 交接文档（HANDOVER）
 
-> 本轮：**v0.5 有界通道 `chan[T]` + v0.6 定长数组 `[N]T`**
+> 本轮：**v0.7 用户定义 Result + `?` 错误传播 + 自研优化器范围证明**
 > 交接时间：2026-10-19（GMT+8）
-> 状态：**180 项回归全绿**（Windows 54 / 自研 Linux 50 / C 16 / corelib 34 / io_uring 26）
-> 代码总量：`tools/` 12.0k 行 Python + `tests/` 1.4k 行（脚本/测试/模拟器）
-> 本轮已提交：`3e9b8c0 v0.5: chan[T] ...` 与 `v0.6: fixed-size arrays [N]T ...`
+> 状态：**183 项回归全绿**（Windows 55 / 自研 Linux 52 / C 16 / corelib 34 / io_uring 26）
+> 代码总量：`tools/` 12.1k 行 Python + `tests/` 1.4k 行
+> 之前已提交：v0.5 `3e9b8c0`、v0.6 `ff8f830`；本轮 v0.7 尚待提交
 
 ---
 
 ## 0. 一句话结论
 
-并发与数据两条主线同时往前推了一格：
-
-- **v0.5 `chan[T]`**：有界 MPMC、阻塞 `send/recv`，自研后端用 `xchg` 自旋锁 + yield，
-  C 后端用 `pthread_mutex/cond`；`spawn`/`join` 与通道组合可用。
-- **v0.6 `[N]T`**：栈上定长数组，字面量 / 动态下标 / 复合赋值 / `len` / 值语义拷贝，
-  越界默认 **fail-fast**（`Rosoto.toml [build] bounds_check` 可关）。
-
-两条特性都在 **Linux 裸 ELF / Windows PE（无 CRT）/ C99** 三条链上输出一致、有回归覆盖。
+Rosoto 现在可以在三条链上使用用户定义的 Result 枚举和 `?`：
 
 ```rosoto
-let mut a = [1, 2, 3, 4]
-a[1] = 20
-a[2] += 5
-assert(len(a) == 4, "len")
-let b = a                 // 值语义拷贝
-b[0] = 100
-assert(a[0] == 1, "no alias")
+enum Result {
+    Ok(value: int)
+    Err(error: str)
+}
 
-let ch = chan[int].open(4)
-let h = spawn producer(ch, 100)
-let mut sum = 0
-let mut i = 0
-while i < 100 { sum += ch.recv()  i += 1 }
-join(h)
+fn parse(n: int) -> Result {
+    if n < 0 { return Result.Err("negative") }
+    return Result.Ok(n)
+}
+
+fn add_one(n: int) -> Result {
+    let value = parse(n)?
+    return Result.Ok(value + 1)
+}
 ```
+
+错误分支复制当前 Result 并直接返回，成功分支提取 `Ok` 载荷。`Ok`/`Err` 可按声明顺序排列，
+不再假定 `Ok` 必须是 tag 0。
+
+同时推进了 native 优化器：严格递增、常量上界循环可进行非负范围传播，安全地消除有符号魔数除法的
+符号修正链；parfor/spawn 独立 worker 保留为寄存器分配边界，避免内联造成 spill 回退。
 
 ---
 
 ## 1. 这一轮做了什么
 
-### 1.1 `chan[T]`：有界 MPMC 通道（v0.5）
+### 1.1 Result + `?`
 
 | 后端 | 实现 |
 |---|---|
-| Linux 自研 x86_64 | 48B 控制块 `[cap, head, tail, count, lock, buf]`；`xchg` 原子自旋锁；忙等 `sched_yield(24)` |
-| Windows 自研 PE | 同一套 RosIR；忙等 `SwitchToThread`（kernel32 导入） |
-| C 后端 | `pthread_mutex_t` + `pthread_cond_t`（`not_empty/not_full`） |
-| 单核降级 | 无跨线程，FIFO 与阻塞语义保持；容量足够时可直接用 |
+| Linux 自研 x86_64 | Result 作为已有 enum 聚合值，`?` 检查 tag；Err 整体拷贝到隐藏返回槽后 return；Ok 载荷从槽 1 读取 |
+| Windows PE | 复用同一 RosIR/Lower，PE 发射层无额外分叉 |
+| C 后端 | GNU C statement expression：Err 直接 `return`，Ok 返回 `u.Ok.value` |
 
-- 新 IR `('xchg', dst, addr, val)`：x86 `xchg [mem], reg`（隐含 LOCK），编码 `REX.W 87 /r`。
-- 语法：`chan[T].open(cap)`、`ch.send(v)`、`x = ch.recv()`；`chan[T]` 可作函数参数。
-- 限制：载荷 8 字节（int/bool/str 指针）；AArch64 未实现；`close/select` 未做；
-  单核配置下生产者发送量 > 容量会按阻塞语义等待（预期行为）。
+当前明确边界：
 
-### 1.2 `[N]T` 定长数组（v0.6）
+- Result 必须是**用户定义 enum**，且恰有两个单载荷变体 `Ok(value)` / `Err(error)`；
+- `Ok` 载荷仅支持标量 int/bool/str；
+- 泛型 `result[T,E]` 尚未自动单态化；
+- 结构体/多槽 payload 暂不接受，避免只读取一个槽导致静默错编；
+- `?` 所在函数必须返回相同的 Result enum。
 
-| 能力 | 实现 |
-|---|---|
-| 字面量 | `[1, 2, 3]` → 帧上 N 个 8 字节槽（C：`int64_t a[N] = {...}`） |
-| 下标读 | `a[i]` → native `load base,idx`；C `a[i]` |
-| 下标写 / 复合赋值 | `a[i] = v` / `a[i] += v`，支持动态下标 |
-| `len(a)` | 编译期常量 N |
-| 值语义拷贝 | `let b = a` / `b = a` → 逐字拷贝（C：`memcpy`） |
-| 越界检查 | 默认 fail-fast：stderr 输出 `rosoto: index out of bounds (fail-fast)` + 退出码 1 |
+`t17_result.ros` 覆盖：正常传播、错误传播、`Err` 在 `Ok` 前声明的反向 tag 顺序，
+Linux native / Windows PE / C 三链均通过。
 
-- 配置：`Rosoto.toml [build] bounds_check = false` 可关闭检查（性能优先，越界即 UB）。
-- 边界：**只支持数值元素**、**只能作函数内局部数组**；作函数参数/返回值会明确报错。
-  （`[]T` 切片与 `map` 需要运行时表示，留到下一轮。）
+### 1.2 自研优化器
 
-### 1.3 运行库按需发射（v0.5，省用）
+#### 非负范围传播
 
-`Lower.run` 改为先降级用户函数、记录 `uses_arena/uses_join/uses_chan/uses_bounds`，
-再发射运行库。效果：
+`analyze_nonneg()` 现在只接受有明确证明的值：
 
-- 不写通道的程序不带 `__chan_*`，Windows PE 不再无谓导入 `SwitchToThread`；
-- hello 的 PE 导入保持 4 个（`ExitProcess/GetStdHandle/WriteFile/VirtualAlloc`）。
+- 单次常量定义；
+- 严格递增的 `i < hi` 循环；
+- `lo`、`hi` 是可追溯常量；
+- 步长为正且末次步进不会溢出；
+- 循环体不重定义归纳变量。
 
-### 1.4 本轮修掉的 3 个真实缺陷（都有回归）
+之后才传播 `add/mul/shl/sar/umulhi` 的上界，用于安全消除有符号魔数除法的符号修正。
+证明不满足时保守保留原代码。
 
-| # | 症状 | 根因 | 修复 |
-|---|---|---|---|
-| 1 | `assert(1 == 2)` 的失败路径**静默变成正常退出**（exit 0、stderr 空） | 内联标签后缀只用 `caller.nv`；两个不同函数 nv 相同又内联同一 callee 时标签重名，后发射的覆盖前者，`main` 的跳转跳进**另一个函数体内** | 后缀改为 `.inl_{caller_name}_{base}` |
-| 2 | 变量作 `spawn` 实参时 C 编译报 `'ch' undeclared` | C helper 误用调用点变量名（`a->a0 = ch;`），而非形参 | helper 只用 `p0..`，实参只在调用点求值一次 |
-| 3 | 非 chan 程序也带通道运行库 + `SwitchToThread` 导入 | 运行库全量发射 | 按需发射（uses_* 标志） |
+#### worker 内联边界
 
-> 第 1 个是本项目至今最隐蔽的 bug：IR 完全正确、反汇编也「像对的」，
-> 只有交叉引用标签地址才暴露；由 `win_assert` 回归与 Windows 套件抓住。
+parfor/spawn worker 的独立栈和寄存器压力敏感，继续保留 `Fn.no_inline` 边界；
+避免把 helper 塞进 worker 后扩大活跃区间、触发 spill，导致热循环反而变慢。
 
-### 1.5 回归扩容
+> 本轮没有把未验证的周期归约重写保留在最终管线；当前性能提交只包含已通过全量回归的范围证明与 worker 边界。
 
-| 套件 | v0.4 | 本轮 | 新增 |
-|---|---|---|---|
-| Windows PE | 47 | **54** | chan（2 项）、数组与越界（4 项）、单核 chan（1 项） |
-| Linux 自研 | 42 | **50** | chan（4 项）、数组与越界（4 项） |
-| C / corelib / io_uring | 16 / 34 / 26 | 不变 | — |
+### 1.3 产品后端策略
 
-新增夹具：
-`tests/t15_chan.ros`、`tests/single_core/t15_chan_seq.ros`、
-`tests/t16_arrays.ros`、`tests/array_bounds.ros`。
+- `rosoto_cli.py` 默认目标：Windows 使用 `win`，其他平台使用 `native`；
+- C 后端必须显式 `--target c`，只用于交叉验证、自举、移植和测试；
+- 文档已同步：README / SPEC / BACKEND 都标明 C 后端不是产品默认运行路径。
+
+### 1.4 回归
+
+新增：
+
+- `tests/t17_result.ros`；
+- native 回归 [12]：Result native + C 传播；
+- Windows 回归：Result PE 自校验。
+
+当前总量：
+
+```
+Windows PE 55 ✅  |  自研 Linux 52 ✅  |  C 16 ✅  |  corelib 34 ✅  |  io_uring 26 ✅
+总计 183 项
+```
 
 ---
 
-## 2. 还没有做什么（未完成清单）
+## 2. 还没有做什么
 
 ### 2.1 语言特性
 
-| 特性 | 现状 | 优先级 |
+| 特性 | 状态 | 优先级 |
 |---|---|---|
-| `option[T]` / `result[T,E]` + `?` | ❌ native 仍报错；C 只有 int 占位 | **高** |
-| `[]T` 切片（指针+长度） | ❌ 只有类型语法；数组也不能当参数 | **高** |
-| `map[K]V` | ❌ 未实现 | **高** |
-| 数组作函数参数/返回值 | ❌ 明确报错（v0.6 边界） | 高 |
+| 泛型 `option[T]` / `result[T,E]` | ❌ 尚未自动展开 | 高 |
+| `[]T` 切片（指针+长度） | ❌ 只有类型语法，数组不能作参数 | 高 |
+| `map[K]V` | ❌ 未实现 | 高 |
+| 数组作函数参数/返回值 | ❌ `[N]T` v0.6 边界明确报错 | 高 |
 | `chan.close()` / `select` / 无界通道 | ❌ | 中 |
 | `h.join()` 方法式语法 | ❌ 当前是 `join(h)` | 中 |
-| 泛型 / `interface` | ❌ | 中 |
-| 所有权 + 借用检查 | ❌ arena/spawn/array 目前靠约定 | 中 |
+| 泛型 / interface | ❌ | 中 |
+| 所有权 + 借用检查 | ❌ arena/spawn/array 依赖约定 | 中 |
 | `@simd` / `@no_preempt` / `@rc[T]` / `@extern("C")` | ❌ | 中 |
-| 浮点运算（f32/f64） | 🟡 类型名可解析，运算/打印未打通 | 中 |
-| `rosoto_fmt` 覆盖新语法 | ❌ | 低 |
+| 浮点实际运算 | 🟡 类型名可解析，运算/打印未打通 | 中 |
+| `rosoto_fmt` 新语法覆盖 | ❌ | 低 |
 
 ### 2.2 平台 / 性能
 
-| 项 | 现状 |
+| 项 | 状态 |
 |---|---|
-| **Windows 网络（IOCP/AFD）** | ❌ `net.TcpServer` 在 Windows 上仍不可用 |
-| **自研后端网络（Linux epoll）** | ❌ native 后端还没有网络；只有 C 后端有 |
-| macOS/iOS（Mach-O + kqueue） | ❌ 需 Mac 真机/CI |
-| Android / Web(wasm64) | ❌ |
-| AArch64 的 `spawn`/`chan` | ❌ 仅 x86_64（需 ldaxr/stxr 版本） |
+| Windows IOCP/AFD | ❌ `net.TcpServer` 尚未进入 Windows PE 后端 |
+| 自研 Linux epoll 网络 | ❌ native 后端尚无网络 intrinsic |
+| macOS/iOS Mach-O + kqueue | ❌ 需 Mac 真机/CI |
+| Android / wasm64 | ❌ |
+| AArch64 spawn/chan | ❌ 需要 `ldaxr/stxr` 原子发射层 |
 | SIMD 自动向量化 | ❌ loop_sum 与 gcc -O2 的主要差距 |
 | 尾调用消除 / LTO / 热重载 | ❌ |
 | Windows PE 调试信息 / SEH unwind | ❌ |
 
 ### 2.3 工程化
 
-| 项 | 现状 |
+| 项 | 状态 |
 |---|---|
 | `rosoto test --target all` | ❌ 需分别指定 |
-| `rosoto bench` 跨平台基线 | 🟡 有壳，未建基线 |
-| CI（Linux/Windows 双矩阵） | ❌ 未接 |
-| Windows 上 C 后端验证 | ❌ 本机无 gcc/clang |
+| 跨平台 bench 基线 | 🟡 有命令，没有稳定 baseline 文件 |
+| Linux/Windows CI | ❌ 未接 |
+| Windows C 后端执行验证 | ❌ 本机无 gcc/clang |
 
 ---
 
-## 3. 差什么（阻塞项 / 需要的输入）
+## 3. 差什么
 
-1. **git 远端仍缺失**：仓库是本地 git，未配置 remote。
-   请给 URL，或执行 `git remote add origin <URL> && git push -u origin master`。
-2. **macOS / ARM64 真机或 CI**：Mach-O/kqueue 与 AArch64 执行级验证缺硬件。
-3. **Windows 无 gcc/clang**：C 后端回归只能在 WSL 跑。
-4. **Windows 网络压测环境**：IOCP/AFD 落地后需要句柄上限、防火墙、压测客户端。
-5. **产品级平台优先级**：`PLATFORM.md §5`（Windows 网络 / macOS / wasm）。
-
----
-
-## 4. 写了多少（本轮产出统计）
-
-| 类别 | 文件 | 行数 | 说明 |
-|---|---|---|---|
-| 前端 + C 后端 | `tools/rosoto.py` | 2199（+238） | chan 语法/类型、C 通道运行时、数组字面量/索引/len/拷贝/越界、spawn helper 修复 |
-| 自研 x86_64 | `tools/rosoto_native.py` | 3063（+317） | xchg IR、chan 运行时、数组帧槽/拷贝/越界、按需发射、内联标签修复 |
-| RosIR 优化器 | `tools/rosoto_opt.py` | 905（+4） | xchg 的 def/use、保序、延迟 |
-| Windows PE | `tools/rosoto_pe.py` | 353 | 未改（复用 winapi） |
-| 命令行 | `tools/rosoto_cli.py` | 315 | 版本 0.6.0 |
-| 回归 | `tests/run_win_tests.py` | 362（+30） | chan/数组/越界/单核 |
-| 回归 | `tests/run_native_tests.sh` | — | chan 4 项 + 数组 4 项 |
-| 新夹具 | `t15_chan.ros`、`t15_chan_seq.ros`、`t16_arrays.ros`、`array_bounds.ros` | 92 | 通道 / 数组 / 负向越界 |
-| 文档 | `README.md` / `SPEC.md` / `BACKEND.md` / `Rosoto.toml` / `HANDOVER.md` | — | v0.5 / v0.6 同步（含 `bounds_check`） |
-
-**测试规模**：180 项（Windows 54 / 自研 Linux 50 / C 16 / corelib 34 / io_uring 26），全绿。
-**跨链验证**：chan 与数组在 Linux ELF / Windows PE / C99 三链输出一致；
-数组越界在三链都 fail-fast。
+1. **git remote**：本地仓库仍没有远端 URL，因此不能完成网络 push。
+2. **Mac/ARM64 机器或 CI**：macOS Mach-O/kqueue 与 AArch64 真机验证缺硬件。
+3. **Windows C 工具链**：C 回归继续依赖 WSL gcc。
+4. **IOCP 压测环境**：需要 Windows 句柄上限、防火墙配置和压测客户端。
+5. **SIMD 基线环境**：需要固定 CPU、固定构建参数和 baseline 文件，避免把机器负载误判成优化收益。
 
 ---
 
-## 5. 需要写什么（下一轮建议）
+## 4. 写了多少
 
-1. **`option` / `result` + `?`**（错误模型，SPEC §3 的核心承诺）
-   - 复用 enum 的 tag+payload；先做 `option[int]` / `result[int,str]` 单态化；
-   - `?` 在 native 后端降级为「tag 检查 + 提前返回 Err」。
-2. **`[]T` 切片**（数组作参数/返回值的前提）
-   - 表示：`{ptr, len}` 两字；先支持从 `[N]T` 取切片与只读传递；
-   - 有了 slice，`net.Conn`/`[]byte` 才有可能在 native 后端落地。
-3. **`map[K]V`**（开放寻址；可指定 arena）
-4. **自研后端网络**（epoll/IOCP；依赖 slice + 间接调用）
-5. **SIMD 自动向量化**（性能主线，loop_sum 基线）
-6. **macOS Mach-O + kqueue**（有 Mac 资源再做）
+| 类别 | 文件 | 说明 |
+|---|---|---|
+| 前端 + C 后端 | `tools/rosoto.py` | 2230 | Result `?` C 降级、tag 顺序/标量边界检查 |
+| 自研 x86_64 | `tools/rosoto_native.py` | 3095 | Result `?` native 降级、tag 顺序处理 |
+| RosIR 优化器 | `tools/rosoto_opt.py` | 1002 | 范围传播、worker 内联边界、保守溢出条件 |
+| Windows PE | `tools/rosoto_pe.py` | 353 | 未改（复用 RosIR） |
+| 命令行 | `tools/rosoto_cli.py` | 319 | 版本 0.7.0、主机架构默认 target |
+| 测试 | `tests/run_win_tests.py` | 363 | Result Windows PE 回归 |
+| 测试夹具 | `tests/t17_result.ros` | 61 | 正常/错误/反向 tag 顺序 |
+| 文档 | `README.md` / `SPEC.md` / `BACKEND.md` / `HANDOVER.md` | — | v0.7 同步 |
+
+**测试规模**：183 项全绿（Windows 55 / native 52 / C 16 / corelib 34 / io_uring 26）。
 
 ---
 
-## 6. 怎么接着干（开工步骤）
+## 5. 需要写什么
+
+1. **`[]T` 切片**：`{ptr,len}` 两字表示；数组到 slice 的零拷贝转换；slice 参数/返回值；
+   这是 native `[]byte` 网络回调的前置。
+2. **泛型 `option[T]` / `result[T,E]`**：在当前用户定义 Result 基础上做受控单态化。
+3. **`map[K]V`**：开放寻址 + arena 绑定，先支持标量键值。
+4. **native epoll / Windows IOCP 网络**：需要 slice 与间接回调调用。
+5. **SIMD 自动向量化**：先做 canonical reduction loop，再加 `@simd`。
+6. **macOS Mach-O + kqueue**：有 Mac runner 后落地。
+
+---
+
+## 6. 怎么接着干
 
 ```bash
-# 全量回归（180 项）
-bash tests/run_native_tests.sh      # 50
-bash tests/run_tests.sh             # 16（需 cc）
+# 全量回归（183 项）
+bash tests/run_native_tests.sh      # 52
+bash tests/run_tests.sh             # 16
 bash tests/test_corelib.sh          # 34
 bash tests/test_uring.sh            # 26
-python tests/run_win_tests.py       # 54（Windows 原生）
+python tests/run_win_tests.py       # 55
 
-# 新特性三链
-python tools/rosoto_cli.py run tests/t15_chan.ros --target win
-python3 tools/rosoto_native.py run tests/t15_chan.ros
-python3 tools/rosoto.py       run tests/t15_chan.ros
+# Result 三链
+python tools/rosoto_pe.py run tests/t17_result.ros
+python3 tools/rosoto_native.py run tests/t17_result.ros
+python3 tools/rosoto.py run tests/t17_result.ros
 
-python tools/rosoto_pe.py run tests/t16_arrays.ros
-python3 tools/rosoto_native.py run tests/t16_arrays.ros
-python3 tools/rosoto_native.py run tests/array_bounds.ros   # 期望退出码 1
+# 性能审计
+python tools/rosoto_cli.py bench examples/loop_sum.ros --target win --runs 5
+python tools/rosoto_native.py build examples/loop_sum.ros -o build/loop
 
-# 看 IR / 调试
-python tools/rosoto_pe.py build tests/t16_arrays.ros -o build/x.exe --dump-ir --no-opt
-python tools/rosoto_dbg.py build/x.exe
+# 调试/IR
+python tools/rosoto_pe.py build tests/t17_result.ros -o build/x.exe --dump-ir --no-opt
 ```
 
-### 新增 IR 指令检查表（现在共 9 处）
+### 新增 IR/优化改动检查表
 
-1. `tools/rosoto_native.py::_map_ins`
-2. `tools/rosoto_opt.py::vreg_mentions`
-3. `tools/rosoto_opt.py::_subst_vregs`
-4. `tools/rosoto_opt.py::PURE`
-5. `tools/rosoto_opt.py::_EFF`
-6. `tools/rosoto_opt.py::_LAT` + `_TERM`
-7. `tools/rosoto_native.py::allocate` 的 `call_sites`
-8. x86_64 `gen_instr`（+ Windows `WinCodegen.gen_instr`）
-9. AArch64 `gen_instr`（若该指令需要跨架构）
+1. `vreg_mentions`
+2. `_subst_vregs`
+3. `_map_ins`
+4. `PURE`
+5. `_EFF`
+6. `_LAT` / `_TERM`
+7. `allocate.call_sites`
+8. x86/Windows `gen_instr`
+9. AArch64 `gen_instr`（若跨架构）
 
-### 血泪教训（累计）
+### 累计教训
 
-- **内联标签后缀必须带 caller 名字**（v0.5 的 exit-0 静默 bug）。
-- **C 后端 helper 只能引用形参**，实参表达式只在调用点求值。
-- **运行库按需发射**：先降级用户函数收集 uses_*，再发运行库。
-- **字符串条件分支走 `__str_eq`**（`branch()` 不能直接比指针）。
-- **子线程不能从父栈溢出槽取参数**（`spawn_child` 从新栈顶 `[rsp-8]` 取）。
-- **arena release 与 mark 配对**；`break/continue/return` 会跳过 release。
-- **数组越界检查要覆盖读和写**，负下标也要判（`i < 0 || i >= N`）。
-- **`winapi` 必须进 `_EFF`**；栈参数先写再搬寄存器实参。
-- **PE `headers_size` 含节表**；`.reloc` 补齐必须是 0x0000；线程入口参数在 RCX。
-- **parfor/spawn worker 永不内联**；RosIR 非 SSA。
+- Result 的 `Ok` tag 不能硬编码为 0，必须按 enum 声明顺序查索引。
+- Result `?` 目前只接受两个单载荷变体和标量 Ok payload，超出边界必须报错。
+- 非负范围证明必须检查唯一初始化、唯一步进定义、上界和溢出；不能跨控制流读取旧常量。
+- worker 是独立栈/寄存器压力边界，不能盲目内联。
+- 内联标签必须带 caller 名字，否则跨函数同名会把跳转导入错误函数。
+- C helper 只能引用 helper 形参，不能引用调用点局部变量名。
 
 ---
 
-## 7. 远端同步 / 版本控制
+## 7. 版本控制 / 远端
 
-- 仓库：本目录（`master`）。
-- 已提交：
-  - `3e9b8c0 v0.5: chan[T] bounded MPMC channels + on-demand runtime (172 tests green)`
-  - v0.6 数组提交：`v0.6: fixed-size arrays [N]T with bounds-checked access (180 tests green)`
-- **仍没有 git remote**。请给 URL，或执行：
+- 本轮待提交：`v0.7: Result propagation and conservative range analysis (183 tests green)`。
+- 已有提交：
+  - `3e9b8c0` v0.5 chan
+  - `ff8f830` v0.6 arrays
+- **仍没有 git remote**。请提供 URL，或执行：
   ```bash
   git remote add origin <URL>
   git push -u origin master
   ```
-- 若「远程端目录」指本机 `C:\Users\43551\Desktop\Rosoto\rosoto`：文件已直接写入。
 
 ---
 
-## 8. 本轮改动的文件清单
+## 8. 文件清单
 
 ```
 修改：
-  tools/rosoto.py             chan 语法/类型、数组字面量/索引/len/拷贝/越界、C 通道运行时、spawn helper 修复
-  tools/rosoto_native.py      xchg IR、__chan_*、数组帧槽/拷贝/越界、按需发射、内联标签修复
-  tools/rosoto_opt.py         xchg 的 def/use/保序/延迟
-  tools/rosoto_cli.py         版本 0.6.0
-  tests/run_native_tests.sh   chan 4 项 + 数组 4 项
-  tests/run_win_tests.py      chan/数组/越界/单核
-  Rosoto.toml                 新增 [build] bounds_check
+  tools/rosoto.py          C Result ? 生成、Result 类型检查
+  tools/rosoto_native.py   native Result ?、tag 顺序与标量边界
+  tools/rosoto_opt.py      非负范围传播、worker 内联边界
+  tools/rosoto_cli.py      产品默认 target、版本 0.7.0
+  tests/run_native_tests.sh / tests/run_win_tests.py
   README.md / SPEC.md / BACKEND.md / HANDOVER.md
 
 新增：
-  tests/t15_chan.ros                 多生产者 + 容量 4 阻塞 + FIFO
-  tests/single_core/t15_chan_seq.ros 单核 FIFO
-  tests/t16_arrays.ros               数组 len/读写/拷贝/循环
-  tests/array_bounds.ros             越界负向用例
+  tests/t17_result.ros     Result Ok/Err、错误传播、反向 tag 顺序
 
 测试：
-  Windows 54 ✅  |  自研 Linux 50 ✅  |  C 16 ✅  |  corelib 34 ✅  |  io_uring 26 ✅
+  Windows 55 ✅ | native Linux 52 ✅ | C 16 ✅ | corelib 34 ✅ | io_uring 26 ✅
 ```

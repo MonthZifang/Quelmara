@@ -1,6 +1,6 @@
 # Rosoto 自研后端设计（BACKEND.md）
 
-> 决策：**自研后端**，不走 LLVM、不走 C 中转。平台优先与游戏定位**两条线并行推进**，优化持续加深。
+> 决策：**产品后端必须自研**，不走 LLVM、不走 C 中转。C99 生成器仅保留为显式交叉验证、自举和移植工具，不属于产品运行后端。平台优先与游戏定位**两条线并行推进**，优化持续加深。
 > 现状：v0.1 已实现 x86_64 全链路 —— Rosoto → RosIR → 优化 passes → 线性扫描寄存器分配 → 自研指令编码器 → **裸 ELF64 可执行文件**（无 libc、无 gcc、无外部依赖）。
 > v0.3 新增 **Windows x86_64 PE/COFF 写出器 + kernel32 导入 + CreateThread 多核**（无 CRT，产物 6–26 KB）。
 > v0.4 新增 **spawn/join 任务并行**（`spawn_child` IR + Linux clone / Windows CreateThread / C pthread）
@@ -34,7 +34,7 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
   └── AArch64 编码器 → ELF64 写出器（Linux）
 ```
 
-**双后端交叉验证**：同一份 `.ros` 源码可同时用 C 后端（gcc -O2）与自研后端编译，输出 diff 即回归——两个独立实现互为 oracle（fib / divmod 160 行 / loop_sum / parfor_sum 全部验证一致）。
+**双实现交叉验证**：同一份 `.ros` 源码可显式用 C 后端（gcc -O2）与自研后端编译，输出 diff 即回归——C 生成器只作为测试 oracle，不改变产品默认的自研后端路径。
 
 ---
 
@@ -82,8 +82,12 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | 调用感知分配 | 跨调用值只进 callee-saved / 溢出，避免隐式破坏 |
 | 帧槽复用 | 不相交生命周期共享槽位 |
 | mov 消除 | 同寄存器搬运零成本 |
+| 循环范围传播 | 对严格递增常量上界循环证明非负值，消除安全的有符号魔数修正链 |
+| worker 内联边界 | parfor/spawn 独立栈 worker 保留调用，避免内联造成寄存器 spill 回退 |
 
-实测：魔数除法使 `loop_sum`（2 亿次含模热循环）637ms → 518ms；518ms vs gcc -O2 158ms 的剩余差距 = gcc 的**自动向量化 + 指令调度**（对应下方路线图 v0.3/v0.4）。
+实测说明：本轮范围传播只作用于有唯一初始化、严格上界和无溢出证明的非负值，
+用于安全收缩有符号魔数除法窗口；完整回归保持全绿。loop_sum 的跨机器 wall-clock
+不作为本轮结论，下一轮 SIMD 基线会固定 CPU/构建参数后再比较。
 
 **跨平台注意事项（新增，血泪教训）**：`winapi` 是**有副作用的屏障** —— 指令调度器必须把它
 和 `call/syscall/store/load` 一起放进 `_EFF` 保序集合，否则 `WaitForSingleObject` 会被重排到
@@ -115,7 +119,7 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | 目标 | 后端方案 | 状态 |
 |---|---|---|
 | Linux x86_64 | 自研编码器 + ELF 写出器 | ✅ v0.1 |
-| Windows x86_64 | 自研 PE/COFF 写出器 + kernel32 导入 + CreateThread | ✅ v0.3（本机执行级 54 项） |
+| Windows x86_64 | 自研 PE/COFF 写出器 + kernel32 导入 + CreateThread | ✅ v0.3（本机执行级 55 项） |
 | Linux aarch64 | 自研 ARM64 编码器（RosIR 架构无关，只换发射层） | 🟡 模拟器执行级，待真机 |
 | Windows 网络（IOCP/AFD） | 导入 WSA*/IOCP 或 AFD 设备 | 🚧 下一格（PLATFORM.md 候选 A） |
 | macOS / iOS (arm64) | Mach-O 写出器 + libSystem + kqueue 运行时 | 🚧 需 Mac 真机/CI |
@@ -166,7 +170,7 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | game_loop（结构体帧循环） | 20480 B | — | 自校验通过 |
 
 回归：`python tests/run_win_tests.py`（结构自检 + 执行级 + 单核降级 + assert 失败路径
-+ 与 Linux ELF 逐字节交叉验证，共 54 项）。
++ 与 Linux ELF 逐字节交叉验证，共 55 项）。
 
 ---
 
