@@ -1,6 +1,6 @@
-# Rosoto 代码教程（TUTORIAL）
+# Quelmara 代码教程（TUTORIAL）
 
-> 从零上手 Rosoto：环境 → 第一个程序 → 语法 → 多核 → 工具链 → 避坑。
+> 从零上手 Quelmara：环境 → 第一个程序 → 语法 → 多核 → 工具链 → 避坑。
 > 全部命令在仓库根目录执行。代码示例均可直接运行。
 > 看效果请先翻 **`SHOWCASE.md`**；查语言细节看 `SPEC.md`。
 
@@ -15,11 +15,11 @@
 | AArch64 | Python 3.10+ | 自研 ELF 发射层已就绪（模拟器验证，待真机） |
 
 ```bash
-git clone https://github.com/MonthZifang/Rosoto.git
-cd Rosoto
+git clone https://github.com/MonthZifang/Quelmara.git
+cd Quelmara
 # 验证安装：跑一个示例
-python3 tools/rosoto_native.py run examples/hello.ros
-# hello, rosoto
+python3 tools/stage0/qlm_native.py run examples/hello.ros
+# hello, quelmara
 ```
 
 ---
@@ -28,7 +28,7 @@ python3 tools/rosoto_native.py run examples/hello.ros
 
 创建 `my.ros`：
 
-```rosoto
+```quelmara
 module my
 
 fn main() {
@@ -38,8 +38,8 @@ fn main() {
 ```
 
 ```bash
-python3 tools/rosoto_native.py run my.ros     # 编译 + 立即运行
-python3 tools/rosoto_native.py build my.ros -o build/my   # 只编译
+python3 tools/stage0/qlm_native.py run my.ros     # 编译 + 立即运行
+python3 tools/stage0/qlm_native.py build my.ros -o build/my   # 只编译
 ./build/my
 ```
 
@@ -52,7 +52,7 @@ python3 tools/rosoto_native.py build my.ros -o build/my   # 只编译
 
 ## 2. 变量与类型
 
-```rosoto
+```quelmara
 fn main() {
     let x = 10              // let 默认不可变
     let mut y = 0           // mut 显式声明可变
@@ -60,7 +60,7 @@ fn main() {
     print(y)
 
     let ok = true           // bool
-    let name = "rosoto"     // str（UTF-8 不可变）
+    let name = "quelmara"     // str（UTF-8 不可变）
     print(name + " says " + ok.to_str())
 }
 ```
@@ -73,7 +73,7 @@ fn main() {
 
 ## 3. 表达式与控制流
 
-```rosoto
+```quelmara
 fn classify(x: int) -> str {
     if x < 0 {
         return "negative"
@@ -103,7 +103,7 @@ fn countdown(n: int) {
 
 `match` 是表达式，必须穷尽（编译期检查）：
 
-```rosoto
+```quelmara
 enum Shape {
     Circle(radius: int)
     Rect(w: int, h: int)
@@ -121,7 +121,7 @@ fn area(s: Shape) -> int {
 
 ## 4. 函数
 
-```rosoto
+```quelmara
 fn add(a: int, b: int) -> int {
     return a + b
 }
@@ -138,7 +138,7 @@ fn main() {
 
 ## 5. struct：值语义建模
 
-```rosoto
+```quelmara
 struct Item {
     name: str
     qty: int
@@ -160,7 +160,7 @@ fn main() {
 
 ## 6. 错误处理：Result + `?`
 
-```rosoto
+```quelmara
 enum Result {
     Ok(value: int)
     Err(error: str)
@@ -189,7 +189,7 @@ fn main() {
 
 `option[T]` 同理可用（int/bool/str）：
 
-```rosoto
+```quelmara
 let m = option[int].some(42)
 let v = match m {
     Option.Some(x) => x
@@ -201,7 +201,7 @@ let v = match m {
 
 ## 7. 数组与切片
 
-```rosoto
+```quelmara
 fn main() {
     let mut a = [1, 2, 3, 4]
     a[1] = 20
@@ -220,7 +220,7 @@ fn main() {
 }
 ```
 
-- 越界默认 **fail-fast**（退出码 1）；`Rosoto.toml` 里
+- 越界默认 **fail-fast**（退出码 1）；`Quelmara.toml` 里
   `[build] bounds_check = false` 可关闭（越界即 UB，慎用）；
 - `[N]T` 目前是函数内局部数组（作参数/返回值会明确报错）；
   传参请用切片 `[]T`（{ptr, len} 两字零拷贝视图）。
@@ -231,7 +231,7 @@ fn main() {
 
 ### 8.1 parfor —— 数据并行 + 归约
 
-```rosoto
+```quelmara
 fn main() {
     let mut total = 0
     parfor i in 0..1_000_000 {
@@ -246,7 +246,7 @@ fn main() {
 
 ### 8.2 spawn / join —— 任务并行
 
-```rosoto
+```quelmara
 fn square(x: int) -> int {
     return x * x
 }
@@ -259,7 +259,7 @@ fn main() {
 
 ### 8.3 chan[T] —— 有界 MPMC 通道
 
-```rosoto
+```quelmara
 fn producer(ch: chan[int], n: int) {
     let mut i = 0
     while i < n {
@@ -285,7 +285,7 @@ fn main() {
 ### 8.4 单核开关
 
 ```toml
-# Rosoto.toml
+# Quelmara.toml
 [core]
 multicore = false    # parfor/spawn 编译期降级串行，代码零改动
 threads   = 1
@@ -295,7 +295,7 @@ threads   = 1
 
 ## 9. arena：批量分配、整体回收
 
-```rosoto
+```quelmara
 fn main() {
     arena {
         let msg = "sum=" + 45.to_str()
@@ -313,15 +313,15 @@ fn main() {
 
 ```bash
 # 自研后端（产品路径）
-python3 tools/rosoto_native.py run   examples/hello.ros          # 编译+运行
-python3 tools/rosoto_native.py build examples/hello.ros -o build/hello
-python3 tools/rosoto_native.py build examples/hello.ros --dump-ir  # 看 RosIR
+python3 tools/stage0/qlm_native.py run   examples/hello.ros          # 编译+运行
+python3 tools/stage0/qlm_native.py build examples/hello.ros -o build/hello
+python3 tools/stage0/qlm_native.py build examples/hello.ros --dump-ir  # 看 RosIR
 
 # Windows（在 Windows 上）
-python tools/rosoto_cli.py run examples/hello.ros --target win   # 产出 build/hello.exe
+python tools/stage0/qlm_cli.py run examples/hello.ros --target win   # 产出 build/hello.exe
 
 # C 后端（仅交叉验证/自举，不是产品后端）
-python3 tools/rosoto.py build examples/hello.ros --cc
+python3 tools/stage0/qlm.py build examples/hello.ros --cc
 
 # 性能基准（best-of-3）
 bash tests/bench.sh
@@ -336,7 +336,7 @@ python tests/run_win_tests.py         # Windows PE 61
 
 ---
 
-## 11. Rosoto.toml 常用配置
+## 11. Quelmara.toml 常用配置
 
 ```toml
 [core]

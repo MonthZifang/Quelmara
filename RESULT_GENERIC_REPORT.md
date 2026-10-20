@@ -1,9 +1,9 @@
 # result[T,E] 受控单态化 —— 实现简报
 
 日期：2026-10-19
-改动范围：`tools/rosoto.py`（前端 + C 后端共用前端部分）、`tests/t20_result_generic.ros`（新增）、
+改动范围：`tools/stage0/qlm.py`（前端 + C 后端共用前端部分）、`tests/t20_result_generic.ros`（新增）、
 `tests/run_native_tests.sh`、`tests/run_win_tests.py`。
-**未触碰**：`tools/rosoto_native.py`、`tools/rosoto_opt.py`、`tools/rosoto_pe.py`（后端零改动）。
+**未触碰**：`tools/stage0/qlm_native.py`、`tools/stage0/qlm_opt.py`、`tools/stage0/qlm_pe.py`（后端零改动）。
 
 ## 一、实现思路（完全照抄 `option[T]` v0.8 先例）
 
@@ -11,7 +11,7 @@
 类型元组合成一个真枚举 `__res_<T>_<E>`，类型元组坍缩为 `("named", "__res_<T>_<E>")`，
 下游 enum 布局 / match / 聚合返回 ABI / `?` 降级全部复用既有通路。
 
-### 改动点（全部在 `tools/rosoto.py`）
+### 改动点（全部在 `tools/stage0/qlm.py`）
 
 1. **词法**：`KEYWORDS` 加入 `"result"`（与 `option`/`chan` 同级的关键字类型名）。
    全库 grep 确认没有任何 `.ros` 源码把 `result` 当标识符用，无兼容性影响。
@@ -94,19 +94,19 @@ $ bash tests/test_corelib.sh
 ```
 
 ```
-$ python3 tools/rosoto_native.py run tests/t20_result_generic.ros
+$ python3 tools/stage0/qlm_native.py run tests/t20_result_generic.ros
 result generic ok
 
-$ python3 tools/rosoto.py run tests/t20_result_generic.ros
-[rosoto] tests/t20_result_generic.ros -> build/t20_result_generic.c
-[rosoto] config: .../Rosoto.toml | multicore=True threads=auto
-[rosoto] cc: cc -std=gnu11 -O2 -pthread -o build/t20_result_generic build/t20_result_generic.c
-[rosoto] exec build/t20_result_generic
+$ python3 tools/stage0/qlm.py run tests/t20_result_generic.ros
+[qlm] tests/t20_result_generic.ros -> build/t20_result_generic.c
+[qlm] config: .../Quelmara.toml | multicore=True threads=auto
+[qlm] cc: cc -std=gnu11 -O2 -pthread -o build/t20_result_generic build/t20_result_generic.c
+[qlm] exec build/t20_result_generic
 result generic ok
 ```
 
-两条链的**程序输出完全一致**（`result generic ok`）。C 链 stdout 多出的 `[rosoto]`
-横幅是编译器日志（所有既有测试同样如此，各测试段统一用 `grep -v '^\[rosoto'` 过滤）；
+两条链的**程序输出完全一致**（`result generic ok`）。C 链 stdout 多出的 `[qlm]`
+横幅是编译器日志（所有既有测试同样如此，各测试段统一用 `grep -v '^\[qlm'` 过滤）；
 `run_native_tests.sh` [14] 段里的 diff 检查即按此约定过滤后逐字节比对，通过。
 
 native 计数说明：基线 54 项 → 本次新增段 [14] 3 项 → 57 项，FAIL=0。

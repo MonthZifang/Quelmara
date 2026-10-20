@@ -1,4 +1,4 @@
-# Rosoto 全平台路线（PLATFORM.md）
+# Quelmara 全平台路线（PLATFORM.md）
 
 > 结论先说：**「全平台」不是一句口号，而是一张可逐格填满的矩阵**。
 > 每一格 = 指令发射层 + 可执行格式写出器 + 系统 ABI/运行时 + IO 后端。
@@ -49,7 +49,7 @@
 - **省用**：堆先 `MEM_RESERVE` 512MB 虚拟地址，按 **1MB 粒度 MEM_COMMIT**，
   只有真正写到才占提交配额；`heap_limit_mb` 仍是 fail-fast 硬上限。
 - **多核**：`CreateThread` + 共享内存归约，和 Linux 的 `clone()` 语义一致；
-  `Rosoto.toml [core] multicore=false` 时编译期降级为串行，结果不变。
+  `Quelmara.toml [core] multicore=false` 时编译期降级为串行，结果不变。
 
 ### 实测（本机 Windows 10/11 x64，20 逻辑核）
 
@@ -100,7 +100,7 @@
    - 导入 `WSAStartup / WSASocketW / bind / listen / AcceptEx / WSARecv / WSASend /
      CreateIoCompletionPort / GetQueuedCompletionStatus`。
    - 连接对象 = `OVERLAPPED` + 池化 buffer；完成端口线程数 = `[net] io_threads`。
-   - 与现有 `Rosoto.toml [net]` 上限（max_conns / buffer / backpressure）一一对应。
+   - 与现有 `Quelmara.toml [net]` 上限（max_conns / buffer / backpressure）一一对应。
    - 成本：~600–900 行导入封装 + 运行时事件循环。
 2. **A：AFD（\Device\Afd）**（更底层、更省，但无公开文档）
    - 直接 `NtDeviceIoControlFile` + IO_STATUS_BLOCK，少一层 winsock。
@@ -110,7 +110,7 @@
 
 ### 候选 B：macOS / iOS（Mach-O + kqueue）——P1
 
-- 指令层复用 AArch64（`rosoto_arm64.py`），新增 Mach-O 写出器（LC_SEGMENT_64 /
+- 指令层复用 AArch64（`qlm_arm64.py`），新增 Mach-O 写出器（LC_SEGMENT_64 /
   LC_MAIN / LC_LOAD_DYLIB / LC_DYLD_INFO_ONLY / 代码签名留空）。
 - 系统调用：macOS 不再稳定支持 raw syscall 跨版本，走 **libSystem 导入**
   （`write / exit / mmap / pthread_create`），与 Windows 的 winapi 层同构。
@@ -122,7 +122,7 @@
 
 - RosIR → wasm 指令是一一映射，优化器完全复用；运行时用 WASI（`fd_write` / `proc_exit`）。
 - 多核：Web Workers + SharedArrayBuffer（需要 COOP/COEP 响应头）。
-- 价值：浏览器里跑 Rosoto 游戏 demo，传播力最强；性能不如原生，但「全平台」叙事完整。
+- 价值：浏览器里跑 Quelmara 游戏 demo，传播力最强；性能不如原生，但「全平台」叙事完整。
 - 成本：~1200 行（wasm 编码 + 线性内存布局 + WASI 导入）。
 
 ### 候选 D：移动端（iOS/Android）——P3
@@ -153,7 +153,7 @@
 ## 6. 平台无关的硬约束（所有格都必须满足）
 
 - **同一份 `.ros` 源码**，不改一行即可换 target。
-- **同一套 `Rosoto.toml`**：多核/线程/网络上限/堆上限在编译期注入。
+- **同一套 `Quelmara.toml`**：多核/线程/网络上限/堆上限在编译期注入。
 - **交叉验证**：新平台的输出必须与 Linux 自研后端逐字节一致（浮点/CPU 信息除外）。
 - **无 CRT / 无 GC / 无隐藏分配**：启动即 main，退出即 ExitProcess。
 - **失败要响**：超限（连接数/堆）一律 fail-fast，不静默膨胀。

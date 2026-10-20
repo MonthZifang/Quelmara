@@ -1,18 +1,18 @@
-# Rosoto
+# Quelmara
 
 **原生编译 · 多核默认 · 网络原生 · 全平台 · 结构干净 · 游戏/工程双强 · 省资源**
 
-Rosoto 是一门从 0 到 1 设计的系统级编程语言。本仓库包含：
+Quelmara 是一门从 0 到 1 设计的系统级编程语言。本仓库包含：
 
 > **后端约束：产品编译必须使用自研后端。** Linux 默认走自研 x86_64 ELF，Windows 默认走自研 x86_64 PE/COFF，AArch64 使用自研发射器。C99 后端只用于显式交叉验证、自举和测试，不是产品运行后端。
 
 ```
-Rosoto/
+Quelmara/
 ├── SPEC.md              # 语言规范（语法/类型/多核/网络/配置文件/工具链）
 ├── BACKEND.md           # 自研后端设计：RosIR/优化目录/双轨路线/实测基线
 ├── PLATFORM.md          # 全平台矩阵与移植成本模型（Windows/macOS/wasm 讨论）
 ├── HANDOVER.md          # 交接文档：做了什么/没做什么/差什么/写了多少/需要写什么
-├── Rosoto.toml          # 根配置文件：多核开关、线程数、网络资源上限（唯一全局开关）
+├── Quelmara.toml          # 根配置文件：多核开关、线程数、网络资源上限（唯一全局开关）
 ├── examples/
 │   ├── hello.ros              # 最小程序：函数/字符串/while
 │   ├── fib.ros                # 递归（多后端交叉验证）
@@ -26,17 +26,17 @@ Rosoto/
 │   ├── traffic_light.ros      # 状态机：enum + match（自校验）
 │   └── echo_server.ros        # net.TcpServer 百万连接 echo（epoll 非阻塞，C 后端）
 ├── tools/
-│   ├── rosoto.py          # 前端 + C 后端：Rosoto -> C99（pthread / epoll / 配置驱动降级）
-│   ├── rosoto_native.py   # 自研 x86_64：Rosoto -> RosIR -> 机器码 -> 裸 ELF64（无 libc）
-│   ├── rosoto_pe.py       # 自研 Windows：同一 RosIR -> PE32+/COFF（无 CRT，kernel32 导入）
-│   ├── rosoto_arm64.py    # 自研 AArch64：同一条 RosIR，只换发射层
-│   ├── rosoto_opt.py      # RosIR 优化器（后端/平台无关）
-│   ├── rosoto_cli.py      # 统一命令行：默认当前平台自研后端；C 仅显式交叉验证
-│   ├── rosoto_fmt.py      # 官方格式化器
-│   ├── rosoto_mt.py       # 多核任务运行时发射器（work-stealing）
-│   ├── rosoto_mem.py      # 内存/引用运行时发射器（arena/slab/稳定引用/视图）
-│   ├── rosoto_store.py    # 文件/存储运行时发射器（CRC32C/WAL/页存储/io_uring 文件 IO）
-│   └── rosoto_uring.py    # io_uring 网络后端运行时发射器
+│   ├── qlm.py          # 前端 + C 后端：Quelmara -> C99（pthread / epoll / 配置驱动降级）
+│   ├── qlm_native.py   # 自研 x86_64：Quelmara -> RosIR -> 机器码 -> 裸 ELF64（无 libc）
+│   ├── qlm_pe.py       # 自研 Windows：同一 RosIR -> PE32+/COFF（无 CRT，kernel32 导入）
+│   ├── qlm_arm64.py    # 自研 AArch64：同一条 RosIR，只换发射层
+│   ├── qlm_opt.py      # RosIR 优化器（后端/平台无关）
+│   ├── qlm_cli.py      # 统一命令行：默认当前平台自研后端；C 仅显式交叉验证
+│   ├── qlm_fmt.py      # 官方格式化器
+│   ├── qlm_mt.py       # 多核任务运行时发射器（work-stealing）
+│   ├── qlm_mem.py      # 内存/引用运行时发射器（arena/slab/稳定引用/视图）
+│   ├── qlm_store.py    # 文件/存储运行时发射器（CRC32C/WAL/页存储/io_uring 文件 IO）
+│   └── qlm_uring.py    # io_uring 网络后端运行时发射器
 └── tests/
     ├── run_tests.sh         # C 后端回归（16 项）
     ├── run_native_tests.sh  # 自研后端回归（52 项，含 AArch64 模拟器执行级验证）
@@ -49,20 +49,20 @@ Rosoto/
 ## 快速开始
 
 ```bash
-# 自研后端：Rosoto -> 裸 ELF64（无 libc / 无 gcc）
-python3 tools/rosoto_native.py run examples/fib.ros
-python3 tools/rosoto_native.py run examples/parfor_sum.ros   # 多核：raw clone()
+# 自研后端：Quelmara -> 裸 ELF64（无 libc / 无 gcc）
+python3 tools/stage0/qlm_native.py run examples/fib.ros
+python3 tools/stage0/qlm_native.py run examples/parfor_sum.ros   # 多核：raw clone()
 
-# Windows：Rosoto -> PE32+（无 CRT，kernel32 导入）
-python tools/rosoto_cli.py run examples/hello.ros --target win     # 产出 build/hello.exe
+# Windows：Quelmara -> PE32+（无 CRT，kernel32 导入）
+python tools/stage0/qlm_cli.py run examples/hello.ros --target win     # 产出 build/hello.exe
 python tests/run_win_tests.py                                     # Windows 55 项回归
 
 # C 后端（仅显式交叉验证/自举，不是产品后端）
-python3 tools/rosoto.py run examples/hello.ros
-python3 tools/rosoto.py run examples/parallel_sum.ros
+python3 tools/stage0/qlm.py run examples/hello.ros
+python3 tools/stage0/qlm.py run examples/parallel_sum.ros
 
 # 网络 echo 服务器（当前网络 intrinsic 仍在 C 后端，另开终端 nc localhost 9000）
-python3 tools/rosoto.py build examples/echo_server.ros --cc
+python3 tools/stage0/qlm.py build examples/echo_server.ros --cc
 ./build/echo_server
 
 # 回归测试（五套，共 183 项）
@@ -75,7 +75,7 @@ python tests/run_win_tests.py    # Windows PE 55 项（需在 Windows 上执行�
 
 ## 核心机制速览
 
-**1. 多核是默认行为**，单核是显式选择 —— 在项目根目录 `Rosoto.toml`：
+**1. 多核是默认行为**，单核是显式选择 —— 在项目根目录 `Quelmara.toml`：
 
 ```toml
 [core]
@@ -87,21 +87,21 @@ Linux 走 `clone()`，Windows 走 `CreateThread`，归约结果语义一致。
 
 **2. 网络是运行时的一部分**，不是库：
 
-```rosoto
+```quelmara
 fn on_data(c: net.Conn, data: []byte) -> net.Action {
     c.write(data)?          // 零拷贝回写 + 显式背压
     return net.Action.Keep
 }
 ```
 
-资源上限（`max_conns` / 缓冲区 / 背压策略）全部在 `Rosoto.toml` 声明，超限 fail-fast。
+资源上限（`max_conns` / 缓冲区 / 背压策略）全部在 `Quelmara.toml` 声明，超限 fail-fast。
 当前实现：C 后端 epoll / io_uring（Linux）；Windows IOCP 在 PLATFORM.md 候选 A。
 
 **3. 无 GC**：所有权 + 借用检查 + 帧级 arena，析构确定性 —— 游戏帧循环无停顿。
 
 **4. `struct` 值语义 + `enum`/`match` + `break`/`continue`**：
 
-```rosoto
+```quelmara
 struct Vec3 { x: int  y: int  z: int }
 
 enum Shape { Circle(radius: int)  Rect(w: int, h: int) }
@@ -119,7 +119,7 @@ x86_64 ELF / Windows PE / AArch64 / C 四条链输出交叉验证。
 
 **5. 任务并行 + 有界通道 + 帧级 arena（v0.4 / v0.5）**：
 
-```rosoto
+```quelmara
 fn producer(ch: chan[int], n: int) {
     let mut i = 0
     while i < n { ch.send(i)  i += 1 }
@@ -150,7 +150,7 @@ fn frame() {
 
 **6. 定长数组 `[N]T`（v0.6）**：
 
-```rosoto
+```quelmara
 let mut a = [1, 2, 3, 4]
 a[1] = 20
 a[2] += 5
@@ -165,12 +165,12 @@ print(a[i])        // 越界：fail-fast（退出码 1，stderr 报错）
 ```
 
 - 数值元素、栈上帧槽、值语义拷贝；下标支持动态变量与复合赋值。
-- 越界默认 fail-fast（`Rosoto.toml [build] bounds_check = false` 可关闭）。
+- 越界默认 fail-fast（`Quelmara.toml [build] bounds_check = false` 可关闭）。
 - `[N]T` 目前只支持函数内局部数组；作函数参数/返回值会**明确报错**（v0.6 边界）。
 
 **7. 字符串（v0.12）**：
 
-```rosoto
+```quelmara
 let s = "hello"
 print(len(s))        // 5：字节长度
 print(s[0])          // 104：字节值（0..255），可直接参与算术

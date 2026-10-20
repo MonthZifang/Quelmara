@@ -1,4 +1,4 @@
-# Rosoto 交接文档（HANDOVER）
+# Quelmara 交接文档（HANDOVER）
 
 > 工作区状态（2026-10-20 深夜）：**v0.9 / v0.10 已提交 `b42e0a4`，v0.11 已提交 `ade98a4`，
 > v0.12 为当前工作区内容**（字符串 + @extern 收口）。
@@ -23,9 +23,9 @@
 
 ## 0. 一句话结论
 
-Rosoto 现在可以在三条链上使用用户定义的 Result 枚举和 `?`：
+Quelmara 现在可以在三条链上使用用户定义的 Result 枚举和 `?`：
 
-```rosoto
+```quelmara
 enum Result {
     Ok(value: int)
     Err(error: str)
@@ -95,7 +95,7 @@ parfor/spawn worker 的独立栈和寄存器压力敏感，继续保留 `Fn.no_i
 
 ### 1.3 产品后端策略
 
-- `rosoto_cli.py` 默认目标：Windows 使用 `win`，其他平台使用 `native`；
+- `qlm_cli.py` 默认目标：Windows 使用 `win`，其他平台使用 `native`；
 - C 后端必须显式 `--target c`，只用于交叉验证、自举、移植和测试；
 - 文档已同步：README / SPEC / BACKEND 都标明 C 后端不是产品默认运行路径。
 
@@ -141,7 +141,7 @@ Windows PE 74 ✅（本机实测，[1]–[6]；[7] 需 WSL）
 | `@simd` / `@no_preempt` / `@rc[T]` | ❌ | 中 |
 | `@extern("C")` | 🟡 C 后端发射原型；自研后端明确拒绝（无动态链接器） | 中 |
 | 浮点实际运算 | ✅ v0.10 运算/比较/转换/格式化三链打通（t23，f64+f32） | — |
-| `rosoto_fmt` 新语法覆盖 | ❌ | 低 |
+| `qlm_fmt` 新语法覆盖 | ❌ | 低 |
 
 ### 2.2 平台 / 性能
 
@@ -160,7 +160,7 @@ Windows PE 74 ✅（本机实测，[1]–[6]；[7] 需 WSL）
 
 | 项 | 状态 |
 |---|---|
-| `rosoto test --target all` | ❌ 需分别指定 |
+| `quelmara test --target all` | ❌ 需分别指定 |
 | 跨平台 bench 基线 | 🟡 有命令，没有稳定 baseline 文件 |
 | Linux/Windows CI | ❌ 未接 |
 | Windows C 后端执行验证 | ❌ 本机无 gcc/clang |
@@ -185,11 +185,11 @@ Windows PE 74 ✅（本机实测，[1]–[6]；[7] 需 WSL）
 
 | 类别 | 文件 | 行数 | 说明 |
 |---|---|---|---|
-| 前端 + C 后端 | `tools/rosoto.py` | ~4.7k | 解析/推断/C 发射；v0.12 加 str 长度、字节下标、十进制解析 |
-| 自研 x86_64 + RosIR | `tools/rosoto_native.py` | ~4.5k | v0.12 加 `str_len` / str 下标 / `__str_to_int` 运行时 |
-| RosIR 优化器 | `tools/rosoto_opt.py` | 1021 | 范围传播、worker 内联边界、保守溢出条件 |
-| Windows PE | `tools/rosoto_pe.py` | 353 | 未改（复用 RosIR） |
-| 命令行 | `tools/rosoto_cli.py` | 336 | 主机架构默认 target |
+| 前端 + C 后端 | `tools/stage0/qlm.py` | ~4.7k | 解析/推断/C 发射；v0.12 加 str 长度、字节下标、十进制解析 |
+| 自研 x86_64 + RosIR | `tools/stage0/qlm_native.py` | ~4.5k | v0.12 加 `str_len` / str 下标 / `__str_to_int` 运行时 |
+| RosIR 优化器 | `tools/stage0/qlm_opt.py` | 1021 | 范围传播、worker 内联边界、保守溢出条件 |
+| Windows PE | `tools/stage0/qlm_pe.py` | 353 | 未改（复用 RosIR） |
+| 命令行 | `tools/stage0/qlm_cli.py` | 336 | 主机架构默认 target |
 | 测试 | `tests/run_win_tests.py` | ~430 | v0.12 加 `[3c] 字符串` 段（15 条断言） |
 | 测试夹具 | `tests/t27_str.ros` / `t28_toint.ros` | 110 | 长度/下标/解析/边界/往返 |
 | 文档 | `README.md` / `SPEC.md` / `BACKEND.md` / `CHANGELOG.md` / `HANDOVER.md` | — | v0.12 同步 |
@@ -226,22 +226,22 @@ bash tests/test_corelib.sh          # 34
 bash tests/test_uring.sh            # 26
 
 # 字符串（v0.12）
-python tools/rosoto_pe.py run tests/t27_str.ros
-python tools/rosoto_pe.py run tests/t28_toint.ros
-python3 tools/rosoto_native.py run tests/t27_str.ros     # 需 Linux
-python3 tools/rosoto.py run tests/t28_toint.ros          # 需 gcc
+python tools/stage0/qlm_pe.py run tests/t27_str.ros
+python tools/stage0/qlm_pe.py run tests/t28_toint.ros
+python3 tools/stage0/qlm_native.py run tests/t27_str.ros     # 需 Linux
+python3 tools/stage0/qlm.py run tests/t28_toint.ros          # 需 gcc
 
 # Result 三链
-python tools/rosoto_pe.py run tests/t17_result.ros
-python3 tools/rosoto_native.py run tests/t17_result.ros
-python3 tools/rosoto.py run tests/t17_result.ros
+python tools/stage0/qlm_pe.py run tests/t17_result.ros
+python3 tools/stage0/qlm_native.py run tests/t17_result.ros
+python3 tools/stage0/qlm.py run tests/t17_result.ros
 
 # 性能审计
-python tools/rosoto_cli.py bench examples/loop_sum.ros --target win --runs 5
-python tools/rosoto_native.py build examples/loop_sum.ros -o build/loop
+python tools/stage0/qlm_cli.py bench examples/loop_sum.ros --target win --runs 5
+python tools/stage0/qlm_native.py build examples/loop_sum.ros -o build/loop
 
 # 调试/IR
-python tools/rosoto_pe.py build tests/t17_result.ros -o build/x.exe --dump-ir --no-opt
+python tools/stage0/qlm_pe.py build tests/t17_result.ros -o build/x.exe --dump-ir --no-opt
 ```
 
 ### 新增 IR/优化改动检查表
@@ -275,21 +275,21 @@ python tools/rosoto_pe.py build tests/t17_result.ros -o build/x.exe --dump-ir --
 
 ## 7. 版本控制 / 远端
 
-- **git remote 已配置并推送**：`origin = https://github.com/MonthZifang/Rosoto`（2026-10-20）。
+- **git remote 已配置并推送**：`origin = https://github.com/MonthZifang/Quelmara`（2026-10-20）。
 - 最新提交：
   - `ffadac6` v0.12：字符串 len/下标/十进制解析 + @extern 收口 + aarch64 CLI 修复
   - `ade98a4` v0.11：`h.join()` + `chan.close()` + `select`
   - `7cda6f4` docs：远端与单文件夹约定
-  - `cd6468e` archive: v0.2 快照（rosoto_old_v02.tar.gz）
+  - `cd6468e` archive: v0.2 快照（qlm_old_v02.tar.gz）
   - `b42e0a4` v0.9+v0.10：modsum 折叠 + 泛型 result/切片 + map[K]V + 浮点
   - `d61c593` v0.8 option[T]
   - `d38c359` v0.7 Result `?`
   - `ff8f830` v0.6 arrays
   - `3e9b8c0` v0.5 chan
 - 后续推送：`git push origin master`。
-- 工作区已整理为单一文件夹：`Rosoto/rosoto/`（git 仓库）；历史快照
-  rosoto_map / rosoto_rg / rosoto_old_v02 与顶层 scratch 已清出工作区
-  （old_v02 内容以 `rosoto/archive/rosoto_old_v02.tar.gz` 形式保留在仓库内）。
+- 工作区已整理为单一文件夹：`Quelmara/quelmara/`（git 仓库）；历史快照
+  qlm_map / qlm_rg / qlm_old_v02 与顶层 scratch 已清出工作区
+  （old_v02 内容以 `quelmara/archive/qlm_old_v02.tar.gz` 形式保留在仓库内）。
 
 ---
 
@@ -297,10 +297,10 @@ python tools/rosoto_pe.py build tests/t17_result.ros -o build/x.exe --dump-ir --
 
 ```
 修改：
-  tools/rosoto.py          C Result ? 生成、Result 类型检查
-  tools/rosoto_native.py   native Result ?、tag 顺序与标量边界
-  tools/rosoto_opt.py      非负范围传播、worker 内联边界
-  tools/rosoto_cli.py      产品默认 target、版本 0.7.0
+  tools/stage0/qlm.py          C Result ? 生成、Result 类型检查
+  tools/stage0/qlm_native.py   native Result ?、tag 顺序与标量边界
+  tools/stage0/qlm_opt.py      非负范围传播、worker 内联边界
+  tools/stage0/qlm_cli.py      产品默认 target、版本 0.7.0
   tests/run_native_tests.sh / tests/run_win_tests.py
   README.md / SPEC.md / BACKEND.md / HANDOVER.md
 
@@ -309,18 +309,18 @@ python tools/rosoto_pe.py build tests/t17_result.ros -o build/x.exe --dump-ir --
 
 v0.8 本轮改动（option[T]）：
 修改：
-  tools/rosoto.py          KEYWORDS+option、ensure_option_enum 单态化、parse_type/parse_primary 构造、
+  tools/stage0/qlm.py          KEYWORDS+option、ensure_option_enum 单态化、parse_type/parse_primary 构造、
                            resolve_option_patterns、C gen_match 求值式先行 + Option 改写
-  tools/rosoto_native.py   lower_match 求值式先行 + Option 模式改写（PE/AArch64 零改动）
+  tools/stage0/qlm_native.py   lower_match 求值式先行 + Option 模式改写（PE/AArch64 零改动）
   tests/run_native_tests.sh / tests/run_win_tests.py   登记 t19（native [13] + PE + 交叉验证）
 新增：
   tests/t19_option.ros     option[int]/option[str] 构造、函数返回、Option.Some/None 解构
 
 v0.12 本轮改动（字符串 + @extern 收口）：
 修改：
-  tools/rosoto.py          len(str)->strlen、s[i] 字节下标 + rosoto_str_bounds、
-                           rosoto_str_to_int、to_int()/to_int(s) 的 str 分支、推断层类型
-  tools/rosoto_native.py   len(str)->__str_len、s[i] load8 + 动态越界、
+  tools/stage0/qlm.py          len(str)->strlen、s[i] 字节下标 + qlm_str_bounds、
+                           qlm_str_to_int、to_int()/to_int(s) 的 str 分支、推断层类型
+  tools/stage0/qlm_native.py   len(str)->__str_len、s[i] load8 + 动态越界、
                            __str_to_int / __str_to_int_fail 运行时、run() 拦截 @extern
   tests/run_win_tests.py   新增 [3c] 字符串段 + test_str_failfast()；交叉验证登记 t27/t28
   tests/run_native_tests.sh  新增 [21] str / [22] @extern 段

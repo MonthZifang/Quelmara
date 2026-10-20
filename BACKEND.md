@@ -1,7 +1,7 @@
-# Rosoto 自研后端设计（BACKEND.md）
+# Quelmara 自研后端设计（BACKEND.md）
 
 > 决策：**产品后端必须自研**，不走 LLVM、不走 C 中转。C99 生成器仅保留为显式交叉验证、自举和移植工具，不属于产品运行后端。平台优先与游戏定位**两条线并行推进**，优化持续加深。
-> 现状：v0.1 已实现 x86_64 全链路 —— Rosoto → RosIR → 优化 passes → 线性扫描寄存器分配 → 自研指令编码器 → **裸 ELF64 可执行文件**（无 libc、无 gcc、无外部依赖）。
+> 现状：v0.1 已实现 x86_64 全链路 —— Quelmara → RosIR → 优化 passes → 线性扫描寄存器分配 → 自研指令编码器 → **裸 ELF64 可执行文件**（无 libc、无 gcc、无外部依赖）。
 > v0.3 新增 **Windows x86_64 PE/COFF 写出器 + kernel32 导入 + CreateThread 多核**（无 CRT，产物 6–26 KB）。
 > v0.4 新增 **spawn/join 任务并行**（`spawn_child` IR + Linux clone / Windows CreateThread / C pthread）
 > 与 **arena 帧级回收**（native 回卷 bump 指针；C 后端为作用域）。

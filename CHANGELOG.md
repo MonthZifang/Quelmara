@@ -1,4 +1,4 @@
-# Rosoto 更新日志（CHANGELOG）
+# Quelmara 更新日志（CHANGELOG）
 
 > 产品后端 = 自研后端（Linux x86_64 ELF / Windows PE32+ / AArch64）；
 > C99 后端仅作交叉验证。格式：每版本记录「特性 / 优化 / 修复 / 回归规模」。
@@ -16,7 +16,7 @@
 - **`s.to_int()` / `to_int(s)`**：十进制解析，支持前导 `+`/`-`、前导零。
   非法输入（空串、非数字、前后空格）与 int64 溢出**一律 fail-fast**，
   不静默返回 0、不静默回绕。自研端 `__str_to_int` 与 C 端
-  `rosoto_str_to_int` 判定顺序逐条对齐。
+  `qlm_str_to_int` 判定顺序逐条对齐。
 - **`to_int()` 方法式语法**：浮点 `f.to_int()` 也顺势支持（向零截断）。
 
 ### 修复
@@ -28,7 +28,7 @@
 - **`bin` 指令 dst 与 rhs 同 vreg 且 lhs 为 imm 时结果恒 0**：`bin sub acc,
   imm0, acc` 先写 dst 再读 rhs，读到的已是被覆盖的值。取反一律改用专用
   `neg` 指令，不再用减法模拟。
-- **`rosoto build --target arm64` 完全不可用**：`_build_arm64` 把
+- **`quelmara build --target arm64` 完全不可用**：`_build_arm64` 把
   `transpile_a64()` 的 `(blob, cfg)` 二元组直接当 `(out, size, cfg)` 返回，
   CLI 一解包就 `ValueError: not enough values to unpack (expected 3, got 2)`，
   连 `hello.ros` 都编不过。现在补上 `write_elf_a64()` 写盘，AArch64 目标从
@@ -77,7 +77,7 @@
   arena 块内绑定。缺失键 `get` fail-fast（回归 [16]，自研/C 三链）。
 - **浮点实际运算**（`float` = f64，`f` 后缀 = f32）：字面量 / 四则运算 / 比较 /
   `to_int` / `to_float` / 一元负号 / 函数参数与返回值 / `to_str()`，
-  格式化与 C 端 `rosoto_f64_to_str` 算法逐位一致：`[1e-6, 1e12)` 定点 6 位小数去尾零，
+  格式化与 C 端 `qlm_f64_to_str` 算法逐位一致：`[1e-6, 1e12)` 定点 6 位小数去尾零，
   其余科学计数 `d.dddddde±N`，nan/inf/-inf/0 特判（回归 [17]，自研/C 三链）。
 
 ### 修复
@@ -107,7 +107,7 @@
 
 ### 优化
 
-- **模块级数求和折叠 `opt_modsum`（新 pass，`tools/rosoto_opt.py`）**
+- **模块级数求和折叠 `opt_modsum`（新 pass，`tools/stage0/qlm_opt.py`）**
   规范归约循环 `acc += (x0 + s·j) mod D`（gcd(s,D)=1 且 x 非负已证）整体折叠：
   - 整周期块：任意连续 U=D 项余数是 0..D-1 的排列 ⇒ 每块贡献常量 `D(D-1)/2`，
     `B = N//U` 块直接折叠成 `acc += B·D(D-1)/2`（N 编译期常量时继续常量折叠）；
@@ -120,7 +120,7 @@
   - `for` 形态 `jcc ge` 守卫与 `while` 形态统一按 `i < hi` 做上界证明；
   - 双 vreg 加法传播（如 `i*C + k`）、形参初始化归纳变量；
   - 效果：worker 热循环里有符号魔数除法的双重符号修正链整体消除（parfor 原 4 倍差距的主因）。
-- **乘常数编码修复（`tools/rosoto_native.py`，潜伏 bug）**
+- **乘常数编码修复（`tools/stage0/qlm_native.py`，潜伏 bug）**
   `mul_const` 回退路径（lea 链规划失败时）曾把 `x*C` 静默编码成 `x*x`——常数被丢弃。
   新增 `Enc.imul_rri`（三操作数 `imul r64, r64, imm32`）修正；历史上任何
   lea 链规划不下的常量乘法都会错编，本轮由 modsum 闭式代码首次触发并修复。
@@ -173,7 +173,7 @@
 
 ## v0.1–v0.2（此前）
 
-- v0.1：Rosoto → RosIR → 优化 passes → 线性扫描寄存器分配 → 自研指令编码器 → 裸 ELF64；
+- v0.1：Quelmara → RosIR → 优化 passes → 线性扫描寄存器分配 → 自研指令编码器 → 裸 ELF64；
   魔数除法（mulhi+移位）、常量折叠、复制传播、DCE、cmp+jcc 融合、帧槽复用。
 - v0.2：RosIR 优化器成型（LICM / CSE / 循环展开 / 指令调度 / 强度削减）、内联、
   运行库 RosIR 自举（print/itoa/strlen/alloc）。

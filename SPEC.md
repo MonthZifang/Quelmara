@@ -1,8 +1,8 @@
-# Rosoto 语言规范 (v0.1 草案)
+# Quelmara 语言规范 (v0.1 草案)
 
 > 目标一句话：**原生编译、多核默认、网络 IO 极致、全平台、代码结构干净、游戏/工程双强、省资源。**
 
-> **后端约束：产品构建必须使用 Rosoto 自研后端。** C99 后端只允许在显式指定时用于交叉验证、自举和移植；它不是产品默认后端，也不改变 native/PE/AArch64 自研链路的规范地位。
+> **后端约束：产品构建必须使用 Quelmara 自研后端。** C99 后端只允许在显式指定时用于交叉验证、自举和移植；它不是产品默认后端，也不改变 native/PE/AArch64 自研链路的规范地位。
 
 ---
 
@@ -11,7 +11,7 @@
 | 原则 | 含义 |
 |---|---|
 | 原生优先 | AOT 编译为机器码，无 VM、无解释器、无 GC 停顿 |
-| 多核默认 | 并行是默认行为，单核是显式选择（根目录 `Rosoto.toml` 禁用） |
+| 多核默认 | 并行是默认行为，单核是显式选择（根目录 `Quelmara.toml` 禁用） |
 | 网络原生 | 协议栈路径最短：epoll/kqueue/io_uring 内建，百万连接、KB 级常驻 |
 | 可预测 | 确定性析构、无隐式堆分配、无隐藏控制流（错误用 `?` 显式传播） |
 | 结构即文档 | 一个模块一个目录，入口即声明，无全局命名空间污染 |
@@ -21,7 +21,7 @@
 
 ## 1. 词法与结构
 
-```rosoto
+```quelmara
 // 单行注释
 /* 块注释 /* 可嵌套 */ */
 
@@ -55,7 +55,7 @@ result[T, E] 显式错误（配合 `?` 传播）
 
 定长数组（v0.6 子集）：
 
-```rosoto
+```quelmara
 let mut a = [1, 2, 3, 4]
 a[1] = 20
 a[2] += 5
@@ -66,11 +66,11 @@ let b = a              // 值语义拷贝，b[0] 与 a[0] 独立
 - 元素只支持数值类型（int/bool 家族）；`[N]T` 目前只能作函数内局部变量，
   作函数参数/返回值会明确报错。
 - 下标支持动态表达式；越界默认 fail-fast，可用
-  `Rosoto.toml [build] bounds_check = false` 关闭（越界即 UB）。
+  `Quelmara.toml [build] bounds_check = false` 关闭（越界即 UB）。
 
 字符串（v0.12 子集）：
 
-```rosoto
+```quelmara
 let s = "hello"
 len(s)                 // 5：字节长度（UTF-8 下中文一个字 > 1）
 s[0]                   // 104：该字节的无符号值（0..255），C 惯例
@@ -92,7 +92,7 @@ s + " world"           // 拼接（arena/静态缓冲，见后端说明）
 
 自定义类型：
 
-```rosoto
+```quelmara
 struct Vec3 {
     x: f32
     y: f32
@@ -119,7 +119,7 @@ interface Renderable {
 
 ## 3. 函数与控制流
 
-```rosoto
+```quelmara
 fn add(a: int, b: int) -> int {
     return a + b
 }
@@ -149,7 +149,7 @@ fn countdown(n: int) {
 - 表达式一切皆值：`if`、`match`、`block` 均可返回值
 - `match` 必须穷尽（编译期检查）：
 
-```rosoto
+```quelmara
 let name = match shape {
     Shape.Circle(r) => "circle r=" + r.to_str()
     Shape.Rect(w, h) => "rect " + w.to_str() + "x" + h.to_str()
@@ -158,7 +158,7 @@ let name = match shape {
 
 - 错误传播：`?` 把 `result` 的错误一路上抛，禁止静默吞错
 
-```rosoto
+```quelmara
 fn load_config(path: str) -> result[Config, IoError] {
     let text = fs.read_to_string(path)?    // 出错直接 return Err
     return Ok(parse(text))
@@ -169,9 +169,9 @@ fn load_config(path: str) -> result[Config, IoError] {
 
 ## 4. 多核模型（默认开启）
 
-Rosoto 的运行时是一个 **work-stealing 任务调度器**，默认占用全部物理核心。
+Quelmara 的运行时是一个 **work-stealing 任务调度器**，默认占用全部物理核心。
 
-```rosoto
+```quelmara
 fn main() {
     // 数据并行：自动分块、跨核调度、归约
     let mut total = 0
@@ -194,13 +194,13 @@ fn main() {
 
 规则：
 1. `parfor`/`spawn` 默认并行 —— **无需任何注解**
-2. 多核禁用必须在**项目根目录 `Rosoto.toml`** 显式声明（见 §7）；禁用后所有并行结构退化为确定性串行，程序语义不变
+2. 多核禁用必须在**项目根目录 `Quelmara.toml`** 显式声明（见 §7）；禁用后所有并行结构退化为确定性串行，程序语义不变
 3. 抢占点在安全位置（无锁临界区不切），游戏主循环可选 `@no_preempt`
 4. 绑核/亲和性可配置；容器场景自动识别 cgroup CPU 配额
 
 ### 4.1 v0.4 已落地子集（明确边界）
 
-```rosoto
+```quelmara
 fn tick(n: int) -> int { return n * 2 }
 
 fn main() {
@@ -222,7 +222,7 @@ fn main() {
 
 ### 4.2 `chan[T]`（v0.5 已落地子集）
 
-```rosoto
+```quelmara
 fn producer(ch: chan[int], n: int) {
     let mut i = 0
     while i < n { ch.send(i)  i += 1 }
@@ -255,7 +255,7 @@ fn main() {
 
 网络不是库，是语言运行时的一部分。IO reactor 与任务调度器同进程协作：**IO 线程只做事件分发，业务在任务池执行**，零拷贝 buffer 池化复用。
 
-```rosoto
+```quelmara
 module echo
 
 import std.net
@@ -293,14 +293,14 @@ fn main() {
 - 后端按平台自动选择：Linux `io_uring` → `epoll`，macOS/BSD `kqueue`，Windows `IOCP`，移动端 `epoll/kqueue`
 - 每连接内存 ≈ 数百字节；100 万连接常驻内存 < 1 GB（可配上限 `max_conns`）
 - 背压：`c.write` 返回 `result[void, Backpressured]`，超限时策略可配（丢弃/断开/阻塞任务）
-- 资源上限全部在 `Rosoto.toml` 声明（见 §7），超限行为确定（fail-fast，不静默膨胀）
+- 资源上限全部在 `Quelmara.toml` 声明（见 §7），超限行为确定（fail-fast，不静默膨胀）
 - UDP / Unix socket / TLS / HTTP/2 / WebSocket 作为 `std.net` 子模块同级提供
 
 ---
 
 ## 6. 游戏与工程性能
 
-```rosoto
+```quelmara
 fn frame(world: &mut World) {
     arena {                        // 帧级 arena：本帧分配，帧末整体释放
         let mut jobs = []Job
@@ -323,7 +323,7 @@ fn frame(world: &mut World) {
 ### 6.1 `arena { }` 的 v0.4 实现与边界
 
 - **native（Linux/Windows）**：真实回卷 bump 分配器 —— 进入块时记下偏移，
-  块末整体释放；用 `Rosoto.toml [memory] heap_limit_mb` 可证伪验证
+  块末整体释放；用 `Quelmara.toml [memory] heap_limit_mb` 可证伪验证
   （`tests/arena_lowheap`：1MB 上限、4MB 分配量，有 arena 通过、无 arena OOM）。
 - **C 后端**：字符串走轮转静态缓冲、无堆分配，`arena` 编译为纯作用域。
 - **约束**：块内分配的对象**不得逃逸**；块内 `break/continue/return` 会跳过释放；
@@ -332,7 +332,7 @@ fn frame(world: &mut World) {
 
 ---
 
-## 7. 根配置文件 `Rosoto.toml`
+## 7. 根配置文件 `Quelmara.toml`
 
 **位置：项目根目录。这是唯一合法的全局资源开关。** 未声明字段取默认值。
 
@@ -384,14 +384,14 @@ threads   = 1
                                                     ├ AArch64 编码器 → ELF64（Linux arm64）
                                                     └ C99 转译 → 任意 C 编译器（移植/自举/网络 demo）
 
-rosoto build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF）
+quelmara build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF）
 ```
 
-- `rosoto build`   编译（读取 `Rosoto.toml`）
-- `rosoto run`     编译+运行
-- `rosoto test`    内建测试框架（`test "名字" { ... }`）
-- `rosoto fmt`     官方格式化器（一种风格，终结争论）
-- `rosoto bench`   基准测试，输出回归对比
+- `quelmara build`   编译（读取 `Quelmara.toml`）
+- `quelmara run`     编译+运行
+- `quelmara test`    内建测试框架（`test "名字" { ... }`）
+- `quelmara fmt`     官方格式化器（一种风格，终结争论）
+- `quelmara bench`   基准测试，输出回归对比
 
 ---
 
@@ -401,10 +401,10 @@ rosoto build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF
 
 | 后端 | 路径 | 状态 |
 |---|---|---|
-| **自研 x86_64 Linux** | Rosoto → RosIR → 自研 x86_64 编码器 → 裸 ELF64（无 libc） | ✅ v0.1，执行级 |
+| **自研 x86_64 Linux** | Quelmara → RosIR → 自研 x86_64 编码器 → 裸 ELF64（无 libc） | ✅ v0.1，执行级 |
 | **自研 x86_64 Windows** | 同一 RosIR/编码器 → PE32+/COFF（无 CRT，kernel32 导入） | ✅ v0.3，本机 55 项 |
 | **自研 AArch64 Linux** | 同一条 RosIR，只换发射层 → ELF64 | 🟡 模拟器执行级，待真机 |
-| C 后端 | Rosoto → C99 → 任意 C 编译器（移植/bootstrapping/网络 demo） | ✅ v0.1 |
+| C 后端 | Quelmara → C99 → 任意 C 编译器（移植/bootstrapping/网络 demo） | ✅ v0.1 |
 
 各后端对同一 `.ros` 源码交叉验证输出，互为 oracle。
 
@@ -422,12 +422,12 @@ rosoto build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF
 | **`enum` + `match`（穷尽性检查 / 载荷解构 / 块臂 / 通配臂）** | ✅ 全部后端 |
 | **结构体/枚举返回值（隐藏出参指针 ABI）** | ✅ 全部后端 |
 | `parfor`（Linux：raw clone；Windows：CreateThread；C：pthread）| ✅ 受 `[core] multicore` 控制 |
-| `Rosoto.toml` 解析（core/net/memory/build）| ✅ 全部后端 |
+| `Quelmara.toml` 解析（core/net/memory/build）| ✅ 全部后端 |
 | `net.TcpServer()`（epoll 非阻塞并发服务器 / io_uring 后端）| ✅ C 后端 intrinsic；Windows 待 IOCP |
 | 魔数除法/强度削减/DCE/复制传播/线性扫描寄存器分配 | ✅ 自研后端 |
 | **内联 / CSE-GVN / LICM / 循环展开 / 指令调度** | ✅ 自研后端（RosIR 级，全部发射层共享） |
 | **Windows PE32+/COFF 写出 / kernel32 导入 / DIR64 重定位** | ✅ v0.3 |
-| `test "名字" { ... }` 内建测试块 | ✅ `rosoto test` |
+| `test "名字" { ... }` 内建测试块 | ✅ `quelmara test` |
 | `assert(cond, "msg")` | ✅ 全部后端（含 Windows stderr + 退出码 1） |
 | **`spawn f(args)` + `join(h)`（Linux clone / Windows CreateThread / C pthread）** | ✅ v0.4，x86_64 + C；标量参数/返回值，单核同步降级 |
 | **`arena { }` 帧级分配（native 真实回卷 bump；C 为作用域）** | ✅ v0.4（1MB 上限下 4MB 分配量的可证伪回归） |

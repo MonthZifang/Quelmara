@@ -1,24 +1,24 @@
-# Rosoto 代码展示（SHOWCASE）
+# Quelmara 代码展示（SHOWCASE）
 
-> 一页看懂 Rosoto 长什么样、能干什么、跑多快。所有代码都是仓库里可直接运行的示例，
+> 一页看懂 Quelmara 长什么样、能干什么、跑多快。所有代码都是仓库里可直接运行的示例，
 > 输出均为实测。想系统学习请看 **`TUTORIAL.md`**；语言细节看 `SPEC.md`。
 
 ---
 
 ## 1. 你好，原生机器码
 
-```rosoto
+```quelmara
 // examples/hello.ros
 module hello
 
 fn main() {
-    print("hello, rosoto")
+    print("hello, quelmara")
 }
 ```
 
 ```bash
-python3 tools/rosoto_native.py run examples/hello.ros
-# hello, rosoto
+python3 tools/stage0/qlm_native.py run examples/hello.ros
+# hello, quelmara
 ```
 
 产物是**裸 ELF64**（无 libc、无 gcc 参与链接）；Windows 上产出 PE32+（无 CRT，
@@ -28,7 +28,7 @@ python3 tools/rosoto_native.py run examples/hello.ros
 
 ## 2. 热循环：闭式折叠赢过 gcc -O2
 
-```rosoto
+```quelmara
 // examples/loop_sum.ros —— 2 亿次迭代，魔数取模
 module loop_sum
 
@@ -50,7 +50,7 @@ fn main() {
 自研优化器识别出「模数算术级数求和」规范形态：gcd(7,13)=1 ⇒ 连续 13 项余数恰是
 0..12 的排列，2 亿项整体折叠成常量 + 5 项尾数——**结果 1199999988，全程 13 ms**。
 
-| | Rosoto 自研 | gcc -O2（C 后端） |
+| | Quelmara 自研 | gcc -O2（C 后端） |
 |---|---|---|
 | loop_sum 2 亿 | **11–13 ms** | 231–235 ms |
 
@@ -58,7 +58,7 @@ fn main() {
 
 ## 3. 多核 parfor：写循环就并行
 
-```rosoto
+```quelmara
 // examples/parfor_sum.ros —— 6M 任务、3 核归约
 module parfor_sum
 
@@ -83,13 +83,13 @@ fn main() {
 
 `parfor` 自动静态分块 + 线程本地归约（Linux `clone()` / Windows `CreateThread`）。
 `total +=` 是归约变量，结果确定性一致。**35 ms（gcc pthread 版 131 ms）**。
-在 `Rosoto.toml` 写一行 `multicore = false`，同一份代码编译期降级为串行，语义不变。
+在 `Quelmara.toml` 写一行 `multicore = false`，同一份代码编译期降级为串行，语义不变。
 
 ---
 
 ## 4. struct 值语义 + enum/match 穷尽检查
 
-```rosoto
+```quelmara
 // examples/inventory.ros（节选）——工程建模
 struct Item {
     name: str
@@ -118,7 +118,7 @@ fn area(s: Shape) -> int {
 
 ## 5. Result + `?`：错误不许静默吞
 
-```rosoto
+```quelmara
 // examples/（回归 tests/t17_result.ros 同源）
 enum Result {
     Ok(value: int)
@@ -141,7 +141,7 @@ fn add_one(n: int) -> Result {
 `?` 在三后端（自研 ELF / Windows PE / C）语义一致；`Ok`/`Err` 可任意声明顺序，
 泛型 `result[T, E]` / `option[T]` 已受控单态化：
 
-```rosoto
+```quelmara
 let maybe = option[int].some(42)
 let v = match maybe {
     Option.Some(x) => x
@@ -153,7 +153,7 @@ let v = match maybe {
 
 ## 6. 任务并行 spawn/join + 有界通道 chan[T]
 
-```rosoto
+```quelmara
 fn producer(ch: chan[int], n: int) {
     let mut i = 0
     while i < n {
@@ -183,7 +183,7 @@ fn main() {
 
 ## 7. 定长数组 [N]T 与切片 []T
 
-```rosoto
+```quelmara
 let mut a = [1, 2, 3, 4]
 a[1] = 20
 a[2] += 5
@@ -204,7 +204,7 @@ print(a[i])          // 越界 → fail-fast，退出码 1，stderr 报错
 
 ## 8. arena：帧级回收，没有 GC 停顿
 
-```rosoto
+```quelmara
 fn frame() {
     arena {
         let msg = "sum=" + 499500.to_str()
@@ -222,7 +222,7 @@ fn frame() {
 
 **基准**（Xeon E5-2666 v3 / WSL2 / gcc 15.2，`tests/bench.sh` best-of-3，2026-10-20）：
 
-| 负载 | Rosoto 自研 | gcc -O2 / pthread | 倍率 |
+| 负载 | Quelmara 自研 | gcc -O2 / pthread | 倍率 |
 |---|---|---|---|
 | loop_sum 2 亿热循环 | **13 ms** | 231 ms | 17.8x |
 | parfor_sum 6M 任务 / 3 核 | **35 ms** | 131 ms | 3.7x |
