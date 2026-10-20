@@ -463,6 +463,7 @@ class Lower:
         self.uses_join = False
         self.uses_bounds = False
         self.uses_f64_str = False
+        self.uses_str_to_int = False
         if platform == "windows":
             # WriteFile 的 lpNumberOfBytesWritten 落点（Win32 必须给非空指针）
             self.written_gid = self.intern_array(1)
@@ -594,6 +595,13 @@ class Lower:
     def slice_len(self, fn, s):
         n = fn.new_v()
         fn.emit("load", n, s, ("imm", 1))
+        return n
+
+    def str_len(self, fn, p):
+        """str 的字节长度：走运行时 __str_len（与 __str_eq/__str_concat 同一套
+        零结尾字节串表示，str 是一等类型但没有长度前缀）"""
+        n = fn.new_v()
+        fn.emit("call", n, "__str_len", [p])
         return n
 
     # ---- 定长数组（v0.6）：帧槽 N 字 + 值语义拷贝 ----
@@ -911,7 +919,16 @@ class Lower:
                 d = fn.new_v()
                 fn.emit("load", d, ptr, idx)
                 return d
-            raise SyntaxError("下标只能用于定长数组或切片")
+            if self._is_str(fn, obj):
+                # str 下标 -> 该字节的无符号值（0..255）；长度是运行期 strlen 结果，
+                # load8 走 movzx，不做符号扩展
+                idx = self.eval(e[2], fn, env)
+                ln = self.str_len(fn, obj)
+                self.emit_bounds(fn, idx, ln, dynamic=True)
+                d = fn.new_v()
+                fn.emit("load8", d, obj, idx)
+                return d
+            raise SyntaxError("下标只能用于定长数组、切片或 str")
         if k == "spawn":
             return self.lower_spawn(e[1], fn, env)
         if k == "chanopen":
@@ -1048,6 +1065,14 @@ class Lower:
                 d = fn.new_v()
                 fn.emit("call", d, "__str_from_i64", [obj])
                 return self._mark_str(fn, d)
+            if e[2] == "to_int" and self._is_str(fn, obj):
+                # s.to_int()：十进制解析；非法输入 / 溢出 fail-fast
+                if e[3]:
+                    raise SyntaxError(".to_int() 不接受实参")
+                self.uses_str_to_int = True
+                d = fn.new_v()
+                fn.emit("call", d, "__str_to_int", [obj])
+                return d
             raise SyntaxError(f"原生后端 v0.2 不支持方法 {e[2]}")
         if k == "try":
             spec = self.eval(e[1], fn, env)
@@ -1492,6 +1517,12 @@ class Lower:
             if len(e[2]) != 1:
                 raise SyntaxError(f"{name}(x) 需要且只需要一个实参")
             x = self.eval(e[2][0], fn, env)
+            if name == "to_int" and self._is_str(fn, x):
+                # to_int(str)：十进制解析，与 s.to_int() 同一条运行时
+                self.uses_str_to_int = True
+                d = fn.new_v()
+                fn.emit("call", d, "__str_to_int", [x])
+                return d
             wf = self._float_of(fn, x)
             if name == "to_int":
                 return self.conv_to(fn, x, wf, None)
@@ -1543,6 +1574,8 @@ class Lower:
                     d = fn.new_v()
                     fn.emit("call", d, "__map_len", [env[a[1]]])
                     return d
+                if self._is_str(fn, env[a[1]]):
+                    return self.str_len(fn, env[a[1]])
             # 非名字实参：按求值结果判别（如函数返回的切片）
             av = self.eval(a, fn, env)
             if self._is_slice(fn, av):
@@ -1552,7 +1585,9 @@ class Lower:
                 d = fn.new_v()
                 fn.emit("call", d, "__map_len", [av])
                 return d
-            raise SyntaxError("len() 目前只支持定长数组、切片或 map")
+            if self._is_str(fn, av):
+                return self.str_len(fn, av)
+            raise SyntaxError("len() 目前只支持定长数组、切片、map 或 str")
         if name == "slice_of" and name not in self.fns_ast:
             # 数组 -> 切片：零拷贝转换（SPEC §2 `[]T`）
             if len(e[2]) != 1:
@@ -2982,6 +3017,73 @@ class Lower:
         f.emit("ret", i)
         self.out.append(f)
 
+        if self.uses_str_to_int:
+            # __str_to_int(p) -> int64：十进制解析（可选 +/- 前导）。
+            # 非法字符 / 空串 / 溢出一律 fail-fast，不静默回绕；
+            # 与 C 后端 rosoto_str_to_int 判定顺序逐条对齐。
+            msg = "rosoto: str.to_int() invalid decimal input (fail-fast)\n"
+            gid_f = self.intern_str(msg)
+            f = Fn("__str_to_int_fail")
+            f.emit("args", [])
+            bp = f.new_v()
+            f.emit("movaddr", bp, gid_f)
+            self.emit_write(f, 2, bp, ("imm", len(msg.encode("utf-8"))))
+            self.emit_exit(f, 1)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            f = Fn("__str_to_int")
+            p = f.new_v()
+            f.emit("args", [p])
+            i, neg, acc, digits = f.new_v(), f.new_v(), f.new_v(), f.new_v()
+            for v in (i, neg, acc, digits):
+                f.emit("mov", v, ("imm", 0))
+            cc = f.new_v()
+            f.emit("load8", cc, p, ("imm", 0))
+            l_not_minus = f.label("stnm")
+            l_sign_done = f.label("stsd")
+            f.emit("jcc", "ne", cc, ("imm", 45), l_not_minus)   # '-'
+            f.emit("mov", neg, ("imm", 1))
+            f.emit("mov", i, ("imm", 1))
+            f.emit("jmp", l_sign_done)
+            f.emit("label", l_not_minus)
+            f.emit("jcc", "ne", cc, ("imm", 43), l_sign_done)   # '+'
+            f.emit("mov", i, ("imm", 1))
+            f.emit("label", l_sign_done)
+
+            l_top = f.label("stt")
+            l_end = f.label("ste")
+            l_fail = f.label("stf")
+            l_pos = f.label("stp")
+            f.emit("label", l_top)
+            f.emit("load8", cc, p, i)          # 原地更新：循环内不得换 vreg
+            f.emit("jz", cc, l_end)
+            f.emit("jcc", "l", cc, ("imm", 48), l_fail)        # < '0'
+            f.emit("jcc", "g", cc, ("imm", 57), l_fail)        # > '9'
+            # 溢出前置检查：acc > INT64_MAX/10 时再乘 10 必溢出
+            f.emit("jcc", "g", acc, ("imm", 922337203685477580), l_fail)
+            f.emit("bin", "mul", acc, acc, ("imm", 10))
+            f.emit("bin", "sub", cc, cc, ("imm", 48))
+            f.emit("bin", "add", acc, acc, cc)
+            # 乘法回绕成负数同样视为溢出（覆盖末位 8/9 的边界情况）
+            f.emit("jcc", "l", acc, ("imm", 0), l_fail)
+            f.emit("mov", digits, ("imm", 1))
+            f.emit("bin", "add", i, i, ("imm", 1))
+            f.emit("jmp", l_top)
+
+            f.emit("label", l_end)
+            f.emit("jz", digits, l_fail)       # 一位数字都没有
+            f.emit("jz", neg, l_pos)
+            # 注意：不能用 bin sub acc, imm0, acc —— dst 与 rhs 同为 acc 时
+            # 分配器会先写 dst 再读 rhs，结果恒为 0。取反走专用 neg 指令。
+            f.emit("neg", acc, acc)
+            f.emit("label", l_pos)
+            f.emit("ret", acc)
+            f.emit("label", l_fail)
+            f.emit("call", None, "__str_to_int_fail", [])
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
         # __memcpy(dst, src, n)  正向拷贝（不处理重叠；调用方保证）
         f = Fn("__memcpy")
         d, s, m = f.new_v(), f.new_v(), f.new_v()
@@ -3391,6 +3493,19 @@ class Lower:
         return getattr(fn, "mapv", {}).get(v) if isinstance(v, int) else None
 
     def run(self, fns_ast):
+        # @extern("C") 声明只有函数原型、没有函数体：自研后端产出裸 ELF/PE，
+        # 没有动态链接器可用，外部符号无处解析。这里必须给出明确诊断，
+        # 而不是让 body=None 一路漏到 lowering 里炸成 Python traceback。
+        for f in fns_ast:
+            if f.get("extern"):
+                raise SyntaxError(
+                    f'函数 {f["name"]} 声明为 @extern("C")：自研后端（Linux ELF / '
+                    f"Windows PE）不链接外部符号，无法解析该声明；"
+                    f"请改用 --target c 由系统链接器接 libc")
+            if f.get("body") is None:
+                raise SyntaxError(
+                    f"函数 {f['name']} 没有函数体：无函数体的声明必须带 "
+                    f'@extern("C") 注解')
         # 先降级用户函数，再按需发射运行库：只把真正用到的
         # arena/join/chan 运行时塞进产物（省体积、省导入）。
         for f in fns_ast:

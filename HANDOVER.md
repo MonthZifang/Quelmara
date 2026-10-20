@@ -1,10 +1,18 @@
 # Rosoto 交接文档（HANDOVER）
 
-> 工作区状态（2026-10-20 晚间）：**v0.8 已提交 `d61c593`**；v0.9 性能轮 + v0.10 map/浮点在工作区待提交。
+> 工作区状态（2026-10-20 深夜）：**v0.9 / v0.10 已提交 `b42e0a4`，v0.11 已提交 `ade98a4`，
+> v0.12 为当前工作区内容**（字符串 + @extern 收口）。
 > v0.9：`opt_modsum` 模和折叠 + 范围分析扩展 + `mul_const` 回退路径错编修复（loop_sum 11–13ms，见 CHANGELOG）。
 > v0.10：`map[K]V` 开放寻址哈希表（t22）+ 浮点实际运算（t23，修复 `__f64_to_str` 科学计数法死循环）。
-> 本机（Windows）验证：PE 链 [1]–[6] 52 项全绿；[7] 交叉验证与 native/C 链需 Linux/WSL 环境。
-> 代码总量：`tools/` 12.3k 行 Python + `tests/` 1.5k 行
+> v0.11：`h.join()` 方法式 + `chan.close()` + `select`（t24/t25/t26）。
+> 本机（Windows）验证：PE 链 [1]–[6] **74 项全绿**；[7] 交叉验证与 native/C 链需 Linux/WSL 环境
+> （本机无 gcc/clang，C 后端只能验证「生成」不能验证「执行」）。
+> 代码总量：`tools/` 14.4k 行 Python + `tests/` 1.6k 行
+>
+> ### v0.12 一句话
+> 补上字符串最基础的三个能力：`len(s)` 字节长度、`s[i]` 字节下标（无符号 0..255，
+> 越界 fail-fast）、`s.to_int()` 十进制解析（非法输入/溢出一律 fail-fast）；
+> 同时把 v0.11 遗留的 `@extern("C")` 在自研后端从 Python traceback 改成明确诊断。
 >
 > ### v0.10 一句话
 > `map[K]V`（K/V ∈ int/bool/str，开放寻址 + 线性探测 + 墓碑 + 扩容）与浮点实际运算
@@ -100,12 +108,15 @@ parfor/spawn worker 的独立栈和寄存器压力敏感，继续保留 `Fn.no_i
 - native 回归 [12]：Result native + C 传播；[13]：option native + C；
 - Windows 回归：Result / option PE 自校验 + PE×ELF 交叉验证。
 
-当前总量：
+当前总量（v0.12）：
 
 ```
-Windows PE 57 ✅  |  自研 Linux 54 ✅  |  C 16 ✅  |  corelib 34 ✅  |  io_uring 26 ✅
-总计 187 项（v0.7 的 183 + v0.8 option 4 项）
+Windows PE 74 ✅（本机实测，[1]–[6]；[7] 需 WSL）
+自研 Linux / C / corelib / io_uring：需 Linux 环境执行，本机无法运行
 ```
+
+> v0.7 的 183 → v0.8 option(+4) → v0.9/v0.10(+t20/t21/t22/t23) → v0.11(+t24/t25/t26)
+> → v0.12 字符串(+15 条 PE 断言，t27/t28)。各段具体项数在 Linux 侧 `run_native_tests.sh` 里累计。
 
 ---
 
@@ -116,15 +127,19 @@ Windows PE 57 ✅  |  自研 Linux 54 ✅  |  C 16 ✅  |  corelib 34 ✅  |  io
 | 特性 | 状态 | 优先级 |
 |---|---|---|
 | `option[T]` 单态化 | ✅ v0.8 合成枚举 + match 解构（int/bool/str） | — |
-| 泛型 `result[T,E]` | ❌ 尚未自动展开 | 高 |
-| `[]T` 切片（指针+长度） | ❌ 只有类型语法，数组不能作参数 | 高 |
-| `map[K]V` | ❌ 未实现 | 高 |
-| 数组作函数参数/返回值 | ❌ `[N]T` v0.6 边界明确报错 | 高 |
-| `chan.close()` / `select` / 无界通道 | ❌ | 中 |
-| `h.join()` 方法式语法 | ❌ 当前是 `join(h)` | 中 |
+| 泛型 `result[T,E]` | ✅ v0.9 受控单态化（t20） | — |
+| `[]T` 切片（指针+长度） | ✅ v0.9 `slice_of(a)` 零拷贝 + 参数/返回值/别名写入（t21） | — |
+| `map[K]V` | ✅ v0.10 开放寻址 + 墓碑 + 扩容（t22） | — |
+| `chan.close()` / `select` | ✅ v0.11（t25/t26）；无界通道仍 ❌ | — |
+| `h.join()` 方法式语法 | ✅ v0.11 解析期脱糖（t24） | — |
+| `len(str)` / `s[i]` 字节下标 / `s.to_int()` | ✅ v0.12 三链；越界与非法输入 fail-fast（t27/t28） | — |
+| **`s[lo..hi]` 子切片** | ❌ 取子串仍必须手写逐字节拷贝 | **高** |
+| **`argv` / 命令行参数** | ❌ 没有入口参数通道，写不出真正的 CLI 工具 | **高** |
+| 数组作函数参数/返回值 | ❌ `[N]T` v0.6 边界明确报错（`slice_of` 是当前替代） | 中 |
 | 泛型 / interface | ❌ | 中 |
 | 所有权 + 借用检查 | ❌ arena/spawn/array 依赖约定 | 中 |
-| `@simd` / `@no_preempt` / `@rc[T]` / `@extern("C")` | ❌ | 中 |
+| `@simd` / `@no_preempt` / `@rc[T]` | ❌ | 中 |
+| `@extern("C")` | 🟡 C 后端发射原型；自研后端明确拒绝（无动态链接器） | 中 |
 | 浮点实际运算 | ✅ v0.10 运算/比较/转换/格式化三链打通（t23，f64+f32） | — |
 | `rosoto_fmt` 新语法覆盖 | ❌ | 低 |
 
@@ -154,38 +169,45 @@ Windows PE 57 ✅  |  自研 Linux 54 ✅  |  C 16 ✅  |  corelib 34 ✅  |  io
 
 ## 3. 差什么
 
-1. **git remote**：本地仓库仍没有远端 URL，因此不能完成网络 push。
-2. **Mac/ARM64 机器或 CI**：macOS Mach-O/kqueue 与 AArch64 真机验证缺硬件。
-3. **Windows C 工具链**：C 回归继续依赖 WSL gcc。
-4. **IOCP 压测环境**：需要 Windows 句柄上限、防火墙配置和压测客户端。
-5. **SIMD 基线环境**：需要固定 CPU、固定构建参数和 baseline 文件，避免把机器负载误判成优化收益。
+1. **`argv` / 命令行参数**：目前没有入口参数通道（PE 走 `GetCommandLineA` + 拆分，
+   Linux 走 `_start` 栈上的 argc/argv），写不出真正的 CLI 工具——这是当前最大的可用性缺口。
+2. **`s[lo..hi]` 子切片**：`str` 是不可变字节串，取子串现在只能手写逐字节拷贝。
+   需要解析 `a..b` 下标 + 后端生成 `{ptr+lo, hi-lo}` 视图（数组与切片同语法）。
+3. **Mac/ARM64 机器或 CI**：macOS Mach-O/kqueue 与 AArch64 真机验证缺硬件。
+4. **Windows C 工具链**：本机无 gcc/clang，C 后端只能验证「生成」不能验证「执行」
+   （已验证 `gcc`/`clang`/`tcc`/MSVC 均不可用于 GNU C + POSIX 头）。
+5. **IOCP 压测环境**：需要 Windows 句柄上限、防火墙配置和压测客户端。
+6. **SIMD 基线环境**：需要固定 CPU、固定构建参数和 baseline 文件，避免把机器负载误判成优化收益。
 
 ---
 
 ## 4. 写了多少
 
-| 类别 | 文件 | 说明 |
-|---|---|---|
-| 前端 + C 后端 | `tools/rosoto.py` | 2230 | Result `?` C 降级、tag 顺序/标量边界检查 |
-| 自研 x86_64 | `tools/rosoto_native.py` | 3095 | Result `?` native 降级、tag 顺序处理 |
-| RosIR 优化器 | `tools/rosoto_opt.py` | 1002 | 范围传播、worker 内联边界、保守溢出条件 |
+| 类别 | 文件 | 行数 | 说明 |
+|---|---|---|---|
+| 前端 + C 后端 | `tools/rosoto.py` | ~4.7k | 解析/推断/C 发射；v0.12 加 str 长度、字节下标、十进制解析 |
+| 自研 x86_64 + RosIR | `tools/rosoto_native.py` | ~4.5k | v0.12 加 `str_len` / str 下标 / `__str_to_int` 运行时 |
+| RosIR 优化器 | `tools/rosoto_opt.py` | 1021 | 范围传播、worker 内联边界、保守溢出条件 |
 | Windows PE | `tools/rosoto_pe.py` | 353 | 未改（复用 RosIR） |
-| 命令行 | `tools/rosoto_cli.py` | 319 | 版本 0.7.0、主机架构默认 target |
-| 测试 | `tests/run_win_tests.py` | 363 | Result Windows PE 回归 |
-| 测试夹具 | `tests/t17_result.ros` | 61 | 正常/错误/反向 tag 顺序 |
-| 文档 | `README.md` / `SPEC.md` / `BACKEND.md` / `HANDOVER.md` | — | v0.7 同步 |
+| 命令行 | `tools/rosoto_cli.py` | 336 | 主机架构默认 target |
+| 测试 | `tests/run_win_tests.py` | ~430 | v0.12 加 `[3c] 字符串` 段（15 条断言） |
+| 测试夹具 | `tests/t27_str.ros` / `t28_toint.ros` | 110 | 长度/下标/解析/边界/往返 |
+| 文档 | `README.md` / `SPEC.md` / `BACKEND.md` / `CHANGELOG.md` / `HANDOVER.md` | — | v0.12 同步 |
 
-**测试规模**：183 项全绿（Windows 55 / native 52 / C 16 / corelib 34 / io_uring 26）。
+**测试规模**：Windows PE 74 项（本机实测全绿）；native / C / corelib / io_uring 需 Linux。
 
 ---
 
 ## 5. 需要写什么
 
-1. **`[]T` 切片**：`{ptr,len}` 两字表示；数组到 slice 的零拷贝转换；slice 参数/返回值；
-   这是 native `[]byte` 网络回调的前置。
-2. **泛型 `option[T]` / `result[T,E]`**：在当前用户定义 Result 基础上做受控单态化。
-3. **`map[K]V`**：开放寻址 + arena 绑定，先支持标量键值。
-4. **native epoll / Windows IOCP 网络**：需要 slice 与间接回调调用。
+1. **`argv` / 命令行参数**（最高优先）：`args() -> []str` 或 `arg(i) -> str`；
+   PE 走 `GetCommandLineA`（kernel32 已在导入表里）+ 空格/引号拆分运行时；
+   Linux 走 `_start` 栈 `[argc][argv...]` 直接取。
+2. **`s[lo..hi]` 子切片**：解析区间下标，后端生成 `{ptr+lo, hi-lo}` 零拷贝视图；
+   越界按 `lo <= hi <= N` 检查。数组与切片用同一语法。
+3. **`[N]T` 作函数参数/返回值**：值语义拷贝路径（隐藏出参 ABI），
+   当前用 `slice_of(a)` 规避。
+4. **native epoll / Windows IOCP 网络**：需要间接回调调用。
 5. **SIMD 自动向量化**：先做 canonical reduction loop，再加 `@simd`。
 6. **macOS Mach-O + kqueue**：有 Mac runner 后落地。
 
@@ -194,12 +216,20 @@ Windows PE 57 ✅  |  自研 Linux 54 ✅  |  C 16 ✅  |  corelib 34 ✅  |  io
 ## 6. 怎么接着干
 
 ```bash
-# 全量回归（183 项）
-bash tests/run_native_tests.sh      # 52
+# Windows（本机可跑）
+python tests/run_win_tests.py       # 74 项，[1]-[6] 全绿；[7] 需 WSL
+
+# Linux（需 gcc / 自研 ELF 环境）
+bash tests/run_native_tests.sh      # 含 [21] str / [22] @extern
 bash tests/run_tests.sh             # 16
 bash tests/test_corelib.sh          # 34
 bash tests/test_uring.sh            # 26
-python tests/run_win_tests.py       # 55
+
+# 字符串（v0.12）
+python tools/rosoto_pe.py run tests/t27_str.ros
+python tools/rosoto_pe.py run tests/t28_toint.ros
+python3 tools/rosoto_native.py run tests/t27_str.ros     # 需 Linux
+python3 tools/rosoto.py run tests/t28_toint.ros          # 需 gcc
 
 # Result 三链
 python tools/rosoto_pe.py run tests/t17_result.ros
@@ -234,6 +264,12 @@ python tools/rosoto_pe.py build tests/t17_result.ros -o build/x.exe --dump-ir --
 - worker 是独立栈/寄存器压力边界，不能盲目内联。
 - 内联标签必须带 caller 名字，否则跨函数同名会把跳转导入错误函数。
 - C helper 只能引用 helper 形参，不能引用调用点局部变量名。
+- **`bin` 指令不能用 `sub dst, imm, dst` 模拟取反**：dst 与 rhs 同 vreg 时，
+  分配器先写 dst 再读 rhs，结果恒为 0。取反一律走专用 `neg` 指令。
+- **无函数体的声明必须带 `@extern`**：`body=None` 直接漏进 lowering 会变成
+  Python traceback（用户看到的是解释器堆栈而不是编译错误）。后端入口要显式拦截。
+- **`str` 没有长度前缀**：`len(s)`、`s[i]` 都是 O(n)（先 strlen 再比对），
+  别按 O(1) 去设计热路径；真要 O(1) 得把 `str` 改成 `{len, ptr}` 并同步所有后端。
 
 ---
 
@@ -277,6 +313,21 @@ v0.8 本轮改动（option[T]）：
 新增：
   tests/t19_option.ros     option[int]/option[str] 构造、函数返回、Option.Some/None 解构
 
+v0.12 本轮改动（字符串 + @extern 收口）：
+修改：
+  tools/rosoto.py          len(str)->strlen、s[i] 字节下标 + rosoto_str_bounds、
+                           rosoto_str_to_int、to_int()/to_int(s) 的 str 分支、推断层类型
+  tools/rosoto_native.py   len(str)->__str_len、s[i] load8 + 动态越界、
+                           __str_to_int / __str_to_int_fail 运行时、run() 拦截 @extern
+  tests/run_win_tests.py   新增 [3c] 字符串段 + test_str_failfast()；交叉验证登记 t27/t28
+  tests/run_native_tests.sh  新增 [21] str / [22] @extern 段
+  SPEC.md / CHANGELOG.md / HANDOVER.md
+新增：
+  tests/t27_str.ros        len / 字节下标 / 动态下标 / 拼接后下标 / 手写 atoi
+  tests/t28_toint.ros      正负号 / 前导零 / int64 边界 / to_str 往返 / CSV 扫描
+  tests/str_bounds.ros     str 下标越界 fail-fast（负向）
+  tests/extern_decl.ros    @extern("C") 声明（自研后端必须拒绝）
+
 测试：
-  Windows 57 ✅ | native Linux 54 ✅ | C 16 ✅ | corelib 34 ✅ | io_uring 26 ✅（总 187）
+  Windows PE 74 ✅（本机实测）；native Linux / C / corelib / io_uring 需 Linux 环境
 ```

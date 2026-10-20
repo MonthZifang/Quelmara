@@ -45,7 +45,7 @@ import std.core
 int     默认 64 位有符号        i8 i16 i32 i64  u8 u16 u32 u64
 float   默认 64 位浮点          f32 f64
 bool    true | false
-str     UTF-8 不可变字符串（长度内联）
+str     UTF-8 字节串（零结尾；`len` 由扫描求得，O(n)）
 []T     切片（指针+长度，零拷贝传递）
 [N]T    定长数组（栈上；v0.6 已实现：数值元素、索引、len、值语义拷贝、越界 fail-fast）
 map[K]V 开放寻址哈希表（可指定 arena 分配）
@@ -67,6 +67,28 @@ let b = a              // 值语义拷贝，b[0] 与 a[0] 独立
   作函数参数/返回值会明确报错。
 - 下标支持动态表达式；越界默认 fail-fast，可用
   `Rosoto.toml [build] bounds_check = false` 关闭（越界即 UB）。
+
+字符串（v0.12 子集）：
+
+```rosoto
+let s = "hello"
+len(s)                 // 5：字节长度（UTF-8 下中文一个字 > 1）
+s[0]                   // 104：该字节的无符号值（0..255），C 惯例
+s[1] + 1               // 字符算术直接可用
+s == "hello"           // 内容相等（不是指针比较）
+s < "hellp"            // 字典序
+s + " world"           // 拼接（arena/静态缓冲，见后端说明）
+"42".to_int()          // 42；to_int(s) 等价
+(-7).to_str()          // "-7"
+```
+
+- `str` 是**零结尾字节串**，没有长度前缀，因此 `len(s)` 是 O(n) 扫描，
+  `s[i]` 是先求 `strlen` 再比对的动态越界检查。
+- `s[i]` 返回**字节**值而不是单字符 `str`：`str` 是不可变字节串，
+  取子串需要分配，当前没有切片语法（后续版本引入 `s[lo..hi]`）。
+- 非法十进制（空串、非数字字符、前后空格、超出 int64）一律 fail-fast，
+  不静默返回 0、不静默回绕。
+- UTF-8 多字节字符按字节下标访问时，得到的是该字节而不是码点。
 
 自定义类型：
 
@@ -394,6 +416,7 @@ rosoto build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 ELF
 | `if/else` / `while` / `for i in a..b` / `return` | ✅ 全部后端 |
 | **`break` / `continue`** | ✅ 全部后端 |
 | int / bool / str / 表达式全集 | ✅ 全部后端 |
+| **`len(str)` / `s[i]` 字节下标 / `s.to_int()`（v0.12）** | ✅ 自研 x86_64 + C；越界与非法输入 fail-fast |
 | **`struct` 声明 / 字面量 / 字段读写 / 复合赋值** | ✅ 全部后端 |
 | **嵌套结构体 + 按值拷贝 + 按值传参（副作用不外泄）** | ✅ 全部后端 |
 | **`enum` + `match`（穷尽性检查 / 载荷解构 / 块臂 / 通配臂）** | ✅ 全部后端 |

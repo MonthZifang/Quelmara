@@ -5,7 +5,46 @@
 
 ---
 
-## v0.11 — 2026-10-20 任务/通道语法补全（工作区，待提交）
+## v0.12 — 2026-10-20 字符串可用性 + @extern 收口
+
+### 新特性
+
+- **`len(s)` 支持 `str`**：走自研后端既有运行时 `__str_len`（字节扫描），
+  C 后端走 `strlen`。字符串是零结尾字节串，没有长度前缀，所以是 O(n)。
+- **`s[i]` 字符串字节下标**：返回该字节的**无符号值**（0..255，`movzx` 零扩展），
+  走与数组/切片同一套动态越界检查；越界 fail-fast（stderr + 退出码 1）。
+- **`s.to_int()` / `to_int(s)`**：十进制解析，支持前导 `+`/`-`、前导零。
+  非法输入（空串、非数字、前后空格）与 int64 溢出**一律 fail-fast**，
+  不静默返回 0、不静默回绕。自研端 `__str_to_int` 与 C 端
+  `rosoto_str_to_int` 判定顺序逐条对齐。
+- **`to_int()` 方法式语法**：浮点 `f.to_int()` 也顺势支持（向零截断）。
+
+### 修复
+
+- **`@extern("C")` 在自研后端裸崩**：v0.11 只实现了 C 后端的原型发射，
+  `body=None` 一路漏到 lowering，PE/native 抛 `TypeError: 'NoneType' object
+  is not iterable`（Python traceback）。现在在 `run()` 入口显式拒绝并给出
+  人话诊断（自研后端产出裸 ELF/PE，没有动态链接器，不解析外部符号）。
+- **`bin` 指令 dst 与 rhs 同 vreg 且 lhs 为 imm 时结果恒 0**：`bin sub acc,
+  imm0, acc` 先写 dst 再读 rhs，读到的已是被覆盖的值。取反一律改用专用
+  `neg` 指令，不再用减法模拟。
+- **`rosoto build --target arm64` 完全不可用**：`_build_arm64` 把
+  `transpile_a64()` 的 `(blob, cfg)` 二元组直接当 `(out, size, cfg)` 返回，
+  CLI 一解包就 `ValueError: not enough values to unpack (expected 3, got 2)`，
+  连 `hello.ros` 都编不过。现在补上 `write_elf_a64()` 写盘，AArch64 目标从
+  CLI 恢复可用（t27/t28 已能在自研模拟器上跑通）。
+
+### 验证
+
+- Windows PE：**74 项全绿**（v0.11 的 59 + 字符串 15）。
+  新增 `[3c] 字符串`：t27/t28 自校验、str 越界、5 类非法十进制、
+  `@extern` 诊断共 15 条断言。
+- AArch64：t27/t28 经自研模拟器执行，输出与 x86 全等；str 越界同样 fail-fast。
+- native runner 新增 `[21] str` / `[22] @extern` 段（native + C 双跑 + 双链 diff + a64 对拍）。
+
+---
+
+## v0.11 — 2026-10-20 任务/通道语法补全（已提交 `ade98a4`，2/2 见 v0.12）
 
 ### 新特性
 
@@ -28,7 +67,7 @@
 
 ---
 
-## v0.10 — 2026-10-20 map[K]V + 浮点运算（工作区，待提交）
+## v0.10 — 2026-10-20 map[K]V + 浮点运算（已提交 `b42e0a4`）
 
 ### 新特性
 
@@ -57,7 +96,7 @@
 
 ---
 
-## v0.9 — 2026-10-20 性能轮（工作区，待提交）
+## v0.9 — 2026-10-20 性能轮（已提交 `b42e0a4`）
 
 **基准**（Xeon E5-2666 v3 / WSL2 / gcc 15.2，`tests/bench.sh` best-of-3）：
 

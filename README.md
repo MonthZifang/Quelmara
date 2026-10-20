@@ -168,7 +168,22 @@ print(a[i])        // 越界：fail-fast（退出码 1，stderr 报错）
 - 越界默认 fail-fast（`Rosoto.toml [build] bounds_check = false` 可关闭）。
 - `[N]T` 目前只支持函数内局部数组；作函数参数/返回值会**明确报错**（v0.6 边界）。
 
-**7. 无 CRT 的 Windows 原生产物**：入口即 `main`，
+**7. 字符串（v0.12）**：
+
+```rosoto
+let s = "hello"
+print(len(s))        // 5：字节长度
+print(s[0])          // 104：字节值（0..255），可直接参与算术
+print(s == "hello")  // true：内容相等，不是指针比较
+print("42".to_int()) // 42：十进制解析，非法输入 fail-fast
+print((-7).to_str()) // "-7"
+```
+
+- `str` 是零结尾字节串，`len` 与 `s[i]` 都是 O(n) 扫描（没有长度前缀）。
+- `s[i]` 给的是**字节**不是单字符 `str`；越界 fail-fast，与数组/切片同策略。
+- 非法十进制（空串 / 非数字 / 空格 / 超出 int64）一律 fail-fast，不静默返回 0。
+
+**8. 无 CRT 的 Windows 原生产物**：入口即 `main`，
 导入仅 kernel32（`GetStdHandle/WriteFile/ExitProcess/VirtualAlloc/CreateThread/...`），
 堆按 1MB 粒度提交，hello 仅 **7 KB 级**。
 

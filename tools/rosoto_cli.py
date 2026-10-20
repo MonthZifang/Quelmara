@@ -67,7 +67,12 @@ def _build_native(src, out, dump_ir=False, optimize=True):
 
 def _build_arm64(src, out, dump_ir=False, optimize=True):
     import rosoto_arm64 as A
-    return A.transpile_a64(src, dump_ir=dump_ir, optimize=optimize)
+    # transpile_a64 只返回 (blob, cfg)：ELF 头/程序头由 write_elf_a64 写出。
+    # 之前直接把 2 元组当 (out, size, cfg) 返回，CLI 一解包就 ValueError。
+    blob, cfg = A.transpile_a64(src, dump_ir=dump_ir, optimize=optimize)
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    A.write_elf_a64(out, blob)
+    return out, len(blob), cfg
 
 
 def _build_c(src, out, dump_ir=False, optimize=True, cc=True):

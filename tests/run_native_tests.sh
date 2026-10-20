@@ -215,6 +215,46 @@ $NAT run tests/t26_select.ros 2>/dev/null | grep -v '^\[rosoto' > build/.sel26_n
 $CBE run tests/t26_select.ros 2>/dev/null | grep -v '^\[rosoto' > build/.sel26_c
 diff build/.sel26_n build/.sel26_c >/dev/null && ok "select 自研后端 == C 后端" || bad "select 双链不一致"
 
+echo "[21] str 长度/字节下标/十进制解析（v0.12）：双链一致"
+$NAT run tests/t27_str.ros >/dev/null 2>&1 && ok "native str len/下标正确" || bad "native str len/下标 失败"
+$CBE run tests/t27_str.ros >/dev/null 2>&1 && ok "C str len/下标正确" || bad "C str len/下标 失败"
+$NAT run tests/t28_toint.ros >/dev/null 2>&1 && ok "native str.to_int 正确（含边界/往返）" || bad "native str.to_int 失败"
+$CBE run tests/t28_toint.ros >/dev/null 2>&1 && ok "C str.to_int 正确（含边界/往返）" || bad "C str.to_int 失败"
+$NAT run tests/t27_str.ros 2>/dev/null | grep -v '^\[rosoto' > build/.str27_n
+$CBE run tests/t27_str.ros 2>/dev/null | grep -v '^\[rosoto' > build/.str27_c
+diff build/.str27_n build/.str27_c >/dev/null && ok "str 自研后端 == C 后端" || bad "str 双链不一致"
+$NAT run tests/t28_toint.ros 2>/dev/null | grep -v '^\[rosoto' > build/.tint28_n
+$CBE run tests/t28_toint.ros 2>/dev/null | grep -v '^\[rosoto' > build/.tint28_c
+diff build/.tint28_n build/.tint28_c >/dev/null && ok "to_int 自研后端 == C 后端" || bad "to_int 双链不一致"
+$NAT build tests/str_bounds.ros -o build/nat_sb >/dev/null 2>&1
+timeout 30 ./build/nat_sb >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && ok "str 越界 fail-fast（退出码非 0）" || bad "str 越界未失败"
+$CBE build tests/str_bounds.ros --cc >/dev/null 2>&1; mv build/str_bounds build/c_sb 2>/dev/null
+timeout 30 ./build/c_sb >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && ok "C 侧 str 越界 fail-fast" || bad "C 侧 str 越界未失败"
+
+# AArch64 发射层：同一份夹具走自研模拟器，验证 load8/neg/jcc 这几个新用到的指令
+for t in tests/t27_str.ros tests/t28_toint.ros; do
+  n=$(basename $t .ros)
+  $NAT2 build $t -o build/${n}_a64 >/dev/null 2>&1 \
+    && ok "a64 $n 编译通过" || bad "a64 $n 编译失败"
+  timeout 600 python3 tests/a64_emu.py build/${n}_a64 > build/.a64str.$n 2>/dev/null
+  $NAT run $t 2>/dev/null | grep -v '^\[rosoto' > build/.natstr.$n
+  diff build/.natstr.$n build/.a64str.$n >/dev/null \
+    && ok "a64 $n 与 x86 输出全等" || bad "a64 $n 与 x86 不一致"
+done
+$NAT2 build tests/str_bounds.ros -o build/sb_a64 >/dev/null 2>&1
+timeout 120 python3 tests/a64_emu.py build/sb_a64 >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && ok "a64 str 越界 fail-fast" || bad "a64 str 越界未失败"
+
+echo "[22] @extern(\"C\")：自研后端必须明确拒绝（不静默产出坏二进制）"
+if $NAT build tests/extern_decl.ros -o build/nat_ext 2>build/.ext_err; then
+  bad "@extern 在自研后端竟然编译通过"
+else
+  grep -q '@extern' build/.ext_err && ok "@extern 自研后端给出明确诊断" \
+      || bad "@extern 诊断内容不符：$(head -1 build/.ext_err)"
+fi
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

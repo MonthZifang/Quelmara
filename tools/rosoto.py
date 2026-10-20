@@ -82,7 +82,7 @@ KEYWORDS = {"fn", "let", "mut", "if", "else", "while", "for", "parfor",
             "arena", "spawn", "chan", "option", "result", "map", "select"}
 
 TWO_CHAR = {"->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "..", "=>"}
-ONE_CHAR = "(){}[],:.=<>+-*/%!?"
+ONE_CHAR = "(){}[],:.=<>+-*/%!?@"
 
 SYMBOLS = sorted(TWO_CHAR | set(ONE_CHAR), key=len, reverse=True)
 
@@ -227,6 +227,7 @@ class Parser:
         self.structs = {}          # name -> [(field, type)]（预扫描先登记名字）
         self.enums = {}            # name -> [(variant, [(field, type)])]（预扫描先登记名字）
         self.decl_order = []       # [("struct"|"enum", name)] 声明顺序（C typedef 输出顺序）
+        self.externs = {}          # name -> fdef（@extern("C") 声明，无函数体）
         self._prescan()
 
     def _prescan(self):
@@ -282,6 +283,37 @@ class Parser:
                 imports.append(".".join(path))
             elif self.at("fn"):
                 fns.append(self.parse_fn())
+            elif self.at("SYM", "@"):
+                # 注解：@extern("C") fn ... （v0.11）
+                annots = []
+                while self.at("SYM", "@"):
+                    at = self.next()
+                    aname = self.eat("NAME").val
+                    aarg = None
+                    if self.at("SYM", "("):
+                        self.next()
+                        if self.at("STR"):
+                            aarg = self.next().val
+                        self.eat("SYM", ")")
+                    annots.append((aname, aarg, at.line))
+                if not self.at("fn"):
+                    raise SyntaxError(
+                        f"line {annots[-1][2]}: 注解只能用于 fn 声明")
+                fdef = self.parse_fn()
+                if fdef["body"] is not None:
+                    raise SyntaxError(
+                        f"line {annots[-1][2]}: 注解声明不能带函数体")
+                for aname, aarg, line in annots:
+                    if aname == "extern":
+                        if aarg != "C":
+                            raise SyntaxError(
+                                f"line {line}: @extern 只支持 \"C\"，得到 {aarg!r}")
+                        fdef["extern"] = True
+                        self.externs[fdef["name"]] = fdef
+                    else:
+                        raise SyntaxError(
+                            f"line {line}: 未知注解 @{aname}（当前仅支持 @extern(\"C\")）")
+                fns.append(fdef)
             elif self.at("struct"):
                 self.next()
                 name = self.eat("NAME").val
@@ -399,7 +431,11 @@ class Parser:
         if self.at("SYM", "->"):
             self.next()
             ret = self.parse_type()
-        body = self.parse_block()
+        if self.at("SYM", "{"):
+            body = self.parse_block()
+        else:
+            # 无函数体：仅 @extern("C") 声明允许（parse_program 校验注解存在）
+            body = None
         return {"name": name, "params": params, "ret": ret, "body": body}
 
     # ---- 语句 ----
@@ -1256,7 +1292,9 @@ class Infer:
                 return "int64_t"
             if is_slice_env(ot):
                 return "const char *" if slice_env_elem(ot) == "str" else "int64_t"
-            raise SyntaxError("下标只能用于定长数组或切片")
+            if ot == "const char *":
+                return "int64_t"          # str[i] -> 该字节的无符号值
+            raise SyntaxError("下标只能用于定长数组、切片或 str")
         if k == "method":
             obj_t = self.expr(e[1], env)
             m = e[2]
@@ -1455,6 +1493,42 @@ static void rosoto_slice_bounds(int64_t i, int64_t n) {
         fflush(stdout);
         exit(1);
     }
+}
+
+/* str 是零结尾字节串（与 __str_eq/__str_concat 同一表示），没有长度前缀，
+   str[i] 需要先求 strlen 再比对。越界与数组/切片同策略 fail-fast。 */
+static void rosoto_str_bounds(int64_t i, int64_t n) {
+    if (i < 0 || i >= n) {
+        fprintf(stderr, "rosoto: str index out of bounds (fail-fast)\n");
+        fflush(stdout);
+        exit(1);
+    }
+}
+
+/* str -> int 十进制解析（s.to_int() / to_int(s)）。
+   要求整串都是十进制数字（可选前导 +/-），否则 fail-fast；
+   溢出同样 fail-fast（不静默回绕）。与自研后端 __str_to_int 逐条对齐。 */
+static int64_t rosoto_str_to_int(const char *s) {
+    int64_t i = 0, neg = 0, acc = 0, digits = 0;
+    if (s[0] == '-' || s[0] == '+') {
+        neg = (s[0] == '-');
+        i = 1;
+    }
+    while (s[i] != '\0') {
+        char c = s[i];
+        if (c < '0' || c > '9') goto bad;
+        if (acc > 922337203685477580LL) goto bad;
+        acc = acc * 10 + (int64_t)(c - '0');
+        if (acc < 0) goto bad;
+        digits = 1;
+        i++;
+    }
+    if (!digits) goto bad;
+    return neg ? -acc : acc;
+bad:
+    fprintf(stderr, "rosoto: str.to_int() invalid decimal input (fail-fast)\n");
+    fflush(stdout);
+    exit(1);
 }
 
 /* spawn/join 任务句柄：rec[0] = 线程（0 = 单核同步执行），
@@ -2011,10 +2085,12 @@ class Codegen:
                 acode, _ = self.gen_expr(e[2][0], env)
                 return f"((float)({acode}))", "float"
             if name == "to_int" and name not in self.infer.fns:
-                # to_int(x)：浮点 -> int（向零截断）
+                # to_int(x)：浮点 -> int（向零截断）；str -> int（十进制解析，非法输入 fail-fast）
                 if len(e[2]) != 1:
                     raise SyntaxError("to_int(x) 需要且只需要一个实参")
                 acode, at = self.gen_expr(e[2][0], env)
+                if at == "const char *":
+                    return f"rosoto_str_to_int({acode})", "int64_t"
                 return f"((int64_t)({acode}))", "int64_t"
             if name == "cores":
                 return "rosoto_cores()", "int64_t"
@@ -2036,12 +2112,16 @@ class Codegen:
                         return f"({arg[1]}).len", "int64_t"
                     if is_map_env(at):
                         return f"rosoto_map_len({arg[1]})", "int64_t"
+                    if at == "const char *":
+                        return f"((int64_t)strlen({arg[1]}))", "int64_t"
                 acode, atype = self.gen_expr(arg, env)
                 if atype == "RosotoSlice" or is_slice_env(atype):
                     return f"({acode}).len", "int64_t"
                 if is_map_env(atype):
                     return f"rosoto_map_len({acode})", "int64_t"
-                raise SyntaxError("len() 目前只支持定长数组、切片或 map")
+                if atype == "const char *":
+                    return f"((int64_t)strlen({acode}))", "int64_t"
+                raise SyntaxError("len() 目前只支持定长数组、切片、map 或 str")
             if name == "slice_of" and name not in self.infer.fns:
                 # 数组 -> 切片：零拷贝转换（SPEC §2 `[]T`）
                 if len(e[2]) != 1:
@@ -2122,7 +2202,18 @@ class Codegen:
                             f"rosoto_slice_bounds({tmp}, ({ocode}).len); "
                             f"(({cast})({ocode}).{pfield})[{tmp}]; }})", rtype)
                 return f"(({cast})({ocode}).{pfield})[({icode})]", rtype
-            raise SyntaxError("下标只能用于定长数组或切片")
+            if otype == "const char *":
+                # str[i] -> 该字节的无符号值（0..255）；长度是运行期 strlen，
+                # 越界与数组/切片同策略 fail-fast
+                icode, _ = self.gen_expr(e[2], env)
+                if self.bounds:
+                    self.tmp_id += 1
+                    tmp = f"_bi{self.tmp_id}"
+                    return (f"({{ int64_t {tmp} = (int64_t)({icode}); "
+                            f"rosoto_str_bounds({tmp}, (int64_t)strlen({ocode})); "
+                            f"((int64_t)(unsigned char)({ocode})[{tmp}]); }})", "int64_t")
+                return f"((int64_t)(unsigned char)({ocode})[({icode})])", "int64_t"
+            raise SyntaxError("下标只能用于定长数组、切片或 str")
         if k == "arraylit":
             raise SyntaxError("数组字面量只能直接用于 let（v0.6 边界）")
         if k == "chanopen":
@@ -2170,6 +2261,15 @@ class Codegen:
                 if is_float_env(otype):
                     return f"rosoto_f64_to_str((double)({ocode}))", "const char *"
                 return f"rosoto_i64_to_str({ocode})", "const char *"
+            if m == "to_int":
+                # s.to_int()：十进制解析；非法输入 fail-fast（与下标越界同策略）
+                if args:
+                    raise SyntaxError(".to_int() 不接受实参")
+                if otype == "const char *":
+                    return f"rosoto_str_to_int({ocode})", "int64_t"
+                if is_float_env(otype):
+                    return f"((int64_t)({ocode}))", "int64_t"
+                raise SyntaxError(".to_int() 只支持 str 与浮点")
             if m == "write":
                 self.uses_net = True
                 bcode, _ = self.gen_expr(args[0], env)
@@ -2856,14 +2956,27 @@ class Codegen:
         if self.decl_order:
             lines.append("")
 
+        # @extern("C") 原型（非 static，链接期解析；v0.11）
+        for f in fns:
+            if not f.get("extern"):
+                continue
+            params = ", ".join(f"{self.ctype(t)} {n}" for n, t in f["params"]) or "void"
+            lines.append(f"extern {self.ctype(f['ret'])} {f['name']}({params});")
+        if any(f.get("extern") for f in fns):
+            lines.append("")
+
         # 前向声明
         for f in fns:
+            if f.get("extern"):
+                continue
             params = ", ".join(f"{self.ctype(t)} {n}" for n, t in f["params"]) or "void"
             lines.append(f"static {self.ctype(f['ret'])} {f['name']}({params});")
         lines.append("")
 
         bodies = []
         for f in fns:
+            if f.get("extern"):
+                continue
             self.current_ret_t = f["ret"]
             env = {n: self.env_type(t) for n, t in f["params"]}
             for n, t in f["params"]:
@@ -2885,6 +2998,8 @@ class Codegen:
 
     def any_net_usage(self):
         for f in self.fns:
+            if f.get("extern") or f["body"] is None:
+                continue
             d, a, r = set(), set(), set()
             walk_stmts(f["body"], d, a, r)
             if "net" in r or any(x.startswith("net") for x in r):

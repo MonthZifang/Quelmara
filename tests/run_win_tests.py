@@ -288,7 +288,8 @@ def test_cross_verify():
              "tests/t20_result_generic.ros", "tests/t21_slice.ros",
              "tests/t22_map.ros", "tests/t23_float.ros",
              "tests/t24_join_method.ros", "tests/t25_chan_close.ros",
-             "tests/t26_select.ros"]
+             "tests/t26_select.ros", "tests/t27_str.ros",
+             "tests/t28_toint.ros"]
     # 注意：hello 的 cores() 是编译期常量（Windows=物理核，WSL=4），不参与逐字节比对。
     drive = ROOT[0].lower()
     wsl_root = f"/mnt/{drive}/" + ROOT[3:].replace("\\", "/")
@@ -325,6 +326,52 @@ def test_chan_close_fail():
             else bad(f"stderr={stderr[:120]!r}")
 
 
+def test_str_failfast():
+    """str 下标越界、非法十进制解析、@extern 声明都必须给出明确失败/诊断。"""
+    out = os.path.join(ROOT, "build", "win_str_bounds.exe")
+    build(os.path.join(ROOT, "tests/str_bounds.ros"), out)
+    r = run(out)
+    if r is None:
+        skip("str 越界：非 Windows 平台")
+    else:
+        rc, _stdout, stderr = r
+        ok("str 越界 fail-fast（退出码非 0）") if rc != 0 else bad(f"str 越界未失败 rc={rc}")
+        ok("str 越界消息写入 stderr") if b"out of bounds" in stderr \
+            else bad(f"stderr={stderr[:120]!r}")
+
+    # 非法十进制：每种输入都必须退出码非 0，不能静默给出 0
+    for i, lit in enumerate(("abc", "", "12x", " 12", "9223372036854775808")):
+        src = os.path.join(ROOT, "build", f"win_badint_{i}.ros")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write('fn main() {\n    print("%s".to_int())\n}\n' % lit)
+        exe = os.path.join(ROOT, "build", f"win_badint_{i}.exe")
+        build(src, exe)
+        r = run(exe)
+        if r is None:
+            skip(f"to_int 非法输入 {lit!r}：非 Windows 平台")
+            continue
+        rc, _stdout, stderr = r
+        ok(f"to_int({lit!r}) fail-fast") if rc != 0 \
+            else bad(f"to_int({lit!r}) 未失败 rc={rc}")
+        ok(f"to_int({lit!r}) 消息写入 stderr") if b"invalid decimal" in stderr \
+            else bad(f"stderr={stderr[:120]!r}")
+
+    # @extern("C")：自研后端不解析外部符号，必须给出人话诊断而不是 Python traceback
+    src = os.path.join(ROOT, "build", "win_extern.ros")
+    with open(src, "w", encoding="utf-8") as f:
+        f.write('@extern("C")\nfn strlen2(s: str) -> int\n\n'
+                'fn main() {\n    print("x")\n}\n')
+    try:
+        build(src, os.path.join(ROOT, "build", "win_extern.exe"))
+    except SyntaxError as e:
+        ok("@extern 在自研后端给出明确诊断") if "@extern" in str(e) \
+            else bad(f"@extern 诊断内容不符：{e}")
+    except Exception as e:                                   # noqa: BLE001
+        bad(f"@extern 抛了非 SyntaxError：{type(e).__name__}: {e}")
+    else:
+        bad("@extern 在自研后端竟然编译成功（不链接外部符号不该成功）")
+
+
 def main():
     print("== [1] PE/COFF 结构（自研写出器，无 CRT） ==")
     out = os.path.join(ROOT, "build", "win_hello.exe")
@@ -353,6 +400,11 @@ def main():
     print("== [3b] 定长数组 [N]T（v0.6） ==")
     case_output("arrays", "tests/t16_arrays.ros", ["33", "arrays ok"])
     test_array_bounds()
+
+    print("== [3c] 字符串：len / 字节下标 / 十进制解析（v0.12） ==")
+    case_selfcheck("str", "tests/t27_str.ros")
+    case_selfcheck("to_int", "tests/t28_toint.ros")
+    test_str_failfast()
 
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.ros", ["11519999978"])
