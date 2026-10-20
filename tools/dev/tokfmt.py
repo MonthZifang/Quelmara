@@ -66,6 +66,19 @@ def scan_raw(src):
                 i += 1
             i += 2
             continue
+        if c.isdigit() and i + 1 < n and src[i] == "0" and src[i + 1] in "xXbBoO":
+            start, startline = i, line
+            base = {"x": 16, "b": 2, "o": 8}[src[i + 1].lower()]
+            ok = "0123456789abcdefABCDEF" if base == 16 else (
+                "01" if base == 2 else "01234567")
+            j = i + 2
+            while j < n and (src[j] in ok or src[j] == "_"):
+                j += 1
+            if j == i + 2:
+                raise SyntaxError("line %d: 基数前缀后面缺少数字" % line)
+            toks.append(("INT", src[start:j], startline))
+            i = j
+            continue
         if c.isdigit():
             start, startline = i, line
             j = i

@@ -1,0 +1,67 @@
+// t33_subslice.qma：区间子切片 a[lo..hi]（v1.1，左闭右开）
+module t33
+
+fn main() {
+    let s = "hello world"
+
+    // 字符串子切片（拷贝出新串）
+    let h = s[0..5]
+    assert(len(h) == 5, "len")
+    assert(h == "hello", "head")
+    assert(s[6..11] == "world", "tail")
+    assert(len(s[3..3]) == 0, "empty range")
+    assert(s[0..11] == s, "whole")
+
+    // 边界：lo == len 且 hi == len 合法
+    assert(len(s[11..11]) == 0, "at end")
+
+    // 与 substr 等价
+    assert(s[2..7] == substr(s, 2, 5), "same as substr")
+
+    // 数组子切片 -> 切片视图（零拷贝）
+    let a = [10, 20, 30, 40, 50]
+    let mid = a[1..4]
+    assert(len(mid) == 3, "arr len")
+    assert(mid[0] == 20, "arr 0")
+    assert(mid[2] == 40, "arr 2")
+
+    // 切片再切片
+    let sub = mid[1..3]
+    assert(len(sub) == 2, "nested len")
+    assert(sub[0] == 30, "nested 0")
+
+    // 动态区间（变量作为端点）
+    let mut lo = 1
+    let mut hi = 3
+    assert(len(s[lo..hi]) == 2, "dynamic len")
+    lo += 4
+    hi += 4
+    assert(s[lo..hi] == " w", "dynamic value")   // "hello world"[5..7] = " w"
+
+    // 用子切片遍历：切出每个词
+    let mut i = 0
+    let mut cnt = 0
+    let n = len(s)
+    while i < n {
+        let mut j = i
+        while j < n && s[j] != 32 {
+            j += 1
+        }
+        if j > i {
+            cnt += 1
+            let word = s[i..j]
+            assert(len(word) > 0, "word non-empty")
+        }
+        i = j + 1
+    }
+    assert(cnt == 2, "two words")
+
+    // 字符串字典序（v1.1 修正：早期 < > 是指针比较）
+    assert("abc" < "abd", "lex lt")
+    assert("abc" <= "abc", "lex le")
+    assert("abd" > "abc", "lex gt")
+    assert("b" > "aaaa", "prefix order")
+    assert(!("abc" > "abd"), "lex not gt")
+    assert("Z" < "a", "byte order not dictionary")
+    print("subslice ok")
+}

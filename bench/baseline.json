@@ -1,0 +1,53 @@
+{
+  "entries": {
+    "windows/amd64/arm64/fib": {
+      "best_ms": 17823.121,
+      "out": "53a000093408dfa6",
+      "runs": 3,
+      "size": 6493,
+      "ts": "2026-10-20T20:39:06",
+      "version": "1.0.0"
+    },
+    "windows/amd64/arm64/hello": {
+      "best_ms": 1484.478,
+      "out": "d1686d4b7b9a65ef",
+      "runs": 3,
+      "size": 10007,
+      "ts": "2026-10-20T20:38:08",
+      "version": "1.0.0"
+    },
+    "windows/amd64/arm64/t31_logic": {
+      "best_ms": 1484.201,
+      "out": "65bd380f51f75a12",
+      "runs": 3,
+      "size": 11891,
+      "ts": "2026-10-20T20:39:15",
+      "version": "1.0.0"
+    },
+    "windows/amd64/win/fib": {
+      "best_ms": 540.666,
+      "out": "53a000093408dfa6",
+      "runs": 3,
+      "size": 6656,
+      "ts": "2026-10-20T20:39:06",
+      "version": "1.0.0"
+    },
+    "windows/amd64/win/hello": {
+      "best_ms": 546.001,
+      "out": "d1686d4b7b9a65ef",
+      "runs": 3,
+      "size": 7168,
+      "ts": "2026-10-20T20:38:08",
+      "version": "1.0.0"
+    },
+    "windows/amd64/win/t31_logic": {
+      "best_ms": 545.573,
+      "out": "65bd380f51f75a12",
+      "runs": 3,
+      "size": 9728,
+      "ts": "2026-10-20T20:39:15",
+      "version": "1.0.0"
+    }
+  },
+  "version": 1
+}

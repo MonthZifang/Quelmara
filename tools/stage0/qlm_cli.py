@@ -13,7 +13,7 @@ Quelmara 统一命令行入口（SPEC §8）
 通用选项：
   --target native|win|arm64|c|both   代码生成后端（默认当前平台自研后端）
   -o, --out PATH                 输出路径
-  --dump-ir                      打印 RosIR
+  --dump-ir                      打印 QuIR
   --no-opt                       关闭优化管线
 
 设计原则：所有子命令都读取项目根目录的 Quelmara.toml（唯一全局资源开关）。
@@ -30,6 +30,7 @@ import subprocess
 import sys
 import time
 
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from qlm import SRC_EXT, require_source  # noqa: E402
@@ -250,55 +251,124 @@ def cmd_fmt(args):
     return 0
 
 
-def cmd_bench(args):
-    out, size, cfg = build(args.src, args.target, args.out, optimize=not args.no_opt)
-    runs = max(1, args.runs)
-    times = []
-    sample = ""
-    for _ in range(runs):
+def _bench_key(target):
+    """基线 key：平台/架构/后端 —— 跨平台基线必须按这个三元组分开存。"""
+    return f"{platform.system().lower()}/{platform.machine().lower()}/{target}"
+
+
+def _bench_norm(text):
+    """输出归一化：去掉行尾空白与末行空行，避免换行风格造成假不一致。"""
+    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").split("\n")).strip()
+
+
+def _bench_run(exe, target, runs):
+    """跑 runs 次，返回 (best_s, out_hash, first_line)。arm64 走自研模拟器。"""
+    import hashlib
+    if target == "arm64":
+        emu = os.path.join(ROOT, "tests", "a64_emu.py")
+        if not os.path.isfile(emu):
+            return None, None, "(无 a64 模拟器)"
+        cmd = [sys.executable, emu, exe]
+    else:
+        cmd = [os.path.abspath(exe)]
+    times, out = [], ""
+    for _ in range(max(1, runs)):
         t0 = time.perf_counter()
-        r = subprocess.run([os.path.abspath(out)], capture_output=True,
-                           encoding="utf-8", errors="replace")
+        r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
         times.append(time.perf_counter() - t0)
-        sample = r.stdout.strip()
-    best, mean = min(times), statistics.fmean(times)
-    stdev = statistics.pstdev(times) if len(times) > 1 else 0.0
-    print(f"[qlm-bench] {args.src}")
-    print(f"  target={args.target}  size={size}B  runs={runs}")
-    print(f"  best={best*1000:.2f}ms  mean={mean*1000:.2f}ms  stdev={stdev*1000:.2f}ms")
-    if sample:
-        print(f"  output: {sample.splitlines()[0][:60]}")
+        out = r.stdout
+    norm = _bench_norm(out)
+    return min(times), hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16], (
+        norm.splitlines()[0][:60] if norm else "")
 
-    base_path = args.baseline or "bench_baseline.json"
-    record = {"min_s": best, "mean_s": mean, "runs": runs, "size": size,
-              "target": args.target, "src": args.src,
-              "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
-    if args.update_baseline:
-        data = {}
-        if os.path.isfile(base_path):
-            with open(base_path, encoding="utf-8") as f:
-                data = json.load(f)
-        data[args.src] = record
-        with open(base_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, sort_keys=True)
-        print(f"  baseline 已更新 -> {base_path}")
-        return 0
+def cmd_bench(args):
+    """基准 + 跨平台基线。
 
+    基线记录 key = 平台/架构/后端/源文件名：
+      - 时间只在同一 key 内比较（换机器/换后端没有可比性）
+      - 输出哈希则跨 key 比较：同一份源码在不同后端必须产出相同结果，
+        这才是"跨平台"真正要守住的东西。
+    """
+    base_path = args.baseline or os.path.join(ROOT, "bench", "baseline.json")
+    targets = ([t.strip() for t in args.targets.split(",") if t.strip()]
+               if args.targets else [args.target])
+    name = os.path.splitext(os.path.basename(args.src))[0]
+
+    data = {}
     if os.path.isfile(base_path):
         with open(base_path, encoding="utf-8") as f:
             data = json.load(f)
-        prev = data.get(args.src)
-        if prev:
-            delta = (best - prev["min_s"]) / prev["min_s"] * 100
-            flag = "REGRESSION" if delta > args.threshold else ("faster" if delta < 0 else "ok")
-            print(f"  vs baseline({prev.get('ts','?')}): "
-                  f"{prev['min_s']*1000:.2f}ms -> {best*1000:.2f}ms  ({delta:+.1f}%)  [{flag}]")
-            if delta > args.threshold:
-                return 2
-    else:
-        print(f"  （无基线 {base_path}，用 --update-baseline 建立）")
-    return 0
+    entries = data.setdefault("entries", {})
+    data.setdefault("version", 1)
+
+    print(f"[qlm-bench] {args.src}  targets={','.join(targets)}  runs={args.runs}")
+    results = {}
+    rc = 0
+    for tg in targets:
+        if tg == "c":
+            print(f"  {tg:<7} 跳过（C99 只做交叉验证，不计入基线）")
+            continue
+        try:
+            out, size, _cfg = build(args.src, tg, None, optimize=not args.no_opt)
+        except Exception as exc:                      # noqa: BLE001
+            print(f"  {tg:<7} 构建失败：{type(exc).__name__}: {exc}")
+            rc = 2
+            continue
+        best, oh, first = _bench_run(out, tg, args.runs)
+        if best is None:
+            print(f"  {tg:<7} 无法执行：{first}")
+            continue
+        key = f"{_bench_key(tg)}/{name}"
+        results[tg] = {"key": key, "best_ms": best * 1000.0, "size": size, "out": oh}
+        print(f"  {tg:<7} size={size}B  best={best * 1000:.2f}ms  out={oh}  | {first}")
+
+    # ---- 跨后端一致性：同一源码的输出哈希必须相同 ----
+    hashes = {v["out"] for v in results.values()}
+    if len(hashes) > 1:
+        print("  [FAIL] 跨后端输出不一致：")
+        for tg, v in results.items():
+            print(f"         {tg}: {v['out']}")
+        rc = 2
+    elif hashes:
+        print(f"  [ok]   跨后端输出一致（{len(results)} 个后端，sha={hashlib_short(hashes)}）")
+
+    if args.update_baseline:
+        for tg, v in results.items():
+            entries[v["key"]] = {"best_ms": round(v["best_ms"], 3), "size": v["size"],
+                                 "out": v["out"], "runs": args.runs,
+                                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                 "version": VERSION}
+        os.makedirs(os.path.dirname(base_path), exist_ok=True)
+        with open(base_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False, sort_keys=True)
+        print(f"  baseline 已更新 -> {os.path.relpath(base_path, ROOT)}")
+        return rc
+
+    # ---- 与基线对比 ----
+    if not entries:
+        print(f"  （无基线 {os.path.relpath(base_path, ROOT)}，用 --update-baseline 建立）")
+        return rc
+    for tg, v in results.items():
+        prev = entries.get(v["key"])
+        if not prev:
+            print(f"  {tg:<7} 无基线记录（{v['key']}）")
+            continue
+        if prev.get("out") and prev["out"] != v["out"]:
+            print(f"  {tg:<7} [FAIL] 输出与基线不一致：{prev['out']} -> {v['out']}")
+            rc = 2
+        if prev.get("best_ms"):
+            delta = (v["best_ms"] - prev["best_ms"]) / prev["best_ms"] * 100.0
+            flag = "REGRESSION" if delta > args.threshold else ("faster" if delta < -args.threshold else "ok")
+            print(f"  {tg:<7} 基线 {prev['best_ms']:.2f}ms -> {v['best_ms']:.2f}ms "
+                  f"({delta:+.1f}%)  [{flag}]")
+            if flag == "REGRESSION":
+                rc = 2
+    return rc
+
+
+def hashlib_short(hashes):
+    return ",".join(sorted(hashes))
 
 
 def cmd_version(args):
@@ -331,7 +401,7 @@ def main(argv=None):
                        help="代码生成后端（默认当前平台自研后端；c 仅用于显式交叉验证）")
         p.add_argument("-o", "--out", default=None)
         p.add_argument("--no-opt", action="store_true", help="关闭优化管线")
-        p.add_argument("--dump-ir", action="store_true", help="打印 RosIR")
+        p.add_argument("--dump-ir", action="store_true", help="打印 QuIR")
 
     p = sub.add_parser("build", help="编译")
     common(p)
@@ -364,6 +434,8 @@ def main(argv=None):
     p.add_argument("--update-baseline", action="store_true")
     p.add_argument("--threshold", type=float, default=10.0,
                    help="回归阈值（百分比，默认 10%%）")
+    p.add_argument("--targets", default=None,
+                   help="跨平台基线：逗号分隔的多个后端，如 win,native,arm64")
 
     sub.add_parser("version", help="版本与能力")
 

@@ -3,11 +3,11 @@
 """
 Quelmara 原生后端 v0.1（自研，零外部依赖）
 ========================================
-Quelmara 源码 -> RosIR -> 优化passes -> 线性扫描寄存器分配 -> 自研 x86_64 编码器 -> ELF64 裸可执行文件
+Quelmara 源码 -> QuIR -> 优化passes -> 线性扫描寄存器分配 -> 自研 x86_64 编码器 -> ELF64 裸可执行文件
 
 不依赖 libc / gcc / LLVM：
   - 直接产出静态 ELF64（基址 0x400000，单 RWX 段，无重定位）
-  - 运行库（print/itoa）用 RosIR 自举实现，I/O 走 raw syscall
+  - 运行库（print/itoa）用 QuIR 自举实现，I/O 走 raw syscall
   - parfor 多核：raw clone() + wait4() + 共享内存归约（无需 pthread）
 
 已实现优化（见 BACKEND.md 优化目录）：
@@ -384,7 +384,7 @@ class Enc:
 
 
 # ---------------------------------------------------------------------------
-# RosIR：函数 = vreg + 指令列表（非 SSA，可变量原地更新，无 phi）
+# QuIR：函数 = vreg + 指令列表（非 SSA，可变量原地更新，无 phi）
 # 指令：
 #   ('mov', dst, src)                  src: vreg | ('imm',n) | ('ga',gid)
 #   ('bin', op, dst, a, b)             op: add sub mul div mod and or xor shl shr sar
@@ -432,7 +432,7 @@ class Fn:
 
 
 # ---------------------------------------------------------------------------
-# 降级：AST -> RosIR
+# 降级：AST -> QuIR
 # ---------------------------------------------------------------------------
 
 
@@ -467,6 +467,7 @@ class Lower:
         self.uses_args = False
         self.uses_io = False
         self.uses_substr = False
+        self.uses_str_cmp = False
         # 命令行参数（args()）：argc 字数 + argv 指针，入口期或惰性初始化填入
         self.argc_gid = self.intern_array(1)
         self.argv_gid = self.intern_array(1)
@@ -741,7 +742,7 @@ class Lower:
         return self._mark_struct(fn, addr, ename)
 
     def lower_match(self, e, fn, env, as_expr):
-        """match -> tag 比较链 + 每臂载荷绑定（不新增 RosIR 指令，纯现有指令降级）"""
+        """match -> tag 比较链 + 每臂载荷绑定（不新增 QuIR 指令，纯现有指令降级）"""
         _m, scrut, arms = e
         addr = self.eval(scrut, fn, env)
         sname = self._struct_of(fn, addr)
@@ -878,11 +879,15 @@ class Lower:
                      ("imm", 0), ("imm", 0), ("imm", 0)])
 
     def emit_exit(self, fn, code):
+        """code 可以是立即数（int / ("imm", n)）或运行期 vreg。"""
+        if isinstance(code, tuple) and code[0] == "imm":
+            code = code[1]
+        arg = ("imm", code) if isinstance(code, int) else code
         if self.platform == "windows":
-            fn.emit("winapi", None, "ExitProcess", [("imm", code)])
+            fn.emit("winapi", None, "ExitProcess", [arg])
         else:
             fn.emit("syscall", None, self.sc["exit"],
-                    [("imm", code), ("imm", 0), ("imm", 0),
+                    [arg, ("imm", 0), ("imm", 0),
                      ("imm", 0), ("imm", 0), ("imm", 0)])
 
     def emit_alloc(self, fn, size, reserve_only=False):
@@ -1026,6 +1031,15 @@ class Lower:
                 d = fn.new_v()
                 fn.emit("cmpset", "e", d, a, ("imm", 0))
                 return self._mark_bool(fn, d)
+            if e[1] == "~":
+                # 按位取反：x ^ -1（全 1 掩码），不做位宽截断（Quelmara 是 64 位整数）
+                if isinstance(a, tuple) and a[0] == "imm":
+                    return ("imm", ~a[1])
+                d = fn.new_v()
+                fn.emit("bin", "xor", d, a, ("imm", -1))
+                return d
+        if k == "sliceof":
+            return self.lower_sliceof(e, fn, env)
         if k == "binop":
             return self.lower_binop(e, fn, env)
         if k == "select":
@@ -1204,6 +1218,70 @@ class Lower:
             self._mark_float(fn, d, fw)
         return d
 
+    def lower_sliceof(self, e, fn, env):
+        """a[lo..hi]：左闭右开。
+        - str  ：拷贝出新串（与原串不共享，符合 str 不可变语义）
+        - 切片 ：零拷贝视图 {ptr+lo, hi-lo}
+        - 定长数组：转成切片视图（等价 slice_of(a)[lo..hi]）
+        越界一律 fail-fast，判定顺序与 substr 一致。
+        """
+        obj = self.eval(e[1], fn, env)
+        lo = self.eval(e[2], fn, env)
+        hi = self.eval(e[3], fn, env)
+        self.uses_substr = True                     # 复用 __substr_fail
+        l_bad = fn.label("rngbad")
+        l_ok = fn.label("rngok")
+        b = fn.new_v()
+        fn.emit("cmpset", "l", b, lo, ("imm", 0))
+        fn.emit("jnz", b, l_bad)
+        fn.emit("cmpset", "l", b, hi, lo)
+        fn.emit("jnz", b, l_bad)
+
+        if self._is_str(fn, obj):
+            ln = self.str_len(fn, obj)
+            fn.emit("cmpset", "g", b, hi, ln)
+            fn.emit("jnz", b, l_bad)
+            cnt = fn.new_v()
+            fn.emit("bin", "sub", cnt, hi, lo)
+            n1 = fn.new_v()
+            fn.emit("bin", "add", n1, cnt, ("imm", 1))
+            buf = fn.new_v()
+            fn.emit("call", buf, "__alloc", [n1])
+            sp = fn.new_v()
+            fn.emit("bin", "add", sp, obj, lo)
+            fn.emit("call", None, "__memcpy", [buf, sp, cnt])
+            fn.emit("store8", buf, cnt, ("imm", 0))
+            fn.emit("jmp", l_ok)
+            fn.emit("label", l_bad)
+            fn.emit("call", None, "__substr_fail", [])
+            fn.emit("label", l_ok)
+            return self._mark_str(fn, buf)
+
+        n = self._arr_of(fn, obj)
+        if n is not None or self._is_slice(fn, obj):
+            if n is not None:
+                ln = ("imm", n)
+                base = obj                       # 数组的帧槽地址就是元素起点
+                elem = None
+            else:
+                ln = self.slice_len(fn, obj)
+                base = self.slice_ptr(fn, obj)
+                elem = self._slice_elem(fn, obj)
+            fn.emit("cmpset", "g", b, hi, ln)
+            fn.emit("jnz", b, l_bad)
+            cnt = fn.new_v()
+            fn.emit("bin", "sub", cnt, hi, lo)
+            off = fn.new_v()
+            fn.emit("bin", "shl", off, lo, ("imm", 3))     # 元素 8 字节
+            ptr = fn.new_v()
+            fn.emit("bin", "add", ptr, base, off)
+            fn.emit("jmp", l_ok)
+            fn.emit("label", l_bad)
+            fn.emit("call", None, "__substr_fail", [])
+            fn.emit("label", l_ok)
+            return self.make_slice(fn, ptr, cnt, elem=elem)
+        raise SyntaxError("子切片 a[lo..hi] 只支持 str、切片与定长数组")
+
     def lower_binop(self, e, fn, env):
         return self.arith(e[1], self.eval(e[2], fn, env), self.eval(e[3], fn, env), fn, env)
 
@@ -1293,6 +1371,14 @@ class Lower:
             if op in cmp_map:
                 return ("imm", 1 if cmp_map[op] else 0)
         d = fn.new_v()
+        if op in ("<", "<=", ">", ">=") and (self._is_str(fn, a) or self._is_str(fn, b)):
+            # 字符串按字节字典序比较（早期这里走的是指针比较，属于语义 bug）
+            self.uses_str_cmp = True
+            c = fn.new_v()
+            fn.emit("call", c, "__str_cmp", [a, b])
+            cc = {"<": "l", "<=": "le", ">": "g", ">=": "ge"}[op]
+            fn.emit("cmpset", cc, d, c, ("imm", 0))
+            return self._mark_bool(fn, d)
         if op in ("==", "!=", "<", "<=", ">", ">="):
             cc = {"==": "e", "!=": "ne", "<": "l", "<=": "le", ">": "g", ">=": "ge"}[op]
             fn.emit("cmpset", cc, d, a, b)
@@ -1346,7 +1432,8 @@ class Lower:
             return d
         if op not in ("add", "sub", "mul", "div", "mod", "and", "or", "xor", "shl", "shr", "sar"):
             opmap = {"+": "add", "-": "sub", "*": "mul", "/": "div", "%": "mod",
-                     "&": "and", "|": "or", "^": "xor"}
+                     "&": "and", "|": "or", "^": "xor",
+                     "<<": "shl", ">>": "sar", ">>>": "shr"}
             if op not in opmap:
                 raise SyntaxError(f"不支持的运算符 {op}")
             op = opmap[op]
@@ -1566,6 +1653,37 @@ class Lower:
             else:
                 tgt = "__print_i64"
             fn.emit("call", None, tgt, [spec])
+            return ("imm", 0)
+        if name == "eprint":
+            # eprint(x)：与 print 同样的格式化，但写 stderr（诊断输出专用）
+            if len(e[2]) != 1:
+                raise SyntaxError("eprint(x) 需要一个实参")
+            spec = self.eval(e[2][0], fn, env)
+            if self._is_str(fn, spec) or e[2][0][0] == "str":
+                sp = spec
+            elif self._float_of(fn, spec):
+                x = self.conv_to(fn, spec, self._float_of(fn, spec), "f64")
+                self.uses_f64_str = True
+                sp = fn.new_v()
+                fn.emit("call", sp, "__f64_to_str", [x])
+            elif e[2][0][0] == "bool" or (isinstance(spec, int) and spec in getattr(fn, "boolv", set())):
+                sp = fn.new_v()
+                fn.emit("call", sp, "__str_from_bool", [spec])
+            else:
+                sp = fn.new_v()
+                fn.emit("call", sp, "__str_from_i64", [spec])
+            n = self.str_len(fn, sp)
+            self.emit_write(fn, 2, sp, n)
+            nl = fn.new_v()
+            fn.emit("movaddr", nl, self.intern_str("\n"))
+            self.emit_write(fn, 2, nl, ("imm", 1))
+            return ("imm", 0)
+        if name == "exit":
+            # exit(code)：直接结束进程（不跑析构——Quelmara 没有析构）
+            if len(e[2]) != 1:
+                raise SyntaxError("exit(code) 需要一个实参")
+            code = self.eval(e[2][0], fn, env)
+            self.emit_exit(fn, code)
             return ("imm", 0)
         if name in ("to_float", "to_f32", "to_int") and name not in self.fns_ast:
             if len(e[2]) != 1:
@@ -1900,7 +2018,9 @@ class Lower:
                     if self._is_str(fn, spec):
                         self._mark_str(fn, cur)
                 else:
-                    binop = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}[op]
+                    binop = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
+                             "&=": "&", "|=": "|", "^=": "^",
+                             "<<=": "<<", ">>=": ">>", ">>>=": ">>>"}[op]
                     tmp = self.arith(binop, cur, spec, fn, env)
                     tmp = self.conv_to(fn, tmp, self._float_of(fn, tmp),
                                        self._float_of(fn, cur))
@@ -2318,7 +2438,7 @@ class Lower:
         self.out.append(fn)
         return fn
 
-    # ---- 自举运行库（print/itoa，全部 RosIR + raw syscall）----
+    # ---- 自举运行库（print/itoa，全部 QuIR + raw syscall）----
     def lower_runtime(self):
         gid_nl = self.intern(b"\n\x00")
         gid_minus = self.intern(b"-\x00")
@@ -3161,6 +3281,36 @@ class Lower:
         f.emit("ret", i)
         self.out.append(f)
 
+        if self.uses_str_cmp:
+            # __str_cmp(a, b) -> -1 / 0 / 1：按无符号字节字典序
+            f = Fn("__str_cmp")
+            pa, pb = f.new_v(), f.new_v()
+            f.emit("args", [pa, pb])
+            i = f.new_v()
+            f.emit("mov", i, ("imm", 0))
+            ca, cb, bb = f.new_v(), f.new_v(), f.new_v()
+            l_top, l_same = f.label("sc.t"), f.label("sc.s")
+            l_gt, l_eq, l_end = f.label("sc.g"), f.label("sc.e"), f.label("sc.x")
+            f.emit("label", l_top)
+            f.emit("load8", ca, pa, i)
+            f.emit("load8", cb, pb, i)
+            f.emit("cmpset", "e", bb, ca, cb)
+            f.emit("jnz", bb, l_same)
+            f.emit("cmpset", "l", bb, ca, cb)
+            f.emit("jz", bb, l_gt)
+            f.emit("ret", ("imm", -1))
+            f.emit("label", l_gt)
+            f.emit("ret", ("imm", 1))
+            f.emit("label", l_same)
+            f.emit("jz", ca, l_eq)
+            f.emit("bin", "add", i, i, ("imm", 1))
+            f.emit("jmp", l_top)
+            f.emit("label", l_eq)
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_end)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
         if self.uses_io:
             msg = "quelmara: read_text() failed (fail-fast)\n"
             gid_io = self.intern_str(msg)
@@ -3856,12 +4006,12 @@ class Lower:
 
 
 # ===========================================================================
-# 第二部分：RosIR 优化 passes -> 线性扫描寄存器分配 -> 机器码发射 -> ELF
+# 第二部分：QuIR 优化 passes -> 线性扫描寄存器分配 -> 机器码发射 -> ELF
 # ===========================================================================
 
 
 # ---------------------------------------------------------------------------
-# RosIR 优化 passes 独立模块：tools/stage0/qlm_opt.py（x86_64 / aarch64 发射层共享）
+# QuIR 优化 passes 独立模块：tools/stage0/qlm_opt.py（x86_64 / aarch64 发射层共享）
 # 这里只做再导出，保持 `from qlm_native import vreg_mentions` 的既有用法可用。
 # ---------------------------------------------------------------------------
 
@@ -3871,7 +4021,7 @@ from qlm_opt import (PURE, vreg_mentions, loop_regions,          # noqa: E402,F4
 
 
 # ---------------------------------------------------------------------------
-# 过程内联（RosIR 级）：小函数 / 单调用点函数内联，递归/环禁止
+# 过程内联（QuIR 级）：小函数 / 单调用点函数内联，递归/环禁止
 # ---------------------------------------------------------------------------
 
 

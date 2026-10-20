@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Quelmara RosIR 优化器 v0.2(后端无关)
+Quelmara QuIR 优化器 v0.2(后端无关)
 ====================================
-x86_64 / AArch64 / 未来的 PE·Mach-O 发射层共享的 RosIR 级优化 passes:
+x86_64 / AArch64 / 未来的 PE·Mach-O 发射层共享的 QuIR 级优化 passes:
 
   opt_copy_prop    复制传播(仅限单定义 vreg)
   opt_cse          公共子表达式消除(基本块内 GVN,含交换律规范化)
@@ -12,7 +12,7 @@ x86_64 / AArch64 / 未来的 PE·Mach-O 发射层共享的 RosIR 级优化 passe
   opt_dce          死代码消除(全局使用集 + 不动点,兼容循环回边)
   run_pipeline     统一入口(内联 → LICM → CSE → 展开 → 收敛)
 
-设计约束(重要):RosIR 是**非 SSA**的--同一 vreg 可被多次定义、变量原地更新、
+设计约束(重要):QuIR 是**非 SSA**的--同一 vreg 可被多次定义、变量原地更新、
 没有 phi。因此每个 pass 都必须对"vreg 多次定义"保守处理,否则会把
 循环携带的值错误地当成不变量(BACKEND.md §6 已记录过同类事故)。
 
@@ -225,7 +225,7 @@ def _cse_key(ins):
 def opt_cse(fn):
     """基本块内 GVN:纯表达式重复计算 -> mov。跨越副作用/控制流即失效。
 
-    ⚠ RosIR 非 SSA,同一个 vreg 会被重新赋值(例如 `acc = acc + x` 的 acc)。
+    ⚠ QuIR 非 SSA,同一个 vreg 会被重新赋值(例如 `acc = acc + x` 的 acc)。
     因此只要某个 vreg 被重定义,不仅要作废"结果是它"的缓存,
     还要作废**所有把它当操作数**的缓存 -- 否则会把新值误当成旧表达式的结果。
     (这条规则由 parfor_sum 的回归测试接入后发现,见 BACKEND.md 教训记录。)

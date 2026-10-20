@@ -35,6 +35,92 @@ import std.core
 - 标识符：`snake_case`（变量/函数）、`PascalCase`（类型/模块）、`SCREAMING_CASE`（常量）
 - 语句以换行分隔，块用 `{}`；**没有分号**（结构即语法，减少噪音）
 
+### 1.1 字面量与运算符（v1.1）
+
+```quelmara
+const MAX_RETRY = 3
+const MASK      = 0xFF          // 0x / 0b / 0o 三种基数前缀
+const BIAS      = -0.5
+const TAG       = "net"
+
+fn main() {
+    let a = 0b1010 & 0b0110     // 按位与
+    let b = 1 << 20             // 移位
+    let c = ~a                  // 按位取反
+    let d = -8 >> 1             // 算术右移 -> -4
+    let e = -8 >>> 1            // 逻辑右移（按无符号解释）
+    print(a + b + c + d + e)
+}
+```
+
+**优先级（由松到紧，Quelmara 自定义层次）**：
+
+| 顺序 | 运算符 | 结合性 |
+|---|---|---|
+| 1 | `\|\|` | 左 |
+| 2 | `&&` | 左 |
+| 3 | `\|` | 左 |
+| 4 | `^` | 左 |
+| 5 | `&` | 左 |
+| 6 | `==` `!=` | 左 |
+| 7 | `<` `<=` `>` `>=` | 左 |
+| 8 | `<<` `>>` `>>>` | 左 |
+| 9 | `+` `-` | 左 |
+| 10 | `*` `/` `%` | 左 |
+| 11 | 一元 `-` `~` `!` `spawn` | 右 |
+| 12 | 调用 / 下标 / 成员 `.` / `?` | 左 |
+
+> 与 Go 的区别：Go 把 `<< >>` 放在乘法层、把 `|` 放在加法层；Quelmara 把移位放在"加减"与"比较"之间，
+> 位运算整体低于比较运算。与 Python 的区别：Python 里 `&` 高于 `^`，Quelmara 里 `^` 高于 `&`。
+> 这两条都是本语言自己的定义，写代码时按上表，不要按旧习惯猜。
+
+**整数字面量**：十进制 `123`、下划线分隔 `1_000`、`0xFF`、`0b1010`、`0o755`。
+**浮点字面量**：`1.5`（f64）、`1.5f`（f32）、`1e-7`（科学计数）。
+**复合赋值**：`+= -= *= /= %= &= |= ^= <<= >>= >>>=`。
+
+### 1.2 子切片 `a[lo..hi]`
+
+左闭右开，`lo <= hi <= len`，越界 fail-fast：
+
+```quelmara
+let s = "hello world"
+print(s[0..5])        // "hello"   —— str 切片是【拷贝】，与不可变语义一致
+print(s[6..11])       // "world"
+
+let a = [10, 20, 30, 40]
+let m = a[1..3]       // [20, 30]  —— 切片/数组切片是【零拷贝视图】
+```
+
+- `str[lo..hi]` 返回新串（`__alloc` + `memcpy`），与 `substr(s, lo, hi-lo)` 等价；
+- 切片/数组的区间运算共享底层存储，写视图会写穿到原数组（与 `slice_of` 一致）；
+- `a[3..3]` 合法（空区间），`a[3..2]`、`a[0..len+1]` 直接退出码 1。
+
+### 1.3 内建函数（编译期内建，不是标准库）
+
+| 内建 | 签名 | 说明 |
+|---|---|---|
+| `args()` | `-> []str` | 命令行参数，**不含程序名** |
+| `arg(i)` | `int -> str` | 同上取第 i 个，越界 fail-fast |
+| `read_text(p)` | `str -> str` | 整文件读入（NUL 结尾），失败 fail-fast |
+| `substr(s, lo, n)` | `(str,int,int) -> str` | 子串，越界 fail-fast |
+| `chr(b)` | `int -> str` | 单字节串（0..255），可拼出任意字节序列 |
+| `len(x)` | `-> int` | 数组/切片/map/str 的长度（str 是 O(n)） |
+| `eprint(x)` | `-> int` | 与 `print` 同格式，写 **stderr** |
+| `exit(code)` | `int -> int` | 立即结束进程 |
+| `to_int/to_str/to_float` | `-> T` | 标量转换 |
+| `slice_of(a)` | `[N]T -> []T` | 数组零拷贝视图 |
+| `cores()` | `-> int` | 逻辑核数 |
+
+### 1.4 字符串比较是字典序
+
+`==` `!=` 比内容，`< <= > >=` 比**无符号字节字典序**（不是指针比较，也不是 Unicode 码点序）：
+
+```quelmara
+"abc" < "abd"     // true
+"Z"   < "a"       // true（字节序，65 < 97）
+"b"   > "aaaa"    // true（前缀更长的更大）
+```
+
 ---
 
 ## 2. 类型系统
@@ -379,7 +465,7 @@ threads   = 1
 ## 8. 编译与工具链
 
 ```
-.qma 源码 ──parse──▶ AST ──lower──▶ RosIR ──opt──▶ ┌ x86_64 编码器 → 裸 ELF64（Linux）
+.qma 源码 ──parse──▶ AST ──lower──▶ QuIR ──opt──▶ ┌ x86_64 编码器 → 裸 ELF64（Linux）
                                                     ├ x86_64 编码器 → PE32+/COFF（Windows，无 CRT）
                                                     ├ AArch64 编码器 → ELF64（Linux arm64）
                                                     └ C99 转译 → 任意 C 编译器（移植/自举/网络 demo）
@@ -401,9 +487,9 @@ quelmara build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 E
 
 | 后端 | 路径 | 状态 |
 |---|---|---|
-| **自研 x86_64 Linux** | Quelmara → RosIR → 自研 x86_64 编码器 → 裸 ELF64（无 libc） | ✅ v0.1，执行级 |
-| **自研 x86_64 Windows** | 同一 RosIR/编码器 → PE32+/COFF（无 CRT，kernel32 导入） | ✅ v0.3，本机 55 项 |
-| **自研 AArch64 Linux** | 同一条 RosIR，只换发射层 → ELF64 | 🟡 模拟器执行级，待真机 |
+| **自研 x86_64 Linux** | Quelmara → QuIR → 自研 x86_64 编码器 → 裸 ELF64（无 libc） | ✅ v0.1，执行级 |
+| **自研 x86_64 Windows** | 同一 QuIR/编码器 → PE32+/COFF（无 CRT，kernel32 导入） | ✅ v0.3，本机 55 项 |
+| **自研 AArch64 Linux** | 同一条 QuIR，只换发射层 → ELF64 | 🟡 模拟器执行级，待真机 |
 | C 后端 | Quelmara → C99 → 任意 C 编译器（移植/bootstrapping/网络 demo） | ✅ v0.1 |
 
 各后端对同一 `.qma` 源码交叉验证输出，互为 oracle。
@@ -425,7 +511,7 @@ quelmara build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 E
 | `Quelmara.toml` 解析（core/net/memory/build）| ✅ 全部后端 |
 | `net.TcpServer()`（epoll 非阻塞并发服务器 / io_uring 后端）| ✅ C 后端 intrinsic；Windows 待 IOCP |
 | 魔数除法/强度削减/DCE/复制传播/线性扫描寄存器分配 | ✅ 自研后端 |
-| **内联 / CSE-GVN / LICM / 循环展开 / 指令调度** | ✅ 自研后端（RosIR 级，全部发射层共享） |
+| **内联 / CSE-GVN / LICM / 循环展开 / 指令调度** | ✅ 自研后端（QuIR 级，全部发射层共享） |
 | **Windows PE32+/COFF 写出 / kernel32 导入 / DIR64 重定位** | ✅ v0.3 |
 | `test "名字" { ... }` 内建测试块 | ✅ `quelmara test` |
 | `assert(cond, "msg")` | ✅ 全部后端（含 Windows stderr + 退出码 1） |

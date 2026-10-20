@@ -7,9 +7,15 @@
 > v0.9：`opt_modsum` 模和折叠 + 范围分析扩展 + `mul_const` 回退路径错编修复（loop_sum 11–13ms，见 CHANGELOG）。
 > v0.10：`map[K]V` 开放寻址哈希表（t22）+ 浮点实际运算（t23，修复 `__f64_to_str` 科学计数法死循环）。
 > v0.11：`h.join()` 方法式 + `chan.close()` + `select`（t24/t25/t26）。
-> 本机（Windows）验证：PE 链 **86 项全绿**；词法对拍 **66/66 全等**；[7] 交叉验证与 native/C 链需 Linux/WSL 环境
+> 本机（Windows）验证：PE 链 **88 项全绿**；词法对拍 **68/68 全等**；跨平台基线 win+arm64 输出一致；[7] 交叉验证与 native/C 链需 Linux/WSL 环境
 > （本机无 gcc/clang，C 后端只能验证「生成」不能验证「执行」）。
 > 代码总量：`tools/stage0/` 15.1k 行 Python（引导层）+ `bootstrap/` 268 行 Quelmara（自举层）+ `tests/` 1.9k 行
+>
+> ### v1.1 一句话
+> 补齐"写编译器真正需要"的语法：位运算（含 `>>>`）、进制字面量、子切片 `a[lo..hi]`、
+> 顶层 `const`、`eprint`/`exit`、字符串字典序（修正了一个"文档说有、实现是指针比较"的坑）；
+> 跨平台 bench 基线按「平台/架构/后端」分 key 并把输出哈希跨后端对齐；
+> 新增原创性门禁（只许标准库、禁止外部运行时特征）。
 >
 > ### v1.0 一句话
 > 语言正式更名 **Quelmara**，源码扩展名 `.qma`、产物 `.qex`/`.qel`；Python 编译器降级为
@@ -65,7 +71,7 @@ fn add_one(n: int) -> Result {
 | 后端 | 实现 |
 |---|---|
 | Linux 自研 x86_64 | Result 作为已有 enum 聚合值，`?` 检查 tag；Err 整体拷贝到隐藏返回槽后 return；Ok 载荷从槽 1 读取 |
-| Windows PE | 复用同一 RosIR/Lower，PE 发射层无额外分叉 |
+| Windows PE | 复用同一 QuIR/Lower，PE 发射层无额外分叉 |
 | C 后端 | GNU C statement expression：Err 直接 `return`，Ok 返回 `u.Ok.value` |
 
 当前明确边界：
@@ -141,9 +147,16 @@ Windows PE 74 ✅（本机实测，[1]–[6]；[7] 需 WSL）
 | `chan.close()` / `select` | ✅ v0.11（t25/t26）；无界通道仍 ❌ | — |
 | `h.join()` 方法式语法 | ✅ v0.11 解析期脱糖（t24） | — |
 | `len(str)` / `s[i]` 字节下标 / `s.to_int()` | ✅ v0.12 三链；越界与非法输入 fail-fast（t27/t28） | — |
-| **`s[lo..hi]` 子切片** | ❌ 取子串仍必须手写逐字节拷贝 | **高** |
-| **`argv` / 命令行参数** | ❌ 没有入口参数通道，写不出真正的 CLI 工具 | **高** |
+| **`a[lo..hi]` 子切片** | ✅ v1.1 str 拷贝 / 切片视图 / 数组视图（三链） | — |
+| **`argv` / 命令行参数** | ✅ v1.0 `args()` / `arg(i)`（Windows 走 GetCommandLineA 拆分） | — |
 | 数组作函数参数/返回值 | ❌ `[N]T` v0.6 边界明确报错（`slice_of` 是当前替代） | 中 |
+| 位运算 `& \| ^ ~ << >> >>>` | ✅ v1.1 含复合赋值与自定义优先级 | — |
+| 顶层 `const` | ✅ v1.1 字面量内联（无运行时存储） | — |
+| 进制字面量 `0x/0b/0o` | ✅ v1.1 三链 | — |
+| 字符串字典序 `< <= > >=` | ✅ v1.1 修正（此前是指针比较） | — |
+| `eprint` / `exit` | ✅ v1.1 | — |
+| `vec[T]` 变长数组 | ❌ 需要堆上 realloc 与容量管理 | **高** |
+| `for k in m` 遍历 map | ❌ 只有 set/get/has/del/len | **高** |
 | 泛型 / interface | ❌ | 中 |
 | 所有权 + 借用检查 | ❌ arena/spawn/array 依赖约定 | 中 |
 | `@simd` / `@no_preempt` / `@rc[T]` | ❌ | 中 |
@@ -169,7 +182,7 @@ Windows PE 74 ✅（本机实测，[1]–[6]；[7] 需 WSL）
 | 项 | 状态 |
 |---|---|
 | `quelmara test --target all` | ❌ 需分别指定 |
-| 跨平台 bench 基线 | 🟡 有命令，没有稳定 baseline 文件 |
+| 跨平台 bench 基线 | ✅ v1.1 按「平台/架构/后端」分 key，输出哈希跨后端校验 |
 | Linux/Windows CI | ❌ 未接 |
 | Windows C 后端执行验证 | ❌ 本机无 gcc/clang |
 
@@ -194,9 +207,9 @@ Windows PE 74 ✅（本机实测，[1]–[6]；[7] 需 WSL）
 | 类别 | 文件 | 行数 | 说明 |
 |---|---|---|---|
 | 前端 + C 后端 | `tools/stage0/qlm.py` | ~4.7k | 解析/推断/C 发射；v0.12 加 str 长度、字节下标、十进制解析 |
-| 自研 x86_64 + RosIR | `tools/stage0/qlm_native.py` | ~4.5k | v0.12 加 `str_len` / str 下标 / `__str_to_int` 运行时 |
-| RosIR 优化器 | `tools/stage0/qlm_opt.py` | 1021 | 范围传播、worker 内联边界、保守溢出条件 |
-| Windows PE | `tools/stage0/qlm_pe.py` | 353 | 未改（复用 RosIR） |
+| 自研 x86_64 + QuIR | `tools/stage0/qlm_native.py` | ~4.5k | v0.12 加 `str_len` / str 下标 / `__str_to_int` 运行时 |
+| QuIR 优化器 | `tools/stage0/qlm_opt.py` | 1021 | 范围传播、worker 内联边界、保守溢出条件 |
+| Windows PE | `tools/stage0/qlm_pe.py` | 353 | 未改（复用 QuIR） |
 | 命令行 | `tools/stage0/qlm_cli.py` | 336 | 主机架构默认 target |
 | 测试 | `tests/run_win_tests.py` | ~430 | v0.12 加 `[3c] 字符串` 段（15 条断言） |
 | 测试夹具 | `tests/t27_str.qma` / `t28_toint.qma` | 110 | 长度/下标/解析/边界/往返 |

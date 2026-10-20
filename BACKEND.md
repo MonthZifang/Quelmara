@@ -1,7 +1,7 @@
 # Quelmara 自研后端设计（BACKEND.md）
 
 > 决策：**产品后端必须自研**，不走 LLVM、不走 C 中转。C99 生成器仅保留为显式交叉验证、自举和移植工具，不属于产品运行后端。平台优先与游戏定位**两条线并行推进**，优化持续加深。
-> 现状：v0.1 已实现 x86_64 全链路 —— Quelmara → RosIR → 优化 passes → 线性扫描寄存器分配 → 自研指令编码器 → **裸 ELF64 可执行文件**（无 libc、无 gcc、无外部依赖）。
+> 现状：v0.1 已实现 x86_64 全链路 —— Quelmara → QuIR → 优化 passes → 线性扫描寄存器分配 → 自研指令编码器 → **裸 ELF64 可执行文件**（无 libc、无 gcc、无外部依赖）。
 > v0.3 新增 **Windows x86_64 PE/COFF 写出器 + kernel32 导入 + CreateThread 多核**（无 CRT，产物 6–26 KB）。
 > v0.4 新增 **spawn/join 任务并行**（`spawn_child` IR + Linux clone / Windows CreateThread / C pthread）
 > 与 **arena 帧级回收**（native 回卷 bump 指针；C 后端为作用域）。
@@ -18,8 +18,8 @@
 .qma 源码
   │  Parser（词法/语法 → AST）
   ▼
-AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指令流，非 SSA）
-  │               └─ 运行库（print/itoa/alloc/parfor）用 RosIR 自举
+AST ── Lower(platform=linux|windows) ──▶ QuIR（函数 = vreg + 指令流，非 SSA）
+  │               └─ 运行库（print/itoa/alloc/parfor）用 QuIR 自举
   │                  平台差异只在 emit_write/emit_exit/emit_alloc/parfor 的薄层
   ▼
 优化 passes（见 §3 优化目录，后端/平台 100% 共享）
@@ -49,7 +49,7 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 | 临时寄存器 | rax/rcx/rdx/r10/r11 不入池 | mul/div/syscall/编码 scratch 固定使用，杜绝隐式 clobber |
 | 调用约定 | 自研 ABI（SysV 形状） | 无 libc 依赖；参数并行搬移算法（DAG 调度 + 环破除） |
 | 多核 | raw `clone()` + `wait4()` + 共享内存归约 | 不依赖 pthread；子线程栈 mmap 独立，归约数组全局段 |
-| 运行库 | RosIR 自举（print/itoa/strlen/alloc） | 整个二进制从语言自身语义生长，无外部运行时 |
+| 运行库 | QuIR 自举（print/itoa/strlen/alloc） | 整个二进制从语言自身语义生长，无外部运行时 |
 | Windows ABI | kernel32 导入 + IAT `call [rip+disp32]` + Win64 shadow space | 不链 CRT；每个 winapi 指令预留 32B 影子空间，第 5/6 实参落栈 |
 | Windows 代码入口 | `and rsp,-16` → `call main` → `ExitProcess(rax)` | 无 CRT 初始化；线程入口另存 RDI/RSI（Win64 callee-saved） |
 | PE 绝对地址 | 每个 `movabs` 生成一条 DIR64 重定位 | ASLR 打开也正确；`fnaddr`（线程入口）同样重定位 |
@@ -120,15 +120,15 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 |---|---|---|
 | Linux x86_64 | 自研编码器 + ELF 写出器 | ✅ v0.1 |
 | Windows x86_64 | 自研 PE/COFF 写出器 + kernel32 导入 + CreateThread | ✅ v0.3（本机执行级 55 项） |
-| Linux aarch64 | 自研 ARM64 编码器（RosIR 架构无关，只换发射层） | 🟡 模拟器执行级，待真机 |
+| Linux aarch64 | 自研 ARM64 编码器（QuIR 架构无关，只换发射层） | 🟡 模拟器执行级，待真机 |
 | Windows 网络（IOCP/AFD） | 导入 WSA*/IOCP 或 AFD 设备 | 🚧 下一格（PLATFORM.md 候选 A） |
 | macOS / iOS (arm64) | Mach-O 写出器 + libSystem + kqueue 运行时 | 🚧 需 Mac 真机/CI |
 | Android (arm64) | 复用 Linux aarch64 + epoll | 🚧 |
-| Web (wasm64) | RosIR → wasm 发射器（多核用 workers/SharedArrayBuffer） | 🚧 |
+| Web (wasm64) | QuIR → wasm 发射器（多核用 workers/SharedArrayBuffer） | 🚧 |
 | 嵌入式 (riscv/arm) | 自研编码器 + 最小运行时（`multicore=false` + `heap_limit_mb`） | 🚧 |
 | 主机平台 | 各家 SDK 适配层（NDA/法务先行） | 按需 |
 
-移植成本模型：**RosIR 与优化 passes 100% 复用**，每个新平台 = 一个指令发射器 + 一个可执行格式写出器 + 一个 IO 后端（epoll/kqueue/IOCP/io_uring）。
+移植成本模型：**QuIR 与优化 passes 100% 复用**，每个新平台 = 一个指令发射器 + 一个可执行格式写出器 + 一个 IO 后端（epoll/kqueue/IOCP/io_uring）。
 
 ### 游戏轨（帧率/确定性/内存）
 
@@ -164,7 +164,7 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
 |---|---|---|---|
 | hello | 6144 B | — | 无 CRT，冷启动直入 main |
 | fib(25) | 6656 B | — | 与 Linux ELF 输出一致 |
-| loop_sum 2 亿热循环 | 6144 B | 357.9 ms | 同一套 RosIR 优化 |
+| loop_sum 2 亿热循环 | 6144 B | 357.9 ms | 同一套 QuIR 优化 |
 | parfor_sum 20 线程 6M | 14848 B | 196.1 ms | CreateThread + 共享归约 |
 | prime_parallel（10 万内素数） | 15872 B | 18.7 ms | 自校验通过 |
 | game_loop（结构体帧循环） | 20480 B | — | 自校验通过 |

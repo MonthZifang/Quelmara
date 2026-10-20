@@ -445,6 +445,10 @@ def main():
     print("== [3f] 逻辑运算与 let 值语义（v1.0 回归） ==")
     case_selfcheck("logic", "tests/t31_logic.qma")
 
+    print("== [3g] 位运算 / 子切片 / 字典序（v1.1） ==")
+    case_selfcheck("bits", "tests/t32_bits.qma")
+    case_selfcheck("subslice", "tests/t33_subslice.qma")
+
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])
     case_selfcheck("prime_parallel", "examples/prime_parallel.qma")

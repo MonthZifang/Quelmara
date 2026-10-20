@@ -9,7 +9,7 @@ Quelmara 是一门从 0 到 1 设计的系统级编程语言。本仓库包含�
 ```
 Quelmara/
 ├── SPEC.md              # 语言规范（语法/类型/多核/网络/配置文件/工具链）
-├── BACKEND.md           # 自研后端设计：RosIR/优化目录/双轨路线/实测基线
+├── BACKEND.md           # 自研后端设计：QuIR/优化目录/双轨路线/实测基线
 ├── PLATFORM.md          # 全平台矩阵与移植成本模型（Windows/macOS/wasm 讨论）
 ├── HANDOVER.md          # 交接文档：做了什么/没做什么/差什么/写了多少/需要写什么
 ├── Quelmara.toml          # 根配置文件：多核开关、线程数、网络资源上限（唯一全局开关）
@@ -27,10 +27,10 @@ Quelmara/
 │   └── echo_server.qma        # net.TcpServer 百万连接 echo（epoll 非阻塞，C 后端）
 ├── tools/
 │   ├── qlm.py          # 前端 + C 后端：Quelmara -> C99（pthread / epoll / 配置驱动降级）
-│   ├── qlm_native.py   # 自研 x86_64：Quelmara -> RosIR -> 机器码 -> 裸 ELF64（无 libc）
-│   ├── qlm_pe.py       # 自研 Windows：同一 RosIR -> PE32+/COFF（无 CRT，kernel32 导入）
-│   ├── qlm_arm64.py    # 自研 AArch64：同一条 RosIR，只换发射层
-│   ├── qlm_opt.py      # RosIR 优化器（后端/平台无关）
+│   ├── qlm_native.py   # 自研 x86_64：Quelmara -> QuIR -> 机器码 -> 裸 ELF64（无 libc）
+│   ├── qlm_pe.py       # 自研 Windows：同一 QuIR -> PE32+/COFF（无 CRT，kernel32 导入）
+│   ├── qlm_arm64.py    # 自研 AArch64：同一条 QuIR，只换发射层
+│   ├── qlm_opt.py      # QuIR 优化器（后端/平台无关）
 │   ├── qlm_cli.py      # 统一命令行：默认当前平台自研后端；C 仅显式交叉验证
 │   ├── qlm_fmt.py      # 官方格式化器
 │   ├── qlm_mt.py       # 多核任务运行时发射器（work-stealing）
@@ -224,7 +224,7 @@ arena 真实回收（1MB 上限）、单核降级、assert 失败路径，
 
 | 版本 | 内容 |
 |---|---|
-| v0.1 | **自研后端 x86_64 全链路**（RosIR/寄存器分配/指令编码/裸 ELF）+ C 后端 + epoll 网络 + 配置驱动降级 ✅ |
+| v0.1 | **自研后端 x86_64 全链路**（QuIR/寄存器分配/指令编码/裸 ELF）+ C 后端 + epoll 网络 + 配置驱动降级 ✅ |
 | v0.2 | `break`/`continue`/`struct`（值语义/嵌套/字段读写）+ `frameaddr` + 内联/LICM/CSE/展开/调度 + ARM64 发射器 + `enum`/`match` ✅ |
 | v0.3 | **Windows x86_64 PE/COFF 后端（无 CRT）** + kernel32 导入 + DIR64 重定位 + CreateThread 多核 + 1MB 粒度提交 + Windows 回归 ✅ |
 | v0.4 | **`spawn`/`join` 任务并行 + `arena { }` 帧级回收**（Linux/Windows/C 三链）✅ |

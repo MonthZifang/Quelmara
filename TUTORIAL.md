@@ -315,7 +315,7 @@ fn main() {
 # 自研后端（产品路径）
 python3 tools/stage0/qlm_native.py run   examples/hello.qma          # 编译+运行
 python3 tools/stage0/qlm_native.py build examples/hello.qma -o build/hello
-python3 tools/stage0/qlm_native.py build examples/hello.qma --dump-ir  # 看 RosIR
+python3 tools/stage0/qlm_native.py build examples/hello.qma --dump-ir  # 看 QuIR
 
 # Windows（在 Windows 上）
 python tools/stage0/qlm_cli.py run examples/hello.qma --target win   # 产出 build/hello.exe
@@ -381,7 +381,7 @@ backpressure = "drop"   # drop | close | block
 |---|---|
 | `SHOWCASE.md` | 代码展示 + 性能实测 |
 | `SPEC.md` | 语言规范全文（词法/类型/多核/网络/配置） |
-| `BACKEND.md` | 自研后端架构、RosIR、优化器目录 |
+| `BACKEND.md` | 自研后端架构、QuIR、优化器目录 |
 | `PLATFORM.md` | 全平台矩阵与移植成本 |
 | `HANDOVER.md` | 工程现状、未完成项、路线图 |
 | `CHANGELOG.md` | 版本更新日志 |

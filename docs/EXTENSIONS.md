@@ -17,7 +17,7 @@
 | **`.qla`** | Quelmara Library Archive | **库归档**（多个编译单元打成一包） | `quelmara lib`（规划中） | 链接阶段、`quelmara build` |
 | **`.qel`** | Quelmara ELF | **可执行**（ELF64） | `build --target native` / `--target arm64` | Linux 内核加载器、`tests/a64_emu.py` |
 | **`.qex`** | Quelmara EXecutable | **可执行**（PE32+） | `build --target win` | Windows 加载器、`quelmara run` |
-| **`.qir`** | Quelmara IR | **中间表示**（RosIR 文本） | `build --dump-ir` | 人读、优化器调试、跨后端对拍 |
+| **`.qir`** | Quelmara IR | **中间表示**（QuIR 文本） | `build --dump-ir` | 人读、优化器调试、跨后端对拍 |
 | **`.toml`** | — | **配置** | 人 | 编译器（`Quelmara.toml`） |
 
 ### 为什么 `.qel` 和 `.qex` 要分开

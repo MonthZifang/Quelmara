@@ -2,7 +2,7 @@
 
 > 结论先说：**「全平台」不是一句口号，而是一张可逐格填满的矩阵**。
 > 每一格 = 指令发射层 + 可执行格式写出器 + 系统 ABI/运行时 + IO 后端。
-> RosIR、优化 passes、寄存器分配、前端 100% 复用 —— 这是移植成本能压住的原因。
+> QuIR、优化 passes、寄存器分配、前端 100% 复用 —— 这是移植成本能压住的原因。
 >
 > 本轮（v0.3）填上了 **Windows x86_64（PE/COFF，无 CRT）**：计算、字符串、结构体/枚举、
 > 多核 `parfor` 全部可用，产物 6–26 KB，冷启动即 `main`。**网络（IOCP/AFD）尚未接入**。
@@ -18,7 +18,7 @@
 | Linux aarch64 | ELF64 | 自研 AArch64 | raw syscall | epoll | 🟡 模拟器执行级验证，缺真机 |
 | macOS / iOS arm64 | Mach-O | 自研 AArch64（复用） | libSystem 导入 | kqueue | ⛔ 未做 |
 | Android arm64 | ELF64 | 自研 AArch64 | raw syscall | epoll | ⛔ 未做 |
-| Web (wasm64) | .wasm | RosIR → wasm | WASI | 浏览器 fetch/WebSocket | ⛔ 未做 |
+| Web (wasm64) | .wasm | QuIR → wasm | WASI | 浏览器 fetch/WebSocket | ⛔ 未做 |
 | 主机（PS/Xbox/Switch） | 各家格式 | 自研 x86/ARM | 平台 SDK | 平台网络栈 | ⛔ 需 NDA/法务 |
 
 图例：✅ 执行级通过；🟡 部分验证；⛔ 未开始。
@@ -28,7 +28,7 @@
 ## 2. Windows 这一格做了什么（v0.3）
 
 ```
-.qma ──Parser──▶ AST ──Lower(platform="windows")──▶ RosIR
+.qma ──Parser──▶ AST ──Lower(platform="windows")──▶ QuIR
                                                    │
                     优化 passes（与 Linux 完全相同）│ 内联/CSE/LICM/展开/调度/DCE
                                                    ▼
@@ -69,7 +69,7 @@
 
 ## 3. 「全平台」的移植成本模型
 
-**共享部分（约 90% 代码）**：Parser / 类型检查 / RosIR / 优化 passes / 寄存器分配 /
+**共享部分（约 90% 代码）**：Parser / 类型检查 / QuIR / 优化 passes / 寄存器分配 /
 诊断信息 / 测试框架。新增平台**不碰**这些。
 
 **每平台新增部分（约 10%）**：
@@ -120,7 +120,7 @@
 
 ### 候选 C：WebAssembly（wasm64）——P2
 
-- RosIR → wasm 指令是一一映射，优化器完全复用；运行时用 WASI（`fd_write` / `proc_exit`）。
+- QuIR → wasm 指令是一一映射，优化器完全复用；运行时用 WASI（`fd_write` / `proc_exit`）。
 - 多核：Web Workers + SharedArrayBuffer（需要 COOP/COEP 响应头）。
 - 价值：浏览器里跑 Quelmara 游戏 demo，传播力最强；性能不如原生，但「全平台」叙事完整。
 - 成本：~1200 行（wasm 编码 + 线性内存布局 + WASI 导入）。

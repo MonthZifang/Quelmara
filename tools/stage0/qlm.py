@@ -124,12 +124,16 @@ def load_config(src_path):
 KEYWORDS = {"fn", "let", "mut", "if", "else", "while", "for", "parfor",
             "return", "module", "import", "true", "false", "test",
             "break", "continue", "struct", "enum", "match",
-            "arena", "spawn", "chan", "option", "result", "map", "select"}
+            "arena", "spawn", "chan", "option", "result", "map", "select",
+            "const"}
 
-TWO_CHAR = {"->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "..", "=>"}
-ONE_CHAR = "(){}[],:.=<>+-*/%!?@"
+FOUR_CHAR = {">>>="}
+THREE_CHAR = {"<<=", ">>=", ">>>"}
+TWO_CHAR = {"->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "..", "=>",
+            "<<", ">>", "&=", "|=", "^=", "%="}
+ONE_CHAR = "(){}[],:.=<>+-*/%!?@&|^~"
 
-SYMBOLS = sorted(TWO_CHAR | set(ONE_CHAR), key=len, reverse=True)
+SYMBOLS = sorted(FOUR_CHAR | THREE_CHAR | TWO_CHAR | set(ONE_CHAR), key=len, reverse=True)
 
 
 class Tok:
@@ -176,6 +180,19 @@ def tokenize(src, keep_comments=False):
             if keep_comments:
                 toks.append(Tok("COMMENT", "".join(buf), line))
             i = j + 2
+            continue
+        if c.isdigit() and i + 1 < n and src[i] == "0" and src[i + 1] in "xXbBoO":
+            # 0x / 0b / 0o 字面量（编译器写指令编码必须要有十六进制）
+            base = {"x": 16, "b": 2, "o": 8}[src[i + 1].lower()]
+            ok = "0123456789abcdefABCDEF" if base == 16 else (
+                "01" if base == 2 else "01234567")
+            j = i + 2
+            while j < n and (src[j] in ok or src[j] == "_"):
+                j += 1
+            if j == i + 2:
+                raise SyntaxError(f"line {line}: {src[i:i + 2]} 后面缺少数字")
+            toks.append(Tok("INT", int(src[i + 2:j].replace("_", ""), base), line))
+            i = j
             continue
         if c.isdigit():
             j = i
@@ -273,6 +290,7 @@ class Parser:
         self.enums = {}            # name -> [(variant, [(field, type)])]（预扫描先登记名字）
         self.decl_order = []       # [("struct"|"enum", name)] 声明顺序（C typedef 输出顺序）
         self.externs = {}          # name -> fdef（@extern("C") 声明，无函数体）
+        self.consts = {}           # name -> 字面量值（顶层 const，编译期内联）
         self._prescan()
 
     def _prescan(self):
@@ -294,6 +312,24 @@ class Parser:
                     and toks[i + 1].kind == "NAME":
                 self.enums.setdefault(toks[i + 1].val, [])
             i += 1
+
+    def parse_const_value(self, name):
+        """const 的右值：整数/浮点/字符串/布尔，或它们的负号形式。"""
+        neg = False
+        if self.at("SYM", "-"):
+            self.next()
+            neg = True
+        t = self.peek()
+        if t.kind in ("INT", "FLOAT"):
+            self.next()
+            return ("num", -t.val if neg else t.val)
+        if t.kind == "STR" and not neg:
+            self.next()
+            return ("str", t.val)
+        if t.kind in ("true", "false") and not neg:
+            self.next()
+            return ("bool", t.kind == "true")
+        raise SyntaxError(f"line {t.line}: const {name} 的右值必须是字面量")
 
     def peek(self, off=0):
         return self.toks[min(self.pos + off, len(self.toks) - 1)]
@@ -326,6 +362,13 @@ class Parser:
                     self.next()
                     path.append(self.eat("NAME").val)
                 imports.append(".".join(path))
+            elif self.at("const"):
+                # const NAME = <编译期字面量>：只在解析期做内联，不产生运行时存储。
+                # 只接受字面量（含一元负号）——需要算式的常量请直接写字面量。
+                self.next()
+                cname = self.eat("NAME").val
+                self.eat("SYM", "=")
+                self.consts[cname] = self.parse_const_value(cname)
             elif self.at("fn"):
                 fns.append(self.parse_fn())
             elif self.at("SYM", "@"):
@@ -538,7 +581,8 @@ class Parser:
             raise SyntaxError(f"line {t.line}: enum 声明只能在顶层")
         # 赋值 / 表达式语句
         expr = self.parse_expr()
-        if self.at("SYM") and self.peek().val in ("=", "+=", "-=", "*=", "/="):
+        if self.at("SYM") and self.peek().val in (
+                "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="):
             op = self.next().val
             rhs = self.parse_expr()
             if isinstance(expr, tuple) and expr[0] == "name":
@@ -697,10 +741,40 @@ class Parser:
         return l
 
     def parse_and(self):
-        l = self.parse_eq()
+        l = self.parse_bor()
         while self.at("SYM", "&&"):
             self.next()
-            l = ("binop", "&&", l, self.parse_eq())
+            l = ("binop", "&&", l, self.parse_bor())
+        return l
+
+    # 位运算优先级故意采用「自下而上收紧」的层次：
+    #   |  最松
+    #   ^
+    #   &
+    #   比较
+    #   << >>
+    #   加减
+    # 这与 Go（把 << >> 放在乘法层、| 放在加法层）和 Python（& 高于 ^）都不同，
+    # 是 Quelmara 自己的定义，见 SPEC §2.4。
+    def parse_bor(self):
+        l = self.parse_bxor()
+        while self.at("SYM", "|"):
+            self.next()
+            l = ("binop", "|", l, self.parse_bxor())
+        return l
+
+    def parse_bxor(self):
+        l = self.parse_band()
+        while self.at("SYM", "^"):
+            self.next()
+            l = ("binop", "^", l, self.parse_band())
+        return l
+
+    def parse_band(self):
+        l = self.parse_eq()
+        while self.at("SYM", "&"):
+            self.next()
+            l = ("binop", "&", l, self.parse_eq())
         return l
 
     def parse_eq(self):
@@ -711,8 +785,15 @@ class Parser:
         return l
 
     def parse_rel(self):
-        l = self.parse_add()
+        l = self.parse_shift()
         while self.at("SYM") and self.peek().val in ("<", "<=", ">", ">="):
+            op = self.next().val
+            l = ("binop", op, l, self.parse_shift())
+        return l
+
+    def parse_shift(self):
+        l = self.parse_add()
+        while self.at("SYM") and self.peek().val in ("<<", ">>", ">>>"):
             op = self.next().val
             l = ("binop", op, l, self.parse_add())
         return l
@@ -738,6 +819,9 @@ class Parser:
         if self.at("SYM", "-"):
             self.next()
             return ("unop", "-", self.parse_unary())
+        if self.at("SYM", "~"):
+            self.next()
+            return ("unop", "~", self.parse_unary())
         if self.at("spawn"):
             # spawn f(args) -> 线程句柄（int64）；语义见 SPEC §4
             t = self.next()
@@ -790,11 +874,17 @@ class Parser:
                         # 调用结果 / 括号表达式上的 .field -> 字段访问
                         e = ("field", e, name)
             elif self.at("SYM", "["):
-                # 定长数组下标：a[i]
+                # 下标 a[i] 或区间 a[lo..hi]（v1.1 子切片：左闭右开）
                 self.next()
-                idx = self.parse_expr()
-                self.eat("SYM", "]")
-                e = ("index", e, idx)
+                lo = self.parse_expr()
+                if self.at("SYM", ".."):
+                    self.next()
+                    hi = self.parse_expr()
+                    self.eat("SYM", "]")
+                    e = ("sliceof", e, lo, hi)
+                else:
+                    self.eat("SYM", "]")
+                    e = ("index", e, lo)
             elif self.at("SYM", "?"):
                 self.next()
                 e = ("try", e)
@@ -936,6 +1026,10 @@ class Parser:
             return e
         if t.kind == "NAME":
             self.next()
+            # 顶层 const 内联：只在"不是函数调用/成员访问"时替换
+            if t.val in self.consts and not (
+                    self.at("SYM", "(") or self.at("SYM", ".")):
+                return self.consts[t.val]
             # 点路径（仅吸收非方法调用的 .NAME 段；NAME( 留给 postfix 处理方法调用）
             path = [t.val]
             while self.at("SYM", ".") and self.peek(1).kind == "NAME":
@@ -1105,7 +1199,7 @@ def type_str(t):
     return t[1] if t[0] == "named" else ("QlmBuf" if t[1] == ("named", "byte") else "void *")
 
 
-# 切片 `[]T` = {ptr, len} 两字（与自研后端 RosIR 字宽一致）
+# 切片 `[]T` = {ptr, len} 两字（与自研后端 QuIR 字宽一致）
 SLICE_WORDS = 2
 # 切片/数组元素只接受标量：一律按 8 字节字存放
 SCALAR_ELEMS = ("int", "i64", "i32", "u64", "u32", "i16", "u16", "i8", "u8",
@@ -1331,6 +1425,15 @@ class Infer:
                 if elem is None:
                     elem = C_TO_ELEM.get(et, "int")
             return arr_env(elem or "int", len(e[1]))
+        if k == "sliceof":
+            ot = self.expr(e[1], env)
+            if ot == "const char *":
+                return "const char *"
+            if is_arr_env(ot):
+                return "slice:" + arr_env_parts(ot)[0]
+            if is_slice_env(ot):
+                return ot
+            raise SyntaxError("子切片 a[lo..hi] 只支持 str、切片与定长数组")
         if k == "index":
             ot = self.expr(e[1], env)
             if is_arr_env(ot):
@@ -1562,6 +1665,19 @@ static const char *qlm_substr(const char *s, int64_t lo, int64_t n) {
     memcpy(buf, s + lo, (size_t)n);
     buf[n] = 0;
     return buf;
+}
+
+static int64_t qlm_str_cmp(const char *a, const char *b) {
+    int c = strcmp(a, b);
+    return c < 0 ? -1 : (c > 0 ? 1 : 0);
+}
+
+static void qlm_range(int64_t lo, int64_t hi, int64_t len) {
+    if (lo < 0 || hi < lo || hi > len) {
+        fprintf(stderr, "quelmara: sub-slice range out of bounds (fail-fast)\n");
+        fflush(stdout);
+        exit(1);
+    }
 }
 
 static const char *qlm_chr(int64_t b) {
@@ -2223,6 +2339,22 @@ class Codegen:
                 return f"((int64_t)({acode}))", "int64_t"
             if name == "cores":
                 return "qlm_cores()", "int64_t"
+            if name == "eprint" and name not in self.infer.fns:
+                if len(e[2]) != 1:
+                    raise SyntaxError("eprint(x) 需要一个实参")
+                code, t = self.gen_expr(e[2][0], env)
+                if t == "const char *":
+                    return f'(fprintf(stderr, "%s\\n", {code}))', "int64_t"
+                if t == "bool":
+                    return f'(fprintf(stderr, "%s\\n", ({code}) ? "true" : "false"))', "int64_t"
+                if is_float_env(t):
+                    return f'(fprintf(stderr, "%g\\n", (double)({code})))', "int64_t"
+                return f'(fprintf(stderr, "%lld\\n", (long long)({code})))', "int64_t"
+            if name == "exit" and name not in self.infer.fns:
+                if len(e[2]) != 1:
+                    raise SyntaxError("exit(code) 需要一个实参")
+                code, _t = self.gen_expr(e[2][0], env)
+                return f'(exit((int)({code})))', "int64_t"
             if name == "substr" and name not in self.infer.fns:
                 if len(e[2]) != 3:
                     raise SyntaxError("substr(s, lo, n) 需要三个实参")
@@ -2371,6 +2503,35 @@ class Codegen:
                             f"((int64_t)(unsigned char)({ocode})[{tmp}]); }})", "int64_t")
                 return f"((int64_t)(unsigned char)({ocode})[({icode})])", "int64_t"
             raise SyntaxError("下标只能用于定长数组、切片或 str")
+        if k == "sliceof":
+            ocode, otype = self.gen_expr(e[1], env)
+            lcode, _ = self.gen_expr(e[2], env)
+            hcode, _ = self.gen_expr(e[3], env)
+            self.tmp_id += 1
+            base = f"_sl{self.tmp_id}"
+            if otype == "const char *":
+                return (f"({{ int64_t {base}l = (int64_t)({lcode}); "
+                        f"int64_t {base}h = (int64_t)({hcode}); "
+                        f"qlm_range({base}l, {base}h, (int64_t)strlen({ocode})); "
+                        f"qlm_substr({ocode}, {base}l, {base}h - {base}l); }})",
+                        "const char *")
+            if is_arr_env(otype):
+                n = arr_env_parts(otype)[1]
+                return (f"({{ int64_t {base}l = (int64_t)({lcode}); "
+                        f"int64_t {base}h = (int64_t)({hcode}); "
+                        f"qlm_range({base}l, {base}h, {n}); "
+                        f"(QlmSlice){{ .ptr = (void *)((int64_t *)({ocode}) + {base}l), "
+                        f".len = {base}h - {base}l }}; }})",
+                        "slice:" + arr_env_parts(otype)[0])
+            if is_slice_env(otype):
+                elem = slice_env_elem(otype)
+                pfield, cast, _rt = slice_access(elem)
+                return (f"({{ int64_t {base}l = (int64_t)({lcode}); "
+                        f"int64_t {base}h = (int64_t)({hcode}); "
+                        f"qlm_range({base}l, {base}h, ({ocode}).len); "
+                        f"(QlmSlice){{ .ptr = (void *)(({cast})({ocode}).{pfield} + {base}l), "
+                        f".len = {base}h - {base}l }}; }})", otype)
+            raise SyntaxError("子切片 a[lo..hi] 只支持 str、切片与定长数组")
         if k == "arraylit":
             raise SyntaxError("数组字面量只能直接用于 let（v0.6 边界）")
         if k == "chanopen":
@@ -2458,6 +2619,11 @@ class Codegen:
                 # 字符串比较：内容相等（非指针）
                 cmp = f"qlm_str_eq({lc}, {rc})"
                 return (f"({cmp})" if op == "==" else f"(!{cmp})"), "bool"
+            if op in ("<", "<=", ">", ">=") and "const char *" in (lt, rt):
+                # 字典序（早期这里是指针比较）
+                return f"(qlm_str_cmp({lc}, {rc}) {op} 0)", "bool"
+            if op == ">>>":
+                return f"((int64_t)((uint64_t)({lc}) >> (uint64_t)({rc})))", "int64_t"
             return f"({lc} {op} {rc})", "bool" if op in ("==", "!=", "<", "<=", ">", ">=", "&&", "||") else "int64_t"
         if k == "unop":
             code, t = self.gen_expr(e[2], env)

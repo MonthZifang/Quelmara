@@ -3,7 +3,7 @@
 """
 Quelmara 自研 Windows x86_64 后端（PE/COFF，无 CRT）
 ================================================
-Quelmara 源码 -> RosIR（与 Linux/ELF 后端完全同一条前端与优化管线）
+Quelmara 源码 -> QuIR（与 Linux/ELF 后端完全同一条前端与优化管线）
            -> 自研 x86_64 编码器（复用 qlm_native.Enc）
            -> 自研 PE/COFF 写出器（导入 kernel32、DIR64 重定位、4 个节）
 
@@ -12,7 +12,7 @@ Quelmara 源码 -> RosIR（与 Linux/ELF 后端完全同一条前端与优化管
     I/O 走 kernel32 导入（GetStdHandle / WriteFile / ExitProcess），
     内存走 VirtualAlloc（MEM_RESERVE + 1MB 粒度 MEM_COMMIT），
     多核走 CreateThread / WaitForSingleObject，不依赖 pthread。
-  * 与 Linux 后端共享：Parser / RosIR / 优化 passes / 寄存器分配 / 编码器。
+  * 与 Linux 后端共享：Parser / QuIR / 优化 passes / 寄存器分配 / 编码器。
     平台差异只在「如何做一次系统调用」这一薄层（Lower 的 emit_* helper）。
   * 产物默认约数 KB，无运行时初始化，冷启动即 main —— 「省用」。
 
