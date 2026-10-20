@@ -283,21 +283,44 @@ python tools/stage0/qlm_pe.py build tests/t17_result.qma -o build/x.exe --dump-i
 
 ## 7. 版本控制 / 远端
 
-- **git remote 已配置并推送**：`origin = https://github.com/MonthZifang/Quelmara`（2026-10-20）。
-- 最新提交：
-  - `ffadac6` v0.12：字符串 len/下标/十进制解析 + @extern 收口 + aarch64 CLI 修复
-  - `ade98a4` v0.11：`h.join()` + `chan.close()` + `select`
-  - `7cda6f4` docs：远端与单文件夹约定
-  - `cd6468e` archive: v0.2 快照（qlm_old_v02.tar.gz）
-  - `b42e0a4` v0.9+v0.10：modsum 折叠 + 泛型 result/切片 + map[K]V + 浮点
-  - `d61c593` v0.8 option[T]
-  - `d38c359` v0.7 Result `?`
-  - `ff8f830` v0.6 arrays
-  - `3e9b8c0` v0.5 chan
-- 后续推送：`git push origin master`。
-- 工作区已整理为单一文件夹：`Quelmara/quelmara/`（git 仓库）；历史快照
-  qlm_map / qlm_rg / qlm_old_v02 与顶层 scratch 已清出工作区
-  （old_v02 内容以 `quelmara/archive/qlm_old_v02.tar.gz` 形式保留在仓库内）。
+- **git remote**：`origin = https://github.com/MonthZifang/Rosoto`（待改名为 `Quelmara`）。
+- 提交线：
+  - `026be71` v1.0：自举词法器 + `||`/`let` 修复
+  - `52714d0` C2+C3：read_text / substr / chr
+  - `cd05d39` C0+C1：堆对齐 + args()
+  - `d76f686` 扩展名 `.qma` 硬切
+  - `25fe994` 文档 + 门禁
+  - `6493b2d` 改名 Quelmara + 模块下沉 stage0
+  - `ffadac6` / `ca3cc93` v0.12；`ade98a4` v0.11；`b42e0a4` v0.9+v0.10
+- 工作区已整理为单一文件夹：`Rosoto/rosoto/`（git 仓库）。
+
+### 目录改名（需要用户手动执行）
+
+当前会话把仓库目录作为工作目录，操作系统会拒绝改名（`Permission denied`）。
+**关闭当前会话后**在 `C://Users//43551//Desktop` 执行：
+
+```bash
+mv Rosoto/rosoto Rosoto/quelmara     # 内层仓库目录
+mv Rosoto Quelmara                   # 外层目录
+```
+
+然后在 `C://Users//43551//Desktop//Quelmara//quelmara` 重新打开项目；
+`.workbuddy/memory` 会随外层目录一起搬走。
+
+### GitHub 仓库改名（需要用户手动执行）
+
+1. 打开 `https://github.com/MonthZifang/Rosoto/settings` → Repository name → 改为 `Quelmara` → Rename。
+2. 本地更新 remote 并推送：
+   ```bash
+   git remote set-url origin https://github.com/MonthZifang/Quelmara
+   git push origin master
+   ```
+3. 旧地址会自动 301 重定向，但建议同步更新文档里的 URL（`README.md` / `TUTORIAL.md`）。
+
+### 远端脚本
+
+`C://Users//43551//Desktop//Rosoto//push.sh` 已改为从环境变量读密码（不再明文），
+并支持 `QM_REMOTE` / `QM_LOCAL` 覆盖路径，目录改名后不必改脚本。
 
 ---
 
