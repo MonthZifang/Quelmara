@@ -1,0 +1,7 @@
+// map 负向用例：get 不存在的键 -> fail-fast（打印错误 + 非零退出，不返回垃圾值）
+fn main() {
+    let m = map[int]int.new(8)
+    m.set(1, 10)
+    print("before missing get")
+    print(m.get(2))
+}

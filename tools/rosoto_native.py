@@ -42,7 +42,9 @@ ARG_REGS = [RDI, RSI, RDX, RCX, R8, R9]               # 调用约定（自研 AB
 SCRATCH, SCRATCH2, ACC = R11, R10, RAX                # 编码期临时寄存器（不参与分配）
 
 CC = {"e": (0x84, 0x94), "ne": (0x85, 0x95), "l": (0x8C, 0x9C),
-      "ge": (0x8D, 0x9D), "le": (0x8E, 0x9E), "g": (0x8F, 0x9F)}
+      "ge": (0x8D, 0x9D), "le": (0x8E, 0x9E), "g": (0x8F, 0x9F),
+      "p": (0x8A, 0x9A), "np": (0x8B, 0x9B), "b": (0x82, 0x92),
+      "be": (0x86, 0x96), "a": (0x87, 0x97), "ae": (0x83, 0x93)}
 INV_CC = {"e": "ne", "ne": "e", "l": "ge", "ge": "l", "le": "g", "g": "le"}
 
 
@@ -262,6 +264,70 @@ class Enc:
     def movzx_r_r8(self, dst, src8):
         self.emit(rex(w=1, r=dst, b=src8), b"\x0f\xb6", modrm_reg(dst, src8))
 
+    # ---- SSE2 浮点（x86-64 基线自带 SSE2；xmm0/xmm1/xmm2 作编码期临时）----
+    def movq_xr(self, x, r):
+        """movq xmm_x, r64（64 位位模式进 XMM）"""
+        self.emit(b"\x66", rex(w=1, r=x, b=r), b"\x0f\x6e", modrm_reg(x, r))
+
+    def movq_rx(self, r, x):
+        """movq r64, xmm_x"""
+        self.emit(b"\x66", rex(w=1, r=x, b=r), b"\x0f\x7e", modrm_reg(x, r))
+
+    def movd_xr(self, x, r):
+        """movd xmm_x, r32（f32 低 32 位）"""
+        self.emit(b"\x66", rex(r=x, b=r), b"\x0f\x6e", modrm_reg(x, r))
+
+    def movd_rx(self, r, x):
+        """movd r32, xmm_x（写 r32 高 32 位自动清零）"""
+        self.emit(b"\x66", rex(r=x, b=r), b"\x0f\x7e", modrm_reg(x, r))
+
+    def fp_alu(self, w, op, xd, xs):
+        """addsd/subsd/mulsd/divsd（w=f64）或 addss/...（w=f32）：xd = xd OP xs"""
+        pfx = b"\xf2" if w == "f64" else b"\xf3"
+        opc = {"add": b"\x58", "sub": b"\x5c", "mul": b"\x59", "div": b"\x5e"}[op]
+        self.emit(pfx, rex(r=xd, b=xs), b"\x0f", opc, modrm_reg(xd, xs))
+
+    def fp_cmp(self, w, xd, xs):
+        """comisd（66 0F 2F）/ comiss（0F 2F）——设置 EFLAGS，PF=1 无序/NaN。
+        注意与算术指令不同：比较指令的双/单精度靠 66 前缀区分，无 F2/F3。"""
+        if w == "f64":
+            self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x2f", modrm_reg(xd, xs))
+        else:
+            self.emit(rex(r=xd, b=xs), b"\x0f\x2f", modrm_reg(xd, xs))
+
+    def fp_xor(self, w, xd, xs):
+        """xorpd（f64）/ xorps（f32）—— fneg 用符号位掩码：xd ^= xs"""
+        if w == "f64":
+            self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x57", modrm_reg(xd, xs))
+        else:
+            self.emit(rex(r=xd, b=xs), b"\x0f\x57", modrm_reg(xd, xs))
+
+    def cvt(self, kind, xd_or_r, xs_or_r):
+        """标量转换：
+        i2f64: cvtsi2sd xmm, r64   i2f32: cvtsi2ss xmm, r64
+        f64i:  cvttsd2si r64, xmm  f32i:  cvttss2si r64, xmm
+        f32f64: cvtss2sd xmm, xmm  f64f32: cvtsd2ss xmm, xmm"""
+        if kind == "i2f64":
+            self.emit(b"\xf2", rex(w=1, r=xd_or_r, b=xs_or_r), b"\x0f\x2a",
+                      modrm_reg(xd_or_r, xs_or_r))
+        elif kind == "i2f32":
+            self.emit(b"\xf3", rex(w=1, r=xd_or_r, b=xs_or_r), b"\x0f\x2a",
+                      modrm_reg(xd_or_r, xs_or_r))
+        elif kind == "f64i":
+            self.emit(b"\xf2", rex(w=1, r=xd_or_r, b=xs_or_r), b"\x0f\x2c",
+                      modrm_reg(xd_or_r, xs_or_r))
+        elif kind == "f32i":
+            self.emit(b"\xf3", rex(w=1, r=xd_or_r, b=xs_or_r), b"\x0f\x2c",
+                      modrm_reg(xd_or_r, xs_or_r))
+        elif kind == "f32f64":
+            self.emit(b"\xf3", rex(r=xs_or_r, b=xd_or_r), b"\x0f\x5a",
+                      modrm_reg(xs_or_r, xd_or_r))
+        elif kind == "f64f32":
+            self.emit(b"\xf2", rex(r=xs_or_r, b=xd_or_r), b"\x0f\x5a",
+                      modrm_reg(xs_or_r, xd_or_r))
+        else:
+            raise RuntimeError(f"未知 fcvt {kind}")
+
     # -- 控制流 --
     def jmp(self, label):
         self.emit(b"\xe9")
@@ -370,6 +436,12 @@ class Fn:
 # ---------------------------------------------------------------------------
 
 
+# 切片 `[]T` = {ptr, len} 两字：word0 指向元素序列，word1 是元素个数。
+# 与结构体/枚举一样走聚合 ABI（隐藏出参指针返回 / 地址传递），
+# 因此作函数参数/返回值零改动复用。
+SLICE_WORDS = 2
+
+
 class Lower:
     def __init__(self, fns_ast, cfg, arch="x86_64", structs=None, enums=None,
                  platform="linux"):
@@ -386,9 +458,11 @@ class Lower:
         self.gid_of_str = {}
         self.spawn_id = 0
         self.uses_chan = False
+        self.uses_map = False
         self.uses_arena = False
         self.uses_join = False
         self.uses_bounds = False
+        self.uses_f64_str = False
         if platform == "windows":
             # WriteFile 的 lpNumberOfBytesWritten 落点（Win32 必须给非空指针）
             self.written_gid = self.intern_array(1)
@@ -400,9 +474,25 @@ class Lower:
         return name in self.structs or name in self.enums
 
     def field_words(self, t):
-        if t and t[0] == "named" and self.is_agg(t[1]):
+        return self.type_words(t)
+
+    def type_words(self, t):
+        """类型元组 -> 占用字数（切片恒为 2 字 {ptr,len}）"""
+        if not t:
+            return 1
+        if t[0] == "slice":
+            return SLICE_WORDS
+        if t[0] == "named" and self.is_agg(t[1]):
             return self.agg_size(t[1])
         return 1
+
+    def is_agg_type(self, t):
+        """是否走聚合 ABI（隐藏出参指针返回 / 地址传递）"""
+        if not t:
+            return False
+        if t[0] == "slice":
+            return True
+        return t[0] == "named" and self.is_agg(t[1])
 
     def struct_size(self, sname):
         fields = self.structs.get(sname)
@@ -452,7 +542,10 @@ class Lower:
 
     def struct_copy(self, fn, dst, src, sname):
         """按值拷贝 words 个字（src/dst 都是地址；枚举/结构体共用）"""
-        w = self.agg_size(sname)
+        self.words_copy(fn, dst, src, self.agg_size(sname))
+
+    def words_copy(self, fn, dst, src, w):
+        """按值拷贝 w 个字（src/dst 都是地址；切片也用它）"""
         for i in range(w):
             t = fn.new_v()
             fn.emit("load", t, src, ("imm", i))
@@ -461,10 +554,47 @@ class Lower:
     def alloc_struct(self, fn, sname, words=None):
         """开一段新帧槽并返回其地址"""
         w = self.agg_size(sname) if words is None else words
+        return self._mark_struct(fn, self.alloc_words(fn, w), sname)
+
+    def alloc_words(self, fn, w):
         base = fn.new_struct_slot(w)
         addr = fn.new_v()
         fn.emit("frameaddr", addr, base)
-        return self._mark_struct(fn, addr, sname)
+        return addr
+
+    # ---- 切片（v0.9）：{ptr, len} 两字零拷贝视图 ----
+    @staticmethod
+    def _mark_slice(fn, v):
+        if isinstance(v, int):
+            if not hasattr(fn, "slicev"):
+                fn.slicev = set()
+            fn.slicev.add(v)
+        return v
+
+    @staticmethod
+    def _is_slice(fn, v):
+        return isinstance(v, int) and v in getattr(fn, "slicev", set())
+
+    def alloc_slice(self, fn):
+        """开一段 2 字帧槽作为切片值（word0=ptr, word1=len）"""
+        return self._mark_slice(fn, self.alloc_words(fn, SLICE_WORDS))
+
+    def make_slice(self, fn, ptr, length):
+        """由指针 + 长度构造切片值（零拷贝）"""
+        s = self.alloc_slice(fn)
+        fn.emit("store", s, ("imm", 0), ptr)
+        fn.emit("store", s, ("imm", 1), length)
+        return s
+
+    def slice_ptr(self, fn, s):
+        p = fn.new_v()
+        fn.emit("load", p, s, ("imm", 0))
+        return p
+
+    def slice_len(self, fn, s):
+        n = fn.new_v()
+        fn.emit("load", n, s, ("imm", 1))
+        return n
 
     # ---- 定长数组（v0.6）：帧槽 N 字 + 值语义拷贝 ----
     @staticmethod
@@ -491,18 +621,27 @@ class Lower:
             fn.emit("load", t, src, ("imm", i))
             fn.emit("store", dst, ("imm", i), t)
 
-    def emit_bounds(self, fn, idx, n):
-        """越界 fail-fast（Rosoto.toml [build] bounds_check 可关闭）"""
+    def emit_bounds(self, fn, idx, n, dynamic=False):
+        """越界 fail-fast（Rosoto.toml [build] bounds_check 可关闭）。
+        n 默认是常量长度；dynamic=True 时 n 是运行期 vreg（切片动态长度）"""
         if not self.cfg["build"].get("bounds_check", True):
             return
         self.uses_bounds = True
+        nval = n if dynamic else ("imm", n)
         l_ok = fn.label("bok")
         l_fail = fn.label("bfail")
-        fn.emit("jcc", "ge", idx, ("imm", n), l_fail)
+        fn.emit("jcc", "ge", idx, nval, l_fail)
         fn.emit("jcc", "ge", idx, ("imm", 0), l_ok)
         fn.emit("label", l_fail)
         fn.emit("call", None, "__bounds_fail", [])
         fn.emit("label", l_ok)
+
+    @staticmethod
+    def _ty_float_w(ty):
+        """类型元组 -> 'f32'/'f64'/None（浮点宽度）"""
+        if ty and ty[0] == "named" and ty[1] in ("float", "f64", "f32"):
+            return "f32" if ty[1] == "f32" else "f64"
+        return None
 
     def lower_struct_lit(self, sname, fields, fn, env):
         addr = self.alloc_struct(fn, sname)
@@ -516,6 +655,7 @@ class Lower:
                 self._mark_struct(fn, sub, ftype[1])
                 self.struct_copy(fn, sub, val, ftype[1])
             else:
+                val = self.conv_to(fn, val, self._float_of(fn, val), self._ty_float_w(ftype))
                 fn.emit("store", addr, ("imm", off), val)
         return addr
 
@@ -542,6 +682,7 @@ class Lower:
                 self.struct_copy(fn, sub, val, ftype[1])
                 off += self.agg_size(ftype[1])
             else:
+                val = self.conv_to(fn, val, self._float_of(fn, val), self._ty_float_w(ftype))
                 fn.emit("store", addr, ("imm", off), val)
                 off += 1
         return self._mark_struct(fn, addr, ename)
@@ -729,6 +870,8 @@ class Lower:
         k = e[0]
         if k == "num":
             return ("imm", e[1])
+        if k == "fnum":
+            return self.make_fnum(fn, e[1], e[2])
         if k == "bool":
             return ("imm", 1 if e[1] else 0)
         if k == "str":
@@ -746,18 +889,29 @@ class Lower:
                 v = self.eval(el, fn, env)
                 if self._struct_of(fn, v) is not None or self._is_str(fn, v):
                     raise SyntaxError("数组元素暂只支持数值（v0.6 边界）")
+                if self._float_of(fn, v):
+                    raise SyntaxError("数组元素暂不支持浮点（v1 边界）")
                 fn.emit("store", addr, ("imm", i), v)
             return addr
         if k == "index":
             obj = self.eval(e[1], fn, env)
             n = self._arr_of(fn, obj)
-            if n is None:
-                raise SyntaxError("下标只能用于定长数组")
-            idx = self.eval(e[2], fn, env)
-            self.emit_bounds(fn, idx, n)
-            d = fn.new_v()
-            fn.emit("load", d, obj, idx)
-            return d
+            if n is not None:
+                idx = self.eval(e[2], fn, env)
+                self.emit_bounds(fn, idx, n)
+                d = fn.new_v()
+                fn.emit("load", d, obj, idx)
+                return d
+            if self._is_slice(fn, obj):
+                # 切片：ptr = s.word0，长度是运行期值（动态越界检查）
+                ptr = self.slice_ptr(fn, obj)
+                ln = self.slice_len(fn, obj)
+                idx = self.eval(e[2], fn, env)
+                self.emit_bounds(fn, idx, ln, dynamic=True)
+                d = fn.new_v()
+                fn.emit("load", d, ptr, idx)
+                return d
+            raise SyntaxError("下标只能用于定长数组或切片")
         if k == "spawn":
             return self.lower_spawn(e[1], fn, env)
         if k == "chanopen":
@@ -770,15 +924,39 @@ class Lower:
             d = fn.new_v()
             fn.emit("call", d, "__chan_open", [cap])
             return self._mark_chan(fn, d)
+        if k == "mapnew":
+            if self.arch != "x86_64":
+                raise SyntaxError("map[K]V 目前仅支持 x86_64 后端")
+            if len(e[2]) > 1:
+                raise SyntaxError("map[K]V.new(cap) 至多一个容量实参")
+            self.uses_map = True
+            kt = e[1][1][1] if e[1][0] == "map" else "int"
+            vt = e[1][2][1] if e[1][0] == "map" else "int"
+            ktag = 1 if kt == "str" else 0
+            cap = self.eval(e[2][0], fn, env) if e[2] else ("imm", 16)
+            d = fn.new_v()
+            fn.emit("call", d, "__map_open", [cap, ("imm", ktag)])
+            return self._mark_map(fn, d, kt, vt)
         if k == "unop":
             a = self.eval(e[2], fn, env)
             if e[1] == "-":
+                wa = self._float_of(fn, a)
+                if wa:
+                    d = fn.new_v()
+                    fn.emit("fneg", wa, d, a)
+                    return self._mark_float(fn, d, wa)
                 if isinstance(a, tuple) and a[0] == "imm":
                     return ("imm", -a[1])
                 d = fn.new_v()
                 fn.emit("neg", d, a)
                 return d
             if e[1] == "!":
+                wa = self._float_of(fn, a)
+                if wa:
+                    d = fn.new_v()
+                    # +0.0 的位模式就是整数 0，直接当立即数比
+                    fn.emit("fcmpset", wa, "e", d, a, ("imm", 0))
+                    return self._mark_bool(fn, d)
                 if isinstance(a, tuple) and a[0] == "imm":
                     return ("imm", 0 if a[1] else 1)
                 d = fn.new_v()
@@ -788,12 +966,17 @@ class Lower:
             return self.lower_binop(e, fn, env)
         if k == "method":
             obj = self.eval(e[1], fn, env)
+            mp = self._map_of(fn, obj)
+            if mp:
+                return self.lower_map_method(e[2], obj, mp, e[3], fn, env)
             if e[2] in ("send", "recv") and self._is_chan(fn, obj):
                 d = fn.new_v()
                 if e[2] == "send":
                     if len(e[3]) != 1:
                         raise SyntaxError("ch.send(v) 需要一个实参")
                     v = self.eval(e[3][0], fn, env)
+                    if self._float_of(fn, v):
+                        raise SyntaxError("chan 暂不支持浮点值（v1 边界）")
                     fn.emit("call", d, "__chan_send", [obj, v])
                 else:
                     fn.emit("call", d, "__chan_recv", [obj])
@@ -801,6 +984,13 @@ class Lower:
             if e[2] == "to_str":
                 if self._is_str(fn, obj):
                     return obj
+                wf = self._float_of(fn, obj)
+                if wf:
+                    x = self.conv_to(fn, obj, wf, "f64")
+                    self.uses_f64_str = True
+                    d = fn.new_v()
+                    fn.emit("call", d, "__f64_to_str", [x])
+                    return self._mark_str(fn, d)
                 if e[1][0] == "bool" or (isinstance(obj, int) and obj in getattr(fn, "boolv", set())):
                     d = fn.new_v()
                     fn.emit("call", d, "__str_from_bool", [obj])
@@ -887,21 +1077,53 @@ class Lower:
             return self._mark_struct(fn, d, ftype[1])
         d = fn.new_v()
         fn.emit("load", d, obj, ("imm", off))
+        fw = self._ty_float_w(ftype)
+        if fw:
+            self._mark_float(fn, d, fw)
         return d
 
     def lower_binop(self, e, fn, env):
-        op = e[1]
-        a = self.eval(e[2], fn, env)
-        b = self.eval(e[3], fn, env)
+        return self.arith(e[1], self.eval(e[2], fn, env), self.eval(e[3], fn, env), fn, env)
+
+    def make_fnum(self, fn, v, width):
+        """浮点字面量：IEEE754 位模式存进通用寄存器，并打上浮点标记"""
+        if width == "f32":
+            bits = struct.unpack("<I", struct.pack("<f", v))[0]
+        else:
+            bits = struct.unpack("<Q", struct.pack("<d", v))[0]
+        d = fn.new_v()
+        fn.emit("mov", d, ("imm", bits))
+        return self._mark_float(fn, d, width)
+
+    def conv_to(self, fn, v, from_w, to_w):
+        """浮点宽度 / 整数<->浮点转换（与 C 隐式转换规则一致）。
+        from_w/to_w：None=整数，'f32'，'f64'。同型零开销直通。"""
+        if from_w == to_w:
+            return v
+        kind = {(None, "f64"): "i2f64", (None, "f32"): "i2f32",
+                ("f64", None): "f64i", ("f32", None): "f32i",
+                ("f32", "f64"): "f32f64", ("f64", "f32"): "f64f32"}.get((from_w, to_w))
+        if kind is None:
+            raise SyntaxError("不支持的类型转换")
+        d = fn.new_v()
+        fn.emit("fcvt", kind, d, v)
+        return self._mark_float(fn, d, to_w) if to_w else d
+
+    def arith(self, op, a, b, fn, env):
         if op in ("&&", "||"):
             return self._mark_bool(fn, self.lower_logic(op, a, b, fn, env))
+        wa, wb = self._float_of(fn, a), self._float_of(fn, b)
         # 字符串拼接（str 是一等类型，运行库自举）
         if op == "+" and (self._is_str(fn, a) or self._is_str(fn, b)):
+            if wa or wb:
+                raise SyntaxError("字符串与浮点不能拼接；请用 to_str()")
             d = fn.new_v()
             fn.emit("call", d, "__str_concat", [a, b])
             return self._mark_str(fn, d)
         # 字符串相等：内容比较（而非地址比较）
         if op in ("==", "!=") and (self._is_str(fn, a) or self._is_str(fn, b)):
+            if wa or wb:
+                raise SyntaxError("字符串与浮点不能比较；请用 to_str()")
             eq = fn.new_v()
             fn.emit("call", eq, "__str_eq", [a, b])
             if op == "==":
@@ -909,6 +1131,24 @@ class Lower:
             d = fn.new_v()
             fn.emit("cmpset", "e", d, eq, ("imm", 0))
             return self._mark_bool(fn, d)
+        # 浮点运算：按 C 提升规则统一宽度后计算（int 隐式转浮点）
+        if wa or wb:
+            if op in ("%", "&", "|", "^", "<<", ">>"):
+                raise SyntaxError(f"浮点不支持运算符 {op}")
+            w = "f64" if "f64" in (wa, wb) else "f32"
+            a = self.conv_to(fn, a, wa, w)
+            b = self.conv_to(fn, b, wb, w)
+            if op in ("==", "!=", "<", "<=", ">", ">="):
+                fcc = {"==": "e", "!=": "ne", "<": "l", "<=": "le", ">": "g", ">=": "ge"}[op]
+                d = fn.new_v()
+                fn.emit("fcmpset", w, fcc, d, a, b)
+                return self._mark_bool(fn, d)
+            fop = {"+": "add", "-": "sub", "*": "mul", "/": "div"}.get(op)
+            if fop is None:
+                raise SyntaxError(f"不支持的浮点运算符 {op}")
+            d = fn.new_v()
+            fn.emit("fbin", w, fop, d, a, b)
+            return self._mark_float(fn, d, w)
         # 常量折叠（整数截断语义，与 C 一致）
         if isinstance(a, tuple) and isinstance(b, tuple) and a[0] == "imm" and b[0] == "imm":
             x, y = a[1], b[1]
@@ -990,6 +1230,58 @@ class Lower:
             op = opmap[op]
         fn.emit("bin", op, d, a, b)
         return d
+
+    def lower_map_method(self, m, obj, mp, args, fn, env):
+        """m.set/get/has/del -> __map_* 运行时（开放寻址 + 线性探测）。
+        键相等/哈希在运行时按句柄 ktag 分派（str 走 __str_eq 内容比较）；
+        这里在编译期校验键/值实参与声明的 K/V 标量一致，不许静默错编。"""
+        kt, vt = mp
+        self.uses_map = True
+
+        def key_arg(a):
+            kv = self.eval(a, fn, env)
+            self.check_map_arg("键", kt, self._is_str(fn, kv))
+            return kv
+
+        if m == "set":
+            if len(args) != 2:
+                raise SyntaxError("m.set(k, v) 需要两个实参")
+            kv = key_arg(args[0])
+            vv = self.eval(args[1], fn, env)
+            self.check_map_arg("值", vt, self._is_str(fn, vv))
+            d = fn.new_v()
+            fn.emit("call", d, "__map_set", [obj, kv, vv])
+            return d
+        if m == "get":
+            if len(args) != 1:
+                raise SyntaxError("m.get(k) 需要且只需要一个实参")
+            kv = key_arg(args[0])
+            d = fn.new_v()
+            fn.emit("call", d, "__map_get", [obj, kv])
+            return self._mark_str(fn, d) if vt == "str" else d
+        if m == "has":
+            if len(args) != 1:
+                raise SyntaxError("m.has(k) 需要且只需要一个实参")
+            kv = key_arg(args[0])
+            d = fn.new_v()
+            fn.emit("call", d, "__map_has", [obj, kv])
+            return self._mark_bool(fn, d)
+        if m == "del":
+            if len(args) != 1:
+                raise SyntaxError("m.del(k) 需要且只需要一个实参")
+            kv = key_arg(args[0])
+            d = fn.new_v()
+            fn.emit("call", d, "__map_del", [obj, kv])
+            return d
+        raise SyntaxError(f"map 未知方法 .{m}（支持 set/get/has/del）")
+
+    @staticmethod
+    def check_map_arg(which, want, is_str):
+        """map 键/值实参类型校验：str 走内容语义，类型不匹配必须报错"""
+        if want == "str" and not is_str:
+            raise SyntaxError(f"map {which}类型是 str，实参不是 str")
+        if want != "str" and is_str:
+            raise SyntaxError(f"map {which}类型是 {want}，不能用 str 实参")
 
     def lower_spawn(self, call, fn, env):
         """spawn f(args) -> 任务句柄（v0.4）。
@@ -1127,15 +1419,34 @@ class Lower:
             spec = self.eval(arg, fn, env)
             if self._struct_of(fn, spec) is not None:
                 raise SyntaxError("print 暂不支持结构体/枚举；请打印具体字段或 match 解构")
+            if self._map_of(fn, spec) is not None:
+                raise SyntaxError("print 不支持 map 句柄；请打印 get 到的值")
             # 按值类型选打印函数
             if arg[0] == "str" or self._is_str(fn, spec):
                 tgt = "__print_cstr"
             elif arg[0] == "bool" or (isinstance(spec, int) and spec in getattr(fn, "boolv", set())):
                 tgt = "__print_bool"
+            elif self._float_of(fn, spec):
+                # 浮点：先格式化再打印（f32 先拓宽到 f64，与 C (double) 转换一致）
+                spec = self.conv_to(fn, spec, self._float_of(fn, spec), "f64")
+                self.uses_f64_str = True
+                s = fn.new_v()
+                fn.emit("call", s, "__f64_to_str", [spec])
+                fn.emit("call", None, "__print_cstr", [s])
+                return ("imm", 0)
             else:
                 tgt = "__print_i64"
             fn.emit("call", None, tgt, [spec])
             return ("imm", 0)
+        if name in ("to_float", "to_f32", "to_int") and name not in self.fns_ast:
+            if len(e[2]) != 1:
+                raise SyntaxError(f"{name}(x) 需要且只需要一个实参")
+            x = self.eval(e[2][0], fn, env)
+            wf = self._float_of(fn, x)
+            if name == "to_int":
+                return self.conv_to(fn, x, wf, None)
+            tw = "f64" if name == "to_float" else "f32"
+            return self.conv_to(fn, x, wf, tw)
         if name == "cores":
             return ("imm", os.cpu_count() or 1)
         if name == "assert":
@@ -1171,26 +1482,75 @@ class Lower:
             if len(e[2]) != 1:
                 raise SyntaxError("len(x) 需要且只需要一个实参")
             a = e[2][0]
+            if a[0] == "name" and a[1] in env:
+                n = self._arr_of(fn, env[a[1]])
+                if n is not None:
+                    return ("imm", n)
+                if self._is_slice(fn, env[a[1]]):
+                    return self.slice_len(fn, env[a[1]])
+                if self._map_of(fn, env[a[1]]) is not None:
+                    self.uses_map = True
+                    d = fn.new_v()
+                    fn.emit("call", d, "__map_len", [env[a[1]]])
+                    return d
+            # 非名字实参：按求值结果判别（如函数返回的切片）
+            av = self.eval(a, fn, env)
+            if self._is_slice(fn, av):
+                return self.slice_len(fn, av)
+            if self._map_of(fn, av) is not None:
+                self.uses_map = True
+                d = fn.new_v()
+                fn.emit("call", d, "__map_len", [av])
+                return d
+            raise SyntaxError("len() 目前只支持定长数组、切片或 map")
+        if name == "slice_of" and name not in self.fns_ast:
+            # 数组 -> 切片：零拷贝转换（SPEC §2 `[]T`）
+            if len(e[2]) != 1:
+                raise SyntaxError("slice_of(x) 需要且只需要一个数组实参")
+            a = e[2][0]
             if a[0] != "name" or a[1] not in env:
-                raise SyntaxError("len() 目前只支持定长数组变量")
-            n = self._arr_of(fn, env[a[1]])
+                raise SyntaxError("slice_of() 目前只支持定长数组变量（零拷贝转换）")
+            av = env[a[1]]
+            n = self._arr_of(fn, av)
             if n is None:
-                raise SyntaxError("len() 目前只支持定长数组变量")
-            return ("imm", n)
+                raise SyntaxError("slice_of() 目前只支持定长数组变量（零拷贝转换）")
+            return self.make_slice(fn, av, ("imm", n))
         if name not in self.fns_ast:
             raise SyntaxError(f"未定义函数 {name}")
         args = [self.eval(a, fn, env) for a in e[2]]
-        for a in args:
-            if self._arr_of(fn, a) is not None:
-                raise SyntaxError("定长数组暂不支持作函数实参（v0.6 边界）")
-        # 结构体实参：拷贝到临时帧槽再传地址 -> 值语义与 C 后端一致（callee 改不到 caller）
+        params = self.fns_ast[name]["params"]
         for i, a in enumerate(args):
+            n = self._arr_of(fn, a)
+            if n is not None:
+                # 数组作实参：形参是 `[]T` 时零拷贝转切片（SPEC §2），否则报错
+                if i < len(params) and params[i][1][0] == "slice":
+                    args[i] = self.make_slice(fn, a, ("imm", n))
+                    continue
+                raise SyntaxError("定长数组暂不支持作函数实参；请用 slice_of(a) 转成切片")
+        # 聚合实参（结构体/枚举/切片）：拷贝到临时帧槽再传地址
+        # -> 值语义与 C 后端一致（callee 改不到 caller 的切片头）
+        for i, a in enumerate(args):
+            if self._is_slice(fn, a):
+                tmp = self.alloc_slice(fn)
+                self.words_copy(fn, tmp, a, SLICE_WORDS)
+                args[i] = tmp
+                continue
             sname = self._struct_of(fn, a)
             if sname is not None:
                 tmp = self.alloc_struct(fn, sname)
                 self.struct_copy(fn, tmp, a, sname)
                 args[i] = tmp
+        # 标量实参按形参类型转换（浮点宽度 / 整数<->浮点，与 C 隐式转换一致）
+        for i, a in enumerate(args):
+            if i < len(params):
+                args[i] = self.conv_to(fn, a, self._float_of(fn, a),
+                                      self._ty_float_w(params[i][1]))
         ret = self.fns_ast[name]["ret"]
+        if ret[0] == "slice":
+            # 切片返回值：同聚合（隐藏出参指针约定，调用方开帧槽，callee 拷入）
+            tmp = self.alloc_slice(fn)
+            fn.emit("call", None, name, [tmp] + args)
+            return tmp
         if ret[0] == "named" and self.is_agg(ret[1]):
             # 聚合返回值：隐藏出参指针约定（调用方开帧槽，callee 拷入）
             tmp = self.alloc_struct(fn, ret[1])
@@ -1200,6 +1560,11 @@ class Lower:
         fn.emit("call", d, name, args)
         if ret == ("named", "str"):
             return self._mark_str(fn, d)
+        rw = self._ty_float_w(ret) if ret and ret[0] == "named" else None
+        if rw:
+            return self._mark_float(fn, d, rw)
+        if ret and ret[0] == "map":
+            return self._mark_map(fn, d, ret[1][1], ret[2][1])
         return d
 
     # ---- 布尔条件跳转 ----
@@ -1261,6 +1626,12 @@ class Lower:
                 self.struct_copy(fn, dst, spec, sname)
                 env[s[2]] = dst
                 return
+            if self._is_slice(fn, spec):
+                # 切片：{ptr,len} 两字值语义拷贝（仍共享底层存储）
+                dst = self.alloc_slice(fn)
+                self.words_copy(fn, dst, spec, SLICE_WORDS)
+                env[s[2]] = dst
+                return
             is_str = self._is_str(fn, spec)
             is_bool = s[3][0] == "bool" or (isinstance(spec, int) and spec in getattr(fn, "boolv", set()))
             if isinstance(spec, tuple) and spec[0] in ("imm", "ga"):
@@ -1299,12 +1670,19 @@ class Lower:
             op = s[2]
             if isinstance(cur, int):           # 可变量：原地更新（避免 phi）
                 if op == "=":
+                    spec = self.conv_to(fn, spec, self._float_of(fn, spec),
+                                        self._float_of(fn, cur))
                     fn.emit("mov", cur, spec)
                     if self._is_str(fn, spec):
                         self._mark_str(fn, cur)
                 else:
-                    binop = {"+=": "add", "-=": "sub", "*=": "mul", "/=": "div", "%=": "mod"}[op]
-                    fn.emit("bin", binop, cur, cur, spec)
+                    binop = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}[op]
+                    tmp = self.arith(binop, cur, spec, fn, env)
+                    tmp = self.conv_to(fn, tmp, self._float_of(fn, tmp),
+                                       self._float_of(fn, cur))
+                    fn.emit("mov", cur, tmp)
+                    if self._is_str(fn, tmp):
+                        self._mark_str(fn, cur)
             else:
                 raise SyntaxError("常量不可赋值")
             return
@@ -1336,21 +1714,29 @@ class Lower:
         if k == "return":
             if self.fn_ret[0] == "array":
                 raise SyntaxError("定长数组暂不支持作返回值（v0.6 边界）")
-            if self.fn_ret_agg:
+            if self.fn_ret_agg or self.fn_ret_slice:
                 if s[1] is None:
-                    raise SyntaxError("聚合（结构体/枚举）返回值函数必须 return 一个值")
+                    raise SyntaxError("聚合（结构体/枚举/切片）返回值函数必须 return 一个值")
                 spec = self.eval(s[1], fn, env)
-                if self._struct_of(fn, spec) != self.fn_ret_agg:
-                    raise SyntaxError(
-                        f"函数返回类型是 {self.fn_ret_agg}，return 的表达式类型不匹配")
-                # 值语义：拷进调用方提供的隐藏出参槽，再返回
-                self.struct_copy(fn, self.fn_ret_target, spec, self.fn_ret_agg)
+                if self.fn_ret_slice:
+                    if not self._is_slice(fn, spec):
+                        raise SyntaxError("函数返回类型是切片，return 的表达式类型不匹配")
+                    self.words_copy(fn, self.fn_ret_target, spec, SLICE_WORDS)
+                else:
+                    if self._struct_of(fn, spec) != self.fn_ret_agg:
+                        raise SyntaxError(
+                            f"函数返回类型是 {self.fn_ret_agg}，return 的表达式类型不匹配")
+                    # 值语义：拷进调用方提供的隐藏出参槽，再返回
+                    self.struct_copy(fn, self.fn_ret_target, spec, self.fn_ret_agg)
                 fn.emit("ret", ("imm", 0))
                 return
             if s[1] is None:
                 fn.emit("ret", None)
             else:
-                fn.emit("ret", self.eval(s[1], fn, env))
+                v = self.eval(s[1], fn, env)
+                v = self.conv_to(fn, v, self._float_of(fn, v),
+                                 self._ty_float_w(self.fn_ret) if self.fn_ret[0] == "named" else None)
+                fn.emit("ret", v)
             return
         if k == "expr":
             self.eval(s[1], fn, env)
@@ -1416,33 +1802,44 @@ class Lower:
             return
         spec = self.eval(s[3], fn, env)
         if op == "=":
+            spec = self.conv_to(fn, spec, self._float_of(fn, spec), self._ty_float_w(ftype))
             fn.emit("store", addr, ("imm", off), spec)
             return
-        binop = {"+=": "add", "-=": "sub", "*=": "mul", "/=": "div", "%=": "mod"}[op]
+        binop = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}[op]
         cur = fn.new_v()
         fn.emit("load", cur, addr, ("imm", off))
-        fn.emit("bin", binop, cur, cur, spec)
-        fn.emit("store", addr, ("imm", off), cur)
+        fw = self._ty_float_w(ftype)
+        if fw:
+            self._mark_float(fn, cur, fw)
+        tmp = self.arith(binop, cur, spec, fn, env)
+        tmp = self.conv_to(fn, tmp, self._float_of(fn, tmp), fw)
+        fn.emit("store", addr, ("imm", off), tmp)
 
     def lower_assign_index(self, s, fn, env):
-        """a[i] = v / a[i] += v（越界 fail-fast）"""
+        """a[i] = v / a[i] += v（越界 fail-fast）；定长数组与切片通用"""
         base, idxe, op, rhs = s[1], s[2], s[3], s[4]
         obj = self.eval(base, fn, env)
         n = self._arr_of(fn, obj)
-        if n is None:
-            raise SyntaxError("下标赋值只能用于定长数组")
+        if n is not None:
+            tgt, nval, dyn = obj, n, False
+        elif self._is_slice(fn, obj):
+            # 切片：写入落到底层元素序列（零拷贝别名）
+            tgt = self.slice_ptr(fn, obj)
+            nval, dyn = self.slice_len(fn, obj), True
+        else:
+            raise SyntaxError("下标赋值只能用于定长数组或切片")
         idx = self.eval(idxe, fn, env)
-        self.emit_bounds(fn, idx, n)
+        self.emit_bounds(fn, idx, nval, dynamic=dyn)
         val = self.eval(rhs, fn, env)
         if op == "=":
-            fn.emit("store", obj, idx, val)
+            fn.emit("store", tgt, idx, val)
             return
         binop = {"+=": "add", "-=": "sub", "*=": "mul",
                  "/=": "div", "%=": "mod"}[op]
         cur = fn.new_v()
-        fn.emit("load", cur, obj, idx)
+        fn.emit("load", cur, tgt, idx)
         fn.emit("bin", binop, cur, cur, val)
-        fn.emit("store", obj, idx, cur)
+        fn.emit("store", tgt, idx, cur)
 
     def block(self, stmts, fn, env):
         for s in stmts:
@@ -1654,23 +2051,37 @@ class Lower:
         fn.boolv = set()
         self.fn_ret_agg = None
         self.fn_ret_target = None
+        self.fn_ret_slice = False
         ret = f["ret"]
-        if ret[0] == "named" and self.is_agg(ret[1]):
+        if ret[0] == "slice":
+            # 切片返回值：同聚合 ABI（隐藏出参指针作第一参数）
+            self.fn_ret_slice = True
+            self.fn_ret_target = fn.new_v()
+        elif ret[0] == "named" and self.is_agg(ret[1]):
             # 聚合返回值：ABI = 隐藏出参指针作第一参数（发射层零改动）
             self.fn_ret_agg = ret[1]
             self.fn_ret_target = fn.new_v()
         params = [fn.new_v() for _ in f["params"]]
-        if self.fn_ret_agg:
+        if self.fn_ret_agg or self.fn_ret_slice:
             fn.emit("args", [self.fn_ret_target] + params)
-            self._mark_struct(fn, self.fn_ret_target, self.fn_ret_agg)
+            if self.fn_ret_agg:
+                self._mark_struct(fn, self.fn_ret_target, self.fn_ret_agg)
+            else:
+                self._mark_slice(fn, self.fn_ret_target)
         else:
             fn.emit("args", params)
         env = {name: params[i] for i, (name, _) in enumerate(f["params"])}
         for i, (name, ty) in enumerate(f["params"]):
             if ty == ("named", "str"):
                 fn.strv.add(params[i])
+            elif self._ty_float_w(ty):
+                self._mark_float(fn, params[i], self._ty_float_w(ty))
             elif ty[0] == "chan":
                 self._mark_chan(fn, params[i])
+            elif ty[0] == "map":
+                self._mark_map(fn, params[i], ty[1][1], ty[2][1])
+            elif ty[0] == "slice":
+                self._mark_slice(fn, params[i])
             elif ty[0] == "array":
                 self._mark_arr(fn, params[i], ty[1])
             elif ty[0] == "named" and self.is_agg(ty[1]):
@@ -2023,6 +2434,386 @@ class Lower:
             f.emit("ret", v)
             self.out.append(f)
 
+        # ---- map[K]V（v0.10）：开放寻址 + 线性探测哈希表 ----
+        # 控制块 7 字：[cap, count, used, ktag, st, kt, vt]，st/kt/vt 三组平行槽，
+        # state 0=空 1=占用 2=墓碑。键相等/哈希按 ktag 分派（str 走 __str_eq 内容比较）。
+        # 哈希与 C 后端逐位一致：整数 splitmix64 终混、str FNV-1a，否则双链 diff 会挂。
+        # 扩容：used*10 >= cap*7 时容量翻倍 rehash（墓碑不带入）。
+        # arena 绑定：存储走 __alloc bump 分配器，因此 arena 块内创建的 map
+        # 随 __arena_release 整体回卷回收（块内对象不得逃逸，与字符串同约定）。
+        if self.uses_map:
+            if self.arch != "x86_64":
+                raise SyntaxError("map[K]V 目前仅支持 x86_64 后端")
+            msg_nf = "rosoto: map key not found (fail-fast)\n"
+            gid_nf = self.intern_str(msg_nf)
+
+            # __map_hash_word(x) -> u64   splitmix64 终混（64 位回绕乘）
+            f = Fn("__map_hash_word")
+            x = f.new_v()
+            f.emit("args", [x])
+            z = f.new_v()
+            f.emit("mov", z, x)
+            t = f.new_v()
+            for sh, mul in ((30, 0xBF58476D1CE4E5B9), (27, 0x94D049BB133111EB)):
+                f.emit("bin", "shr", t, z, ("imm", sh))
+                f.emit("bin", "xor", z, z, t)
+                f.emit("bin", "mul", z, z, ("imm", mul))
+            f.emit("bin", "shr", t, z, ("imm", 31))
+            f.emit("bin", "xor", z, z, t)
+            f.emit("ret", z)
+            self.out.append(f)
+
+            # __map_hash_str(s) -> u64   FNV-1a（逐字节到 NUL）
+            f = Fn("__map_hash_str")
+            s = f.new_v()
+            f.emit("args", [s])
+            h = f.new_v()
+            f.emit("mov", h, ("imm", 0xcbf29ce484222325))
+            i = f.new_v()
+            f.emit("mov", i, ("imm", 0))
+            l_t, l_e = f.label("hst"), f.label("hse")
+            f.emit("label", l_t)
+            b = f.new_v()
+            f.emit("load8", b, s, i)
+            f.emit("jz", b, l_e)
+            f.emit("bin", "xor", h, h, b)
+            f.emit("bin", "mul", h, h, ("imm", 0x100000001b3))
+            f.emit("bin", "add", i, i, ("imm", 1))
+            f.emit("jmp", l_t)
+            f.emit("label", l_e)
+            f.emit("ret", h)
+            self.out.append(f)
+
+            # __map_hash(m, k) -> u64   按 ktag 分派
+            f = Fn("__map_hash")
+            m, k = f.new_v(), f.new_v()
+            f.emit("args", [m, k])
+            tag = f.new_v()
+            f.emit("load", tag, m, ("imm", 3))
+            l_str = f.label("mhstr")
+            f.emit("jnz", tag, l_str)
+            h1 = f.new_v()
+            f.emit("call", h1, "__map_hash_word", [k])
+            f.emit("ret", h1)
+            f.emit("label", l_str)
+            h2 = f.new_v()
+            f.emit("call", h2, "__map_hash_str", [k])
+            f.emit("ret", h2)
+            self.out.append(f)
+
+            # __map_key_eq(m, a, b) -> 0/1   int/bool 按值，str 按 __str_eq 内容
+            f = Fn("__map_key_eq")
+            m, a, b = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [m, a, b])
+            tag = f.new_v()
+            f.emit("load", tag, m, ("imm", 3))
+            l_str = f.label("kestr")
+            f.emit("jnz", tag, l_str)
+            d = f.new_v()
+            f.emit("cmpset", "e", d, a, b)
+            f.emit("ret", d)
+            f.emit("label", l_str)
+            d2 = f.new_v()
+            f.emit("call", d2, "__str_eq", [a, b])
+            f.emit("ret", d2)
+            self.out.append(f)
+
+            # __map_find(m, k) -> 槽下标 / -1（线性探测；墓碑继续探）
+            f = Fn("__map_find")
+            m, k = f.new_v(), f.new_v()
+            f.emit("args", [m, k])
+            cap = f.new_v()
+            f.emit("load", cap, m, ("imm", 0))
+            mask = f.new_v()
+            f.emit("bin", "sub", mask, cap, ("imm", 1))
+            st = f.new_v()
+            f.emit("load", st, m, ("imm", 4))
+            kt = f.new_v()
+            f.emit("load", kt, m, ("imm", 5))
+            h = f.new_v()
+            f.emit("call", h, "__map_hash", [m, k])
+            i = f.new_v()
+            f.emit("bin", "and", i, h, mask)
+            l_t, l_empty = f.label("fdt"), f.label("fde")
+            l_next, l_hit = f.label("fdn"), f.label("fdh")
+            f.emit("label", l_t)
+            s = f.new_v()
+            f.emit("load", s, st, i)
+            f.emit("jcc", "e", s, ("imm", 0), l_empty)
+            f.emit("jcc", "ne", s, ("imm", 1), l_next)    # 墓碑：继续探测
+            kk = f.new_v()
+            f.emit("load", kk, kt, i)
+            eq = f.new_v()
+            f.emit("call", eq, "__map_key_eq", [m, kk, k])
+            f.emit("jnz", eq, l_hit)
+            f.emit("jmp", l_next)
+            f.emit("label", l_hit)
+            f.emit("ret", i)
+            f.emit("label", l_empty)
+            f.emit("ret", ("imm", -1))
+            f.emit("label", l_next)
+            f.emit("bin", "add", i, i, ("imm", 1))
+            f.emit("bin", "and", i, i, mask)
+            f.emit("jmp", l_t)
+            self.out.append(f)
+
+            # __map_open(cap, ktag) -> 句柄（cap<1 取 16，再向上取整到 2 的幂）
+            f = Fn("__map_open")
+            cap, ktag = f.new_v(), f.new_v()
+            f.emit("args", [cap, ktag])
+            l_ok = f.label("mook")
+            f.emit("jcc", "ge", cap, ("imm", 1), l_ok)
+            f.emit("mov", cap, ("imm", 16))
+            f.emit("label", l_ok)
+            n = f.new_v()
+            f.emit("bin", "sub", n, cap, ("imm", 1))
+            for sh in (1, 2, 4, 8, 16, 32):
+                tt = f.new_v()
+                f.emit("bin", "shr", tt, n, ("imm", sh))
+                f.emit("bin", "or", n, n, tt)
+            f.emit("bin", "add", cap, n, ("imm", 1))
+            blk = f.new_v()
+            f.emit("call", blk, "__alloc", [("imm", 56)])
+            sz = f.new_v()
+            f.emit("bin", "mul", sz, cap, ("imm", 8))
+            st = f.new_v()
+            f.emit("call", st, "__alloc", [sz])
+            kt = f.new_v()
+            f.emit("call", kt, "__alloc", [sz])
+            vt = f.new_v()
+            f.emit("call", vt, "__alloc", [sz])
+            i = f.new_v()
+            f.emit("mov", i, ("imm", 0))
+            l_zt, l_ze = f.label("mozt"), f.label("moze")
+            f.emit("label", l_zt)
+            f.emit("jcc", "ge", i, cap, l_ze)
+            f.emit("store", st, i, ("imm", 0))
+            f.emit("bin", "add", i, i, ("imm", 1))
+            f.emit("jmp", l_zt)
+            f.emit("label", l_ze)
+            f.emit("store", blk, ("imm", 0), cap)
+            f.emit("store", blk, ("imm", 1), ("imm", 0))    # count
+            f.emit("store", blk, ("imm", 2), ("imm", 0))    # used
+            f.emit("store", blk, ("imm", 3), ktag)
+            f.emit("store", blk, ("imm", 4), st)
+            f.emit("store", blk, ("imm", 5), kt)
+            f.emit("store", blk, ("imm", 6), vt)
+            f.emit("ret", blk)
+            self.out.append(f)
+
+            # __map_grow(m)：容量翻倍 rehash（旧表是 bump 分配，不回收；
+            # arena 块内随块整体回卷，块外到进程退出才丢）
+            f = Fn("__map_grow")
+            m = f.new_v()
+            f.emit("args", [m])
+            cap = f.new_v()
+            f.emit("load", cap, m, ("imm", 0))
+            ncap = f.new_v()
+            f.emit("bin", "mul", ncap, cap, ("imm", 2))
+            nmask = f.new_v()
+            f.emit("bin", "sub", nmask, ncap, ("imm", 1))
+            ost = f.new_v()
+            f.emit("load", ost, m, ("imm", 4))
+            okt = f.new_v()
+            f.emit("load", okt, m, ("imm", 5))
+            ovt = f.new_v()
+            f.emit("load", ovt, m, ("imm", 6))
+            nsz = f.new_v()
+            f.emit("bin", "mul", nsz, ncap, ("imm", 8))
+            nst = f.new_v()
+            f.emit("call", nst, "__alloc", [nsz])
+            nkt = f.new_v()
+            f.emit("call", nkt, "__alloc", [nsz])
+            nvt = f.new_v()
+            f.emit("call", nvt, "__alloc", [nsz])
+            i = f.new_v()
+            f.emit("mov", i, ("imm", 0))
+            l_zt, l_ze = f.label("mgzt"), f.label("mgze")
+            f.emit("label", l_zt)
+            f.emit("jcc", "ge", i, ncap, l_ze)
+            f.emit("store", nst, i, ("imm", 0))
+            f.emit("bin", "add", i, i, ("imm", 1))
+            f.emit("jmp", l_zt)
+            f.emit("label", l_ze)
+            nused = f.new_v()
+            f.emit("mov", nused, ("imm", 0))
+            f.emit("mov", i, ("imm", 0))
+            l_rt, l_re = f.label("mgrt"), f.label("mgre")
+            l_skip, l_pt, l_slot = f.label("mgsk"), f.label("mgpt"), f.label("mgsl")
+            f.emit("label", l_rt)
+            f.emit("jcc", "ge", i, cap, l_re)
+            s = f.new_v()
+            f.emit("load", s, ost, i)
+            f.emit("jcc", "ne", s, ("imm", 1), l_skip)   # 墓碑/空槽不带入
+            kk = f.new_v()
+            f.emit("load", kk, okt, i)
+            vv = f.new_v()
+            f.emit("load", vv, ovt, i)
+            h = f.new_v()
+            f.emit("call", h, "__map_hash", [m, kk])
+            j = f.new_v()
+            f.emit("bin", "and", j, h, nmask)
+            f.emit("label", l_pt)
+            ts = f.new_v()
+            f.emit("load", ts, nst, j)
+            f.emit("jz", ts, l_slot)
+            f.emit("bin", "add", j, j, ("imm", 1))
+            f.emit("bin", "and", j, j, nmask)
+            f.emit("jmp", l_pt)
+            f.emit("label", l_slot)
+            f.emit("store", nst, j, ("imm", 1))
+            f.emit("store", nkt, j, kk)
+            f.emit("store", nvt, j, vv)
+            f.emit("bin", "add", nused, nused, ("imm", 1))
+            f.emit("label", l_skip)
+            f.emit("bin", "add", i, i, ("imm", 1))
+            f.emit("jmp", l_rt)
+            f.emit("label", l_re)
+            f.emit("store", m, ("imm", 0), ncap)
+            f.emit("store", m, ("imm", 2), nused)
+            f.emit("store", m, ("imm", 4), nst)
+            f.emit("store", m, ("imm", 5), nkt)
+            f.emit("store", m, ("imm", 6), nvt)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            # __map_set(m, k, v)：插入/覆盖写；墓碑优先复用；越阈值扩容
+            f = Fn("__map_set")
+            m, k, v = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [m, k, v])
+            cap = f.new_v()
+            f.emit("load", cap, m, ("imm", 0))
+            mask = f.new_v()
+            f.emit("bin", "sub", mask, cap, ("imm", 1))
+            st = f.new_v()
+            f.emit("load", st, m, ("imm", 4))
+            kt = f.new_v()
+            f.emit("load", kt, m, ("imm", 5))
+            vt = f.new_v()
+            f.emit("load", vt, m, ("imm", 6))
+            h = f.new_v()
+            f.emit("call", h, "__map_hash", [m, k])
+            i = f.new_v()
+            f.emit("bin", "and", i, h, mask)
+            first = f.new_v()
+            f.emit("mov", first, ("imm", -1))
+            l_t, l_ins = f.label("mst"), f.label("msins")
+            l_tomb, l_upd = f.label("mstm"), f.label("msup")
+            l_next, l_use = f.label("msn"), f.label("msuse")
+            l_noused, l_grow = f.label("msnu"), f.label("msgr")
+            f.emit("label", l_t)
+            s = f.new_v()
+            f.emit("load", s, st, i)
+            f.emit("jcc", "e", s, ("imm", 0), l_ins)
+            f.emit("jcc", "e", s, ("imm", 2), l_tomb)
+            kk = f.new_v()
+            f.emit("load", kk, kt, i)
+            eq = f.new_v()
+            f.emit("call", eq, "__map_key_eq", [m, kk, k])
+            f.emit("jnz", eq, l_upd)
+            f.emit("jmp", l_next)
+            f.emit("label", l_upd)
+            f.emit("store", vt, i, v)                  # 覆盖写
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_tomb)
+            f.emit("jcc", "ge", first, ("imm", 0), l_next)
+            f.emit("mov", first, i)                   # 记第一个墓碑
+            f.emit("jmp", l_next)
+            f.emit("label", l_ins)
+            f.emit("jcc", "l", first, ("imm", 0), l_use)
+            f.emit("mov", i, first)                   # 复用墓碑，探测链不断
+            f.emit("label", l_use)
+            f.emit("store", st, i, ("imm", 1))
+            f.emit("store", kt, i, k)
+            f.emit("store", vt, i, v)
+            cnt = f.new_v()
+            f.emit("load", cnt, m, ("imm", 1))
+            f.emit("bin", "add", cnt, cnt, ("imm", 1))
+            f.emit("store", m, ("imm", 1), cnt)
+            f.emit("jcc", "ge", first, ("imm", 0), l_noused)
+            used = f.new_v()
+            f.emit("load", used, m, ("imm", 2))
+            f.emit("bin", "add", used, used, ("imm", 1))
+            f.emit("store", m, ("imm", 2), used)
+            f.emit("label", l_noused)
+            used2 = f.new_v()
+            f.emit("load", used2, m, ("imm", 2))
+            u10 = f.new_v()
+            f.emit("bin", "mul", u10, used2, ("imm", 10))
+            c7 = f.new_v()
+            f.emit("bin", "mul", c7, cap, ("imm", 7))
+            f.emit("jcc", "ge", u10, c7, l_grow)     # 装载因子 >= 0.7 -> 扩容
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_grow)
+            f.emit("call", None, "__map_grow", [m])
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_next)
+            f.emit("bin", "add", i, i, ("imm", 1))
+            f.emit("bin", "and", i, i, mask)
+            f.emit("jmp", l_t)
+            self.out.append(f)
+
+            # __map_get(m, k) -> v；键不存在 fail-fast（stderr + exit(1)）
+            f = Fn("__map_get")
+            m, k = f.new_v(), f.new_v()
+            f.emit("args", [m, k])
+            idx = f.new_v()
+            f.emit("call", idx, "__map_find", [m, k])
+            l_ok = f.label("mgok")
+            f.emit("jcc", "ge", idx, ("imm", 0), l_ok)
+            p = f.new_v()
+            f.emit("movaddr", p, gid_nf)
+            self.emit_write(f, 2, p, ("imm", len(msg_nf.encode("utf-8"))))
+            self.emit_exit(f, 1)
+            f.emit("label", l_ok)
+            vt = f.new_v()
+            f.emit("load", vt, m, ("imm", 6))
+            d = f.new_v()
+            f.emit("load", d, vt, idx)
+            f.emit("ret", d)
+            self.out.append(f)
+
+            # __map_has(m, k) -> 0/1
+            f = Fn("__map_has")
+            m, k = f.new_v(), f.new_v()
+            f.emit("args", [m, k])
+            idx = f.new_v()
+            f.emit("call", idx, "__map_find", [m, k])
+            d = f.new_v()
+            f.emit("cmpset", "ge", d, idx, ("imm", 0))
+            f.emit("ret", d)
+            self.out.append(f)
+
+            # __map_del(m, k)：置墓碑（删缺失键：无操作）
+            f = Fn("__map_del")
+            m, k = f.new_v(), f.new_v()
+            f.emit("args", [m, k])
+            idx = f.new_v()
+            f.emit("call", idx, "__map_find", [m, k])
+            l_ok, l_end = f.label("mdok"), f.label("mdend")
+            f.emit("jcc", "ge", idx, ("imm", 0), l_ok)
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_ok)
+            st = f.new_v()
+            f.emit("load", st, m, ("imm", 4))
+            f.emit("store", st, idx, ("imm", 2))     # 墓碑：探测链继续有效
+            cnt = f.new_v()
+            f.emit("load", cnt, m, ("imm", 1))
+            f.emit("bin", "sub", cnt, cnt, ("imm", 1))
+            f.emit("store", m, ("imm", 1), cnt)
+            f.emit("label", l_end)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            # __map_len(m) -> count（不含墓碑）
+            f = Fn("__map_len")
+            m = f.new_v()
+            f.emit("args", [m])
+            d = f.new_v()
+            f.emit("load", d, m, ("imm", 1))
+            f.emit("ret", d)
+            self.out.append(f)
+
         # __str_len(p) -> int
         f = Fn("__str_len")
         p = f.new_v()
@@ -2139,6 +2930,233 @@ class Lower:
         f.emit("ret", buf)
         self.out.append(f)
 
+        # ---- 浮点格式化（与 C 端 rosoto_f64_to_str 算法逐位一致，双链 diff 依赖）----
+        # __fmt_u64(buf, pos, v, pad) -> 新 pos：十进制写入，至少 pad 位（前导零）
+        if self.uses_f64_str:
+            def fbits(v):
+                return struct.unpack("<Q", struct.pack("<d", v))[0]
+
+            f = Fn("__fmt_u64")
+            buf, pos, v, pad = f.new_v(), f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [buf, pos, v, pad])
+            l_rec, l_wr = f.label("f64rec"), f.label("f64wr")
+            f.emit("jcc", "ge", v, ("imm", 10), l_rec)
+            f.emit("jcc", "g", pad, ("imm", 1), l_rec)
+            f.emit("jmp", l_wr)
+            f.emit("label", l_rec)
+            q = f.new_v()
+            f.emit("bin", "div", q, v, ("imm", 10))
+            p2 = f.new_v()
+            f.emit("bin", "sub", p2, pad, ("imm", 1))
+            f.emit("call", pos, "__fmt_u64", [buf, pos, q, p2])
+            f.emit("label", l_wr)
+            dd = f.new_v()
+            f.emit("bin", "mod", dd, v, ("imm", 10))
+            ch = f.new_v()
+            f.emit("bin", "add", ch, dd, ("imm", 48))
+            f.emit("store8", buf, pos, ch)
+            f.emit("bin", "add", pos, pos, ("imm", 1))
+            f.emit("ret", pos)
+            self.out.append(f)
+
+            # __f64_to_str(x) -> ptr
+            f = Fn("__f64_to_str")
+            x = f.new_v()
+            f.emit("args", [x])
+            buf = f.new_v()
+            f.emit("call", buf, "__alloc", [("imm", 64)])
+            pos = f.new_v()
+            f.emit("mov", pos, ("imm", 0))
+
+            def st(chs):
+                """从 pos 起写字符串（含结尾 0），返回后 pos 已前进"""
+                nonlocal pos
+                for cc in chs:
+                    f.emit("store8", buf, pos, ("imm", cc))
+                    f.emit("bin", "add", pos, pos, ("imm", 1))
+
+            def ret_buf():
+                f.emit("ret", buf)
+
+            # nan
+            c = f.new_v()
+            f.emit("fcmpset", "f64", "ne", c, x, x)
+            l1 = f.label("fnan")
+            f.emit("jz", c, l1)
+            f.emit("store8", buf, ("imm", 0), ("imm", 110))   # 'n'
+            f.emit("store8", buf, ("imm", 1), ("imm", 97))    # 'a'
+            f.emit("store8", buf, ("imm", 2), ("imm", 110))   # 'n'
+            f.emit("store8", buf, ("imm", 3), ("imm", 0))
+            ret_buf()
+            f.emit("label", l1)
+            # +inf / -inf
+            c = f.new_v()
+            f.emit("fcmpset", "f64", "g", c, x, ("imm", fbits(1.7976931348623157e308)))
+            l2 = f.label("finf")
+            f.emit("jz", c, l2)
+            f.emit("store8", buf, ("imm", 0), ("imm", 105))   # 'i'
+            f.emit("store8", buf, ("imm", 1), ("imm", 110))   # 'n'
+            f.emit("store8", buf, ("imm", 2), ("imm", 102))   # 'f'
+            f.emit("store8", buf, ("imm", 3), ("imm", 0))
+            ret_buf()
+            f.emit("label", l2)
+            c = f.new_v()
+            f.emit("fcmpset", "f64", "l", c, x, ("imm", fbits(-1.7976931348623157e308)))
+            l3 = f.label("fninf")
+            f.emit("jz", c, l3)
+            f.emit("store8", buf, ("imm", 0), ("imm", 45))    # '-'
+            f.emit("store8", buf, ("imm", 1), ("imm", 105))   # 'i'
+            f.emit("store8", buf, ("imm", 2), ("imm", 110))   # 'n'
+            f.emit("store8", buf, ("imm", 3), ("imm", 102))   # 'f'
+            f.emit("store8", buf, ("imm", 4), ("imm", 0))
+            ret_buf()
+            f.emit("label", l3)
+            # 0
+            c = f.new_v()
+            f.emit("fcmpset", "f64", "e", c, x, ("imm", 0))   # +0.0 == 整数 0 位模式
+            l4 = f.label("fzero")
+            f.emit("jz", c, l4)
+            f.emit("store8", buf, ("imm", 0), ("imm", 48))    # '0'
+            f.emit("store8", buf, ("imm", 1), ("imm", 0))
+            ret_buf()
+            f.emit("label", l4)
+            # 负号（注意非 SSA：两条路径都必须先定义 xn，否则跳过分支后读垃圾）
+            neg = f.new_v()
+            f.emit("fcmpset", "f64", "l", neg, x, ("imm", 0))
+            xn = f.new_v()
+            l5, l5b = f.label("fpos"), f.label("fpos2")
+            f.emit("jz", neg, l5)
+            f.emit("store8", buf, pos, ("imm", 45))
+            f.emit("bin", "add", pos, pos, ("imm", 1))
+            f.emit("fneg", "f64", xn, x)
+            f.emit("jmp", l5b)
+            f.emit("label", l5)
+            f.emit("mov", xn, x)
+            f.emit("label", l5b)
+            x = xn
+            # 定点区间判定：1e-6 <= x < 1e12
+            c1 = f.new_v()
+            f.emit("fcmpset", "f64", "ge", c1, x, ("imm", fbits(1e-6)))
+            c2 = f.new_v()
+            f.emit("fcmpset", "f64", "l", c2, x, ("imm", fbits(1e12)))
+            band = f.new_v()
+            f.emit("bin", "and", band, c1, c2)
+            l_sci = f.label("fsci")
+            f.emit("jz", band, l_sci)
+            # ---- 定点 ----
+            t = f.new_v()
+            f.emit("fbin", "f64", "mul", t, x, ("imm", fbits(1e6)))
+            t2 = f.new_v()
+            f.emit("fbin", "f64", "add", t2, t, ("imm", fbits(0.5)))
+            u = f.new_v()
+            f.emit("fcvt", "f64i", u, t2)
+            ip = f.new_v()
+            f.emit("bin", "div", ip, u, ("imm", 1000000))
+            fp = f.new_v()
+            f.emit("bin", "mod", fp, u, ("imm", 1000000))
+            f.emit("call", pos, "__fmt_u64", [buf, pos, ip, ("imm", 1)])
+            l_nf = f.label("fnofrac")
+            f.emit("jz", fp, l_nf)
+            f.emit("store8", buf, pos, ("imm", 46))          # '.'
+            f.emit("bin", "add", pos, pos, ("imm", 1))
+            p0 = f.new_v()
+            f.emit("mov", p0, pos)
+            f.emit("call", pos, "__fmt_u64", [buf, pos, fp, ("imm", 6)])
+            # 去尾零
+            l_tr, l_tre = f.label("ftr"), f.label("ftre")
+            f.emit("label", l_tr)
+            f.emit("jcc", "le", pos, p0, l_tre)
+            m1 = f.new_v()
+            f.emit("bin", "sub", m1, pos, ("imm", 1))
+            ch = f.new_v()
+            f.emit("load8", ch, buf, m1)
+            f.emit("jcc", "ne", ch, ("imm", 48), l_tre)
+            f.emit("bin", "sub", pos, pos, ("imm", 1))
+            f.emit("jmp", l_tr)
+            f.emit("label", l_tre)
+            f.emit("label", l_nf)
+            l_done = f.label("fdone")
+            f.emit("jmp", l_done)
+            # ---- 科学计数 ----
+            f.emit("label", l_sci)
+            exp = f.new_v()
+            f.emit("mov", exp, ("imm", 0))
+            # 注意非 SSA：循环变量必须原地更新（dst==src，同 itoa 的 div v,v,10），
+            # 若写入新 vreg 再 rebind Python 变量，循环条件读到的仍是旧 vreg -> 死循环
+            l_hi, l_hie = f.label("fhi"), f.label("fhie")
+            f.emit("label", l_hi)
+            c = f.new_v()
+            f.emit("fcmpset", "f64", "ge", c, x, ("imm", fbits(10.0)))
+            f.emit("jz", c, l_hie)
+            f.emit("fbin", "f64", "div", x, x, ("imm", fbits(10.0)))
+            f.emit("bin", "add", exp, exp, ("imm", 1))
+            f.emit("jmp", l_hi)
+            f.emit("label", l_hie)
+            l_lo, l_loe = f.label("flo"), f.label("floe")
+            f.emit("label", l_lo)
+            c = f.new_v()
+            f.emit("fcmpset", "f64", "l", c, x, ("imm", fbits(1.0)))
+            f.emit("jz", c, l_loe)
+            f.emit("fbin", "f64", "mul", x, x, ("imm", fbits(10.0)))
+            f.emit("bin", "sub", exp, exp, ("imm", 1))
+            f.emit("jmp", l_lo)
+            f.emit("label", l_loe)
+            t = f.new_v()
+            f.emit("fbin", "f64", "mul", t, x, ("imm", fbits(1e6)))
+            t2 = f.new_v()
+            f.emit("fbin", "f64", "add", t2, t, ("imm", fbits(0.5)))
+            m = f.new_v()
+            f.emit("fcvt", "f64i", m, t2)
+            l_mc = f.label("fmcarry")
+            f.emit("jcc", "ne", m, ("imm", 10000000), l_mc)
+            f.emit("mov", m, ("imm", 1000000))
+            f.emit("bin", "add", exp, exp, ("imm", 1))
+            f.emit("label", l_mc)
+            d0 = f.new_v()
+            f.emit("bin", "div", d0, m, ("imm", 1000000))
+            rest = f.new_v()
+            f.emit("bin", "mod", rest, m, ("imm", 1000000))
+            f.emit("call", pos, "__fmt_u64", [buf, pos, d0, ("imm", 1)])
+            l_nr = f.label("fnorest")
+            f.emit("jz", rest, l_nr)
+            f.emit("store8", buf, pos, ("imm", 46))
+            f.emit("bin", "add", pos, pos, ("imm", 1))
+            p0 = f.new_v()
+            f.emit("mov", p0, pos)
+            f.emit("call", pos, "__fmt_u64", [buf, pos, rest, ("imm", 6)])
+            l_tr2, l_tre2 = f.label("ftr2"), f.label("ftre2")
+            f.emit("label", l_tr2)
+            f.emit("jcc", "le", pos, p0, l_tre2)
+            m1 = f.new_v()
+            f.emit("bin", "sub", m1, pos, ("imm", 1))
+            ch = f.new_v()
+            f.emit("load8", ch, buf, m1)
+            f.emit("jcc", "ne", ch, ("imm", 48), l_tre2)
+            f.emit("bin", "sub", pos, pos, ("imm", 1))
+            f.emit("jmp", l_tr2)
+            f.emit("label", l_tre2)
+            f.emit("label", l_nr)
+            # 指数
+            f.emit("store8", buf, pos, ("imm", 101))          # 'e'
+            f.emit("bin", "add", pos, pos, ("imm", 1))
+            aexp = f.new_v()
+            l_ep, l_eout = f.label("fepos"), f.label("feout")
+            f.emit("jcc", "ge", exp, ("imm", 0), l_ep)
+            f.emit("store8", buf, pos, ("imm", 45))           # '-'
+            f.emit("bin", "add", pos, pos, ("imm", 1))
+            f.emit("bin", "sub", aexp, ("imm", 0), exp)
+            f.emit("jmp", l_eout)
+            f.emit("label", l_ep)
+            f.emit("store8", buf, pos, ("imm", 43))           # '+'
+            f.emit("bin", "add", pos, pos, ("imm", 1))
+            f.emit("mov", aexp, exp)
+            f.emit("label", l_eout)
+            f.emit("call", pos, "__fmt_u64", [buf, pos, aexp, ("imm", 1)])
+            f.emit("label", l_done)
+            f.emit("store8", buf, pos, ("imm", 0))
+            f.emit("ret", buf)
+            self.out.append(f)
+
         # __str_from_bool(v) -> ptr
         f = Fn("__str_from_bool")
         v = f.new_v()
@@ -2155,6 +3173,24 @@ class Lower:
         f.emit("label", l_e)
         f.emit("ret", ("imm", 0))
         self.out.append(f)
+
+    # ---- 浮点值跟踪（与 str/bool 同机制：vreg -> 'f32'/'f64'）----
+    @staticmethod
+    def _mark_float(fn, v, w):
+        if isinstance(v, int):
+            fv = getattr(fn, "floatv", None)
+            if fv is None:
+                fv = {}
+                fn.floatv = fv
+            fv[v] = w
+        return v
+
+    @staticmethod
+    def _float_of(fn, x):
+        """vreg -> 'f32'/'f64'；非浮点（含 imm/ga）返回 None"""
+        if isinstance(x, int):
+            return getattr(fn, "floatv", {}).get(x)
+        return None
 
     # ---- 字符串值跟踪（非 SSA：在 Fn 上记一个集合）----
     @staticmethod
@@ -2189,6 +3225,19 @@ class Lower:
     @staticmethod
     def _is_chan(fn, v):
         return isinstance(v, int) and v in getattr(fn, "chanv", set())
+
+    # ---- map 值跟踪（v0.10）：句柄 vreg -> (键标签, 值标签) ----
+    @staticmethod
+    def _mark_map(fn, v, kt, vt):
+        if isinstance(v, int):
+            if not hasattr(fn, "mapv"):
+                fn.mapv = {}
+            fn.mapv[v] = (kt, vt)
+        return v
+
+    @staticmethod
+    def _map_of(fn, v):
+        return getattr(fn, "mapv", {}).get(v) if isinstance(v, int) else None
 
     def run(self, fns_ast):
         # 先降级用户函数，再按需发射运行库：只把真正用到的
@@ -2229,6 +3278,14 @@ def _map_ins(ins, f):
         return ("mov", V(ins[1]), S(ins[2]))
     if op == "bin":
         return ("bin", ins[1], V(ins[2]), S(ins[3]), S(ins[4]))
+    if op == "fbin":
+        return ("fbin", ins[1], ins[2], V(ins[3]), S(ins[4]), S(ins[5]))
+    if op == "fneg":
+        return ("fneg", ins[1], V(ins[2]), S(ins[3]))
+    if op == "fcmpset":
+        return ("fcmpset", ins[1], ins[2], V(ins[3]), S(ins[4]), S(ins[5]))
+    if op == "fcvt":
+        return ("fcvt", ins[1], V(ins[2]), S(ins[3]))
     if op in ("neg", "not"):
         return (op, V(ins[1]), S(ins[2]))
     if op == "cmpset":
@@ -2516,6 +3573,28 @@ class Codegen:
         self.enc.emit(b"\x00" * 8)
         return target
 
+    def fp_from_gpr(self, w, x, r):
+        """GPR 位模式 -> XMM x（f64 走 movq，f32 走 movd）"""
+        if w == "f64":
+            self.enc.movq_xr(x, r)
+        else:
+            self.enc.movd_xr(x, r)
+
+    def fp_to_dst(self, w, dst, x):
+        """XMM x -> dst vreg（f32 写出后高位清零，保持 64 位槽语义）"""
+        rd = self.safe_dst_reg(dst)
+        if rd is not None:
+            if w == "f64":
+                self.enc.movq_rx(rd, x)
+            else:
+                self.enc.movd_rx(rd, x)
+            return
+        if w == "f64":
+            self.enc.movq_rx(SCRATCH2, x)
+        else:
+            self.enc.movd_rx(SCRATCH2, x)
+        self.commit(dst, SCRATCH2)
+
     def commit(self, dst, reg):
         kind, val = self.alloc[dst]
         if kind == "r":
@@ -2670,6 +3749,57 @@ class Codegen:
             else:
                 enc.alu_ri("xor", ra, -1)
             self.commit(ins[1], ra)
+        elif op == "fbin":
+            w, fop, dst, a, b = ins[1], ins[2], ins[3], ins[4], ins[5]
+            self.fp_from_gpr(w, 0, self.mat(SCRATCH2, a))
+            self.fp_from_gpr(w, 1, self.mat(SCRATCH, b))
+            enc.fp_alu(w, fop, 0, 1)
+            self.fp_to_dst(w, dst, 0)
+        elif op == "fneg":
+            w, dst, a = ins[1], ins[2], ins[3]
+            self.fp_from_gpr(w, 0, self.mat(SCRATCH2, a))
+            enc.mov_ri(SCRATCH, 0x8000000000000000 if w == "f64" else 0x80000000)
+            self.fp_from_gpr(w, 2, SCRATCH)
+            enc.fp_xor(w, 0, 2)
+            self.fp_to_dst(w, dst, 0)
+        elif op == "fcmpset":
+            w, cc, dst, a, b = ins[1], ins[2], ins[3], ins[4], ins[5]
+            self.fp_from_gpr(w, 0, self.mat(SCRATCH2, a))
+            self.fp_from_gpr(w, 1, self.mat(SCRATCH, b))
+            enc.fp_cmp(w, 0, 1)
+            # 有序语义与 C 一致：NaN 时 PF=1，比较结果必须为假（!= 为真）
+            if cc == "ne":
+                enc.setcc("p", SCRATCH)
+                enc.setcc("ne", ACC)
+                enc.movzx_r_r8(SCRATCH, SCRATCH)
+                enc.movzx_r_r8(ACC, ACC)
+                enc.alu_rr("or", ACC, SCRATCH)
+            else:
+                # comis* 按无符号语义置 CF/ZF：l/le/g/ge 必须用 setb/setbe/seta/setae
+                ucc = {"e": "e", "ne": "ne", "l": "b", "le": "be",
+                       "g": "a", "ge": "ae"}[cc]
+                enc.setcc("np", SCRATCH)
+                enc.setcc(ucc, ACC)
+                enc.movzx_r_r8(SCRATCH, SCRATCH)
+                enc.movzx_r_r8(ACC, ACC)
+                enc.alu_rr("and", ACC, SCRATCH)
+            self.commit(dst, ACC)
+        elif op == "fcvt":
+            kind, dst, a = ins[1], ins[2], ins[3]
+            if kind in ("i2f64", "i2f32"):
+                # cvtsi2sd/ss 的源是 GPR，不是 XMM
+                enc.cvt(kind, 0, self.mat(SCRATCH2, a))
+                self.fp_to_dst("f32" if kind == "i2f32" else "f64", dst, 0)
+                return
+            if kind in ("f64i", "f32i"):
+                self.fp_from_gpr("f64" if kind == "f64i" else "f32", 0, self.mat(SCRATCH2, a))
+                enc.cvt(kind, ACC, 0)
+                self.commit(dst, ACC)
+                return
+            self.fp_from_gpr("f32" if kind in ("i2f32", "f32f64") else "f64", 0,
+                             self.mat(SCRATCH2, a))
+            enc.cvt(kind, 0, 0)
+            self.fp_to_dst("f32" if kind in ("i2f32", "f64f32") else "f64", dst, 0)
         elif op == "cmpset":
             cc, dst, a, b = ins[1], ins[2], ins[3], ins[4]
             rd = self.safe_dst_reg(dst, [a, b])
@@ -2832,10 +3962,15 @@ class Codegen:
             return
         chain = const_mul_chain(c)
         plan = self._plan_mul_chain(chain, dst, src) if chain else None
-        if plan is None:                           # 合格魔数找不到：安全回退 imul
+        if plan is None:
+            # 合格魔数找不到：安全回退 imul。
+            # 大常量（如 map 哈希用的 splitmix64 / FNV 素数，>= 2^40）走这里：
+            # 先把常量物化进 SCRATCH 再 imul（历史 bug：直接 imul_rr(dst, src)
+            # 算成了 src*src，大常量乘法会静默算错）。
             if dst != src:
                 enc.mov_rr(dst, src)
-            enc.imul_rr(dst, src)
+            enc.mov_ri(SCRATCH, c)
+            enc.imul_rr(dst, SCRATCH)
             return
         for (t, pb, qi, sc) in plan:
             enc.lea3(t, pb, qi, sc)

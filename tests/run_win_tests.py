@@ -284,7 +284,9 @@ def test_cross_verify():
         return
     cases = ["tests/divmod.ros", "tests/t8.ros", "tests/t9.ros", "tests/t11.ros",
              "tests/t12.ros", "examples/inventory.ros", "examples/collatz.ros",
-             "examples/game_loop.ros", "tests/t19_option.ros"]
+             "examples/game_loop.ros", "tests/t19_option.ros",
+             "tests/t20_result_generic.ros", "tests/t21_slice.ros",
+             "tests/t22_map.ros", "tests/t23_float.ros"]
     # 注意：hello 的 cores() 是编译期常量（Windows=物理核，WSL=4），不参与逐字节比对。
     drive = ROOT[0].lower()
     wsl_root = f"/mnt/{drive}/" + ROOT[3:].replace("\\", "/")
@@ -342,6 +344,10 @@ def main():
     case_output("chan", "tests/t15_chan.ros", ["749500", "chan ok"])
     case_selfcheck("result", "tests/t17_result.ros")
     case_selfcheck("option", "tests/t19_option.ros")
+    case_selfcheck("result_generic", "tests/t20_result_generic.ros")
+    case_selfcheck("slice", "tests/t21_slice.ros")
+    case_selfcheck("map", "tests/t22_map.ros")
+    case_selfcheck("float", "tests/t23_float.ros")
 
     print("== [5] 单核降级（Rosoto.toml multicore=false） ==")
     test_single_core()

@@ -1,17 +1,15 @@
 # Rosoto 交接文档（HANDOVER）
 
-> 本轮：**v0.8 `option[T]` 受控单态化**（合成枚举 `__opt_<T>` + `Option.Some/None` match 解构）
-> 交接时间：2026-10-19（GMT+8）
-> 状态：**187 项回归全绿**（Windows 57 / 自研 Linux 54 / C 16 / corelib 34 / io_uring 26）
+> 工作区状态（2026-10-20 晚间）：**v0.8 已提交 `d61c593`**；v0.9 性能轮 + v0.10 map/浮点在工作区待提交。
+> v0.9：`opt_modsum` 模和折叠 + 范围分析扩展 + `mul_const` 回退路径错编修复（loop_sum 11–13ms，见 CHANGELOG）。
+> v0.10：`map[K]V` 开放寻址哈希表（t22）+ 浮点实际运算（t23，修复 `__f64_to_str` 科学计数法死循环）。
+> 本机（Windows）验证：PE 链 [1]–[6] 52 项全绿；[7] 交叉验证与 native/C 链需 Linux/WSL 环境。
 > 代码总量：`tools/` 12.3k 行 Python + `tests/` 1.5k 行
-> 已提交：v0.5 `3e9b8c0`、v0.6 `ff8f830`、v0.7 `d38c359`；本轮 v0.8 待提交
 >
-> ### v0.8 一句话
-> `option[T]`（T ∈ int/bool/str）现可跨 native / Windows PE / C 三链使用：
-> `option[int].some(x)` / `.none()` 构造，`Option.Some(v)` / `Option.None` match 解构，
-> 函数可返回 `option[T]`（复用枚举聚合返回 ABI）。实现 = 按 T 现场合成真枚举 `__opt_<T>{Some(value:T),None}`
-> （前端单态化，类型元组坍缩为 `("named","__opt_<T>")`）+ 构造脱糖为 `enumlit` + `Option.X` 模式
-> 按求值式真实枚举名改写（`resolve_option_patterns`）。**后端零改动**，完全复用既有 enum 布局 / match / 聚合 ABI。
+> ### v0.10 一句话
+> `map[K]V`（K/V ∈ int/bool/str，开放寻址 + 线性探测 + 墓碑 + 扩容）与浮点实际运算
+> （f64/f32 四则/比较/转换/格式化，定点 + 科学计数双路径）三链打通；
+> 顺带修复自研后端 `__f64_to_str` 在科学计数路径的非 SSA 死循环（`print(1e-7)` 挂死）。
 
 ---
 
@@ -127,7 +125,7 @@ Windows PE 57 ✅  |  自研 Linux 54 ✅  |  C 16 ✅  |  corelib 34 ✅  |  io
 | 泛型 / interface | ❌ | 中 |
 | 所有权 + 借用检查 | ❌ arena/spawn/array 依赖约定 | 中 |
 | `@simd` / `@no_preempt` / `@rc[T]` / `@extern("C")` | ❌ | 中 |
-| 浮点实际运算 | 🟡 类型名可解析，运算/打印未打通 | 中 |
+| 浮点实际运算 | ✅ v0.10 运算/比较/转换/格式化三链打通（t23，f64+f32） | — |
 | `rosoto_fmt` 新语法覆盖 | ❌ | 低 |
 
 ### 2.2 平台 / 性能

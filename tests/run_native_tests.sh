@@ -145,6 +145,43 @@ echo "[13] option[T] 单态化 + match 解构"
 $NAT run tests/t19_option.ros >/dev/null 2>&1 && ok "native option 构造/match 正确" || bad "native option 失败"
 $CBE run tests/t19_option.ros >/dev/null 2>&1 && ok "C option 构造/match 正确" || bad "C option 失败"
 
+echo "[14] result[T,E] 单态化 + ? 传播 + match 解构"
+$NAT run tests/t20_result_generic.ros >/dev/null 2>&1 && ok "native result[T,E] 构造/?/match 正确" || bad "native result[T,E] 失败"
+$CBE run tests/t20_result_generic.ros >/dev/null 2>&1 && ok "C result[T,E] 构造/?/match 正确" || bad "C result[T,E] 失败"
+$NAT run tests/t20_result_generic.ros 2>/dev/null | grep -v '^\[rosoto' > build/.res20_n
+$CBE run tests/t20_result_generic.ros 2>/dev/null | grep -v '^\[rosoto' > build/.res20_c
+diff build/.res20_n build/.res20_c >/dev/null && ok "result[T,E] 自研后端 == C 后端" || bad "result[T,E] 双后端不一致"
+
+echo "[15] 切片 []T（{ptr,len} 两字零拷贝视图 + 聚合 ABI）"
+$NAT run tests/t21_slice.ros >/dev/null 2>&1 && ok "native 切片 构造/索引/传参/返回正确" || bad "native 切片 失败"
+$CBE run tests/t21_slice.ros >/dev/null 2>&1 && ok "C 切片 构造/索引/传参/返回正确" || bad "C 切片 失败"
+$NAT run tests/t21_slice.ros 2>/dev/null | grep -v '^\[rosoto' > build/.sli21_n
+$CBE run tests/t21_slice.ros 2>/dev/null | grep -v '^\[rosoto' > build/.sli21_c
+diff build/.sli21_n build/.sli21_c >/dev/null && ok "切片 自研后端 == C 后端" || bad "切片 双后端不一致"
+$NAT build tests/slice_bounds.ros -o build/nat_sb >/dev/null 2>&1
+timeout 30 ./build/nat_sb >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && ok "切片越界 fail-fast（动态长度检查）" || bad "切片越界未失败"
+
+echo "[16] map[K]V（开放寻址 + 线性探测 + 墓碑 + 扩容）"
+$NAT run tests/t22_map.ros >/dev/null 2>&1 && ok "native map set/get/has/del/扩容/墓碑正确" || bad "native map 失败"
+$CBE run tests/t22_map.ros >/dev/null 2>&1 && ok "C map set/get/has/del/扩容/墓碑正确" || bad "C map 失败"
+$NAT run tests/t22_map.ros 2>/dev/null | grep -v '^\[rosoto' > build/.map22_n
+$CBE run tests/t22_map.ros 2>/dev/null | grep -v '^\[rosoto' > build/.map22_c
+diff build/.map22_n build/.map22_c >/dev/null && ok "map 自研后端 == C 后端" || bad "map 双链不一致"
+$NAT build tests/map_bounds.ros -o build/nat_mb >/dev/null 2>&1
+timeout 30 ./build/nat_mb >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && ok "map get 缺失键 fail-fast（退出码非 0）" || bad "map get 缺失键未失败"
+$CBE build tests/map_bounds.ros --cc >/dev/null 2>&1; mv build/map_bounds build/c_mb 2>/dev/null
+timeout 30 ./build/c_mb >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && ok "C 侧 map get 缺失键 fail-fast" || bad "C 侧 map get 缺失键未失败"
+
+echo "[17] 浮点 f64/f32（运算/比较/转换/格式化，双链一致）"
+$NAT run tests/t23_float.ros >/dev/null 2>&1 && ok "native 浮点 运算/比较/转换/格式化正确" || bad "native 浮点 失败"
+$CBE run tests/t23_float.ros >/dev/null 2>&1 && ok "C 浮点 运算/比较/转换/格式化正确" || bad "C 浮点 失败"
+$NAT run tests/t23_float.ros 2>/dev/null | grep -v '^\[rosoto' > build/.flt23_n
+$CBE run tests/t23_float.ros 2>/dev/null | grep -v '^\[rosoto' > build/.flt23_c
+diff build/.flt23_n build/.flt23_c >/dev/null && ok "浮点 自研后端 == C 后端" || bad "浮点 双链不一致"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

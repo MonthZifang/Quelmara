@@ -1,0 +1,165 @@
+// t22_map.ros：map[K]V 开放寻址哈希表（v0.10）
+// 覆盖：int/bool/str 键、int/str 值、set/get/has/del/len、覆盖写、
+//       str 键内容相等（不同对象）、cap=16 起步插 200 键扩容、
+//       删除后墓碑复用、map 作函数参数/返回值、arena 块内绑定
+// 自校验：assert 失败即非零退出；双链（自研 x86_64 / C）输出必须逐字节一致
+module t22
+
+// map 作函数参数（句柄传递，键类型在编译期固定）
+fn total(m: map[int]int, n: int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        if m.has(i) {
+            s += m.get(i)
+        }
+        i += 1
+    }
+    return s
+}
+
+// map 作返回值
+fn make_seeded() -> map[int]int {
+    let m = map[int]int.new(4)
+    m.set(7, 70)
+    m.set(8, 80)
+    return m
+}
+
+fn main() {
+    // ---- int 键 + int 值：set/get/has/del/len ----
+    let mut m = map[int]int.new(16)
+    assert(len(m) == 0, "empty len")
+    assert(!m.has(1), "missing has")
+    m.set(1, 100)
+    m.set(2, 200)
+    m.set(3, 300)
+    assert(len(m) == 3, "len after set")
+    assert(m.get(1) == 100, "get 1")
+    assert(m.get(2) == 200, "get 2")
+    assert(m.get(3) == 300, "get 3")
+    assert(m.has(2), "has 2")
+
+    // 覆盖写：同键 set 两次取后者
+    m.set(2, 222)
+    assert(m.get(2) == 222, "overwrite")
+    assert(len(m) == 3, "len unchanged after overwrite")
+
+    // 删除后 has 为 false、len 减一
+    m.del(2)
+    assert(!m.has(2), "deleted has")
+    assert(len(m) == 2, "len after del")
+    assert(m.get(1) == 100, "survivor 1")
+    assert(m.get(3) == 300, "survivor 3")
+    m.del(99)
+    assert(len(m) == 2, "del missing is no-op")
+
+    // 墓碑复用：删除后再插入同键 / 新键
+    m.set(2, 2222)
+    assert(m.get(2) == 2222, "reinsert same key")
+    assert(len(m) == 3, "len after reinsert")
+    m.del(2)
+    m.set(5, 500)
+    assert(m.get(5) == 500, "tombstone reused by new key")
+    assert(m.get(1) == 100, "probe chain intact 1")
+    assert(m.get(3) == 300, "probe chain intact 3")
+    assert(len(m) == 3, "len after tombstone reuse")
+
+    // ---- str 键 + int 值（内容相等，不是同一个对象）----
+    let mut sm = map[str]int.new(4)
+    sm.set("alpha", 1)
+    // 拼接产物与字面量 "alpha" 指针不同：只有内容比较才能命中
+    let k = "alp" + "ha"
+    assert(sm.has(k), "str key content eq")
+    assert(sm.get(k) == 1, "str get via concat key")
+    sm.set(k, 2)
+    assert(sm.get("alpha") == 2, "overwrite via literal key")
+    assert(len(sm) == 1, "str map len")
+    sm.set("beta", 3)
+    assert(len(sm) == 2, "str map len 2")
+    assert(sm.get("beta") == 3, "beta")
+    sm.del(k)
+    assert(!sm.has("alpha"), "str del by content")
+    assert(sm.get("beta") == 3, "beta survives")
+    assert(len(sm) == 1, "str map len after del")
+
+    // ---- int 键 + str 值 ----
+    let mut vm = map[int]str.new(4)
+    vm.set(1, "one")
+    vm.set(2, "two")
+    assert(vm.get(1) == "one", "str value eq")
+    assert(vm.get(2) == "two", "str value eq 2")
+    vm.set(1, "won")
+    assert(vm.get(1) == "won", "str value overwrite")
+    assert(len(vm) == 2, "int->str len")
+    print(vm.get(2))
+
+    // ---- bool 键 ----
+    let mut bm = map[bool]int.new(2)
+    bm.set(true, 10)
+    bm.set(false, 20)
+    assert(bm.get(true) == 10, "bool key true")
+    assert(bm.get(false) == 20, "bool key false")
+    bm.set(true, 11)
+    assert(bm.get(true) == 11, "bool overwrite")
+    assert(len(bm) == 2, "bool map len")
+
+    // ---- 扩容：cap=16 起步插 200 键，逐个 get 验证 ----
+    let mut big = map[int]int.new(16)
+    let mut i = 0
+    while i < 200 {
+        big.set(i, i * 3 + 1)
+        i += 1
+    }
+    assert(len(big) == 200, "big len")
+    i = 0
+    let mut acc = 0
+    while i < 200 {
+        assert(big.has(i), "big has")
+        acc += big.get(i)
+        i += 1
+    }
+    // sum(3i+1) for i in 0..199 = 3*19900 + 200 = 59900
+    assert(acc == 59900, "big sum")
+    assert(big.get(0) == 1, "big first")
+    assert(big.get(199) == 598, "big last")
+    print(acc)
+
+    // 扩容 + 删除交错：删一半再补新键（墓碑复用 + 探测链完好）
+    i = 0
+    while i < 100 {
+        big.del(i)
+        i += 1
+    }
+    assert(len(big) == 100, "big len after del half")
+    i = 0
+    while i < 50 {
+        big.set(1000 + i, i)
+        i += 1
+    }
+    assert(len(big) == 150, "big len after refill")
+    assert(big.get(1000) == 0, "refill key 1000")
+    assert(big.get(1049) == 49, "refill key 1049")
+    assert(big.get(150) == 451, "survivor 150")
+
+    // ---- map 作参数 / 返回值 ----
+    assert(total(m, 10) == 900, "map param total")
+    let g = make_seeded()
+    assert(g.get(7) == 70, "returned map 7")
+    assert(g.get(8) == 80, "returned map 8")
+    assert(len(g) == 2, "returned map len")
+
+    // ---- arena 绑定：块内创建的 map 存储随块结束整体回收（native bump 回卷）----
+    arena {
+        let am = map[int]int.new(8)
+        let mut j = 0
+        while j < 8 {
+            am.set(j, j * j)
+            j += 1
+        }
+        assert(len(am) == 8, "arena map len")
+        assert(am.get(7) == 49, "arena map get")
+    }
+
+    print("map ok")
+}

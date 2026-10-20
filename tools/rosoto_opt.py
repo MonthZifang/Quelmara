@@ -41,7 +41,8 @@ BRANCHES = ("jmp", "jz", "jnz", "jcc", "ret")
 COMMUTATIVE = ("add", "mul", "and", "or", "xor")
 # 绝不陷入的纯运算:可被投机执行(LICM 安全集)
 NON_TRAPPING = ("add", "sub", "mul", "and", "or", "xor", "shl", "shr", "sar", "umulhi")
-PURE = {"mov", "bin", "neg", "not", "cmpset", "load", "load8", "movaddr", "frameaddr"}
+PURE = {"mov", "bin", "neg", "not", "cmpset", "load", "load8", "movaddr", "frameaddr",
+        "fbin", "fneg", "fcmpset", "fcvt"}
 
 
 def vreg_mentions(ins):
@@ -54,6 +55,14 @@ def vreg_mentions(ins):
         return [ins[1]], ints([ins[2]])
     if op == "bin":
         return [ins[2]], ints([ins[3], ins[4]])
+    if op == "fbin":
+        return [ins[3]], ints([ins[4], ins[5]])
+    if op == "fneg":
+        return [ins[2]], ints([ins[3]])
+    if op == "fcmpset":
+        return [ins[3]], ints([ins[4], ins[5]])
+    if op == "fcvt":
+        return [ins[2]], ints([ins[3]])
     if op in ("neg", "not"):
         return [ins[1]], ints([ins[2]])
     if op == "cmpset":
@@ -889,6 +898,14 @@ def _subst_vregs(ins, sub):
         return ("mov", sub(ins[1]), S(ins[2]))
     if op == "bin":
         return ("bin", ins[1], sub(ins[2]), S(ins[3]), S(ins[4]))
+    if op == "fbin":
+        return ("fbin", ins[1], ins[2], sub(ins[3]), S(ins[4]), S(ins[5]))
+    if op == "fneg":
+        return ("fneg", ins[1], sub(ins[2]), S(ins[3]))
+    if op == "fcmpset":
+        return ("fcmpset", ins[1], ins[2], sub(ins[3]), S(ins[4]), S(ins[5]))
+    if op == "fcvt":
+        return ("fcvt", ins[1], sub(ins[2]), S(ins[3]))
     if op in ("neg", "not"):
         return (op, sub(ins[1]), S(ins[2]))
     if op == "cmpset":
@@ -934,7 +951,9 @@ def opt_copy_prop(fn):
     alias = {}
     for ins in fn.instrs:
         if ins[0] == "mov" and isinstance(ins[2], int) and ins[1] != ins[2]:
-            if def_count.get(ins[1], 0) == 1:
+            # ⚠ 源 vreg 也必须只定义一次：否则 mov 之后源被重写，
+            # 把后续 use 替换成源 vreg 会读到新值（尾零修剪 p0 被吞的教训）。
+            if def_count.get(ins[1], 0) == 1 and def_count.get(ins[2], 0) == 1:
                 alias[ins[1]] = ins[2]
     for v in list(alias):
         seen = {v}

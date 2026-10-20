@@ -21,6 +21,7 @@ Rosoto -> C99 转译器原型 (v0.1)
 
 import argparse
 import os
+import struct
 import subprocess
 import sys
 import tomllib
@@ -78,7 +79,7 @@ def load_config(src_path):
 KEYWORDS = {"fn", "let", "mut", "if", "else", "while", "for", "parfor",
             "return", "module", "import", "true", "false", "test",
             "break", "continue", "struct", "enum", "match",
-            "arena", "spawn", "chan", "option"}
+            "arena", "spawn", "chan", "option", "result", "map"}
 
 TWO_CHAR = {"->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "..", "=>"}
 ONE_CHAR = "(){}[],:.=<>+-*/%!?"
@@ -135,7 +136,34 @@ def tokenize(src, keep_comments=False):
             j = i
             while j < n and (src[j].isdigit() or src[j] == "_"):
                 j += 1
-            toks.append(Tok("INT", int(src[i:j].replace("_", "")), line))
+            # 浮点字面量：小数点后必须跟数字（`0..n` 的 `..` 不受影响）
+            is_float = False
+            if j + 1 < n and src[j] == "." and src[j + 1].isdigit():
+                is_float = True
+                j += 1
+                while j < n and (src[j].isdigit() or src[j] == "_"):
+                    j += 1
+            # 指数部分：e/E 后可跟 +/-，再必须跟数字（`1e` 不吞进标识符）
+            if j < n and src[j] in "eE":
+                k2 = j + 1
+                if k2 < n and src[k2] in "+-":
+                    k2 += 1
+                if k2 < n and src[k2].isdigit():
+                    is_float = True
+                    j = k2
+                    while j < n and (src[j].isdigit() or src[j] == "_"):
+                        j += 1
+            text = src[i:j].replace("_", "")
+            if is_float:
+                # `f` 后缀 = f32（单精度）；默认 f64
+                width = "f64"
+                if j < n and src[j] == "f" and not (
+                        j + 1 < n and (src[j + 1].isalnum() or src[j + 1] == "_")):
+                    width = "f32"
+                    j += 1
+                toks.append(Tok("FLOAT", (float(text), width), line))
+            else:
+                toks.append(Tok("INT", int(text), line))
             i = j
             continue
         if c.isalpha() or c == "_":
@@ -323,12 +351,32 @@ class Parser:
             et = self.parse_type()
             self.eat("SYM", "]")
             return ("chan", et)
+        if self.at("map"):
+            # map[K]V：开放寻址哈希表（K/V 仅 int/bool/str 标量，SPEC 附录 v0.10）
+            t = self.next()
+            self.eat("SYM", "[")
+            kt = self.parse_type()
+            self.eat("SYM", "]")
+            vt = self.parse_type()
+            map_kv_tag(kt, "键类型", t.line)
+            map_kv_tag(vt, "值类型", t.line)
+            return ("map", kt, vt)
         if self.at("option"):
             self.next()
             self.eat("SYM", "[")
             tt = self.parse_type()
             self.eat("SYM", "]")
             return ("named", self.ensure_option_enum(tt, self.peek().line))
+        if self.at("result"):
+            # result[T, E]（T=Ok 载荷，E=Err 载荷）受控单态化入口
+            rt = self.peek()
+            self.next()
+            self.eat("SYM", "[")
+            tt = self.parse_type()
+            self.eat("SYM", ",")
+            et = self.parse_type()
+            self.eat("SYM", "]")
+            return ("named", self.ensure_result_enum(tt, et, rt.line))
         name = self.eat("NAME").val
         while self.at("SYM", "."):
             self.next()
@@ -529,6 +577,20 @@ class Parser:
             self.decl_order.append(("enum", name))
         return name
 
+    def ensure_result_enum(self, tt, et, line):
+        """result[T,E] 受控单态化：按 (T,E) 现场合成具名枚举 __res_<T>_<E>
+        {Ok(value:T), Err(error:E)}（Ok 固定在前）。
+        类型元组直接坍缩为 ("named","__res_<T>_<E>")，下游 enum 布局/match/聚合返回 ABI 全部复用。"""
+        for t in (tt, et):
+            if not (t and t[0] == "named" and t[1] in ("int", "i64", "i32", "i16", "i8",
+                                                       "u64", "u32", "u16", "u8", "bool", "str")):
+                raise SyntaxError(f"line {line}: result[T,E] 的 T/E 暂只支持整数/bool/str 标量")
+        name = "__res_" + tt[1] + "_" + et[1]
+        if name not in self.enums:
+            self.enums[name] = [("Ok", [("value", tt)]), ("Err", [("error", et)])]
+            self.decl_order.append(("enum", name))
+        return name
+
     def parse_if(self):
         self.eat("if")
         cond = self.parse_expr()
@@ -668,6 +730,33 @@ class Parser:
             self.eat("SYM", "(")
             args = self.parse_args()      # parse_args 已吃掉右括号
             return ("chanopen", et, args)
+        if t.kind == "map":
+            # map[K]V.new(cap) -> 开放寻址哈希表句柄（cap 须 2 的幂，省略默认 16）
+            # 注意：值类型只取单段名字，否则 parse_type 的限定名循环会把
+            # `int.new` 整个吞成类型名（历史坑：构造表达式必须与类型位分开）。
+            self.next()
+            self.eat("SYM", "[")
+            kt = self.parse_type()
+            self.eat("SYM", "]")
+            if self.at("SYM", "[") or self.at("chan") or self.at("option") \
+                    or self.at("result") or self.at("map"):
+                vt = self.parse_type()      # 复合值类型：留给校验统一报错
+            else:
+                vt = ("named", self.eat("NAME").val)
+            map_kv_tag(kt, "键类型", t.line)
+            map_kv_tag(vt, "值类型", t.line)
+            self.eat("SYM", ".")
+            self.eat("NAME", "new")
+            self.eat("SYM", "(")
+            args = self.parse_args()
+            if len(args) > 1:
+                raise SyntaxError(f"line {t.line}: map[K]V.new(cap) 至多一个容量实参")
+            if args:
+                v = map_lit_cap(args[0])
+                if v is not None and (v < 1 or (v & (v - 1)) != 0):
+                    raise SyntaxError(
+                        f"line {t.line}: map[K]V.new 容量必须是 2 的幂，得到 {v}")
+            return ("mapnew", ("map", kt, vt), args)
         if t.kind == "option":
             # option[T].some(x) / option[T].none() -> 合成枚举构造（脱糖为 enumlit）
             self.next()
@@ -684,6 +773,24 @@ class Parser:
             if meth == "none" and len(args) == 0:
                 return ("enumlit", [name, "None"], [])
             raise SyntaxError(f"line {t.line}: option[T].{meth} 用法无效（仅 some(x)/none()）")
+        if t.kind == "result":
+            # result[T,E].ok(x) / result[T,E].err(e) -> 合成枚举构造（脱糖为 enumlit）
+            self.next()
+            self.eat("SYM", "[")
+            tt = self.parse_type()
+            self.eat("SYM", ",")
+            et = self.parse_type()
+            self.eat("SYM", "]")
+            name = self.ensure_result_enum(tt, et, t.line)
+            self.eat("SYM", ".")
+            meth = self.eat("NAME").val
+            self.eat("SYM", "(")
+            args = self.parse_args()
+            if meth == "ok" and len(args) == 1:
+                return ("enumlit", [name, "Ok"], [("value", args[0])])
+            if meth == "err" and len(args) == 1:
+                return ("enumlit", [name, "Err"], [("error", args[0])])
+            raise SyntaxError(f"line {t.line}: result[T,E].{meth} 用法无效（仅 ok(x)/err(e)）")
         if t.kind == "SYM" and t.val == "[":
             # 定长数组字面量：[1, 2, 3]（v0.6 只支持数值元素）
             self.next()
@@ -699,6 +806,9 @@ class Parser:
         if t.kind == "INT":
             self.next()
             return ("num", t.val)
+        if t.kind == "FLOAT":
+            self.next()
+            return ("fnum", t.val[0], t.val[1])   # (值, "f32"|"f64")
         if t.kind == "STR":
             self.next()
             return ("str", t.val)
@@ -774,13 +884,20 @@ def parse_source(src):
 
 
 def resolve_option_patterns(arms, scrut_ename):
-    """把 `Option.Some/None` 模式路径首段改写为求值式真实合成枚举名 __opt_*（受控单态化）。
-    仅当求值式确为 option 合成枚举时改写；其余原样返回。"""
-    if not scrut_ename or not str(scrut_ename).startswith("__opt_"):
+    """把 `Option.Some/None` / `Result.Ok/Err` 模式路径首段改写为求值式真实合成枚举名
+    __opt_* / __res_*（受控单态化）。
+    仅当求值式确为对应合成枚举时改写（用户手写 Result 等原样返回）；其余原样返回。"""
+    if not scrut_ename:
+        return arms
+    if str(scrut_ename).startswith("__opt_"):
+        head = "Option"
+    elif str(scrut_ename).startswith("__res_"):
+        head = "Result"
+    else:
         return arms
     out = []
     for pat, body in arms:
-        if pat and pat[0] == "pat" and pat[1] and pat[1][0] == "Option":
+        if pat and pat[0] == "pat" and pat[1] and pat[1][0] == head:
             out.append((("pat", [scrut_ename] + list(pat[1][1:]), pat[2]), body))
         else:
             out.append((pat, body))
@@ -862,7 +979,8 @@ def with_test_runner(fns_ast, tests):
 # ---------------------------------------------------------------------------
 
 BUILTIN_RETS = {"print": "void", "cores": "int", "assert": "void",
-                "join": "int64_t", "len": "int64_t"}
+                "join": "int64_t", "len": "int64_t",
+                "to_float": "double", "to_f32": "float", "to_int": "int64_t"}
 
 CTYPE = {
     "int": "int64_t", "i64": "int64_t", "i32": "int32_t", "u64": "uint64_t",
@@ -874,6 +992,139 @@ CTYPE = {
 
 def type_str(t):
     return t[1] if t[0] == "named" else ("RosotoBuf" if t[1] == ("named", "byte") else "void *")
+
+
+# 切片 `[]T` = {ptr, len} 两字（与自研后端 RosIR 字宽一致）
+SLICE_WORDS = 2
+# 切片/数组元素只接受标量：一律按 8 字节字存放
+SCALAR_ELEMS = ("int", "i64", "i32", "u64", "u32", "i16", "u16", "i8", "u8",
+                "bool", "str", "byte")
+
+
+def slice_elem_tag(t):
+    """切片元素类型元组 -> 环境类型串标签；越界元素报错"""
+    if t[0] != "named" or t[1] not in SCALAR_ELEMS:
+        raise SyntaxError("切片元素暂只支持标量类型（int/bool/str）")
+    return t[1]
+
+
+def is_slice_env(t):
+    """环境类型串是否是切片（`slice:<elem>`）"""
+    return isinstance(t, str) and t.startswith("slice:")
+
+
+def slice_env_elem(t):
+    """`slice:<elem>` -> 元素标签"""
+    return t[6:] if is_slice_env(t) else None
+
+
+# ---- map[K]V（v0.10）：开放寻址哈希表（K/V 仅 int/bool/str 标量）----
+MAP_KV_SCALARS = ("int", "bool", "str")
+
+
+def map_kv_tag(t, which, line=None):
+    """map 的键/值类型必须是 int/bool/str 标量；返回标签，越界明确报错"""
+    if t is None or t[0] != "named" or t[1] not in MAP_KV_SCALARS:
+        got = t[1] if (t and t[0] == "named") else repr(t)
+        loc = f"line {line}: " if line is not None else ""
+        raise SyntaxError(f"{loc}map 的{which}只支持 int/bool/str 标量，得到 {got!r}")
+    return t[1]
+
+
+def map_lit_cap(e):
+    """map[K]V.new(cap) 实参是整数字面量 -> 返回值（供 2 的幂校验），否则 None"""
+    return e[1] if (isinstance(e, tuple) and e[0] == "num") else None
+
+
+def map_env_tag(kt, vt):
+    """map 在作用域里的类型标记：`map:<键标签>:<值标签>`"""
+    return f"map:{kt}:{vt}"
+
+
+def map_env_of_type(t):
+    """类型元组 ("map", k, v) -> 环境标记；不是 map 返回 None"""
+    if t and t[0] == "map":
+        return map_env_tag(map_kv_tag(t[1], "键类型"), map_kv_tag(t[2], "值类型"))
+    return None
+
+
+def is_map_env(t):
+    """环境类型串是否是 map（`map:<k>:<v>`）"""
+    return isinstance(t, str) and t.startswith("map:")
+
+
+def map_env_parts(t):
+    """`map:<k>:<v>` -> (键标签, 值标签)；不是 map 返回 None"""
+    if not is_map_env(t):
+        return None
+    _, k, v = t.split(":", 2)
+    return k, v
+
+
+def slice_access(elem):
+    """切片元素访问三元组：(ptr 字段名, C 元素指针类型, 读出的 C 类型)。
+    `[]byte` 走 RosotoBuf（字节寻址，网络运行时 ABI）；其余按 8 字节字寻址。"""
+    if elem == "byte":
+        return "data", "char *", "int64_t"
+    if elem == "str":
+        return "ptr", "const char **", "const char *"
+    return "ptr", "int64_t *", "int64_t"
+
+
+def slice_cname(elem):
+    """切片元素标签 -> C 结构体名"""
+    return "RosotoBuf" if elem == "byte" else "RosotoSlice"
+
+
+def slice_ptr_field(elem):
+    return "data" if elem == "byte" else "ptr"
+
+
+# 定长数组在作用域里的标记：`arr:<elem>:<n>`（elem = 元素类型名，n = 长度）
+def arr_env(elem, n):
+    return f"arr:{elem}:{n}"
+
+
+def is_arr_env(t):
+    return isinstance(t, str) and t.startswith("arr:")
+
+
+def arr_env_parts(t):
+    """`arr:<elem>:<n>` -> (elem, n)；不是数组返回 None"""
+    if not is_arr_env(t):
+        return None
+    elem, _, n = t[4:].partition(":")
+    return elem, int(n)
+
+
+# C 侧类型串 -> 元素类型名（arraylit 这类只有 C 类型可参考的场合用）
+C_TO_ELEM = {"int64_t": "int", "bool": "bool", "const char *": "str"}
+
+
+# ---- 浮点（SPEC §2）：float == f64 双精度；f32 单精度。
+# 环境类型串直接用 C 类型名：f64/float -> "double"，f32 -> "float"。
+FLOAT_ENVS = ("double", "float")
+
+
+def is_float_env(t):
+    """环境类型串是否浮点"""
+    return t in FLOAT_ENVS
+
+
+def float_env_of(width):
+    """"f32"/"f64" -> 环境类型串"""
+    return "float" if width == "f32" else "double"
+
+
+def float_width_of_env(t):
+    """环境类型串 -> "f32"/"f64"""  
+    return "f32" if t == "float" else "f64"
+
+
+def unify_float(lt, rt):
+    """浮点二元运算结果类型：任一 f64 则提升为 f64（与 C 提升规则一致）"""
+    return "double" if "double" in (lt, rt) else "float"
+
 
 
 class Infer:
@@ -888,11 +1139,15 @@ class Infer:
     def _env_type(self, t):
         if t[0] == "chan":
             return "int64_t"
+        if t[0] == "map":
+            return "int64_t"
+        if t[0] == "slice":
+            return "slice:" + slice_elem_tag(t[1])
         if t[0] == "array":
             if not (t[2][0] == "named" and t[2][1] in
                     ("int", "i64", "i32", "u64", "u32", "i16", "u16", "i8", "u8", "bool")):
                 raise SyntaxError("定长数组暂只支持数值元素")
-            return f"arr:{t[1]}"
+            return arr_env(t[2][1], t[1])
         if t[0] == "named" and t[1] in self.structs:
             return "struct:" + t[1]
         if t[0] == "named" and t[1] in self.enums:
@@ -909,6 +1164,10 @@ class Infer:
                 if t[1] in self.enums:
                     return "enum:" + t[1]
                 return CTYPE.get(t[1], "int64_t")
+            if t[0] == "slice":
+                return "slice:" + slice_elem_tag(t[1])
+            if t[0] == "map":
+                return map_env_of_type(t) or "int64_t"
             return "RosotoBuf" if t[1] == ("named", "byte") else "void *"
         return BUILTIN_RETS.get(name, "void")
 
@@ -917,6 +1176,8 @@ class Infer:
         k = e[0]
         if k == "num":
             return "int64_t"
+        if k == "fnum":
+            return "float" if e[2] == "f32" else "double"
         if k == "str":
             return "const char *"
         if k == "bool":
@@ -927,28 +1188,50 @@ class Infer:
             return "int" if e[1][0] == "net" else "int64_t"
         if k == "call":
             name = e[1][-1]
+            if name == "slice_of" and name not in self.fns:
+                if len(e[2]) != 1:
+                    raise SyntaxError("slice_of(x) 需要且只需要一个数组实参")
+                at = self.expr(e[2][0], env)
+                if not is_arr_env(at):
+                    raise SyntaxError("slice_of() 目前只支持定长数组变量（零拷贝转换）")
+                return "slice:" + arr_env_parts(at)[0]
             return self.fn_ret(name)
         if k == "spawn":
             return "int64_t"
         if k == "chanopen":
             return "int64_t"
+        if k == "mapnew":
+            return map_env_of_type(e[1]) or "int64_t"
         if k == "arraylit":
+            elem = None
             for el in e[1]:
                 et = self.expr(el, env)
                 if et in ("const char *", "void", "RosotoBuf") or \
                         (isinstance(et, str) and (et.startswith("struct:") or
                                                   et.startswith("enum:") or
-                                                  et.startswith("arr:"))):
+                                                  is_arr_env(et) or is_slice_env(et))):
                     raise SyntaxError("数组字面量暂只支持数值元素")
-            return f"arr:{len(e[1])}"
+                if elem is None:
+                    elem = C_TO_ELEM.get(et, "int")
+            return arr_env(elem or "int", len(e[1]))
         if k == "index":
             ot = self.expr(e[1], env)
-            if not (isinstance(ot, str) and ot.startswith("arr:")):
-                raise SyntaxError("下标只能用于定长数组")
-            return "int64_t"
+            if is_arr_env(ot):
+                return "int64_t"
+            if is_slice_env(ot):
+                return "const char *" if slice_env_elem(ot) == "str" else "int64_t"
+            raise SyntaxError("下标只能用于定长数组或切片")
         if k == "method":
             obj_t = self.expr(e[1], env)
             m = e[2]
+            mp = map_env_parts(obj_t) if isinstance(obj_t, str) else None
+            if mp:
+                kv, vv = mp
+                if m == "get":
+                    return "const char *" if vv == "str" else "int64_t"
+                if m == "has":
+                    return "bool"
+                return "int64_t"
             if m in ("send", "recv"):
                 return "int64_t"
             if m == "to_str":
@@ -965,6 +1248,8 @@ class Infer:
             if op in ("==", "!=", "<", "<=", ">", ">=", "&&", "||"):
                 return "bool"
             lt, rt = self.expr(e[2], env), self.expr(e[3], env)
+            if is_float_env(lt) or is_float_env(rt):
+                return unify_float(lt, rt)
             return "const char *" if "const char *" in (lt, rt) else "int64_t"
         if k == "unop":
             return "bool" if e[1] == "!" else self.expr(e[2], env)
@@ -1045,6 +1330,49 @@ static const char *rosoto_i64_to_str(int64_t v) {
     return b;
 }
 static const char *rosoto_bool_to_str(bool v) { return v ? "true" : "false"; }
+
+/* 浮点格式化：与自研后端 __f64_to_str 算法逐位一致（双链 diff 依赖）。
+   nan/inf/-inf；0 -> "0"；[1e-6, 1e12) 定点 6 位小数去尾零；
+   其余科学计数 d.dddddde±N（尾数 6 位小数去尾零）。
+   四舍五入（half away from zero）；定点用 x*1e6+0.5 截断，与原生后端
+   cvttsd2si 语义一致。 */
+static const char *rosoto_f64_to_str(double x) {
+    char *b = rosoto_sbuf[rosoto_sbuf_i++ & (ROSOTO_SBUF_N - 1)];
+    if (x != x) { strcpy(b, "nan"); return b; }
+    if (x > 1.7976931348623157e308) { strcpy(b, "inf"); return b; }
+    if (x < -1.7976931348623157e308) { strcpy(b, "-inf"); return b; }
+    if (x == 0.0) { strcpy(b, "0"); return b; }
+    int neg = x < 0;
+    if (neg) x = -x;
+    char *p = b;
+    if (neg) *p++ = '-';
+    if (x >= 1e-6 && x < 1e12) {
+        uint64_t u = (uint64_t)(x * 1e6 + 0.5);
+        uint64_t ip = u / 1000000, fp = u % 1000000;
+        p += sprintf(p, "%llu", (unsigned long long)ip);
+        if (fp != 0) {
+            char f[8]; sprintf(f, "%06llu", (unsigned long long)fp);
+            char *e = f + 6; while (e > f && e[-1] == '0') e--;
+            *p++ = '.'; memcpy(p, f, (size_t)(e - f)); p += e - f;
+        }
+        *p = 0;
+    } else {
+        int exp10 = 0;
+        while (x >= 10.0) { x /= 10.0; exp10++; }
+        while (x < 1.0) { x *= 10.0; exp10--; }
+        uint64_t m = (uint64_t)(x * 1e6 + 0.5);
+        if (m == 10000000ULL) { m = 1000000ULL; exp10++; }
+        char mf[8]; sprintf(mf, "%07llu", (unsigned long long)m);
+        *p++ = mf[0];
+        char *e = mf + 7; while (e > mf + 1 && e[-1] == '0') e--;
+        if (e > mf + 1) { *p++ = '.'; memcpy(p, mf + 1, (size_t)(e - (mf + 1))); p += e - (mf + 1); }
+        *p++ = 'e'; *p++ = exp10 >= 0 ? '+' : '-';
+        p += sprintf(p, "%llu", (unsigned long long)(exp10 >= 0 ? exp10 : -exp10));
+        *p = 0;
+    }
+    return b;
+}
+static void rosoto_print_f64(double v) { printf("%s\n", rosoto_f64_to_str(v)); }
 static const char *rosoto_concat(const char *a, const char *b) {
     char *buf = rosoto_sbuf[rosoto_sbuf_i++ & (ROSOTO_SBUF_N - 1)];
     snprintf(buf, ROSOTO_SBUF_SZ, "%s%s", a ? a : "", b ? b : "");
@@ -1071,6 +1399,20 @@ static void rosoto_assert(bool cond, const char *msg) {
 static void rosoto_bounds(int64_t i, int64_t n) {
     if (i < 0 || i >= n) {
         fprintf(stderr, "rosoto: index out of bounds (fail-fast)\n");
+        fflush(stdout);
+        exit(1);
+    }
+}
+
+/* 切片：{ptr, len} 两字零拷贝视图（SPEC §2 `[]T`）。
+   ptr 指向元素序列，len 是元素个数；元素一律按 8 字节字存放，
+   因此 str 元素是 `const char **`，其余按 `int64_t *` 访问。
+   数组 -> 切片是零拷贝转换，两者共享同一段存储。 */
+typedef struct { void *ptr; int64_t len; } RosotoSlice;
+
+static void rosoto_slice_bounds(int64_t i, int64_t n) {
+    if (i < 0 || i >= n) {
+        fprintf(stderr, "rosoto: slice index out of bounds (fail-fast)\n");
         fflush(stdout);
         exit(1);
     }
@@ -1130,6 +1472,144 @@ static int64_t rosoto_chan_recv(int64_t h) {
     pthread_cond_signal(&c->not_full);
     pthread_mutex_unlock(&c->m);
     return v;
+}
+
+/* map[K]V：开放寻址 + 线性探测哈希表（SPEC 附录 v0.10）。
+   控制块 [cap, count, used, ktag, st, kt, vt]：st/kt/vt 三组平行槽，
+   每槽 state 0=空 1=占用 2=墓碑；键相等 int/bool 按值、str 按内容
+   （rosoto_str_eq）；哈希：整数 splitmix64 终混、str FNV-1a ——
+   必须与原生后端 __map_hash_* 逐位一致，否则双链 diff 会挂。
+   扩容：used*10 >= cap*7 时容量翻倍 rehash（墓碑不带入）。
+   arena 绑定：原生后端走 bump 分配器，arena 块结束整体回收；
+   C 后端的 arena 是纯作用域，这里 malloc 出来的表到进程退出才回收。 */
+typedef struct {
+    int64_t cap, count, used, ktag;
+    int64_t *st, *kt, *vt;
+} RosotoMap;
+
+static uint64_t rosoto_map_hash_word(int64_t x) {
+    uint64_t z = (uint64_t)x;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+static uint64_t rosoto_map_hash_str(const char *s) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    const unsigned char *p = (const unsigned char *)(s ? s : "");
+    for (; *p; p++) h = (h ^ (uint64_t)(*p)) * 0x100000001b3ULL;
+    return h;
+}
+
+static uint64_t rosoto_map_hash(const RosotoMap *m, int64_t k) {
+    return m->ktag ? rosoto_map_hash_str((const char *)(intptr_t)k)
+                   : rosoto_map_hash_word(k);
+}
+
+static bool rosoto_map_key_eq(const RosotoMap *m, int64_t a, int64_t b) {
+    return m->ktag ? rosoto_str_eq((const char *)(intptr_t)a, (const char *)(intptr_t)b)
+                   : (a == b);
+}
+
+static int64_t rosoto_map_find(RosotoMap *m, int64_t k) {
+    int64_t mask = m->cap - 1;
+    int64_t i = (int64_t)(rosoto_map_hash(m, k) & (uint64_t)mask);
+    for (;;) {
+        int64_t s = m->st[i];
+        if (s == 0) return -1;                       /* 空槽：探测链断 */
+        if (s == 1 && rosoto_map_key_eq(m, m->kt[i], k)) return i;
+        i = (i + 1) & mask;                          /* 线性探测（墓碑继续探） */
+    }
+}
+
+static void rosoto_map_grow(RosotoMap *m) {
+    int64_t ocap = m->cap, ncap = ocap * 2, nmask = ncap - 1, i;
+    int64_t *ost = m->st, *okt = m->kt, *ovt = m->vt;
+    int64_t *nst = (int64_t *)calloc((size_t)ncap, sizeof(int64_t));
+    int64_t *nkt = (int64_t *)calloc((size_t)ncap, sizeof(int64_t));
+    int64_t *nvt = (int64_t *)calloc((size_t)ncap, sizeof(int64_t));
+    int64_t nused = 0;
+    for (i = 0; i < ocap; i++) {
+        if (ost[i] != 1) continue;                   /* 墓碑/空槽不带入 */
+        int64_t k = okt[i];
+        int64_t j = (int64_t)(rosoto_map_hash(m, k) & (uint64_t)nmask);
+        while (nst[j] == 1) j = (j + 1) & nmask;
+        nst[j] = 1; nkt[j] = k; nvt[j] = ovt[i];
+        nused++;
+    }
+    m->cap = ncap; m->used = nused;
+    m->st = nst; m->kt = nkt; m->vt = nvt;
+    free(ost); free(okt); free(ovt);
+}
+
+static int64_t rosoto_map_open(int64_t cap, int64_t ktag) {
+    if (cap < 1) cap = 16;                           /* 默认容量 16 */
+    cap--;                                           /* 向上取整到 2 的幂 */
+    cap |= cap >> 1; cap |= cap >> 2; cap |= cap >> 4;
+    cap |= cap >> 8; cap |= cap >> 16; cap |= cap >> 32;
+    cap++;
+    RosotoMap *m = (RosotoMap *)malloc(sizeof(RosotoMap));
+    m->cap = cap; m->count = 0; m->used = 0; m->ktag = ktag;
+    m->st = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
+    m->kt = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
+    m->vt = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
+    return (int64_t)(intptr_t)m;
+}
+
+static int64_t rosoto_map_set(int64_t h, int64_t k, int64_t v) {
+    RosotoMap *m = (RosotoMap *)(intptr_t)h;
+    int64_t mask = m->cap - 1;
+    int64_t i = (int64_t)(rosoto_map_hash(m, k) & (uint64_t)mask), first = -1;
+    for (;;) {
+        int64_t s = m->st[i];
+        if (s == 0) {
+            if (first >= 0) i = first;               /* 复用墓碑，探测链不断 */
+            m->st[i] = 1; m->kt[i] = k; m->vt[i] = v;
+            m->count++;
+            if (first < 0) m->used++;
+            if (m->used * 10 >= m->cap * 7) rosoto_map_grow(m);
+            return 0;
+        }
+        if (s == 2) {
+            if (first < 0) first = i;                /* 记第一个墓碑 */
+        } else if (rosoto_map_key_eq(m, m->kt[i], k)) {
+            m->vt[i] = v;                            /* 覆盖写 */
+            return 0;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+static int64_t rosoto_map_get(int64_t h, int64_t k) {
+    RosotoMap *m = (RosotoMap *)(intptr_t)h;
+    int64_t i = rosoto_map_find(m, k);
+    if (i < 0) {
+        /* 键不存在：fail-fast（打印错误 + 非零退出，不返回垃圾值） */
+        fprintf(stderr, "rosoto: map key not found (fail-fast)\n");
+        fflush(stdout);
+        exit(1);
+    }
+    return m->vt[i];
+}
+
+static bool rosoto_map_has(int64_t h, int64_t k) {
+    RosotoMap *m = (RosotoMap *)(intptr_t)h;
+    return rosoto_map_find(m, k) >= 0;
+}
+
+static int64_t rosoto_map_del(int64_t h, int64_t k) {
+    RosotoMap *m = (RosotoMap *)(intptr_t)h;
+    int64_t i = rosoto_map_find(m, k);
+    if (i >= 0) {
+        m->st[i] = 2;                                /* 墓碑：探测链继续有效 */
+        m->count--;
+    }
+    return 0;                                        /* 删缺失键：无操作 */
+}
+
+static int64_t rosoto_map_len(int64_t h) {
+    RosotoMap *m = (RosotoMap *)(intptr_t)h;
+    return m->count;
 }
 """
 
@@ -1309,8 +1789,11 @@ class Codegen:
             raise SyntaxError("定长数组暂不支持作函数参数/返回值（v0.6 边界）")
         if t[0] == "chan":
             return "int64_t"
+        if t[0] == "map":
+            return "int64_t"          # map 句柄：整数字（指向运行时表）
         if t[0] == "slice":
-            return "RosotoBuf" if t[1] == ("named", "byte") else "void *"
+            elem = slice_elem_tag(t[1])          # 元素类型越界时在这里报错
+            return "RosotoBuf" if elem == "byte" else "RosotoSlice"
         name = t[1]
         if name in self.structs or name in self.enums:
             return name
@@ -1373,6 +1856,12 @@ class Codegen:
         k = e[0]
         if k == "num":
             return f"(int64_t)({e[1]})", "int64_t"
+        if k == "fnum":
+            if e[2] == "f32":
+                # f32 字面量：用 f32 舍入后的精确值 + f 后缀，与原生后端逐位一致
+                v32 = struct.unpack("<f", struct.pack("<f", e[1]))[0]
+                return f"((float){v32!r}f)", "float"
+            return f"(double)({e[1]!r})", "double"
         if k == "str":
             return self.cstr(e[1]), "const char *"
         if k == "bool":
@@ -1404,11 +1893,34 @@ class Codegen:
                 code, t = self.gen_expr(e[2][0], env)
                 if t.startswith("struct:"):
                     raise SyntaxError("print 暂不支持结构体；请打印具体字段")
+                if is_map_env(t):
+                    raise SyntaxError("print 不支持 map 句柄；请打印 get 到的值")
                 if t == "const char *":
                     return f"rosoto_print_str({code})", "void"
                 if t == "bool":
                     return f"rosoto_print_bool({code})", "void"
+                if is_float_env(t):
+                    return f"rosoto_print_f64((double)({code}))", "void"
                 return f"rosoto_print_i64({code})", "void"
+            if name == "to_float" and name not in self.infer.fns:
+                # to_float(x)：int/bool -> double（浮点唯一隐式入口，显式转换）
+                if len(e[2]) != 1:
+                    raise SyntaxError("to_float(x) 需要且只需要一个实参")
+                acode, at = self.gen_expr(e[2][0], env)
+                if is_float_env(at):
+                    return f"(double)({acode})", "double"
+                return f"((double)({acode}))", "double"
+            if name == "to_f32" and name not in self.infer.fns:
+                if len(e[2]) != 1:
+                    raise SyntaxError("to_f32(x) 需要且只需要一个实参")
+                acode, _ = self.gen_expr(e[2][0], env)
+                return f"((float)({acode}))", "float"
+            if name == "to_int" and name not in self.infer.fns:
+                # to_int(x)：浮点 -> int（向零截断）
+                if len(e[2]) != 1:
+                    raise SyntaxError("to_int(x) 需要且只需要一个实参")
+                acode, at = self.gen_expr(e[2][0], env)
+                return f"((int64_t)({acode}))", "int64_t"
             if name == "cores":
                 return "rosoto_cores()", "int64_t"
             if name == "assert":
@@ -1421,30 +1933,78 @@ class Codegen:
                 if len(e[2]) != 1:
                     raise SyntaxError("len(x) 需要且只需要一个实参")
                 arg = e[2][0]
-                if arg[0] != "name" or not str(env.get(arg[1], "")).startswith("arr:"):
-                    raise SyntaxError("len() 目前只支持定长数组变量")
-                return str(int(env[arg[1]][4:])), "int64_t"
+                if arg[0] == "name":
+                    at = env.get(arg[1], "")
+                    if is_arr_env(at):
+                        return str(arr_env_parts(at)[1]), "int64_t"
+                    if is_slice_env(at):
+                        return f"({arg[1]}).len", "int64_t"
+                    if is_map_env(at):
+                        return f"rosoto_map_len({arg[1]})", "int64_t"
+                acode, atype = self.gen_expr(arg, env)
+                if atype == "RosotoSlice" or is_slice_env(atype):
+                    return f"({acode}).len", "int64_t"
+                if is_map_env(atype):
+                    return f"rosoto_map_len({acode})", "int64_t"
+                raise SyntaxError("len() 目前只支持定长数组、切片或 map")
+            if name == "slice_of" and name not in self.infer.fns:
+                # 数组 -> 切片：零拷贝转换（SPEC §2 `[]T`）
+                if len(e[2]) != 1:
+                    raise SyntaxError("slice_of(x) 需要且只需要一个数组实参")
+                arg = e[2][0]
+                if arg[0] != "name" or not is_arr_env(env.get(arg[1], "")):
+                    raise SyntaxError("slice_of() 目前只支持定长数组变量（零拷贝转换）")
+                elem, n = arr_env_parts(env[arg[1]])
+                return (f"(({slice_cname(elem)}){{ (void *)({arg[1]}), (int64_t)({n}) }})",
+                        "slice:" + elem)
             if name == "join" and name not in self.infer.fns:
                 if len(e[2]) != 1:
                     raise SyntaxError("join(handle) 需要且只需要一个句柄")
                 hcode, _ = self.gen_expr(e[2][0], env)
                 return f"rosoto_join({hcode})", "int64_t"
-            args = ", ".join(self.gen_expr(a, env)[0] for a in e[2])
+            # 实参：数组传给 `[]T` 形参时零拷贝转切片（SPEC §2）
+            fdef = self.infer.fns.get(name)
+            parts = []
+            for i, a in enumerate(e[2]):
+                acode, atype = self.gen_expr(a, env)
+                if fdef and i < len(fdef["params"]):
+                    pt = fdef["params"][i][1]
+                    if pt[0] == "slice" and is_arr_env(atype):
+                        pe, pn = arr_env_parts(atype)
+                        acode = f"(({slice_cname(pe)}){{ (void *)({acode}), (int64_t)({pn}) }})"
+                    elif pt[0] == "slice" and is_slice_env(atype) \
+                            and slice_env_elem(atype) != slice_elem_tag(pt[1]):
+                        raise SyntaxError(
+                            f"切片实参元素类型不匹配：得到 {slice_env_elem(atype)}，"
+                            f"形参需要 {slice_elem_tag(pt[1])}")
+                parts.append(acode)
+            args = ", ".join(parts)
             return f"{name}({args})", self.infer.fn_ret(name)
         if k == "spawn":
             return self.gen_spawn(e[1], env)
         if k == "index":
             ocode, otype = self.gen_expr(e[1], env)
-            if not (isinstance(otype, str) and otype.startswith("arr:")):
-                raise SyntaxError("下标只能用于定长数组")
-            n = int(otype[4:])
-            icode, _ = self.gen_expr(e[2], env)
-            if self.bounds:
-                self.tmp_id += 1
-                tmp = f"_bi{self.tmp_id}"
-                return (f"({{ int64_t {tmp} = (int64_t)({icode}); "
-                        f"rosoto_bounds({tmp}, {n}); ({ocode})[{tmp}]; }})", "int64_t")
-            return f"({ocode})[({icode})]", "int64_t"
+            if is_arr_env(otype):
+                n = arr_env_parts(otype)[1]
+                icode, _ = self.gen_expr(e[2], env)
+                if self.bounds:
+                    self.tmp_id += 1
+                    tmp = f"_bi{self.tmp_id}"
+                    return (f"({{ int64_t {tmp} = (int64_t)({icode}); "
+                            f"rosoto_bounds({tmp}, {n}); ({ocode})[{tmp}]; }})", "int64_t")
+                return f"({ocode})[({icode})]", "int64_t"
+            if is_slice_env(otype):
+                elem = slice_env_elem(otype)
+                pfield, cast, rtype = slice_access(elem)
+                icode, _ = self.gen_expr(e[2], env)
+                if self.bounds:
+                    self.tmp_id += 1
+                    tmp = f"_bi{self.tmp_id}"
+                    return (f"({{ int64_t {tmp} = (int64_t)({icode}); "
+                            f"rosoto_slice_bounds({tmp}, ({ocode}).len); "
+                            f"(({cast})({ocode}).{pfield})[{tmp}]; }})", rtype)
+                return f"(({cast})({ocode}).{pfield})[({icode})]", rtype
+            raise SyntaxError("下标只能用于定长数组或切片")
         if k == "arraylit":
             raise SyntaxError("数组字面量只能直接用于 let（v0.6 边界）")
         if k == "chanopen":
@@ -1452,9 +2012,23 @@ class Codegen:
                 raise SyntaxError("chan[T].open(cap) 需要且只需要一个容量实参")
             cap, _ = self.gen_expr(e[2][0], env)
             return f"rosoto_chan_open({cap})", "int64_t"
+        if k == "mapnew":
+            tag = map_env_of_type(e[1])
+            if tag is None:
+                raise SyntaxError("map 构造语法是 map[K]V.new(cap)")
+            if len(e[2]) > 1:
+                raise SyntaxError("map[K]V.new(cap) 至多一个容量实参")
+            ktag = 1 if map_env_parts(tag)[0] == "str" else 0
+            cap = "16"
+            if e[2]:
+                cap, _ = self.gen_expr(e[2][0], env)
+            return f"rosoto_map_open({cap}, {ktag})", tag
         if k == "method":
             obj, m, args = e[1], e[2], e[3]
             ocode, otype = self.gen_expr(obj, env)
+            mp = map_env_parts(otype) if is_map_env(otype) else None
+            if mp:
+                return self.gen_map_method(m, ocode, mp, args, env)
             if m in ("send", "recv"):
                 if not (obj[0] == "name" and env.get("__chan__" + obj[1])):
                     raise SyntaxError(f".{m} 只能用于 chan 通道")
@@ -1469,6 +2043,8 @@ class Codegen:
                     return ocode, "const char *"
                 if otype == "bool":
                     return f"rosoto_bool_to_str({ocode})", "const char *"
+                if is_float_env(otype):
+                    return f"rosoto_f64_to_str((double)({ocode}))", "const char *"
                 return f"rosoto_i64_to_str({ocode})", "const char *"
             if m == "write":
                 self.uses_net = True
@@ -1484,6 +2060,17 @@ class Codegen:
             op = e[1]
             lc, lt = self.gen_expr(e[2], env)
             rc, rt = self.gen_expr(e[3], env)
+            lf, rf = is_float_env(lt), is_float_env(rt)
+            if lf or rf:
+                if not (lf and rf):
+                    raise SyntaxError("整数与浮点不能混合运算；请用 to_float(x) 显式转换")
+                if op in ("%", "&", "|", "^", "<<", ">>"):
+                    raise SyntaxError(f"浮点不支持运算符 {op}")
+                if op == "+" and "const char *" in (lt, rt):
+                    raise SyntaxError("字符串与浮点不能拼接；请用 to_str()")
+                rt2 = unify_float(lt, rt)
+                return (f"({lc} {op} {rc})",
+                        "bool" if op in ("==", "!=", "<", "<=", ">", ">=") else rt2)
             if op == "+" and "const char *" in (lt, rt):
                 return f"rosoto_concat({lc}, {rc})", "const char *"
             if op in ("==", "!=") and "const char *" in (lt, rt):
@@ -1634,14 +2221,65 @@ class Codegen:
         return self.env_type(ftype)
 
     def env_type(self, t):
-        """作用域里记录的类型标记：结构体 'struct:Name'、枚举 'enum:Name'，其余用 C 类型串"""
+        """作用域里记录的类型标记：结构体 'struct:Name'、枚举 'enum:Name'、
+        切片 'slice:<elem>'、map 'map:<k>:<v>'，其余用 C 类型串"""
         if t[0] == "chan":
             return "int64_t"
+        if t[0] == "map":
+            return map_env_of_type(t)
+        if t[0] == "slice":
+            return "slice:" + slice_elem_tag(t[1])
         if t[0] == "named" and t[1] in self.structs:
             return "struct:" + t[1]
         if t[0] == "named" and t[1] in self.enums:
             return "enum:" + t[1]
         return self.ctype(t)
+
+    def gen_map_method(self, m, ocode, mp, args, env):
+        """m.set/get/has/del -> C 运行时调用（开放寻址表）。
+        键相等/哈希在运行时按句柄 ktag 分派：str 按内容，int/bool 按值。"""
+        kv, vv = mp
+
+        def key_arg(a):
+            kcode, ktype = self.gen_expr(a, env)
+            self.check_map_arg("键", kv, ktype)
+            return kcode
+
+        if m == "set":
+            if len(args) != 2:
+                raise SyntaxError("m.set(k, v) 需要两个实参")
+            kcode = key_arg(args[0])
+            vcode, vtype = self.gen_expr(args[1], env)
+            self.check_map_arg("值", vv, vtype)
+            return f"rosoto_map_set({ocode}, {kcode}, {vcode})", "int64_t"
+        if m == "get":
+            if len(args) != 1:
+                raise SyntaxError("m.get(k) 需要且只需要一个实参")
+            kcode = key_arg(args[0])
+            code = f"rosoto_map_get({ocode}, {kcode})"
+            if vv == "str":
+                return f"((const char *)(intptr_t)({code}))", "const char *"
+            return code, "int64_t"
+        if m == "has":
+            if len(args) != 1:
+                raise SyntaxError("m.has(k) 需要且只需要一个实参")
+            kcode = key_arg(args[0])
+            return f"rosoto_map_has({ocode}, {kcode})", "bool"
+        if m == "del":
+            if len(args) != 1:
+                raise SyntaxError("m.del(k) 需要且只需要一个实参")
+            kcode = key_arg(args[0])
+            return f"rosoto_map_del({ocode}, {kcode})", "int64_t"
+        raise SyntaxError(f"map 未知方法 .{m}（支持 set/get/has/del）")
+
+    @staticmethod
+    def check_map_arg(which, want, got):
+        """map 键/值实参类型校验：str 走内容语义，类型不匹配必须报错（不许静默错编）"""
+        if want == "str":
+            if got != "const char *":
+                raise SyntaxError(f"map {which}类型是 str，实参类型不匹配（得到 {got}）")
+        elif got == "const char *":
+            raise SyntaxError(f"map {which}类型是 {want}，不能用 str 实参")
 
     def gen_serve(self, obj, env):
         """server.serve() -> rosoto_echo_serve(...)"""
@@ -1685,25 +2323,36 @@ class Codegen:
                 # 定长数组字面量：int64_t a[N] = { ... };
                 n = len(lit[1])
                 codes = []
+                elem = None
                 for el in lit[1]:
                     c, et = self.gen_expr(el, env)
                     if et in ("const char *", "void", "RosotoBuf") or (
                             isinstance(et, str) and (et.startswith("struct:") or
                                                      et.startswith("enum:") or
-                                                     et.startswith("arr:"))):
+                                                     is_arr_env(et) or is_slice_env(et))):
                         raise SyntaxError("数组字面量暂只支持数值元素")
+                    if elem is None:
+                        elem = C_TO_ELEM.get(et, "int")
                     codes.append(c)
-                env[s[2]] = f"arr:{n}"
+                env[s[2]] = arr_env(elem or "int", n)
                 return f"{pad}int64_t {s[2]}[{n}] = {{ {', '.join(codes)} }};"
             code, t = self.gen_expr(lit, env)
-            if isinstance(t, str) and t.startswith("arr:"):
+            if is_arr_env(t):
                 # 定长数组值语义拷贝
-                n = int(t[4:])
+                elem, n = arr_env_parts(t)
                 if lit[0] != "name":
                     raise SyntaxError("数组只能从另一个数组变量拷贝")
                 env[s[2]] = t
                 return (f"{pad}int64_t {s[2]}[{n}]; "
                         f"memcpy({s[2]}, {code}, sizeof({s[2]}));")
+            if is_slice_env(t):
+                # 切片：{ptr, len} 两字拷贝（零拷贝视图，共享底层存储）
+                env[s[2]] = t
+                return f"{pad}{slice_cname(slice_env_elem(t))} {s[2]} = {code};"
+            if is_map_env(t):
+                # map 句柄：int64_t（指向运行时开放寻址表）
+                env[s[2]] = t
+                return f"{pad}int64_t {s[2]} = {code};"
             if t.startswith("struct:"):
                 t = t[7:]
             if t.startswith("enum:"):
@@ -1717,8 +2366,8 @@ class Codegen:
             return f"{pad}{decl} {s[2]} = {code};"
         if k == "assign":
             atype = str(env.get(s[1], ""))
-            if atype.startswith("arr:"):
-                n = int(atype[4:])
+            if is_arr_env(atype):
+                n = arr_env_parts(atype)[1]
                 if s[2] != "=":
                     raise SyntaxError("数组只支持 = 整体赋值")
                 if s[3][0] != "name":
@@ -1727,14 +2376,37 @@ class Codegen:
                 if rt != atype:
                     raise SyntaxError("数组赋值两侧长度不一致")
                 return f"{pad}memcpy({s[1]}, {code}, sizeof({s[1]}));"
+            if is_slice_env(atype):
+                if s[2] != "=":
+                    raise SyntaxError("切片只支持 = 整体赋值")
+                code, rt = self.gen_expr(s[3], env)
+                if rt != atype:
+                    raise SyntaxError("切片赋值两侧元素类型不一致")
+                return f"{pad}{s[1]} = {code};"
             code, t = self.gen_expr(s[3], env)
             return f"{pad}{s[1]} {s[2]} {code};"
         if k == "assign_index":
             base, idxe, op, rhs = s[1], s[2], s[3], s[4]
             bcode, btype = self.gen_expr(base, env)
-            if not (isinstance(btype, str) and btype.startswith("arr:")):
-                raise SyntaxError("下标赋值只能用于定长数组")
-            n = int(btype[4:])
+            if is_slice_env(btype):
+                elem = slice_env_elem(btype)
+                pfield, cast, _ = slice_access(elem)
+                icode, _ = self.gen_expr(idxe, env)
+                rcode, _ = self.gen_expr(rhs, env)
+                if not self.bounds:
+                    return f"{pad}(({cast})({bcode}).{pfield})[({icode})] {op} {rcode};"
+                self.tmp_id += 1
+                tmp = f"_bi{self.tmp_id}"
+                return "\n".join([
+                    f"{pad}{{",
+                    f"{pad}    int64_t {tmp} = (int64_t)({icode});",
+                    f"{pad}    rosoto_slice_bounds({tmp}, ({bcode}).len);",
+                    f"{pad}    (({cast})({bcode}).{pfield})[{tmp}] {op} {rcode};",
+                    f"{pad}}}",
+                ])
+            if not is_arr_env(btype):
+                raise SyntaxError("下标赋值只能用于定长数组或切片")
+            n = arr_env_parts(btype)[1]
             icode, _ = self.gen_expr(idxe, env)
             rcode, _ = self.gen_expr(rhs, env)
             if not self.bounds:
@@ -2127,6 +2799,9 @@ def walk_expr(e, declared, assigned, referenced):
     elif k == "spawn":
         walk_expr(e[1], declared, assigned, referenced)
     elif k == "chanopen":
+        for a in e[2]:
+            walk_expr(a, declared, assigned, referenced)
+    elif k == "mapnew":
         for a in e[2]:
             walk_expr(a, declared, assigned, referenced)
     elif k == "structlit":
