@@ -1,5 +1,5 @@
 // parallel_sum.ros — 多核数据并行：parfor 自动分块、跨核归约
-// 在根目录 Rosoto.toml 中设 [core] multicore = false 即可降为单核串行，
+// 在根目录 Quelmara.toml 中设 [core] multicore = false 即可降为单核串行，
 // 程序代码零改动、语义不变。
 module parallel_sum
 

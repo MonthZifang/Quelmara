@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-# Rosoto 工具链入口
-#   用法: ./rosoto <build|run|test|fmt|bench|version> [参数]
-#   等价于: python3 tools/rosoto_cli.py ...
-set -euo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$HERE/tools/rosoto_cli.py" "$@"

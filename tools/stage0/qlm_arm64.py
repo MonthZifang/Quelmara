@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Rosoto 原生后端 —— AArch64 发射器 v0.1（平台轨）
+Quelmara 原生后端 —— AArch64 发射器 v0.1（平台轨）
 ================================================
-Rosoto -> RosIR（与 x86_64 完全共享）-> 同一套优化 passes / 寄存器分配
+Quelmara -> RosIR（与 x86_64 完全共享）-> 同一套优化 passes / 寄存器分配
       -> 自研 ARM64 指令编码器 -> ELF64 (e_machine=AArch64) 裸可执行文件
 
 移植成本验证：RosIR/优化/分配器 100% 复用，本文件只实现
@@ -11,8 +11,8 @@ Rosoto -> RosIR（与 x86_64 完全共享）-> 同一套优化 passes / 寄存�
 对应 BACKEND.md 平台轨承诺的"每个新平台 = 一个发射器 + 一个格式写出器"。
 
 用法：
-  python3 tools/rosoto_arm64.py build examples/fib.ros -o build/fib_a64
-  python3 tools/rosoto_arm64.py verify examples/fib.ros   # capstone 反汇编级验证
+  python3 tools/stage0/qlm_arm64.py build examples/fib.ros -o build/fib_a64
+  python3 tools/stage0/qlm_arm64.py verify examples/fib.ros   # capstone 反汇编级验证
 
 ⚠ 本机无 qemu-aarch64：aarch64 产物的【执行级】验证需 aarch64 主机或 qemu-user；
   当前验证级别 = ELF 结构 + capstone 反汇编 + 关键序列人工核对（见 HANDOVER.md）。
@@ -24,7 +24,7 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rosoto_native import (lower_and_optimize, allocate, vreg_mentions,  # noqa: E402
+from qlm_native import (lower_and_optimize, allocate, vreg_mentions,  # noqa: E402
                            BASE, ENTRY_OFF, SYSCALLS)
 
 # ---------------------------------------------------------------------------
@@ -544,7 +544,7 @@ def verify_disasm(blob, limit=40):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Rosoto 原生后端 AArch64 发射器")
+    ap = argparse.ArgumentParser(description="Quelmara 原生后端 AArch64 发射器")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for c in ("build", "verify"):
         p = sub.add_parser(c)
@@ -560,10 +560,10 @@ def main():
     out = args.out or os.path.join("build", base + "_a64")
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     write_elf_a64(out, blob)
-    print(f"[rosoto-a64] {args.src} -> {out} ({len(blob)} 字节, AArch64 ELF, 无 libc)")
-    print(f"[rosoto-a64] config: {cfg['_path'] or '(默认)'}")
+    print(f"[qlm-a64] {args.src} -> {out} ({len(blob)} 字节, AArch64 ELF, 无 libc)")
+    print(f"[qlm-a64] config: {cfg['_path'] or '(默认)'}")
     if args.cmd == "verify":
-        print(f"[rosoto-a64] 反汇编前 {args.disasm} 条指令：")
+        print(f"[qlm-a64] 反汇编前 {args.disasm} 条指令：")
         verify_disasm(blob, limit=args.disasm)
 
 

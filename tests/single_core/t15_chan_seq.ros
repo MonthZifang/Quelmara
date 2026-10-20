@@ -1,5 +1,5 @@
 // 单核降级下的通道 FIFO：容量足够，不触发阻塞。
-// 配合 tests/single_core/Rosoto.toml（multicore=false）验证串行路径。
+// 配合 tests/single_core/Quelmara.toml（multicore=false）验证串行路径。
 fn main() {
     let c = chan[int].open(4)
     c.send(1)

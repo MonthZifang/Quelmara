@@ -1,4 +1,4 @@
-// hello.ros — Rosoto 最小程序
+// hello.ros — Quelmara 最小程序
 module hello
 
 import std.core
@@ -8,7 +8,7 @@ fn greet(name: str) -> str {
 }
 
 fn main() {
-    print(greet("Rosoto"))
+    print(greet("Quelmara"))
     print("cores online: " + cores().to_str())
 
     let mut i = 0

@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Rosoto -> C99 转译器原型 (v0.1)
+Quelmara -> C99 转译器原型 (v0.1)
 ================================
-把 Rosoto 源码 (.ros) 转译为 C99，再交给任意 C 编译器原生编译。
+把 Quelmara 源码 (.ros) 转译为 C99，再交给任意 C 编译器原生编译。
 
 已实现（对应 SPEC.md §9）：
   - module / import / fn / let / let mut / if-else / while / for-in-range / return
   - int / bool / str / []byte / net.Conn 类型与表达式全集（含字符串 + 拼接）
   - parfor：多核 pthread 分块并行 + reduction 归约
-      * 根目录 Rosoto.toml [core] multicore = false  -> 编译期降级为串行
+      * 根目录 Quelmara.toml [core] multicore = false  -> 编译期降级为串行
       * [core] threads = 0 (自动) / >0 (精确线程数)
   - net.TcpServer { ... } + server.serve()：epoll 非阻塞并发 echo 运行时
       * [net] max_conns / recv_buffer 等资源上限注入编译产物
 
 用法：
-  python3 tools/rosoto.py build examples/hello.ros -o build/hello.c
-  python3 tools/rosoto.py run   examples/hello.ros
+  python3 tools/stage0/qlm.py build examples/hello.ros -o build/hello.c
+  python3 tools/stage0/qlm.py run   examples/hello.ros
 """
 
 import argparse
@@ -27,7 +27,7 @@ import sys
 import tomllib
 
 # ---------------------------------------------------------------------------
-# 0. 配置文件 Rosoto.toml（项目根目录，唯一全局资源开关）
+# 0. 配置文件 Quelmara.toml（项目根目录，唯一全局资源开关）
 # ---------------------------------------------------------------------------
 
 DEFAULT_CONFIG = {
@@ -42,15 +42,15 @@ DEFAULT_CONFIG = {
 
 
 def find_config(src_path):
-    """从源文件目录向上（以及 cwd）查找 Rosoto.toml"""
+    """从源文件目录向上（以及 cwd）查找 Quelmara.toml"""
     candidates = []
     d = os.path.dirname(os.path.abspath(src_path))
     while True:
-        candidates.append(os.path.join(d, "Rosoto.toml"))
+        candidates.append(os.path.join(d, "Quelmara.toml"))
         if d == os.path.dirname(d):
             break
         d = os.path.dirname(d)
-    candidates.append(os.path.join(os.getcwd(), "Rosoto.toml"))
+    candidates.append(os.path.join(os.getcwd(), "Quelmara.toml"))
     for c in candidates:
         if os.path.isfile(c):
             return c
@@ -98,7 +98,7 @@ class Tok:
 
 
 def tokenize(src, keep_comments=False):
-    """词法分析。keep_comments=True 时保留注释记号（供 `rosoto fmt` 使用，
+    """词法分析。keep_comments=True 时保留注释记号（供 `quelmara fmt` 使用，
     格式化器必须能原样保留注释，否则会静默删掉用户文档）。"""
     toks, i, line, n = [], 0, 1, len(src)
     while i < n:
@@ -357,7 +357,7 @@ class Parser:
                 self.enums[name] = variants
                 self.decl_order.append(("enum", name))
             elif self.at("test"):
-                # 内建测试块：test "名字" { ... }（SPEC §8 `rosoto test`）
+                # 内建测试块：test "名字" { ... }（SPEC §8 `quelmara test`）
                 self.next()
                 name = self.eat("STR").val
                 tests.append({"name": name, "body": self.parse_block()})
@@ -940,7 +940,7 @@ class Parser:
 
 
 # ---------------------------------------------------------------------------
-# 2b. 测试块合成（SPEC §8 `rosoto test`）
+# 2b. 测试块合成（SPEC §8 `quelmara test`）
 # ---------------------------------------------------------------------------
 
 
@@ -1052,12 +1052,12 @@ CTYPE = {
     "int": "int64_t", "i64": "int64_t", "i32": "int32_t", "u64": "uint64_t",
     "float": "double", "f64": "double", "f32": "float",
     "bool": "bool", "str": "const char *", "void": "void",
-    "net.Conn": "RosotoConn *", "[]byte": "RosotoBuf", "net.Action": "int",
+    "net.Conn": "QlmConn *", "[]byte": "QlmBuf", "net.Action": "int",
 }
 
 
 def type_str(t):
-    return t[1] if t[0] == "named" else ("RosotoBuf" if t[1] == ("named", "byte") else "void *")
+    return t[1] if t[0] == "named" else ("QlmBuf" if t[1] == ("named", "byte") else "void *")
 
 
 # 切片 `[]T` = {ptr, len} 两字（与自研后端 RosIR 字宽一致）
@@ -1129,7 +1129,7 @@ def map_env_parts(t):
 
 def slice_access(elem):
     """切片元素访问三元组：(ptr 字段名, C 元素指针类型, 读出的 C 类型)。
-    `[]byte` 走 RosotoBuf（字节寻址，网络运行时 ABI）；其余按 8 字节字寻址。"""
+    `[]byte` 走 QlmBuf（字节寻址，网络运行时 ABI）；其余按 8 字节字寻址。"""
     if elem == "byte":
         return "data", "char *", "int64_t"
     if elem == "str":
@@ -1139,7 +1139,7 @@ def slice_access(elem):
 
 def slice_cname(elem):
     """切片元素标签 -> C 结构体名"""
-    return "RosotoBuf" if elem == "byte" else "RosotoSlice"
+    return "QlmBuf" if elem == "byte" else "QlmSlice"
 
 
 def slice_ptr_field(elem):
@@ -1234,11 +1234,11 @@ class Infer:
                 return "slice:" + slice_elem_tag(t[1])
             if t[0] == "map":
                 return map_env_of_type(t) or "int64_t"
-            return "RosotoBuf" if t[1] == ("named", "byte") else "void *"
+            return "QlmBuf" if t[1] == ("named", "byte") else "void *"
         return BUILTIN_RETS.get(name, "void")
 
     def expr(self, e, env):
-        """返回 C 侧类型字符串: int64_t / bool / const char * / RosotoBuf / RosotoConn * / int / void"""
+        """返回 C 侧类型字符串: int64_t / bool / const char * / QlmBuf / QlmConn * / int / void"""
         k = e[0]
         if k == "num":
             return "int64_t"
@@ -1278,7 +1278,7 @@ class Infer:
             elem = None
             for el in e[1]:
                 et = self.expr(el, env)
-                if et in ("const char *", "void", "RosotoBuf") or \
+                if et in ("const char *", "void", "QlmBuf") or \
                         (isinstance(et, str) and (et.startswith("struct:") or
                                                   et.startswith("enum:") or
                                                   is_arr_env(et) or is_slice_env(et))):
@@ -1382,7 +1382,7 @@ class Infer:
 # ---------------------------------------------------------------------------
 
 CORE_RUNTIME = r"""
-/* ===== Rosoto runtime (core) ===== */
+/* ===== Quelmara runtime (core) ===== */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -1390,31 +1390,31 @@ CORE_RUNTIME = r"""
 #include <string.h>
 #include <unistd.h>
 
-static int64_t rosoto_cores(void) {
+static int64_t qlm_cores(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return (int64_t)(n > 0 ? n : 1);
 }
 
 /* 字符串：轮转缓冲池（无 GC、无 malloc 热点） */
-#define ROSOTO_SBUF_N 64
-#define ROSOTO_SBUF_SZ 512
-static char rosoto_sbuf[ROSOTO_SBUF_N][ROSOTO_SBUF_SZ];
-static int rosoto_sbuf_i = 0;
+#define QLM_SBUF_N 64
+#define QLM_SBUF_SZ 512
+static char qlm_sbuf[QLM_SBUF_N][QLM_SBUF_SZ];
+static int qlm_sbuf_i = 0;
 
-static const char *rosoto_i64_to_str(int64_t v) {
-    char *b = rosoto_sbuf[rosoto_sbuf_i++ & (ROSOTO_SBUF_N - 1)];
-    snprintf(b, ROSOTO_SBUF_SZ, "%lld", (long long)v);
+static const char *qlm_i64_to_str(int64_t v) {
+    char *b = qlm_sbuf[qlm_sbuf_i++ & (QLM_SBUF_N - 1)];
+    snprintf(b, QLM_SBUF_SZ, "%lld", (long long)v);
     return b;
 }
-static const char *rosoto_bool_to_str(bool v) { return v ? "true" : "false"; }
+static const char *qlm_bool_to_str(bool v) { return v ? "true" : "false"; }
 
 /* 浮点格式化：与自研后端 __f64_to_str 算法逐位一致（双链 diff 依赖）。
    nan/inf/-inf；0 -> "0"；[1e-6, 1e12) 定点 6 位小数去尾零；
    其余科学计数 d.dddddde±N（尾数 6 位小数去尾零）。
    四舍五入（half away from zero）；定点用 x*1e6+0.5 截断，与原生后端
    cvttsd2si 语义一致。 */
-static const char *rosoto_f64_to_str(double x) {
-    char *b = rosoto_sbuf[rosoto_sbuf_i++ & (ROSOTO_SBUF_N - 1)];
+static const char *qlm_f64_to_str(double x) {
+    char *b = qlm_sbuf[qlm_sbuf_i++ & (QLM_SBUF_N - 1)];
     if (x != x) { strcpy(b, "nan"); return b; }
     if (x > 1.7976931348623157e308) { strcpy(b, "inf"); return b; }
     if (x < -1.7976931348623157e308) { strcpy(b, "-inf"); return b; }
@@ -1449,22 +1449,22 @@ static const char *rosoto_f64_to_str(double x) {
     }
     return b;
 }
-static void rosoto_print_f64(double v) { printf("%s\n", rosoto_f64_to_str(v)); }
-static const char *rosoto_concat(const char *a, const char *b) {
-    char *buf = rosoto_sbuf[rosoto_sbuf_i++ & (ROSOTO_SBUF_N - 1)];
-    snprintf(buf, ROSOTO_SBUF_SZ, "%s%s", a ? a : "", b ? b : "");
+static void qlm_print_f64(double v) { printf("%s\n", qlm_f64_to_str(v)); }
+static const char *qlm_concat(const char *a, const char *b) {
+    char *buf = qlm_sbuf[qlm_sbuf_i++ & (QLM_SBUF_N - 1)];
+    snprintf(buf, QLM_SBUF_SZ, "%s%s", a ? a : "", b ? b : "");
     return buf;
 }
-static void rosoto_print_str(const char *s) { printf("%s\n", s ? s : "(null)"); }
-static void rosoto_print_i64(int64_t v) { printf("%lld\n", (long long)v); }
-static void rosoto_print_bool(bool v) { printf("%s\n", v ? "true" : "false"); }
+static void qlm_print_str(const char *s) { printf("%s\n", s ? s : "(null)"); }
+static void qlm_print_i64(int64_t v) { printf("%lld\n", (long long)v); }
+static void qlm_print_bool(bool v) { printf("%s\n", v ? "true" : "false"); }
 /* 字符串相等：内容比较（而非指针比较）——str 是一等类型 */
-static bool rosoto_str_eq(const char *a, const char *b) {
+static bool qlm_str_eq(const char *a, const char *b) {
     if (a == b) return true;
     if (!a || !b) return false;
     return strcmp(a, b) == 0;
 }
-static void rosoto_assert(bool cond, const char *msg) {
+static void qlm_assert(bool cond, const char *msg) {
     if (!cond) {
         fprintf(stderr, "assert failed: %s\n", msg ? msg : "(no message)");
         fflush(stdout);
@@ -1472,10 +1472,10 @@ static void rosoto_assert(bool cond, const char *msg) {
     }
 }
 
-/* 定长数组越界：fail-fast（可在 Rosoto.toml [build] bounds_check=false 关闭） */
-static void rosoto_bounds(int64_t i, int64_t n) {
+/* 定长数组越界：fail-fast（可在 Quelmara.toml [build] bounds_check=false 关闭） */
+static void qlm_bounds(int64_t i, int64_t n) {
     if (i < 0 || i >= n) {
-        fprintf(stderr, "rosoto: index out of bounds (fail-fast)\n");
+        fprintf(stderr, "quelmara: index out of bounds (fail-fast)\n");
         fflush(stdout);
         exit(1);
     }
@@ -1485,11 +1485,11 @@ static void rosoto_bounds(int64_t i, int64_t n) {
    ptr 指向元素序列，len 是元素个数；元素一律按 8 字节字存放，
    因此 str 元素是 `const char **`，其余按 `int64_t *` 访问。
    数组 -> 切片是零拷贝转换，两者共享同一段存储。 */
-typedef struct { void *ptr; int64_t len; } RosotoSlice;
+typedef struct { void *ptr; int64_t len; } QlmSlice;
 
-static void rosoto_slice_bounds(int64_t i, int64_t n) {
+static void qlm_slice_bounds(int64_t i, int64_t n) {
     if (i < 0 || i >= n) {
-        fprintf(stderr, "rosoto: slice index out of bounds (fail-fast)\n");
+        fprintf(stderr, "quelmara: slice index out of bounds (fail-fast)\n");
         fflush(stdout);
         exit(1);
     }
@@ -1497,9 +1497,9 @@ static void rosoto_slice_bounds(int64_t i, int64_t n) {
 
 /* str 是零结尾字节串（与 __str_eq/__str_concat 同一表示），没有长度前缀，
    str[i] 需要先求 strlen 再比对。越界与数组/切片同策略 fail-fast。 */
-static void rosoto_str_bounds(int64_t i, int64_t n) {
+static void qlm_str_bounds(int64_t i, int64_t n) {
     if (i < 0 || i >= n) {
-        fprintf(stderr, "rosoto: str index out of bounds (fail-fast)\n");
+        fprintf(stderr, "quelmara: str index out of bounds (fail-fast)\n");
         fflush(stdout);
         exit(1);
     }
@@ -1508,7 +1508,7 @@ static void rosoto_str_bounds(int64_t i, int64_t n) {
 /* str -> int 十进制解析（s.to_int() / to_int(s)）。
    要求整串都是十进制数字（可选前导 +/-），否则 fail-fast；
    溢出同样 fail-fast（不静默回绕）。与自研后端 __str_to_int 逐条对齐。 */
-static int64_t rosoto_str_to_int(const char *s) {
+static int64_t qlm_str_to_int(const char *s) {
     int64_t i = 0, neg = 0, acc = 0, digits = 0;
     if (s[0] == '-' || s[0] == '+') {
         neg = (s[0] == '-');
@@ -1526,14 +1526,14 @@ static int64_t rosoto_str_to_int(const char *s) {
     if (!digits) goto bad;
     return neg ? -acc : acc;
 bad:
-    fprintf(stderr, "rosoto: str.to_int() invalid decimal input (fail-fast)\n");
+    fprintf(stderr, "quelmara: str.to_int() invalid decimal input (fail-fast)\n");
     fflush(stdout);
     exit(1);
 }
 
 /* spawn/join 任务句柄：rec[0] = 线程（0 = 单核同步执行），
    rec[1] = 参数块（块首字是返回值）。join 负责回收两块内存。 */
-static int64_t rosoto_join(int64_t h) {
+static int64_t qlm_join(int64_t h) {
     if (h == 0) return 0;
     int64_t *rec = (int64_t *)(intptr_t)h;
     if (rec[0] != 0) pthread_join((pthread_t)(uintptr_t)rec[0], NULL);
@@ -1551,17 +1551,17 @@ typedef struct {
     pthread_cond_t not_empty, not_full;
     int64_t cap, head, tail, count, closed;
     int64_t *buf;
-} RosotoChan;
+} QlmChan;
 
-static void rosoto_chan_fail(const char *what) {
-    fprintf(stderr, "rosoto: %s on closed channel (fail-fast)\n", what);
+static void qlm_chan_fail(const char *what) {
+    fprintf(stderr, "quelmara: %s on closed channel (fail-fast)\n", what);
     fflush(stdout);
     exit(1);
 }
 
-static int64_t rosoto_chan_open(int64_t cap) {
+static int64_t qlm_chan_open(int64_t cap) {
     if (cap <= 0) cap = 1;
-    RosotoChan *c = (RosotoChan *)malloc(sizeof(RosotoChan));
+    QlmChan *c = (QlmChan *)malloc(sizeof(QlmChan));
     pthread_mutex_init(&c->m, NULL);
     pthread_cond_init(&c->not_empty, NULL);
     pthread_cond_init(&c->not_full, NULL);
@@ -1570,12 +1570,12 @@ static int64_t rosoto_chan_open(int64_t cap) {
     return (int64_t)(intptr_t)c;
 }
 
-static int64_t rosoto_chan_send(int64_t h, int64_t v) {
-    RosotoChan *c = (RosotoChan *)(intptr_t)h;
+static int64_t qlm_chan_send(int64_t h, int64_t v) {
+    QlmChan *c = (QlmChan *)(intptr_t)h;
     pthread_mutex_lock(&c->m);
-    if (c->closed) { pthread_mutex_unlock(&c->m); rosoto_chan_fail("send"); }
+    if (c->closed) { pthread_mutex_unlock(&c->m); qlm_chan_fail("send"); }
     while (c->count == c->cap) {
-        if (c->closed) { pthread_mutex_unlock(&c->m); rosoto_chan_fail("send"); }
+        if (c->closed) { pthread_mutex_unlock(&c->m); qlm_chan_fail("send"); }
         pthread_cond_wait(&c->not_full, &c->m);
     }
     c->buf[c->tail] = v;
@@ -1586,8 +1586,8 @@ static int64_t rosoto_chan_send(int64_t h, int64_t v) {
     return 0;
 }
 
-static int64_t rosoto_chan_recv(int64_t h) {
-    RosotoChan *c = (RosotoChan *)(intptr_t)h;
+static int64_t qlm_chan_recv(int64_t h) {
+    QlmChan *c = (QlmChan *)(intptr_t)h;
     pthread_mutex_lock(&c->m);
     /* 关闭后排空再返回 0；未关闭且空则等待 */
     while (c->count == 0 && !c->closed) pthread_cond_wait(&c->not_empty, &c->m);
@@ -1601,12 +1601,12 @@ static int64_t rosoto_chan_recv(int64_t h) {
 }
 
 /* close()：幂等校验（重复关闭 fail-fast）；广播唤醒全部等待方 */
-static int64_t rosoto_chan_close(int64_t h) {
-    RosotoChan *c = (RosotoChan *)(intptr_t)h;
+static int64_t qlm_chan_close(int64_t h) {
+    QlmChan *c = (QlmChan *)(intptr_t)h;
     pthread_mutex_lock(&c->m);
     if (c->closed) {
         pthread_mutex_unlock(&c->m);
-        fprintf(stderr, "rosoto: chan double close (fail-fast)\n");
+        fprintf(stderr, "quelmara: chan double close (fail-fast)\n");
         fflush(stdout);
         exit(1);
     }
@@ -1618,8 +1618,8 @@ static int64_t rosoto_chan_close(int64_t h) {
 }
 
 /* try_recv（v0.11 select 用）：非阻塞取一个；*ok=1 取到、0 空/已关闭排空 */
-static int64_t rosoto_chan_try_recv(int64_t h, int64_t *ok) {
-    RosotoChan *c = (RosotoChan *)(intptr_t)h;
+static int64_t qlm_chan_try_recv(int64_t h, int64_t *ok) {
+    QlmChan *c = (QlmChan *)(intptr_t)h;
     pthread_mutex_lock(&c->m);
     if (c->count == 0) {
         pthread_mutex_unlock(&c->m);
@@ -1635,8 +1635,8 @@ static int64_t rosoto_chan_try_recv(int64_t h, int64_t *ok) {
     return v;
 }
 
-static int64_t rosoto_chan_closed(int64_t h) {
-    RosotoChan *c = (RosotoChan *)(intptr_t)h;
+static int64_t qlm_chan_closed(int64_t h) {
+    QlmChan *c = (QlmChan *)(intptr_t)h;
     pthread_mutex_lock(&c->m);
     int64_t cl = c->closed;
     pthread_mutex_unlock(&c->m);
@@ -1646,7 +1646,7 @@ static int64_t rosoto_chan_closed(int64_t h) {
 /* map[K]V：开放寻址 + 线性探测哈希表（SPEC 附录 v0.10）。
    控制块 [cap, count, used, ktag, st, kt, vt]：st/kt/vt 三组平行槽，
    每槽 state 0=空 1=占用 2=墓碑；键相等 int/bool 按值、str 按内容
-   （rosoto_str_eq）；哈希：整数 splitmix64 终混、str FNV-1a ——
+   （qlm_str_eq）；哈希：整数 splitmix64 终混、str FNV-1a ——
    必须与原生后端 __map_hash_* 逐位一致，否则双链 diff 会挂。
    扩容：used*10 >= cap*7 时容量翻倍 rehash（墓碑不带入）。
    arena 绑定：原生后端走 bump 分配器，arena 块结束整体回收；
@@ -1654,44 +1654,44 @@ static int64_t rosoto_chan_closed(int64_t h) {
 typedef struct {
     int64_t cap, count, used, ktag;
     int64_t *st, *kt, *vt;
-} RosotoMap;
+} QlmMap;
 
-static uint64_t rosoto_map_hash_word(int64_t x) {
+static uint64_t qlm_map_hash_word(int64_t x) {
     uint64_t z = (uint64_t)x;
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
     return z ^ (z >> 31);
 }
 
-static uint64_t rosoto_map_hash_str(const char *s) {
+static uint64_t qlm_map_hash_str(const char *s) {
     uint64_t h = 0xcbf29ce484222325ULL;
     const unsigned char *p = (const unsigned char *)(s ? s : "");
     for (; *p; p++) h = (h ^ (uint64_t)(*p)) * 0x100000001b3ULL;
     return h;
 }
 
-static uint64_t rosoto_map_hash(const RosotoMap *m, int64_t k) {
-    return m->ktag ? rosoto_map_hash_str((const char *)(intptr_t)k)
-                   : rosoto_map_hash_word(k);
+static uint64_t qlm_map_hash(const QlmMap *m, int64_t k) {
+    return m->ktag ? qlm_map_hash_str((const char *)(intptr_t)k)
+                   : qlm_map_hash_word(k);
 }
 
-static bool rosoto_map_key_eq(const RosotoMap *m, int64_t a, int64_t b) {
-    return m->ktag ? rosoto_str_eq((const char *)(intptr_t)a, (const char *)(intptr_t)b)
+static bool qlm_map_key_eq(const QlmMap *m, int64_t a, int64_t b) {
+    return m->ktag ? qlm_str_eq((const char *)(intptr_t)a, (const char *)(intptr_t)b)
                    : (a == b);
 }
 
-static int64_t rosoto_map_find(RosotoMap *m, int64_t k) {
+static int64_t qlm_map_find(QlmMap *m, int64_t k) {
     int64_t mask = m->cap - 1;
-    int64_t i = (int64_t)(rosoto_map_hash(m, k) & (uint64_t)mask);
+    int64_t i = (int64_t)(qlm_map_hash(m, k) & (uint64_t)mask);
     for (;;) {
         int64_t s = m->st[i];
         if (s == 0) return -1;                       /* 空槽：探测链断 */
-        if (s == 1 && rosoto_map_key_eq(m, m->kt[i], k)) return i;
+        if (s == 1 && qlm_map_key_eq(m, m->kt[i], k)) return i;
         i = (i + 1) & mask;                          /* 线性探测（墓碑继续探） */
     }
 }
 
-static void rosoto_map_grow(RosotoMap *m) {
+static void qlm_map_grow(QlmMap *m) {
     int64_t ocap = m->cap, ncap = ocap * 2, nmask = ncap - 1, i;
     int64_t *ost = m->st, *okt = m->kt, *ovt = m->vt;
     int64_t *nst = (int64_t *)calloc((size_t)ncap, sizeof(int64_t));
@@ -1701,7 +1701,7 @@ static void rosoto_map_grow(RosotoMap *m) {
     for (i = 0; i < ocap; i++) {
         if (ost[i] != 1) continue;                   /* 墓碑/空槽不带入 */
         int64_t k = okt[i];
-        int64_t j = (int64_t)(rosoto_map_hash(m, k) & (uint64_t)nmask);
+        int64_t j = (int64_t)(qlm_map_hash(m, k) & (uint64_t)nmask);
         while (nst[j] == 1) j = (j + 1) & nmask;
         nst[j] = 1; nkt[j] = k; nvt[j] = ovt[i];
         nused++;
@@ -1711,13 +1711,13 @@ static void rosoto_map_grow(RosotoMap *m) {
     free(ost); free(okt); free(ovt);
 }
 
-static int64_t rosoto_map_open(int64_t cap, int64_t ktag) {
+static int64_t qlm_map_open(int64_t cap, int64_t ktag) {
     if (cap < 1) cap = 16;                           /* 默认容量 16 */
     cap--;                                           /* 向上取整到 2 的幂 */
     cap |= cap >> 1; cap |= cap >> 2; cap |= cap >> 4;
     cap |= cap >> 8; cap |= cap >> 16; cap |= cap >> 32;
     cap++;
-    RosotoMap *m = (RosotoMap *)malloc(sizeof(RosotoMap));
+    QlmMap *m = (QlmMap *)malloc(sizeof(QlmMap));
     m->cap = cap; m->count = 0; m->used = 0; m->ktag = ktag;
     m->st = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
     m->kt = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
@@ -1725,10 +1725,10 @@ static int64_t rosoto_map_open(int64_t cap, int64_t ktag) {
     return (int64_t)(intptr_t)m;
 }
 
-static int64_t rosoto_map_set(int64_t h, int64_t k, int64_t v) {
-    RosotoMap *m = (RosotoMap *)(intptr_t)h;
+static int64_t qlm_map_set(int64_t h, int64_t k, int64_t v) {
+    QlmMap *m = (QlmMap *)(intptr_t)h;
     int64_t mask = m->cap - 1;
-    int64_t i = (int64_t)(rosoto_map_hash(m, k) & (uint64_t)mask), first = -1;
+    int64_t i = (int64_t)(qlm_map_hash(m, k) & (uint64_t)mask), first = -1;
     for (;;) {
         int64_t s = m->st[i];
         if (s == 0) {
@@ -1736,12 +1736,12 @@ static int64_t rosoto_map_set(int64_t h, int64_t k, int64_t v) {
             m->st[i] = 1; m->kt[i] = k; m->vt[i] = v;
             m->count++;
             if (first < 0) m->used++;
-            if (m->used * 10 >= m->cap * 7) rosoto_map_grow(m);
+            if (m->used * 10 >= m->cap * 7) qlm_map_grow(m);
             return 0;
         }
         if (s == 2) {
             if (first < 0) first = i;                /* 记第一个墓碑 */
-        } else if (rosoto_map_key_eq(m, m->kt[i], k)) {
+        } else if (qlm_map_key_eq(m, m->kt[i], k)) {
             m->vt[i] = v;                            /* 覆盖写 */
             return 0;
         }
@@ -1749,26 +1749,26 @@ static int64_t rosoto_map_set(int64_t h, int64_t k, int64_t v) {
     }
 }
 
-static int64_t rosoto_map_get(int64_t h, int64_t k) {
-    RosotoMap *m = (RosotoMap *)(intptr_t)h;
-    int64_t i = rosoto_map_find(m, k);
+static int64_t qlm_map_get(int64_t h, int64_t k) {
+    QlmMap *m = (QlmMap *)(intptr_t)h;
+    int64_t i = qlm_map_find(m, k);
     if (i < 0) {
         /* 键不存在：fail-fast（打印错误 + 非零退出，不返回垃圾值） */
-        fprintf(stderr, "rosoto: map key not found (fail-fast)\n");
+        fprintf(stderr, "quelmara: map key not found (fail-fast)\n");
         fflush(stdout);
         exit(1);
     }
     return m->vt[i];
 }
 
-static bool rosoto_map_has(int64_t h, int64_t k) {
-    RosotoMap *m = (RosotoMap *)(intptr_t)h;
-    return rosoto_map_find(m, k) >= 0;
+static bool qlm_map_has(int64_t h, int64_t k) {
+    QlmMap *m = (QlmMap *)(intptr_t)h;
+    return qlm_map_find(m, k) >= 0;
 }
 
-static int64_t rosoto_map_del(int64_t h, int64_t k) {
-    RosotoMap *m = (RosotoMap *)(intptr_t)h;
-    int64_t i = rosoto_map_find(m, k);
+static int64_t qlm_map_del(int64_t h, int64_t k) {
+    QlmMap *m = (QlmMap *)(intptr_t)h;
+    int64_t i = qlm_map_find(m, k);
     if (i >= 0) {
         m->st[i] = 2;                                /* 墓碑：探测链继续有效 */
         m->count--;
@@ -1776,14 +1776,14 @@ static int64_t rosoto_map_del(int64_t h, int64_t k) {
     return 0;                                        /* 删缺失键：无操作 */
 }
 
-static int64_t rosoto_map_len(int64_t h) {
-    RosotoMap *m = (RosotoMap *)(intptr_t)h;
+static int64_t qlm_map_len(int64_t h) {
+    QlmMap *m = (QlmMap *)(intptr_t)h;
     return m->count;
 }
 """
 
 NET_RUNTIME = r"""
-/* ===== Rosoto runtime (net: epoll 非阻塞并发 reactor) ===== */
+/* ===== Quelmara runtime (net: epoll 非阻塞并发 reactor) ===== */
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -1794,16 +1794,16 @@ NET_RUNTIME = r"""
 #include <sys/types.h>
 #include <unistd.h>
 
-#ifndef ROSOTO_NET_MAX_CONNS
-#define ROSOTO_NET_MAX_CONNS 1000000
+#ifndef QLM_NET_MAX_CONNS
+#define QLM_NET_MAX_CONNS 1000000
 #endif
-#ifndef ROSOTO_RECV_BUF
-#define ROSOTO_RECV_BUF 4096
+#ifndef QLM_RECV_BUF
+#define QLM_RECV_BUF 4096
 #endif
 
-typedef struct RosotoBuf { char *data; size_t len; } RosotoBuf;
-typedef struct RosotoConn RosotoConn;
-struct RosotoConn {
+typedef struct QlmBuf { char *data; size_t len; } QlmBuf;
+typedef struct QlmConn QlmConn;
+struct QlmConn {
     int fd;
     char peer[64];
     bool closing;
@@ -1812,10 +1812,10 @@ struct RosotoConn {
 #define NET_ACTION_CLOSE 0
 #define NET_ACTION_KEEP  1
 
-static const char *rosoto_conn_peer(RosotoConn *c) { return c->peer; }
+static const char *qlm_conn_peer(QlmConn *c) { return c->peer; }
 
-/* 零拷贝回写；EAGAIN 时丢弃余量（背压策略 drop，见 Rosoto.toml [net].backpressure） */
-static int rosoto_conn_write(RosotoConn *c, RosotoBuf b) {
+/* 零拷贝回写；EAGAIN 时丢弃余量（背压策略 drop，见 Quelmara.toml [net].backpressure） */
+static int qlm_conn_write(QlmConn *c, QlmBuf b) {
     size_t off = 0;
     while (off < b.len) {
         ssize_t n = write(c->fd, b.data + off, b.len - off);
@@ -1826,10 +1826,10 @@ static int rosoto_conn_write(RosotoConn *c, RosotoBuf b) {
     return 0;
 }
 
-static void rosoto_echo_serve(const char *addr,
-                              void (*on_connect)(RosotoConn *),
-                              int (*on_data)(RosotoConn *, RosotoBuf),
-                              void (*on_close)(RosotoConn *),
+static void qlm_echo_serve(const char *addr,
+                              void (*on_connect)(QlmConn *),
+                              int (*on_data)(QlmConn *, QlmBuf),
+                              void (*on_close)(QlmConn *),
                               int64_t max_conns, int64_t backlog, bool nodelay, bool reuse_port) {
     /* 解析 addr: host:port */
     char host[128] = "0.0.0.0";
@@ -1864,10 +1864,10 @@ static void rosoto_echo_serve(const char *addr,
     ev.data.fd = lfd;
     epoll_ctl(ep, EPOLL_CTL_ADD, lfd, &ev);
 
-    RosotoConn **conns = calloc((size_t)ROSOTO_NET_MAX_CONNS, sizeof(RosotoConn *));
+    QlmConn **conns = calloc((size_t)QLM_NET_MAX_CONNS, sizeof(QlmConn *));
     int64_t nconns = 0;
     struct epoll_event events[512];
-    char rbuf[ROSOTO_RECV_BUF];
+    char rbuf[QLM_RECV_BUF];
 
     for (;;) {
         int n = epoll_wait(ep, events, 512, -1);
@@ -1877,12 +1877,12 @@ static void rosoto_echo_serve(const char *addr,
                 for (;;) {
                     int cfd = accept4(lfd, NULL, NULL, SOCK_NONBLOCK);
                     if (cfd < 0) break;
-                    if (nconns >= max_conns || cfd >= ROSOTO_NET_MAX_CONNS) {
+                    if (nconns >= max_conns || cfd >= QLM_NET_MAX_CONNS) {
                         close(cfd);            /* 超出 [net] max_conns：fail-fast 拒绝 */
                         continue;
                     }
                     if (nodelay) setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-                    RosotoConn *c = (RosotoConn *)calloc(1, sizeof(RosotoConn));
+                    QlmConn *c = (QlmConn *)calloc(1, sizeof(QlmConn));
                     c->fd = cfd;
                     struct sockaddr_in peer;
                     socklen_t pl = sizeof(peer);
@@ -1900,7 +1900,7 @@ static void rosoto_echo_serve(const char *addr,
                     if (on_connect) on_connect(c);
                 }
             } else {
-                RosotoConn *c = conns[fd];
+                QlmConn *c = conns[fd];
                 if (!c) continue;
                 ssize_t rn = read(fd, rbuf, sizeof(rbuf));
                 if (rn <= 0) {
@@ -1912,7 +1912,7 @@ static void rosoto_echo_serve(const char *addr,
                     free(c);
                     continue;
                 }
-                RosotoBuf b = { rbuf, (size_t)rn };
+                QlmBuf b = { rbuf, (size_t)rn };
                 int action = on_data ? on_data(c, b) : NET_ACTION_CLOSE;
                 if (action == NET_ACTION_CLOSE) {
                     if (on_close) on_close(c);
@@ -1962,7 +1962,7 @@ class Codegen:
             return "int64_t"          # map 句柄：整数字（指向运行时表）
         if t[0] == "slice":
             elem = slice_elem_tag(t[1])          # 元素类型越界时在这里报错
-            return "RosotoBuf" if elem == "byte" else "RosotoSlice"
+            return "QlmBuf" if elem == "byte" else "QlmSlice"
         name = t[1]
         if name in self.structs or name in self.enums:
             return name
@@ -2065,12 +2065,12 @@ class Codegen:
                 if is_map_env(t):
                     raise SyntaxError("print 不支持 map 句柄；请打印 get 到的值")
                 if t == "const char *":
-                    return f"rosoto_print_str({code})", "void"
+                    return f"qlm_print_str({code})", "void"
                 if t == "bool":
-                    return f"rosoto_print_bool({code})", "void"
+                    return f"qlm_print_bool({code})", "void"
                 if is_float_env(t):
-                    return f"rosoto_print_f64((double)({code}))", "void"
-                return f"rosoto_print_i64({code})", "void"
+                    return f"qlm_print_f64((double)({code}))", "void"
+                return f"qlm_print_i64({code})", "void"
             if name == "to_float" and name not in self.infer.fns:
                 # to_float(x)：int/bool -> double（浮点唯一隐式入口，显式转换）
                 if len(e[2]) != 1:
@@ -2090,16 +2090,16 @@ class Codegen:
                     raise SyntaxError("to_int(x) 需要且只需要一个实参")
                 acode, at = self.gen_expr(e[2][0], env)
                 if at == "const char *":
-                    return f"rosoto_str_to_int({acode})", "int64_t"
+                    return f"qlm_str_to_int({acode})", "int64_t"
                 return f"((int64_t)({acode}))", "int64_t"
             if name == "cores":
-                return "rosoto_cores()", "int64_t"
+                return "qlm_cores()", "int64_t"
             if name == "assert":
                 ccode, _ = self.gen_expr(e[2][0], env)
                 msg = "(no message)"
                 if len(e[2]) > 1 and e[2][1][0] == "str":
                     msg = e[2][1][1]
-                return (f'rosoto_assert(({ccode}), "{msg}")', "void")
+                return (f'qlm_assert(({ccode}), "{msg}")', "void")
             if name == "len" and name not in self.infer.fns:
                 if len(e[2]) != 1:
                     raise SyntaxError("len(x) 需要且只需要一个实参")
@@ -2111,14 +2111,14 @@ class Codegen:
                     if is_slice_env(at):
                         return f"({arg[1]}).len", "int64_t"
                     if is_map_env(at):
-                        return f"rosoto_map_len({arg[1]})", "int64_t"
+                        return f"qlm_map_len({arg[1]})", "int64_t"
                     if at == "const char *":
                         return f"((int64_t)strlen({arg[1]}))", "int64_t"
                 acode, atype = self.gen_expr(arg, env)
-                if atype == "RosotoSlice" or is_slice_env(atype):
+                if atype == "QlmSlice" or is_slice_env(atype):
                     return f"({acode}).len", "int64_t"
                 if is_map_env(atype):
-                    return f"rosoto_map_len({acode})", "int64_t"
+                    return f"qlm_map_len({acode})", "int64_t"
                 if atype == "const char *":
                     return f"((int64_t)strlen({acode}))", "int64_t"
                 raise SyntaxError("len() 目前只支持定长数组、切片、map 或 str")
@@ -2136,7 +2136,7 @@ class Codegen:
                 if len(e[2]) != 1:
                     raise SyntaxError("join(handle) 需要且只需要一个句柄")
                 hcode, _ = self.gen_expr(e[2][0], env)
-                return f"rosoto_join({hcode})", "int64_t"
+                return f"qlm_join({hcode})", "int64_t"
             # 实参：数组传给 `[]T` 形参时零拷贝转切片（SPEC §2）
             fdef = self.infer.fns.get(name)
             parts = []
@@ -2174,9 +2174,9 @@ class Codegen:
             for i, ch in enumerate(chans):
                 tries.append(
                     f"{{ int64_t _so{n}_{i}; int64_t _sv{n}_{i} = "
-                    f"rosoto_chan_try_recv({ch}, &_so{n}_{i}); "
+                    f"qlm_chan_try_recv({ch}, &_so{n}_{i}); "
                     f"if (_so{n}_{i}) {{ _sr{n} = _sv{n}_{i}; break; }} }}")
-            closed = " && ".join(f"rosoto_chan_closed({ch})" for ch in chans)
+            closed = " && ".join(f"qlm_chan_closed({ch})" for ch in chans)
             return ("({ int64_t _sr%d = 0; for (;;) { %s "
                     "if (%s) { _sr%d = 0; break; } usleep(100); } _sr%d; })"
                     % (n, " ".join(tries), closed, n, n)), "int64_t"
@@ -2189,7 +2189,7 @@ class Codegen:
                     self.tmp_id += 1
                     tmp = f"_bi{self.tmp_id}"
                     return (f"({{ int64_t {tmp} = (int64_t)({icode}); "
-                            f"rosoto_bounds({tmp}, {n}); ({ocode})[{tmp}]; }})", "int64_t")
+                            f"qlm_bounds({tmp}, {n}); ({ocode})[{tmp}]; }})", "int64_t")
                 return f"({ocode})[({icode})]", "int64_t"
             if is_slice_env(otype):
                 elem = slice_env_elem(otype)
@@ -2199,7 +2199,7 @@ class Codegen:
                     self.tmp_id += 1
                     tmp = f"_bi{self.tmp_id}"
                     return (f"({{ int64_t {tmp} = (int64_t)({icode}); "
-                            f"rosoto_slice_bounds({tmp}, ({ocode}).len); "
+                            f"qlm_slice_bounds({tmp}, ({ocode}).len); "
                             f"(({cast})({ocode}).{pfield})[{tmp}]; }})", rtype)
                 return f"(({cast})({ocode}).{pfield})[({icode})]", rtype
             if otype == "const char *":
@@ -2210,7 +2210,7 @@ class Codegen:
                     self.tmp_id += 1
                     tmp = f"_bi{self.tmp_id}"
                     return (f"({{ int64_t {tmp} = (int64_t)({icode}); "
-                            f"rosoto_str_bounds({tmp}, (int64_t)strlen({ocode})); "
+                            f"qlm_str_bounds({tmp}, (int64_t)strlen({ocode})); "
                             f"((int64_t)(unsigned char)({ocode})[{tmp}]); }})", "int64_t")
                 return f"((int64_t)(unsigned char)({ocode})[({icode})])", "int64_t"
             raise SyntaxError("下标只能用于定长数组、切片或 str")
@@ -2220,7 +2220,7 @@ class Codegen:
             if len(e[2]) != 1:
                 raise SyntaxError("chan[T].open(cap) 需要且只需要一个容量实参")
             cap, _ = self.gen_expr(e[2][0], env)
-            return f"rosoto_chan_open({cap})", "int64_t"
+            return f"qlm_chan_open({cap})", "int64_t"
         if k == "mapnew":
             tag = map_env_of_type(e[1])
             if tag is None:
@@ -2231,7 +2231,7 @@ class Codegen:
             cap = "16"
             if e[2]:
                 cap, _ = self.gen_expr(e[2][0], env)
-            return f"rosoto_map_open({cap}, {ktag})", tag
+            return f"qlm_map_open({cap}, {ktag})", tag
         if k == "method":
             obj, m, args = e[1], e[2], e[3]
             ocode, otype = self.gen_expr(obj, env)
@@ -2245,38 +2245,38 @@ class Codegen:
                     if len(args) != 1:
                         raise SyntaxError("ch.send(v) 需要一个实参")
                     acode, _ = self.gen_expr(args[0], env)
-                    return f"rosoto_chan_send({ocode}, {acode})", "int64_t"
-                return f"rosoto_chan_recv({ocode})", "int64_t"
+                    return f"qlm_chan_send({ocode}, {acode})", "int64_t"
+                return f"qlm_chan_recv({ocode})", "int64_t"
             if m == "close":
                 if not (obj[0] == "name" and env.get("__chan__" + obj[1])):
                     raise SyntaxError(".close 只能用于 chan 通道")
                 if args:
                     raise SyntaxError("ch.close() 不接受实参")
-                return f"rosoto_chan_close({ocode})", "void"
+                return f"qlm_chan_close({ocode})", "void"
             if m == "to_str":
                 if otype == "const char *":
                     return ocode, "const char *"
                 if otype == "bool":
-                    return f"rosoto_bool_to_str({ocode})", "const char *"
+                    return f"qlm_bool_to_str({ocode})", "const char *"
                 if is_float_env(otype):
-                    return f"rosoto_f64_to_str((double)({ocode}))", "const char *"
-                return f"rosoto_i64_to_str({ocode})", "const char *"
+                    return f"qlm_f64_to_str((double)({ocode}))", "const char *"
+                return f"qlm_i64_to_str({ocode})", "const char *"
             if m == "to_int":
                 # s.to_int()：十进制解析；非法输入 fail-fast（与下标越界同策略）
                 if args:
                     raise SyntaxError(".to_int() 不接受实参")
                 if otype == "const char *":
-                    return f"rosoto_str_to_int({ocode})", "int64_t"
+                    return f"qlm_str_to_int({ocode})", "int64_t"
                 if is_float_env(otype):
                     return f"((int64_t)({ocode}))", "int64_t"
                 raise SyntaxError(".to_int() 只支持 str 与浮点")
             if m == "write":
                 self.uses_net = True
                 bcode, _ = self.gen_expr(args[0], env)
-                return f"rosoto_conn_write({ocode}, {bcode})", "int"
+                return f"qlm_conn_write({ocode}, {bcode})", "int"
             if m == "peer_addr":
                 self.uses_net = True
-                return f"rosoto_conn_peer({ocode})", "const char *"
+                return f"qlm_conn_peer({ocode})", "const char *"
             if m == "serve":
                 return self.gen_serve(obj, env), "void"
             raise SyntaxError(f"未知方法 .{m}")
@@ -2296,10 +2296,10 @@ class Codegen:
                 return (f"({lc} {op} {rc})",
                         "bool" if op in ("==", "!=", "<", "<=", ">", ">=") else rt2)
             if op == "+" and "const char *" in (lt, rt):
-                return f"rosoto_concat({lc}, {rc})", "const char *"
+                return f"qlm_concat({lc}, {rc})", "const char *"
             if op in ("==", "!=") and "const char *" in (lt, rt):
                 # 字符串比较：内容相等（非指针）
-                cmp = f"rosoto_str_eq({lc}, {rc})"
+                cmp = f"qlm_str_eq({lc}, {rc})"
                 return (f"({cmp})" if op == "==" else f"(!{cmp})"), "bool"
             return f"({lc} {op} {rc})", "bool" if op in ("==", "!=", "<", "<=", ">", ">=", "&&", "||") else "int64_t"
         if k == "unop":
@@ -2475,12 +2475,12 @@ class Codegen:
             kcode = key_arg(args[0])
             vcode, vtype = self.gen_expr(args[1], env)
             self.check_map_arg("值", vv, vtype)
-            return f"rosoto_map_set({ocode}, {kcode}, {vcode})", "int64_t"
+            return f"qlm_map_set({ocode}, {kcode}, {vcode})", "int64_t"
         if m == "get":
             if len(args) != 1:
                 raise SyntaxError("m.get(k) 需要且只需要一个实参")
             kcode = key_arg(args[0])
-            code = f"rosoto_map_get({ocode}, {kcode})"
+            code = f"qlm_map_get({ocode}, {kcode})"
             if vv == "str":
                 return f"((const char *)(intptr_t)({code}))", "const char *"
             return code, "int64_t"
@@ -2488,12 +2488,12 @@ class Codegen:
             if len(args) != 1:
                 raise SyntaxError("m.has(k) 需要且只需要一个实参")
             kcode = key_arg(args[0])
-            return f"rosoto_map_has({ocode}, {kcode})", "bool"
+            return f"qlm_map_has({ocode}, {kcode})", "bool"
         if m == "del":
             if len(args) != 1:
                 raise SyntaxError("m.del(k) 需要且只需要一个实参")
             kcode = key_arg(args[0])
-            return f"rosoto_map_del({ocode}, {kcode})", "int64_t"
+            return f"qlm_map_del({ocode}, {kcode})", "int64_t"
         raise SyntaxError(f"map 未知方法 .{m}（支持 set/get/has/del）")
 
     @staticmethod
@@ -2506,7 +2506,7 @@ class Codegen:
             raise SyntaxError(f"map {which}类型是 {want}，不能用 str 实参")
 
     def gen_serve(self, obj, env):
-        """server.serve() -> rosoto_echo_serve(...)"""
+        """server.serve() -> qlm_echo_serve(...)"""
         self.uses_net = True
         name = obj[1]  # ('name', var)
         rec = env.get("_struct_" + name)
@@ -2525,7 +2525,7 @@ class Codegen:
         oc = fget("on_connect", "NULL")
         od = fget("on_data", "NULL")
         ocl = fget("on_close", "NULL")
-        return (f"rosoto_echo_serve({addr}, {oc}, {od}, {ocl}, "
+        return (f"qlm_echo_serve({addr}, {oc}, {od}, {ocl}, "
                 f"{max_conns}, {backlog}, {nodelay}, {reuse_port})")
 
     # ---- 语句 ----
@@ -2550,7 +2550,7 @@ class Codegen:
                 elem = None
                 for el in lit[1]:
                     c, et = self.gen_expr(el, env)
-                    if et in ("const char *", "void", "RosotoBuf") or (
+                    if et in ("const char *", "void", "QlmBuf") or (
                             isinstance(et, str) and (et.startswith("struct:") or
                                                      et.startswith("enum:") or
                                                      is_arr_env(et) or is_slice_env(et))):
@@ -2624,7 +2624,7 @@ class Codegen:
                 return "\n".join([
                     f"{pad}{{",
                     f"{pad}    int64_t {tmp} = (int64_t)({icode});",
-                    f"{pad}    rosoto_slice_bounds({tmp}, ({bcode}).len);",
+                    f"{pad}    qlm_slice_bounds({tmp}, ({bcode}).len);",
                     f"{pad}    (({cast})({bcode}).{pfield})[{tmp}] {op} {rcode};",
                     f"{pad}}}",
                 ])
@@ -2640,7 +2640,7 @@ class Codegen:
             return "\n".join([
                 f"{pad}{{",
                 f"{pad}    int64_t {tmp} = (int64_t)({icode});",
-                f"{pad}    rosoto_bounds({tmp}, {n});",
+                f"{pad}    qlm_bounds({tmp}, {n});",
                 f"{pad}    ({bcode})[{tmp}] {op} {rcode};",
                 f"{pad}}}"])
         if k == "assign_field":
@@ -2764,10 +2764,10 @@ class Codegen:
 
         pad = "    " * ind
         if not self.multicore:
-            # ---- 单核降级：确定性串行（Rosoto.toml [core] multicore = false）----
+            # ---- 单核降级：确定性串行（Quelmara.toml [core] multicore = false）----
             e2 = dict(env)
             e2[var] = "int64_t"
-            out = [f"{pad}/* parfor -> 串行降级（Rosoto.toml: multicore=false, threads={self.threads}） */"]
+            out = [f"{pad}/* parfor -> 串行降级（Quelmara.toml: multicore=false, threads={self.threads}） */"]
             out += [f"{pad}{{ int64_t _lo = {lo}; int64_t _hi = {hi};",
                     f"{pad}for (int64_t {var} = _lo; {var} < _hi; {var}++) {{",
                     self.gen_block(body, e2, ind + 1, ret_t),
@@ -2899,7 +2899,7 @@ class Codegen:
             h.append(f"    a->a{i} = p{i};")
         h += ["    int64_t *rec = (int64_t *)malloc(2 * sizeof(int64_t));",
               "    rec[1] = (int64_t)(intptr_t)a;",
-              "#if ROSOTO_MULTICORE",
+              "#if QLM_MULTICORE",
               "    pthread_t t;",
               f"    pthread_create(&t, NULL, {tname}_worker, a);",
               "    rec[0] = (int64_t)t;",
@@ -2937,12 +2937,12 @@ class Codegen:
         mod = PROGRAM[0] if PROGRAM else None
         fns = self.fns
         # 宏定义最先（net 运行时按需取用配置值）
-        lines = ["/* Generated by Rosoto transpiler v0.1 */",
+        lines = ["/* Generated by Quelmara transpiler v0.1 */",
                  "#define _GNU_SOURCE",
-                 f"#define ROSOTO_THREADS {self.threads}",
-                 f"#define ROSOTO_MULTICORE {1 if self.multicore else 0}",
-                 f"#define ROSOTO_NET_MAX_CONNS {int(self.cfg['net']['max_conns'])}",
-                 f"#define ROSOTO_RECV_BUF {int(self.cfg['net']['recv_buffer'])}",
+                 f"#define QLM_THREADS {self.threads}",
+                 f"#define QLM_MULTICORE {1 if self.multicore else 0}",
+                 f"#define QLM_NET_MAX_CONNS {int(self.cfg['net']['max_conns'])}",
+                 f"#define QLM_RECV_BUF {int(self.cfg['net']['recv_buffer'])}",
                  "#include <unistd.h>",
                  "#include <pthread.h>",
                  CORE_RUNTIME]
@@ -2990,9 +2990,9 @@ class Codegen:
             lines.append("\n".join(self.helpers))
             lines.append("")
         lines += bodies
-        has_main = any(f["name"] == "rosoto_main" for f in fns)
+        has_main = any(f["name"] == "qlm_main" for f in fns)
         lines += ["int main(void) {",
-                  "    rosoto_main();" if has_main else "    /* no main */",
+                  "    qlm_main();" if has_main else "    /* no main */",
                   "    return 0;", "}"]
         return "\n".join(lines)
 
@@ -3149,17 +3149,17 @@ def transpile(src_path):
     mod, imports, fns_ast, tests, structs, enums, decl_order = parse_source(src)
     PROGRAM = (mod, imports, fns_ast, tests)
     fns_ast = with_test_runner(fns_ast, tests)
-    # 用户 main 与 C main 区分：编译为 rosoto_main
+    # 用户 main 与 C main 区分：编译为 qlm_main
     for f in fns_ast:
         if f["name"] == "main":
-            f["name"] = "rosoto_main"
+            f["name"] = "qlm_main"
     cg = Codegen(fns_ast, cfg, structs, enums, decl_order)
     c_code = cg.gen_program()
     return c_code, cfg
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Rosoto transpiler (Rosoto -> C99)")
+    ap = argparse.ArgumentParser(description="Quelmara transpiler (Quelmara -> C99)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build")
     b.add_argument("src")
@@ -3176,8 +3176,8 @@ def main():
     os.makedirs(os.path.dirname(out_c) or ".", exist_ok=True)
     with open(out_c, "w", encoding="utf-8") as f:
         f.write(c_code)
-    print(f"[rosoto] {args.src} -> {out_c}")
-    print(f"[rosoto] config: {cfg['_path'] or '(默认)'} | "
+    print(f"[qlm] {args.src} -> {out_c}")
+    print(f"[qlm] config: {cfg['_path'] or '(默认)'} | "
           f"multicore={cfg['core']['multicore']} threads={cfg['core']['threads'] or 'auto'}")
 
     if args.cmd == "build" and not args.cc:
@@ -3185,10 +3185,10 @@ def main():
 
     bin_path = os.path.join("build", base)
     cc_cmd = ["cc", "-std=gnu11", "-O2", "-pthread", "-o", bin_path, out_c]
-    print("[rosoto] cc:", " ".join(cc_cmd))
+    print("[qlm] cc:", " ".join(cc_cmd))
     subprocess.check_call(cc_cmd)
     if args.cmd == "run":
-        print(f"[rosoto] exec {bin_path}")
+        print(f"[qlm] exec {bin_path}")
         subprocess.check_call([os.path.abspath(bin_path)] + args.args)
 
 

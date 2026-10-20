@@ -1,6 +1,6 @@
 // win_utf8.ros：Windows 控制台 UTF-8 字节输出（WriteFile 原样写字节）
 fn main() {
-    print("你好，Rosoto")
+    print("你好，Quelmara")
     let name = "拼接"
     print("中文 + " + name + " ✓")
     let mut i = 0

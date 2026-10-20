@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Rosoto RosIR 优化器 v0.2(后端无关)
+Quelmara RosIR 优化器 v0.2(后端无关)
 ====================================
 x86_64 / AArch64 / 未来的 PE·Mach-O 发射层共享的 RosIR 级优化 passes:
 
@@ -24,7 +24,7 @@ LICM 的安全性论证:
 """
 
 # ---------------------------------------------------------------------------
-# IR 形状(与 rosoto_native.py 的注释保持一致)
+# IR 形状(与 qlm_native.py 的注释保持一致)
 #   ('mov', dst, src)                src: vreg | ('imm',n) | ('ga',gid)
 #   ('bin', op, dst, a, b)           op: add sub mul div mod and or xor shl shr sar umulhi
 #   ('neg'/'not', dst, a)
@@ -824,7 +824,7 @@ def _match_divmod_window(w):
 def opt_signed_divmod_simplify(fn):
     """把我们自己降级出来的“有符号魔数除法”收缩成无符号版。
 
-    降级固定形态（见 rosoto_native.py 的 bin_op）——注意 ax / t / q 都是
+    降级固定形态（见 qlm_native.py 的 bin_op）——注意 ax / t / q 都是
     **同一个 vreg 原地更新**，所以要按相邻指令窗口匹配，不能按 def 链：
         m  = sar  x, 63          # 符号掩码
         ax = xor  x, m
@@ -1009,7 +1009,7 @@ def opt_all(fn, unroll=True):
 def run_pipeline(fns, inline=True, unroll=True):
     """全部函数的优化管线:内联 -> 逐函数收敛"""
     if inline:
-        from rosoto_native import opt_inline     # 局部导入避免环依赖
+        from qlm_native import opt_inline     # 局部导入避免环依赖
         opt_inline(fns)
     for fn in fns:
         opt_all(fn, unroll=unroll)

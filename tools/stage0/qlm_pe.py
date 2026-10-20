@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Rosoto 自研 Windows x86_64 后端（PE/COFF，无 CRT）
+Quelmara 自研 Windows x86_64 后端（PE/COFF，无 CRT）
 ================================================
-Rosoto 源码 -> RosIR（与 Linux/ELF 后端完全同一条前端与优化管线）
-           -> 自研 x86_64 编码器（复用 rosoto_native.Enc）
+Quelmara 源码 -> RosIR（与 Linux/ELF 后端完全同一条前端与优化管线）
+           -> 自研 x86_64 编码器（复用 qlm_native.Enc）
            -> 自研 PE/COFF 写出器（导入 kernel32、DIR64 重定位、4 个节）
 
 设计要点：
@@ -29,7 +29,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from rosoto_native import (Codegen, lower_and_optimize,  # noqa: E402
+from qlm_native import (Codegen, lower_and_optimize,  # noqa: E402
                            ACC, RCX, RDX, R8, R9, RSP, SCRATCH)
 
 # ---------------------------------------------------------------------------
@@ -324,7 +324,7 @@ def write_exe(path, blob):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Rosoto Windows PE/COFF 后端（无 CRT）")
+    ap = argparse.ArgumentParser(description="Quelmara Windows PE/COFF 后端（无 CRT）")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for c in ("build", "run"):
         p = sub.add_parser(c)
@@ -339,8 +339,8 @@ def main():
     base = os.path.splitext(os.path.basename(args.src))[0]
     out = args.out or os.path.join("build", base + ".exe")
     write_exe(out, blob)
-    print(f"[rosoto-win] {args.src} -> {out} ({len(blob)} bytes PE, no CRT)")
-    print(f"[rosoto-win] config: {cfg['_path'] or '(default)'} | "
+    print(f"[qlm-win] {args.src} -> {out} ({len(blob)} bytes PE, no CRT)")
+    print(f"[qlm-win] config: {cfg['_path'] or '(default)'} | "
           f"multicore={cfg['core']['multicore']} "
           f"threads={cfg['core']['threads'] or 'auto'}")
     if args.cmd == "run":

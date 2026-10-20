@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rosoto 自研原生后端 v0.1 回归测试
+# Quelmara 自研原生后端 v0.1 回归测试
 # 覆盖：正确性(双后端交叉验证) / 多核 clone / 单核降级 / divmod 语义 / 退出码(退出崩溃回归) / 静态 ELF
 set -u
 cd "$(dirname "$0")/.."
@@ -7,9 +7,9 @@ PASS=0; FAIL=0
 ok()   { echo "  ✅ $1"; PASS=$((PASS+1)); }
 bad()  { echo "  ❌ $1"; FAIL=$((FAIL+1)); }
 
-NAT=python3\ tools/rosoto_native.py
-NAT2=python3\ tools/rosoto_arm64.py
-CBE=python3\ tools/rosoto.py
+NAT=python3\ tools/stage0/qlm_native.py
+NAT2=python3\ tools/stage0/qlm_arm64.py
+CBE=python3\ tools/stage0/qlm.py
 
 echo "[1] fib(25) 递归正确性 + 双后端交叉验证"
 $NAT build examples/fib.ros -o build/nat_fib >/dev/null 2>&1
@@ -37,7 +37,7 @@ out=$(./build/nat_par); rc=$?
 [ $rc -eq 0 ] && ok "退出码 0" || bad "退出码 $rc"
 [ "$out" = "11519999978" ] && ok "clone 多核归约 == pthread 后端结果" || bad "输出 [$out]"
 
-echo "[5] 单核降级（tests/single_core/Rosoto.toml: multicore=false）"
+echo "[5] 单核降级（tests/single_core/Quelmara.toml: multicore=false）"
 cp examples/parfor_sum.ros tests/single_core/
 $NAT build tests/single_core/parfor_sum.ros -o build/nat_par_1c >/dev/null 2>&1
 out=$(timeout 120 ./build/nat_par_1c); rc=$?
@@ -71,8 +71,8 @@ diff build/.dc build/.dn64 >/dev/null && ok "a64 divmod 160 行与 x86/C 后端�
 echo "[8] 语言 v0.2：break/continue + struct（双后端交叉验证）"
 for t in tests/t8.ros tests/t9.ros tests/t10.ros tests/t11.ros; do
   n=$(basename $t .ros)
-  $NAT run $t 2>/dev/null | grep -v '^\[rosoto' > build/.x.$n; rc=${PIPESTATUS[0]}
-  $CBE run $t 2>/dev/null | grep -v '^\[rosoto' > build/.y.$n
+  $NAT run $t 2>/dev/null | grep -v '^\[qlm' > build/.x.$n; rc=${PIPESTATUS[0]}
+  $CBE run $t 2>/dev/null | grep -v '^\[qlm' > build/.y.$n
   [ $rc -eq 0 ] && ok "$n 退出码 0" || bad "$n 退出码 $rc"
   diff build/.x.$n build/.y.$n >/dev/null && ok "$n 双后端输出全等" || bad "$n 双后端不一致"
 done
@@ -98,7 +98,7 @@ $NAT build tests/t13_spawn.ros -o build/nat_spawn >/dev/null 2>&1
 out=$(./build/nat_spawn); rc=$?
 [ $rc -eq 0 ] && ok "spawn 退出码 0" || bad "spawn 退出码 $rc"
 [ "$out" = "$(printf '6765\n81\n110\nspawn ok')" ] && ok "spawn 结果正确（fib/square/void 任务）" || bad "spawn 输出 [$out]"
-$CBE run tests/t13_spawn.ros 2>/dev/null | grep -v '^\[rosoto' > build/.spawn_c
+$CBE run tests/t13_spawn.ros 2>/dev/null | grep -v '^\[qlm' > build/.spawn_c
 [ "$out" = "$(cat build/.spawn_c)" ] && ok "spawn 自研后端 == C 后端" || bad "spawn 双后端不一致"
 
 cp tests/t13_spawn.ros tests/single_core/
@@ -119,7 +119,7 @@ $NAT build tests/t15_chan.ros -o build/nat_chan >/dev/null 2>&1
 out=$(timeout 120 ./build/nat_chan); rc=$?
 [ $rc -eq 0 ] && ok "chan 退出码 0" || bad "chan 退出码 $rc"
 [ "$out" = "$(printf '749500\nchan ok')" ] && ok "chan 多生产者 + FIFO 正确" || bad "chan 输出 [$out]"
-$CBE run tests/t15_chan.ros 2>/dev/null | grep -v '^\[rosoto' > build/.chan_c
+$CBE run tests/t15_chan.ros 2>/dev/null | grep -v '^\[qlm' > build/.chan_c
 [ "$out" = "$(cat build/.chan_c)" ] && ok "chan 自研后端 == C 后端" || bad "chan 双后端不一致"
 
 $NAT build tests/single_core/t15_chan_seq.ros -o build/nat_chan_seq >/dev/null 2>&1
@@ -130,7 +130,7 @@ $NAT build tests/t16_arrays.ros -o build/nat_arrays >/dev/null 2>&1
 out=$(timeout 60 ./build/nat_arrays); rc=$?
 [ $rc -eq 0 ] && ok "数组退出码 0" || bad "数组退出码 $rc"
 [ "$out" = "$(printf '33\narrays ok')" ] && ok "数组：len/读写/复合赋值/值拷贝/循环求和正确" || bad "数组输出 [$out]"
-$CBE run tests/t16_arrays.ros 2>/dev/null | grep -v '^\[rosoto' > build/.arr_c
+$CBE run tests/t16_arrays.ros 2>/dev/null | grep -v '^\[qlm' > build/.arr_c
 [ "$out" = "$(cat build/.arr_c)" ] && ok "数组自研后端 == C 后端" || bad "数组双后端不一致"
 
 $NAT build tests/array_bounds.ros -o build/nat_ab >/dev/null 2>&1
@@ -148,15 +148,15 @@ $CBE run tests/t19_option.ros >/dev/null 2>&1 && ok "C option 构造/match 正�
 echo "[14] result[T,E] 单态化 + ? 传播 + match 解构"
 $NAT run tests/t20_result_generic.ros >/dev/null 2>&1 && ok "native result[T,E] 构造/?/match 正确" || bad "native result[T,E] 失败"
 $CBE run tests/t20_result_generic.ros >/dev/null 2>&1 && ok "C result[T,E] 构造/?/match 正确" || bad "C result[T,E] 失败"
-$NAT run tests/t20_result_generic.ros 2>/dev/null | grep -v '^\[rosoto' > build/.res20_n
-$CBE run tests/t20_result_generic.ros 2>/dev/null | grep -v '^\[rosoto' > build/.res20_c
+$NAT run tests/t20_result_generic.ros 2>/dev/null | grep -v '^\[qlm' > build/.res20_n
+$CBE run tests/t20_result_generic.ros 2>/dev/null | grep -v '^\[qlm' > build/.res20_c
 diff build/.res20_n build/.res20_c >/dev/null && ok "result[T,E] 自研后端 == C 后端" || bad "result[T,E] 双后端不一致"
 
 echo "[15] 切片 []T（{ptr,len} 两字零拷贝视图 + 聚合 ABI）"
 $NAT run tests/t21_slice.ros >/dev/null 2>&1 && ok "native 切片 构造/索引/传参/返回正确" || bad "native 切片 失败"
 $CBE run tests/t21_slice.ros >/dev/null 2>&1 && ok "C 切片 构造/索引/传参/返回正确" || bad "C 切片 失败"
-$NAT run tests/t21_slice.ros 2>/dev/null | grep -v '^\[rosoto' > build/.sli21_n
-$CBE run tests/t21_slice.ros 2>/dev/null | grep -v '^\[rosoto' > build/.sli21_c
+$NAT run tests/t21_slice.ros 2>/dev/null | grep -v '^\[qlm' > build/.sli21_n
+$CBE run tests/t21_slice.ros 2>/dev/null | grep -v '^\[qlm' > build/.sli21_c
 diff build/.sli21_n build/.sli21_c >/dev/null && ok "切片 自研后端 == C 后端" || bad "切片 双后端不一致"
 $NAT build tests/slice_bounds.ros -o build/nat_sb >/dev/null 2>&1
 timeout 30 ./build/nat_sb >/dev/null 2>&1; rc=$?
@@ -165,8 +165,8 @@ timeout 30 ./build/nat_sb >/dev/null 2>&1; rc=$?
 echo "[16] map[K]V（开放寻址 + 线性探测 + 墓碑 + 扩容）"
 $NAT run tests/t22_map.ros >/dev/null 2>&1 && ok "native map set/get/has/del/扩容/墓碑正确" || bad "native map 失败"
 $CBE run tests/t22_map.ros >/dev/null 2>&1 && ok "C map set/get/has/del/扩容/墓碑正确" || bad "C map 失败"
-$NAT run tests/t22_map.ros 2>/dev/null | grep -v '^\[rosoto' > build/.map22_n
-$CBE run tests/t22_map.ros 2>/dev/null | grep -v '^\[rosoto' > build/.map22_c
+$NAT run tests/t22_map.ros 2>/dev/null | grep -v '^\[qlm' > build/.map22_n
+$CBE run tests/t22_map.ros 2>/dev/null | grep -v '^\[qlm' > build/.map22_c
 diff build/.map22_n build/.map22_c >/dev/null && ok "map 自研后端 == C 后端" || bad "map 双链不一致"
 $NAT build tests/map_bounds.ros -o build/nat_mb >/dev/null 2>&1
 timeout 30 ./build/nat_mb >/dev/null 2>&1; rc=$?
@@ -178,22 +178,22 @@ timeout 30 ./build/c_mb >/dev/null 2>&1; rc=$?
 echo "[17] 浮点 f64/f32（运算/比较/转换/格式化，双链一致）"
 $NAT run tests/t23_float.ros >/dev/null 2>&1 && ok "native 浮点 运算/比较/转换/格式化正确" || bad "native 浮点 失败"
 $CBE run tests/t23_float.ros >/dev/null 2>&1 && ok "C 浮点 运算/比较/转换/格式化正确" || bad "C 浮点 失败"
-$NAT run tests/t23_float.ros 2>/dev/null | grep -v '^\[rosoto' > build/.flt23_n
-$CBE run tests/t23_float.ros 2>/dev/null | grep -v '^\[rosoto' > build/.flt23_c
+$NAT run tests/t23_float.ros 2>/dev/null | grep -v '^\[qlm' > build/.flt23_n
+$CBE run tests/t23_float.ros 2>/dev/null | grep -v '^\[qlm' > build/.flt23_c
 diff build/.flt23_n build/.flt23_c >/dev/null && ok "浮点 自研后端 == C 后端" || bad "浮点 双链不一致"
 
 echo "[18] h.join() 方法式语法（脱糖为内置 join）"
 $NAT run tests/t24_join_method.ros >/dev/null 2>&1 && ok "native h.join() 方法式 join 正确" || bad "native h.join() 失败"
 $CBE run tests/t24_join_method.ros >/dev/null 2>&1 && ok "C h.join() 方法式 join 正确" || bad "C h.join() 失败"
-$NAT run tests/t24_join_method.ros 2>/dev/null | grep -v '^\[rosoto' > build/.jm24_n
-$CBE run tests/t24_join_method.ros 2>/dev/null | grep -v '^\[rosoto' > build/.jm24_c
+$NAT run tests/t24_join_method.ros 2>/dev/null | grep -v '^\[qlm' > build/.jm24_n
+$CBE run tests/t24_join_method.ros 2>/dev/null | grep -v '^\[qlm' > build/.jm24_c
 diff build/.jm24_n build/.jm24_c >/dev/null && ok "join 方法式 自研后端 == C 后端" || bad "join 方法式 双链不一致"
 
 echo "[19] chan.close()（v0.11）：排空/零值/fail-fast，双链一致"
 $NAT run tests/t25_chan_close.ros >/dev/null 2>&1 && ok "native chan close 排空/零值正确" || bad "native chan close 失败"
 $CBE run tests/t25_chan_close.ros >/dev/null 2>&1 && ok "C chan close 排空/零值正确" || bad "C chan close 失败"
-$NAT run tests/t25_chan_close.ros 2>/dev/null | grep -v '^\[rosoto' > build/.cc25_n
-$CBE run tests/t25_chan_close.ros 2>/dev/null | grep -v '^\[rosoto' > build/.cc25_c
+$NAT run tests/t25_chan_close.ros 2>/dev/null | grep -v '^\[qlm' > build/.cc25_n
+$CBE run tests/t25_chan_close.ros 2>/dev/null | grep -v '^\[qlm' > build/.cc25_c
 diff build/.cc25_n build/.cc25_c >/dev/null && ok "chan close 自研后端 == C 后端" || bad "chan close 双链不一致"
 $NAT build tests/chan_close_fail.ros -o build/nat_ccf >/dev/null 2>&1
 timeout 30 ./build/nat_ccf >/dev/null 2>&1; rc=$?
@@ -211,8 +211,8 @@ timeout 30 ./build/c_cdc >/dev/null 2>&1; rc=$?
 echo "[20] chan select（v0.11）：轮询/yield、声明序优先、全关闭返回 0"
 $NAT run tests/t26_select.ros >/dev/null 2>&1 && ok "native select 各场景正确" || bad "native select 失败"
 $CBE run tests/t26_select.ros >/dev/null 2>&1 && ok "C select 各场景正确" || bad "C select 失败"
-$NAT run tests/t26_select.ros 2>/dev/null | grep -v '^\[rosoto' > build/.sel26_n
-$CBE run tests/t26_select.ros 2>/dev/null | grep -v '^\[rosoto' > build/.sel26_c
+$NAT run tests/t26_select.ros 2>/dev/null | grep -v '^\[qlm' > build/.sel26_n
+$CBE run tests/t26_select.ros 2>/dev/null | grep -v '^\[qlm' > build/.sel26_c
 diff build/.sel26_n build/.sel26_c >/dev/null && ok "select 自研后端 == C 后端" || bad "select 双链不一致"
 
 echo "[21] str 长度/字节下标/十进制解析（v0.12）：双链一致"
@@ -220,11 +220,11 @@ $NAT run tests/t27_str.ros >/dev/null 2>&1 && ok "native str len/下标正确" |
 $CBE run tests/t27_str.ros >/dev/null 2>&1 && ok "C str len/下标正确" || bad "C str len/下标 失败"
 $NAT run tests/t28_toint.ros >/dev/null 2>&1 && ok "native str.to_int 正确（含边界/往返）" || bad "native str.to_int 失败"
 $CBE run tests/t28_toint.ros >/dev/null 2>&1 && ok "C str.to_int 正确（含边界/往返）" || bad "C str.to_int 失败"
-$NAT run tests/t27_str.ros 2>/dev/null | grep -v '^\[rosoto' > build/.str27_n
-$CBE run tests/t27_str.ros 2>/dev/null | grep -v '^\[rosoto' > build/.str27_c
+$NAT run tests/t27_str.ros 2>/dev/null | grep -v '^\[qlm' > build/.str27_n
+$CBE run tests/t27_str.ros 2>/dev/null | grep -v '^\[qlm' > build/.str27_c
 diff build/.str27_n build/.str27_c >/dev/null && ok "str 自研后端 == C 后端" || bad "str 双链不一致"
-$NAT run tests/t28_toint.ros 2>/dev/null | grep -v '^\[rosoto' > build/.tint28_n
-$CBE run tests/t28_toint.ros 2>/dev/null | grep -v '^\[rosoto' > build/.tint28_c
+$NAT run tests/t28_toint.ros 2>/dev/null | grep -v '^\[qlm' > build/.tint28_n
+$CBE run tests/t28_toint.ros 2>/dev/null | grep -v '^\[qlm' > build/.tint28_c
 diff build/.tint28_n build/.tint28_c >/dev/null && ok "to_int 自研后端 == C 后端" || bad "to_int 双链不一致"
 $NAT build tests/str_bounds.ros -o build/nat_sb >/dev/null 2>&1
 timeout 30 ./build/nat_sb >/dev/null 2>&1; rc=$?
@@ -239,7 +239,7 @@ for t in tests/t27_str.ros tests/t28_toint.ros; do
   $NAT2 build $t -o build/${n}_a64 >/dev/null 2>&1 \
     && ok "a64 $n 编译通过" || bad "a64 $n 编译失败"
   timeout 600 python3 tests/a64_emu.py build/${n}_a64 > build/.a64str.$n 2>/dev/null
-  $NAT run $t 2>/dev/null | grep -v '^\[rosoto' > build/.natstr.$n
+  $NAT run $t 2>/dev/null | grep -v '^\[qlm' > build/.natstr.$n
   diff build/.natstr.$n build/.a64str.$n >/dev/null \
     && ok "a64 $n 与 x86 输出全等" || bad "a64 $n 与 x86 不一致"
 done

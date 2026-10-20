@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rosoto 性能基线对比：自研后端 vs gcc -O2
+# Quelmara 性能基线对比：自研后端 vs gcc -O2
 set -u
 cd "$(dirname "$0")/.."
 t() {
@@ -14,10 +14,10 @@ t() {
 }
 
 echo "== 编译 =="
-python3 tools/rosoto_native.py build examples/loop_sum.ros -o build/p_native_loop >/dev/null 2>&1
-python3 tools/rosoto.py build examples/loop_sum.ros --cc >/dev/null 2>&1 && mv build/loop_sum build/p_c_loop 2>/dev/null
-python3 tools/rosoto_native.py build examples/parfor_sum.ros -o build/p_native_par >/dev/null 2>&1
-python3 tools/rosoto.py build examples/parfor_sum.ros --cc >/dev/null 2>&1 && mv build/parfor_sum build/p_c_par 2>/dev/null
+python3 tools/stage0/qlm_native.py build examples/loop_sum.ros -o build/p_native_loop >/dev/null 2>&1
+python3 tools/stage0/qlm.py build examples/loop_sum.ros --cc >/dev/null 2>&1 && mv build/loop_sum build/p_c_loop 2>/dev/null
+python3 tools/stage0/qlm_native.py build examples/parfor_sum.ros -o build/p_native_par >/dev/null 2>&1
+python3 tools/stage0/qlm.py build examples/parfor_sum.ros --cc >/dev/null 2>&1 && mv build/parfor_sum build/p_c_par 2>/dev/null
 
 echo
 echo "loop_sum  (2 亿热循环)"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Rosoto 官方格式化器（`rosoto fmt`）
+Quelmara 官方格式化器（`quelmara fmt`）
 ==================================
 SPEC §8：「官方格式化器（一种风格，终结争论）」
 
@@ -18,7 +18,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rosoto import tokenize  # noqa: E402
+from qlm import tokenize  # noqa: E402
 
 INDENT = "    "
 
@@ -80,7 +80,7 @@ def _is_unary(t, prev):
 
 
 def format_src(src):
-    """把 Rosoto 源码格式化成规范风格。返回格式化后的源码。"""
+    """把 Quelmara 源码格式化成规范风格。返回格式化后的源码。"""
     toks = [t for t in tokenize(src, keep_comments=True) if t.kind != "EOF"]
 
     # 按源码行分组（NL 记号分隔）
@@ -158,7 +158,7 @@ def format_src(src):
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser(description="Rosoto 官方格式化器")
+    ap = argparse.ArgumentParser(description="Quelmara 官方格式化器")
     ap.add_argument("paths", nargs="*", help=".ros 文件或目录（默认当前目录）")
     ap.add_argument("--check", action="store_true",
                     help="只检查不写入；不符合规范时退出码 1")

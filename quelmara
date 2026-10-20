@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Quelmara 工具链入口
+#   用法: ./quelmara <build|run|test|fmt|bench|version> [参数]
+#   等价于: python3 tools/stage0/qlm_cli.py ...
+#   注意：tools/stage0/ 是 stage-0 引导层（Python），最终会被 bootstrap/ 下的自举实现替换。
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$HERE/tools/stage0/qlm_cli.py" "$@"

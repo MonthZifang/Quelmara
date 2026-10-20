@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Rosoto 原生后端 v0.1（自研，零外部依赖）
+Quelmara 原生后端 v0.1（自研，零外部依赖）
 ========================================
-Rosoto 源码 -> RosIR -> 优化passes -> 线性扫描寄存器分配 -> 自研 x86_64 编码器 -> ELF64 裸可执行文件
+Quelmara 源码 -> RosIR -> 优化passes -> 线性扫描寄存器分配 -> 自研 x86_64 编码器 -> ELF64 裸可执行文件
 
 不依赖 libc / gcc / LLVM：
   - 直接产出静态 ELF64（基址 0x400000，单 RWX 段，无重定位）
@@ -15,8 +15,8 @@ Rosoto 源码 -> RosIR -> 优化passes -> 线性扫描寄存器分配 -> 自研 
   cmp+jcc 融合 / 线性扫描寄存器分配(调用感知) / 帧槽复用 / mov 消除
 
 用法：
-  python3 tools/rosoto_native.py build examples/fib.ros -o build/fib
-  python3 tools/rosoto_native.py run   examples/loop_sum.ros
+  python3 tools/stage0/qlm_native.py build examples/fib.ros -o build/fib
+  python3 tools/stage0/qlm_native.py run   examples/loop_sum.ros
 """
 
 import argparse
@@ -26,7 +26,7 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rosoto import (tokenize, Parser, load_config, walk_stmts,  # noqa: E402
+from qlm import (tokenize, Parser, load_config, walk_stmts,  # noqa: E402
                     parse_source, with_test_runner, validate_match,
                     resolve_option_patterns)
 
@@ -630,7 +630,7 @@ class Lower:
             fn.emit("store", dst, ("imm", i), t)
 
     def emit_bounds(self, fn, idx, n, dynamic=False):
-        """越界 fail-fast（Rosoto.toml [build] bounds_check 可关闭）。
+        """越界 fail-fast（Quelmara.toml [build] bounds_check 可关闭）。
         n 默认是常量长度；dynamic=True 时 n 是运行期 vreg（切片动态长度）"""
         if not self.cfg["build"].get("bounds_check", True):
             return
@@ -860,7 +860,7 @@ class Lower:
         return d
 
     def is_serial(self):
-        """Rosoto.toml 是否要求单核/单线程（spawn/parfor 编译期降级）"""
+        """Quelmara.toml 是否要求单核/单线程（spawn/parfor 编译期降级）"""
         return (not self.cfg["core"]["multicore"]) or \
             int(self.cfg["core"]["threads"] or 0) == 1
 
@@ -1964,7 +1964,7 @@ class Lower:
                 isinstance(hi, tuple) and hi[0] == "imm"):
             raise SyntaxError("原生后端 parfor v0.1 要求区间为编译期常量")
         if not self.cfg["core"]["multicore"] or int(self.cfg["core"]["threads"] or 0) == 1:
-            # 单核降级（Rosoto.toml [core] multicore=false）：确定性串行
+            # 单核降级（Quelmara.toml [core] multicore=false）：确定性串行
             i = fn.new_v()
             fn.emit("mov", i, lo)
             hi_v = fn.new_v()
@@ -2288,9 +2288,9 @@ class Lower:
         self.out.append(f)
 
         # ---- 字符串运行库（v0.2）：bump 分配器 + 拼接 + itoa ----
-        # 内存策略跟 Rosoto.toml [memory] heap_limit_mb 走：超限 fail-fast。
+        # 内存策略跟 Quelmara.toml [memory] heap_limit_mb 走：超限 fail-fast。
         heap_sz = int(self.cfg["memory"]["heap_limit_mb"] or 512) * 1024 * 1024
-        gid_oom = self.intern_str("rosoto: heap_limit_mb exceeded (fail-fast)\n")
+        gid_oom = self.intern_str("quelmara: heap_limit_mb exceeded (fail-fast)\n")
         gid_zero = self.intern_array(1)
         self.heap_gid = self.intern_array(1)       # 堆基址
         self.bump_gid = self.intern_array(1)       # 已用偏移
@@ -2356,7 +2356,7 @@ class Lower:
         # ---- arena / 任务运行时（v0.4）----
         # 只发射真正用到的部分：hello 这种程序不会带 __join / __chan_*（省体积/导入）。
         if self.uses_bounds:
-            msg = "rosoto: index out of bounds (fail-fast)\n"
+            msg = "quelmara: index out of bounds (fail-fast)\n"
             gid_b = self.intern_str(msg)
             f = Fn("__bounds_fail")
             f.emit("args", [])
@@ -2415,12 +2415,12 @@ class Lower:
         # 布局（7 个 8 字节字）：[cap, head, tail, count, lock, buf, closed]
         # lock 用 xchg 原子抢锁；忙等时 yield，不把整核跑满。
         # closed（v0.11）：close() 置 1；send 见到即 fail-fast，
-        # recv 排空后返回 0（零值）。与 C 端 RosotoChan.closed 行为一致。
+        # recv 排空后返回 0（零值）。与 C 端 QlmChan.closed 行为一致。
         # 只在 x86_64 发射（AArch64 需要 ldaxr/stxr 版本，后续补）。
         if self.uses_chan and self.arch == "x86_64":
-            msg_cs = "rosoto: send on closed channel (fail-fast)\n"
+            msg_cs = "quelmara: send on closed channel (fail-fast)\n"
             gid_cs = self.intern_str(msg_cs)
-            msg_cd = "rosoto: chan double close (fail-fast)\n"
+            msg_cd = "quelmara: chan double close (fail-fast)\n"
             gid_cd = self.intern_str(msg_cd)
 
             def chan_fail(f, gid, msg):
@@ -2630,7 +2630,7 @@ class Lower:
         if self.uses_map:
             if self.arch != "x86_64":
                 raise SyntaxError("map[K]V 目前仅支持 x86_64 后端")
-            msg_nf = "rosoto: map key not found (fail-fast)\n"
+            msg_nf = "quelmara: map key not found (fail-fast)\n"
             gid_nf = self.intern_str(msg_nf)
 
             # __map_hash_word(x) -> u64   splitmix64 终混（64 位回绕乘）
@@ -3020,8 +3020,8 @@ class Lower:
         if self.uses_str_to_int:
             # __str_to_int(p) -> int64：十进制解析（可选 +/- 前导）。
             # 非法字符 / 空串 / 溢出一律 fail-fast，不静默回绕；
-            # 与 C 后端 rosoto_str_to_int 判定顺序逐条对齐。
-            msg = "rosoto: str.to_int() invalid decimal input (fail-fast)\n"
+            # 与 C 后端 qlm_str_to_int 判定顺序逐条对齐。
+            msg = "quelmara: str.to_int() invalid decimal input (fail-fast)\n"
             gid_f = self.intern_str(msg)
             f = Fn("__str_to_int_fail")
             f.emit("args", [])
@@ -3183,7 +3183,7 @@ class Lower:
         f.emit("ret", buf)
         self.out.append(f)
 
-        # ---- 浮点格式化（与 C 端 rosoto_f64_to_str 算法逐位一致，双链 diff 依赖）----
+        # ---- 浮点格式化（与 C 端 qlm_f64_to_str 算法逐位一致，双链 diff 依赖）----
         # __fmt_u64(buf, pos, v, pad) -> 新 pos：十进制写入，至少 pad 位（前导零）
         if self.uses_f64_str:
             def fbits(v):
@@ -3520,11 +3520,11 @@ class Lower:
 
 
 # ---------------------------------------------------------------------------
-# RosIR 优化 passes 独立模块：tools/rosoto_opt.py（x86_64 / aarch64 发射层共享）
-# 这里只做再导出，保持 `from rosoto_native import vreg_mentions` 的既有用法可用。
+# RosIR 优化 passes 独立模块：tools/stage0/qlm_opt.py（x86_64 / aarch64 发射层共享）
+# 这里只做再导出，保持 `from qlm_native import vreg_mentions` 的既有用法可用。
 # ---------------------------------------------------------------------------
 
-from rosoto_opt import (PURE, vreg_mentions, loop_regions,          # noqa: E402,F401
+from qlm_opt import (PURE, vreg_mentions, loop_regions,          # noqa: E402,F401
                         opt_dce, opt_copy_prop, opt_cse, opt_licm,
                         opt_loop_unroll, opt_all)
 
@@ -4471,7 +4471,7 @@ def transpile_native(src_path, dump_ir=False, optimize=True, arch="x86_64"):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Rosoto 原生后端 (Rosoto -> 裸 ELF64)")
+    ap = argparse.ArgumentParser(description="Quelmara 原生后端 (Quelmara -> 裸 ELF64)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for c in ("build", "run"):
         p = sub.add_parser(c)
@@ -4486,11 +4486,11 @@ def main():
     out = args.out or os.path.join("build", base)
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     write_elf(out, blob)
-    print(f"[rosoto-native] {args.src} -> {out} ({len(blob)} 字节机器码+数据, 无 libc)")
-    print(f"[rosoto-native] config: {cfg['_path'] or '(默认)'} | "
+    print(f"[qlm-native] {args.src} -> {out} ({len(blob)} 字节机器码+数据, 无 libc)")
+    print(f"[qlm-native] config: {cfg['_path'] or '(默认)'} | "
           f"multicore={cfg['core']['multicore']} threads={cfg['core']['threads'] or 'auto'}")
     if args.cmd == "run":
-        print(f"[rosoto-native] exec {out}")
+        print(f"[qlm-native] exec {out}")
         os.execv(os.path.abspath(out), [os.path.abspath(out)])
 
 

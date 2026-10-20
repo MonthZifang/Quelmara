@@ -3,7 +3,7 @@
 """
 A64 迷你模拟器（测试工具）
 ========================
-用于【执行级】验证 Rosoto aarch64 发射器：直接按位解码我们发射的指令子集
+用于【执行级】验证 Quelmara aarch64 发射器：直接按位解码我们发射的指令子集
 （编码器与模拟器是两套独立实现，互为校验）。支持：movz/movk、orr(=mov)、
 add/sub(imm/reg)、and/orr/eor/orn、madd(=mul)、umulh、sdiv、lslv/lsrv/asrv、
 ubfm/sbfm(lsl/lsr/asr imm)、cmp、csinc(=cset)、b/b.cond/bl/ret、cbz/cbnz、

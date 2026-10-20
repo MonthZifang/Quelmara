@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Rosoto 统一命令行入口（SPEC §8）
+Quelmara 统一命令行入口（SPEC §8）
 ================================
-  rosoto build <src>      编译（默认当前平台自研后端）
-  rosoto run   <src>      编译并运行
-  rosoto test  [path]     运行 test "name" { } 内建测试（默认当前平台自研后端）
-  rosoto fmt   [path]     官方格式化器（--check 只检查）
-  rosoto bench <src>      基准测试 + 回归对比（--baseline / --update-baseline）
-  rosoto version          版本与后端能力
+  quelmara build <src>      编译（默认当前平台自研后端）
+  quelmara run   <src>      编译并运行
+  quelmara test  [path]     运行 test "name" { } 内建测试（默认当前平台自研后端）
+  quelmara fmt   [path]     官方格式化器（--check 只检查）
+  quelmara bench <src>      基准测试 + 回归对比（--baseline / --update-baseline）
+  quelmara version          版本与后端能力
 
 通用选项：
   --target native|win|arm64|c|both   代码生成后端（默认当前平台自研后端）
@@ -16,7 +16,7 @@ Rosoto 统一命令行入口（SPEC §8）
   --dump-ir                      打印 RosIR
   --no-opt                       关闭优化管线
 
-设计原则：所有子命令都读取项目根目录的 Rosoto.toml（唯一全局资源开关）。
+设计原则：所有子命令都读取项目根目录的 Quelmara.toml（唯一全局资源开关）。
 """
 
 import argparse
@@ -58,7 +58,7 @@ DEFAULT_TARGET = _default_target()
 # ---------------------------------------------------------------------------
 
 def _build_native(src, out, dump_ir=False, optimize=True):
-    import rosoto_native as N
+    import qlm_native as N
     blob, cfg = N.transpile_native(src, dump_ir=dump_ir, optimize=optimize)
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     N.write_elf(out, blob)
@@ -66,7 +66,7 @@ def _build_native(src, out, dump_ir=False, optimize=True):
 
 
 def _build_arm64(src, out, dump_ir=False, optimize=True):
-    import rosoto_arm64 as A
+    import qlm_arm64 as A
     # transpile_a64 只返回 (blob, cfg)：ELF 头/程序头由 write_elf_a64 写出。
     # 之前直接把 2 元组当 (out, size, cfg) 返回，CLI 一解包就 ValueError。
     blob, cfg = A.transpile_a64(src, dump_ir=dump_ir, optimize=optimize)
@@ -76,7 +76,7 @@ def _build_arm64(src, out, dump_ir=False, optimize=True):
 
 
 def _build_c(src, out, dump_ir=False, optimize=True, cc=True):
-    import rosoto as R
+    import qlm as R
     c_code, cfg = R.transpile(src)
     base = os.path.splitext(os.path.basename(src))[0]
     out_c = os.path.join("build", base + ".c")
@@ -91,7 +91,7 @@ def _build_c(src, out, dump_ir=False, optimize=True, cc=True):
 
 
 def _build_win(src, out, dump_ir=False, optimize=True):
-    import rosoto_pe as W
+    import qlm_pe as W
     pe, cfg = W.transpile_win(src, dump_ir=dump_ir, optimize=optimize)
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     W.write_exe(out, pe)
@@ -123,8 +123,8 @@ def build(src, target=DEFAULT_TARGET, out=None, dump_ir=False, optimize=True):
 def cmd_build(args):
     out, size, cfg = build(args.src, args.target, args.out,
                            dump_ir=args.dump_ir, optimize=not args.no_opt)
-    print(f"[rosoto] {args.src} -> {out}  ({size} 字节, target={args.target})")
-    print(f"[rosoto] config: {cfg.get('_path') or '(默认)'} | "
+    print(f"[qlm] {args.src} -> {out}  ({size} 字节, target={args.target})")
+    print(f"[qlm] config: {cfg.get('_path') or '(默认)'} | "
           f"multicore={cfg['core']['multicore']} "
           f"threads={cfg['core']['threads'] or 'auto'} "
           f"opt={cfg['build']['opt']}")
@@ -134,7 +134,7 @@ def cmd_build(args):
 def cmd_run(args):
     out, size, cfg = build(args.src, args.target, args.out,
                            dump_ir=args.dump_ir, optimize=not args.no_opt)
-    print(f"[rosoto] exec {out}")
+    print(f"[qlm] exec {out}")
     rc = subprocess.call([os.path.abspath(out)] + (args.args or []))
     return rc
 
@@ -161,7 +161,7 @@ def cmd_test(args):
     paths = args.paths or ["tests", "examples"]
     files = _discover_tests(paths)
     if not files:
-        print("[rosoto-test] 没有找到 test \"name\" { } 测试块")
+        print("[qlm-test] 没有找到 test \"name\" { } 测试块")
         return 1
 
     if args.target == "both":
@@ -208,14 +208,14 @@ def cmd_test(args):
 
 
 def cmd_fmt(args):
-    import rosoto_fmt
+    import qlm_fmt
     argv = list(args.paths or [])
     if args.check:
         argv.append("--check")
     if args.quiet:
         argv.append("-q")
-    sys.argv = ["rosoto fmt"] + argv
-    rosoto_fmt.main()
+    sys.argv = ["quelmara fmt"] + argv
+    qlm_fmt.main()
     return 0
 
 
@@ -232,7 +232,7 @@ def cmd_bench(args):
         sample = r.stdout.strip()
     best, mean = min(times), statistics.fmean(times)
     stdev = statistics.pstdev(times) if len(times) > 1 else 0.0
-    print(f"[rosoto-bench] {args.src}")
+    print(f"[qlm-bench] {args.src}")
     print(f"  target={args.target}  size={size}B  runs={runs}")
     print(f"  best={best*1000:.2f}ms  mean={mean*1000:.2f}ms  stdev={stdev*1000:.2f}ms")
     if sample:
@@ -271,7 +271,7 @@ def cmd_bench(args):
 
 
 def cmd_version(args):
-    print(f"Rosoto {VERSION}  ——  自研后端优先 · 多核默认 · 网络原生 · 全平台")
+    print(f"Quelmara {VERSION}  ——  自研后端优先 · 多核默认 · 网络原生 · 全平台")
     print(f"  后端: native(x86_64 裸 ELF64) / win(x86_64 PE/COFF，无 CRT) / "
           f"arm64(AArch64 ELF64) / c(C99 交叉验证，不是产品后端)")
     print(f"  优化: 常量折叠 / 强度削减 / 魔数除法 / 内联 / CSE-GVN / LICM / 循环展开 / "
@@ -289,7 +289,7 @@ def main(argv=None):
         except Exception:
             pass
 
-    ap = argparse.ArgumentParser(prog="rosoto", description="Rosoto 语言工具链")
+    ap = argparse.ArgumentParser(prog="quelmara", description="Quelmara 语言工具链")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p, src=True):

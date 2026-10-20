@@ -1,4 +1,4 @@
-// selftest.ros — 内建测试框架演示（SPEC §8 `rosoto test`）
+// selftest.ros — 内建测试框架演示（SPEC §8 `quelmara test`）
 module selftest
 
 fn add(a: int, b: int) -> int {

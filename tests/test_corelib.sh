@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Rosoto 核心运行时自测（mem / mt / store）
-#   1. 发射三套运行时与自测程序（tools/rosoto_mem.py | rosoto_mt.py | rosoto_store.py）
+# Quelmara 核心运行时自测（mem / mt / store）
+#   1. 发射三套运行时与自测程序（tools/stage0/qlm_mem.py | qlm_mt.py | qlm_store.py）
 #   2. gcc -fsyntax-only（默认标准 + -std=c99）
 #   3. gcc -O2 -Wall -Wextra 编译
 #   4. 运行自测：mem、mt 多核、mt 单核确定性（--multicore false）、store
@@ -31,15 +31,15 @@ command -v "$PY" >/dev/null 2>&1 || { echo "python3 缺失，无法测试"; exit
 # -----------------------------------------------------------------------------
 echo "== 1. 发射运行时（emit）与自测程序（selftest） =="
 for mod in mem mt store; do
-    if "$PY" "tools/rosoto_$mod.py" emit > "$WORK/$mod.rt.c" 2>"$WORK/$mod.emit.err"; then
-        ok "rosoto_$mod.py emit"
+    if "$PY" "tools/stage0/qlm_$mod.py" emit > "$WORK/$mod.rt.c" 2>"$WORK/$mod.emit.err"; then
+        ok "qlm_$mod.py emit"
     else
-        fail "rosoto_$mod.py emit"; cat "$WORK/$mod.emit.err"
+        fail "qlm_$mod.py emit"; cat "$WORK/$mod.emit.err"
     fi
-    if "$PY" "tools/rosoto_$mod.py" selftest > "$WORK/$mod.st.c" 2>"$WORK/$mod.st.err"; then
-        ok "rosoto_$mod.py selftest"
+    if "$PY" "tools/stage0/qlm_$mod.py" selftest > "$WORK/$mod.st.c" 2>"$WORK/$mod.st.err"; then
+        ok "qlm_$mod.py selftest"
     else
-        fail "rosoto_$mod.py selftest"; cat "$WORK/$mod.st.err"
+        fail "qlm_$mod.py selftest"; cat "$WORK/$mod.st.err"
     fi
 done
 
@@ -63,7 +63,7 @@ if gcc -O2 -Wall -Wextra -pthread -o "$WORK/mt_st" "$WORK/mt.st.c" 2>"$WORK/cc_m
 else
     fail "build mt selftest"; cat "$WORK/cc_mt.log"
 fi
-if "$PY" tools/rosoto_mt.py selftest --multicore false > "$WORK/mt.single.c" 2>/dev/null &&
+if "$PY" tools/stage0/qlm_mt.py selftest --multicore false > "$WORK/mt.single.c" 2>/dev/null &&
    gcc -O2 -Wall -Wextra -pthread -o "$WORK/mt_st_single" "$WORK/mt.single.c" 2>"$WORK/cc_mts.log"; then
     ok "build mt selftest（单核确定性模式）"
 else
@@ -97,7 +97,7 @@ echo "== 5. 组合兼容（mem+mt+store 拼接单编译单元，共享符号自�
     echo 'int main(void) { return 0; }'
 } > "$WORK/combined.c"
 if gcc -fsyntax-only "$WORK/combined.c" 2>"$WORK/combined.err"; then
-    ok "组合编译单元语法通过（RosotoView/rosoto_now_ns 等共享定义去重）"
+    ok "组合编译单元语法通过（QlmView/qlm_now_ns 等共享定义去重）"
 else
     fail "组合编译单元"; cat "$WORK/combined.err"
 fi
@@ -117,12 +117,12 @@ neg() { # $1=label，其余为命令
         ok "$label"
     fi
 }
-neg "mem: 负数 heap-limit-mb 拒绝" "$PY" tools/rosoto_mem.py emit --heap-limit-mb -5
-neg "mem: 非法 huge-pages 拒绝" "$PY" tools/rosoto_mem.py emit --huge-pages maybe
-neg "mt: 非法 affinity 拒绝" "$PY" tools/rosoto_mt.py emit --affinity bogus
-neg "mt: 越界 threads 拒绝" "$PY" tools/rosoto_mt.py emit --threads 99999999
-neg "store: 非 2 的幂 page-size 拒绝" "$PY" tools/rosoto_store.py emit --page-size 3000
-neg "store: 越界 wal-buf-kb 拒绝" "$PY" tools/rosoto_store.py emit --wal-buf-kb 1
+neg "mem: 负数 heap-limit-mb 拒绝" "$PY" tools/stage0/qlm_mem.py emit --heap-limit-mb -5
+neg "mem: 非法 huge-pages 拒绝" "$PY" tools/stage0/qlm_mem.py emit --huge-pages maybe
+neg "mt: 非法 affinity 拒绝" "$PY" tools/stage0/qlm_mt.py emit --affinity bogus
+neg "mt: 越界 threads 拒绝" "$PY" tools/stage0/qlm_mt.py emit --threads 99999999
+neg "store: 非 2 的幂 page-size 拒绝" "$PY" tools/stage0/qlm_store.py emit --page-size 3000
+neg "store: 越界 wal-buf-kb 拒绝" "$PY" tools/stage0/qlm_store.py emit --wal-buf-kb 1
 
 # -----------------------------------------------------------------------------
 echo

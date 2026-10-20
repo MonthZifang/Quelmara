@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Rosoto Windows PE/COFF 后端回归（自研，无 CRT）
+Quelmara Windows PE/COFF 后端回归（自研，无 CRT）
 ================================================
 在 Windows 上直接执行 .exe；在非 Windows 上只做结构/构建检查并跳过执行。
 
@@ -10,7 +10,7 @@ Rosoto Windows PE/COFF 后端回归（自研，无 CRT）
   [2] 基础语义：hello / fib / loop_sum / 大整数打印 / UTF-8 中文
   [3] 语言 v0.2：t8 break/continue、t9 struct、t11 嵌套、t12 enum+match
   [4] 多核：parfor_sum / prime_parallel / game_loop / t10（CreateThread 归约）
-  [5] 单核降级：Rosoto.toml multicore=false（同结果）
+  [5] 单核降级：Quelmara.toml multicore=false（同结果）
   [6] 失败路径：assert 退出码 1 + stderr 消息
   [7] 交叉验证：与 Linux 自研 ELF 后端输出逐字节比对（需要 WSL；无则 SKIP）
 """
@@ -23,9 +23,9 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 
-import rosoto_pe  # noqa: E402
+import qlm_pe  # noqa: E402
 
 PASS = FAIL = SKIP = 0
 IS_WIN = os.name == "nt"
@@ -51,8 +51,8 @@ def skip(msg):
 
 def build(src, out):
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    blob, cfg = rosoto_pe.transpile_win(src)
-    rosoto_pe.write_exe(out, blob)
+    blob, cfg = qlm_pe.transpile_win(src)
+    qlm_pe.write_exe(out, blob)
     return blob, cfg
 
 
@@ -178,15 +178,15 @@ def case_selfcheck(name, src):
 
 
 def test_single_core():
-    tmp = tempfile.mkdtemp(prefix="rosoto_win_1c_")
+    tmp = tempfile.mkdtemp(prefix="qlm_win_1c_")
     try:
-        with open(os.path.join(tmp, "Rosoto.toml"), "w", encoding="utf-8") as f:
+        with open(os.path.join(tmp, "Quelmara.toml"), "w", encoding="utf-8") as f:
             f.write("[core]\nmulticore = false\nthreads = 1\n")
         shutil.copy(os.path.join(ROOT, "examples/parfor_sum.ros"), tmp)
         src = os.path.join(tmp, "parfor_sum.ros")
         out = os.path.join(ROOT, "build", "win_parfor_sum_1c.exe")
-        blob, cfg = rosoto_pe.transpile_win(src)
-        rosoto_pe.write_exe(out, blob)
+        blob, cfg = qlm_pe.transpile_win(src)
+        qlm_pe.write_exe(out, blob)
         ok("单核配置被读取（multicore=False）") if cfg["core"]["multicore"] is False \
             else bad(f"配置未生效: {cfg['core']}")
         r = run(out)
@@ -299,7 +299,7 @@ def test_cross_verify():
         build(os.path.join(ROOT, src), out)
         win = run(out, timeout=300)
         cmd = (f"cd {wsl_root!r} && "
-               f"python3 tools/rosoto_native.py run {src} 2>/dev/null | grep -v '^\\[rosoto'")
+               f"python3 tools/stage0/qlm_native.py run {src} 2>/dev/null | grep -v '^\\[qlm'")
         nat = subprocess.run(["wsl.exe", "-d", "Ubuntu", "-u", "root", "--", "bash", "-lc", cmd],
                              capture_output=True)
         if win is None or nat.returncode != 0:
@@ -382,7 +382,7 @@ def main():
     if IS_WIN:
         rc, stdout, _ = run(out)
         lines = stdout.decode().splitlines()
-        ok("hello: 首行 Hello, Rosoto") if lines and lines[0] == "Hello, Rosoto" \
+        ok("hello: 首行 Hello, Quelmara") if lines and lines[0] == "Hello, Quelmara" \
             else bad(f"hello 输出 {lines[:2]!r}")
         ok("hello: 字符串拼接 + 循环 3 tick") if lines[1].startswith("cores online: ") \
             and lines[2:] == ["tick 0", "tick 1", "tick 2"] else bad(f"hello 行 {lines!r}")
@@ -390,7 +390,7 @@ def main():
         skip("hello 执行")
     case_output("fib", "examples/fib.ros", ["75025"])
     case_output("loop_sum", "examples/loop_sum.ros", ["1199999988"])
-    case_output("utf8", "tests/win_utf8.ros", ["你好，Rosoto", "中文 + 拼接 ✓", "0", "1", "2"])
+    case_output("utf8", "tests/win_utf8.ros", ["你好，Quelmara", "中文 + 拼接 ✓", "0", "1", "2"])
 
     print("== [3] 语言 v0.2：struct / enum / match / break / continue ==")
     for t in ("tests/t8.ros", "tests/t9.ros", "tests/t11.ros", "tests/t12.ros"):
@@ -424,7 +424,7 @@ def main():
     case_selfcheck("float", "tests/t23_float.ros")
     case_selfcheck("join_method", "tests/t24_join_method.ros")
 
-    print("== [5] 单核降级（Rosoto.toml multicore=false） ==")
+    print("== [5] 单核降级（Quelmara.toml multicore=false） ==")
     test_single_core()
 
     print("== [5b] arena 帧级回收（1MB 堆上限 / 4MB 分配量） ==")

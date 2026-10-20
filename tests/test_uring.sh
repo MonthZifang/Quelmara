@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Rosoto io_uring 网络后端自测
-#   1. 用 tools/rosoto_uring.py 发射 C 运行时（三种背压策略 + max_conns 极小值）
+# Quelmara io_uring 网络后端自测
+#   1. 用 tools/stage0/qlm_uring.py 发射 C 运行时（三种背压策略 + max_conns 极小值）
 #   2. gcc -fsyntax-only 语法检查（含 -std=c99；无 <linux/io_uring.h> 也必须过）
 #   3. 有 <linux/io_uring.h> 时 gcc -O2 编译，否则优雅降级跳过编译与回环
 #   4. 真实回环：起 echo server，20 并发连接各发一段数据验证回显
@@ -35,7 +35,7 @@ command -v "$PY" >/dev/null 2>&1 || { echo "python3 缺失，无法测试"; exit
 # -----------------------------------------------------------------------------
 echo "== 1. 发射 C 运行时 =="
 for BP in drop close block; do
-    if "$PY" tools/rosoto_uring.py emit --max-conns 1000000 --backpressure "$BP" \
+    if "$PY" tools/stage0/qlm_uring.py emit --max-conns 1000000 --backpressure "$BP" \
             > "$WORK/rt_$BP.c" 2>"$WORK/emit_$BP.err"; then
         ok "emit --backpressure $BP"
     else
@@ -43,7 +43,7 @@ for BP in drop close block; do
     fi
 done
 # 极小 max_conns：用于 fail-fast 拒绝测试
-if "$PY" tools/rosoto_uring.py emit --max-conns 2 --backpressure drop \
+if "$PY" tools/stage0/qlm_uring.py emit --max-conns 2 --backpressure drop \
         > "$WORK/rt_limit.c" 2>"$WORK/emit_limit.err"; then
     ok "emit --max-conns 2"
 else
@@ -103,14 +103,14 @@ start_server() { # $1=binary  $2=port
     "$1" "127.0.0.1:$2" > "$WORK/server.log" 2>&1 &
     SERVER_PID=$!
     for _ in $(seq 1 50); do
-        if grep -q "ROSOTO_URING_READY" "$WORK/server.log" 2>/dev/null; then
+        if grep -q "QLM_URING_READY" "$WORK/server.log" 2>/dev/null; then
             return 0
         fi
         if ! kill -0 "$SERVER_PID" 2>/dev/null; then
             # 内核未启用 io_uring（退出码 42）等环境问题
             wait "$SERVER_PID"; rc=$?
             SERVER_PID=""
-            if [ "$rc" = 42 ] && grep -q "ROSOTO_URING_UNAVAILABLE" "$WORK/server.log"; then
+            if [ "$rc" = 42 ] && grep -q "QLM_URING_UNAVAILABLE" "$WORK/server.log"; then
                 return 42
             fi
             return 1
@@ -138,7 +138,7 @@ errors = []
 def worker(i):
     try:
         s = socket.create_connection(("127.0.0.1", port), timeout=5)
-        payload = ("rosoto-uring-echo-%d-" % i).encode() * 20
+        payload = ("quelmara-uring-echo-%d-" % i).encode() * 20
         s.sendall(payload)
         got = b""
         s.settimeout(5)
@@ -237,7 +237,7 @@ else
     fail "启动 rt_drop 失败"
 fi
 stop_server
-grep -q "ROSOTO_URING_READY" "$WORK/server.log" && check_stat "drop 路径已触发" dropped
+grep -q "QLM_URING_READY" "$WORK/server.log" && check_stat "drop 路径已触发" dropped
 
 # close：爆写不读回显 -> 发送限额溢出主动断开，服务本身存活
 PORT=$(pick_port)
@@ -290,7 +290,7 @@ else
     fail "启动 rt_close 失败"
 fi
 stop_server
-grep -q "ROSOTO_URING_READY" "$WORK/server.log" && check_stat "close 路径已触发" bp_close
+grep -q "QLM_URING_READY" "$WORK/server.log" && check_stat "close 路径已触发" bp_close
 
 # block：慢读 + 爆写 32MB 全量回显一条不丢（任务级阻塞重试、reactor 不卡）
 PORT=$(pick_port)
@@ -302,7 +302,7 @@ s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)  # 小窗口：逼出 hold 挂起路径
 s.settimeout(30)
 s.connect(("127.0.0.1", port))
-blob = (b"rosoto-block-0123456789;" * (size // 24 + 1))[:size]
+blob = (b"quelmara-block-0123456789;" * (size // 24 + 1))[:size]
 recv_buf = bytearray()
 err = []
 
@@ -333,7 +333,7 @@ else
     fail "启动 rt_block 失败"
 fi
 stop_server
-grep -q "ROSOTO_URING_READY" "$WORK/server.log" && check_stat "block 路径已触发" bp_block
+grep -q "QLM_URING_READY" "$WORK/server.log" && check_stat "block 路径已触发" bp_block
 
 # -----------------------------------------------------------------------------
 echo "== 6. max_conns fail-fast 拒绝测试（max_conns=2） =="

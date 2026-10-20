@@ -1,5 +1,5 @@
 // echo_server.ros — 原生网络：epoll/io_uring 非阻塞百万连接 echo 服务器
-// 资源上限由根目录 Rosoto.toml [net] 节声明，超限 fail-fast。
+// 资源上限由根目录 Quelmara.toml [net] 节声明，超限 fail-fast。
 module echo_server
 
 import std.net

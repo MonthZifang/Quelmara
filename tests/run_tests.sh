@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Rosoto v0.1 原型回归测试
-# 1) hello  2) parfor 多核正确性  3) Rosoto.toml 禁用多核降级  4) epoll echo 并发实测
+# Quelmara v0.1 原型回归测试
+# 1) hello  2) parfor 多核正确性  3) Quelmara.toml 禁用多核降级  4) epoll echo 并发实测
 set -u
 cd "$(dirname "$0")/.."
 PASS=0; FAIL=0
@@ -8,25 +8,25 @@ ok()   { echo "  ✅ $1"; PASS=$((PASS+1)); }
 bad()  { echo "  ❌ $1"; FAIL=$((FAIL+1)); }
 
 echo "[1] hello.ros"
-out=$(python3 tools/rosoto.py run examples/hello.ros 2>/dev/null)
-echo "$out" | grep -q "Hello, Rosoto" && ok "greet/字符串拼接" || bad "greet 输出缺失"
+out=$(python3 tools/stage0/qlm.py run examples/hello.ros 2>/dev/null)
+echo "$out" | grep -q "Hello, Quelmara" && ok "greet/字符串拼接" || bad "greet 输出缺失"
 echo "$out" | grep -q "tick 2" && ok "while 循环" || bad "while 输出缺失"
 
 echo "[2] parallel_sum.ros（多核 parfor）"
-out=$(python3 tools/rosoto.py run examples/parallel_sum.ros 2>/dev/null)
+out=$(python3 tools/stage0/qlm.py run examples/parallel_sum.ros 2>/dev/null)
 echo "$out" | grep -q "match   = true" && ok "并行归约 == 串行结果" || bad "并行结果错误"
 grep -q "pthread_create" build/parallel_sum.c && ok "生成 pthread 分块并行代码" || bad "未生成并行代码"
 
-echo "[3] 单核降级（tests/single_core/Rosoto.toml: multicore=false）"
+echo "[3] 单核降级（tests/single_core/Quelmara.toml: multicore=false）"
 cp examples/parallel_sum.ros tests/single_core/parallel_sum.ros
-out=$(python3 tools/rosoto.py run tests/single_core/parallel_sum.ros 2>/dev/null)
+out=$(python3 tools/stage0/qlm.py run tests/single_core/parallel_sum.ros 2>/dev/null)
 echo "$out" | grep -q "match   = true" && ok "串行降级结果不变（语义等价）" || bad "串行降级结果错误"
 grep -q "串行降级" tests/single_core/build/parallel_sum.c 2>/dev/null || grep -q "串行降级" build/parallel_sum.c \
   && ok "编译期降级为串行（无 pthread）" || bad "未降级"
 if ! grep -q "pthread_create" build/parallel_sum.c; then ok "单核产物无线程池"; else bad "单核产物仍含 pthread"; fi
 
 echo "[4] net.TcpServer（epoll echo 并发实测）"
-python3 tools/rosoto.py build examples/echo_server.ros --cc >/dev/null 2>&1 || bad "echo_server 编译失败"
+python3 tools/stage0/qlm.py build examples/echo_server.ros --cc >/dev/null 2>&1 || bad "echo_server 编译失败"
 ./build/echo_server >/dev/null 2>&1 &
 SRV=$!
 sleep 0.5
@@ -59,7 +59,7 @@ for t in tests/t8.ros tests/t9.ros tests/t10.ros tests/t11.ros \
          examples/game_loop.ros examples/collatz.ros examples/inventory.ros \
          examples/prime_parallel.ros; do
   n=$(basename $t .ros)
-  if python3 tools/rosoto.py run $t >/dev/null 2>&1; then ok "$n 自校验通过"; else bad "$n 失败"; fi
+  if python3 tools/stage0/qlm.py run $t >/dev/null 2>&1; then ok "$n 自校验通过"; else bad "$n 失败"; fi
 done
 
 echo "----------------------------------------"

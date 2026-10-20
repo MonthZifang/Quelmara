@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Rosoto Windows 调试小工具（开发期用，不属于语言运行时）
+Quelmara Windows 调试小工具（开发期用，不属于语言运行时）
 ========================================================
 启动一个 PE，在调试器下打印：
   - 实际加载基址（ASLR 后）
@@ -10,8 +10,8 @@ Rosoto Windows 调试小工具（开发期用，不属于语言运行时）
   - 进程退出码
 
 用法：
-  python tools/rosoto_dbg.py build/hello.exe
-  python tools/rosoto_dbg.py build/x.exe --mem 4083 --mem 41c3   # 退出时 dump 数据
+  python tools/stage0/qlm_dbg.py build/hello.exe
+  python tools/stage0/qlm_dbg.py build/x.exe --mem 4083 --mem 41c3   # 退出时 dump 数据
 
 为什么不用 WinDbg：本机没有 SDK；ctypes 直接调 kernel32 的调试 API 足够定位
 「入口跳飞 / 线程参数错 / 归约结果 0」这类后端问题。
@@ -81,7 +81,7 @@ def read_mem(h, addr, n):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Rosoto Windows PE 调试器")
+    ap = argparse.ArgumentParser(description="Quelmara Windows PE 调试器")
     ap.add_argument("exe")
     ap.add_argument("--mem", action="append", default=[], metavar="RVA",
                     help="进程退出时 dump 该 RVA 处的 128 字节（可多次）")
