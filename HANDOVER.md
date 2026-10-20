@@ -239,16 +239,18 @@ python tools/rosoto_pe.py build tests/t17_result.ros -o build/x.exe --dump-ir --
 
 ## 7. 版本控制 / 远端
 
-- 本轮待提交：`v0.8: option[T] monomorphization via synthesized enums (187 tests green)`。
-- 已有提交：
-  - `3e9b8c0` v0.5 chan
-  - `ff8f830` v0.6 arrays
+- **git remote 已配置并推送**：`origin = https://github.com/MonthZifang/Rosoto`（2026-10-20）。
+- 最新提交：
+  - `cd6468e` archive: v0.2 快照（rosoto_old_v02.tar.gz）
+  - `b42e0a4` v0.9+v0.10：modsum 折叠 + 泛型 result/切片 + map[K]V + 浮点
+  - `d61c593` v0.8 option[T]
   - `d38c359` v0.7 Result `?`
-- **仍没有 git remote**。请提供 URL，或执行：
-  ```bash
-  git remote add origin <URL>
-  git push -u origin master
-  ```
+  - `ff8f830` v0.6 arrays
+  - `3e9b8c0` v0.5 chan
+- 后续推送：`git push origin master`。
+- 工作区已整理为单一文件夹：`Rosoto/rosoto/`（git 仓库）；历史快照
+  rosoto_map / rosoto_rg / rosoto_old_v02 与顶层 scratch 已清出工作区
+  （old_v02 内容以 `rosoto/archive/rosoto_old_v02.tar.gz` 形式保留在仓库内）。
 
 ---
 
