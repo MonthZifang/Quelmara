@@ -283,6 +283,7 @@ python tools/stage0/qlm_pe.py build tests/t17_result.qma -o build/x.exe --dump-i
 
 ## 7. 版本控制 / 远端
 
+<!-- legacy-ok:begin -->
 - **git remote**：`origin = https://github.com/MonthZifang/Rosoto`（待改名为 `Quelmara`）。
 - 提交线：
   - `026be71` v1.0：自举词法器 + `||`/`let` 修复
@@ -321,6 +322,7 @@ mv Rosoto Quelmara                   # 外层目录
 
 `C://Users//43551//Desktop//Rosoto//push.sh` 已改为从环境变量读密码（不再明文），
 并支持 `QM_REMOTE` / `QM_LOCAL` 覆盖路径，目录改名后不必改脚本。
+<!-- legacy-ok:end -->
 
 ---
 

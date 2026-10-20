@@ -9,6 +9,7 @@
 
 ### 改名与工具链分层
 
+<!-- legacy-ok:begin -->
 - 语言/产品 Rosoto → **Quelmara**；内部符号 `qlm_*` / `Qlm*` / `QLM_*`。
 - Python 编译器整体下沉到 **`tools/stage0/`**（引导层，待退场）；自举源码放 `bootstrap/`。
 - 源码扩展名 `.ros` → **`.qma`**（硬切：`.ros` 直接退出码 2 并给出 `git mv` 命令）；
@@ -16,6 +17,7 @@
 - 配置 `Rosoto.toml` → `Quelmara.toml`（检测到旧配置报错提示改名，不静默回退默认值）。
 - 新增 `docs/EXTENSIONS.md`（扩展名规范）、`docs/MIGRATION_rosoto_to_quelmara.md`、
   `docs/SELFHOST.md`（组件退场表）；`tools/dev/check_names.py` 常驻门禁。
+<!-- legacy-ok:end -->
 
 ### 新特性（自举前置能力）
 

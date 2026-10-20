@@ -1604,9 +1604,9 @@ static void qlm_set_args(int argc, char **argv) {
     qlm_argv = argv;
 }
 
-static RosotoSlice qlm_args(void) {
+static QlmSlice qlm_args(void) {
     int64_t n = (int64_t)qlm_argc - 1;
-    RosotoSlice s;
+    QlmSlice s;
     if (n < 0) n = 0;
     s.ptr = (void *)(qlm_argv + 1);
     s.len = n;
