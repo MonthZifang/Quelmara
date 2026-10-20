@@ -214,8 +214,9 @@ class EncA64:
 
 
 class CodegenA64:
-    def __init__(self, fns, globals_bytes):
+    def __init__(self, fns, globals_bytes, low=None):
         self.fns = fns
+        self.low = low
         self.globals = globals_bytes
         self.enc = EncA64()
         self.global_fixups = []   # (word_index, gid) —— movz/movk 序列起点
@@ -467,7 +468,11 @@ class CodegenA64:
     # ---- 整体 ----
     def gen_all(self):
         enc = self.enc
-        # _start：BL main -> exit(return)
+        # _start：先保存内核栈上的 argc/argv（若程序用到 args()），再 BL main
+        if self.low is not None and getattr(self.low, "uses_args", False):
+            enc.ldr(X0, SP, 0)          # x0 = [sp] = argc
+            enc.add_imm(X1, SP, 8)      # x1 = &argv[0]
+            enc.bl("__qlm_args_boot")
         enc.bl("main")
         enc.mov_imm(X8, SYSCALLS["aarch64"]["exit"])
         enc.svc()
@@ -522,7 +527,7 @@ def write_elf_a64(path, blob):
 
 def transpile_a64(src_path, dump_ir=False, optimize=True):
     fns, low, cfg = lower_and_optimize(src_path, arch="aarch64", optimize=optimize, dump_ir=dump_ir)
-    cg = CodegenA64(fns, low.globals)
+    cg = CodegenA64(fns, low.globals, low=low)
     return cg.gen_all(), cfg
 
 

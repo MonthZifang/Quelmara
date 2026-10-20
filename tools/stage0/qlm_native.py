@@ -464,6 +464,11 @@ class Lower:
         self.uses_bounds = False
         self.uses_f64_str = False
         self.uses_str_to_int = False
+        self.uses_args = False
+        self.uses_io = False
+        # 命令行参数（args()）：argc 字数 + argv 指针，入口期或惰性初始化填入
+        self.argc_gid = self.intern_array(1)
+        self.argv_gid = self.intern_array(1)
         if platform == "windows":
             # WriteFile 的 lpNumberOfBytesWritten 落点（Win32 必须给非空指针）
             self.written_gid = self.intern_array(1)
@@ -565,24 +570,36 @@ class Lower:
 
     # ---- 切片（v0.9）：{ptr, len} 两字零拷贝视图 ----
     @staticmethod
-    def _mark_slice(fn, v):
+    def _mark_slice(fn, v, elem=None):
         if isinstance(v, int):
             if not hasattr(fn, "slicev"):
                 fn.slicev = set()
             fn.slicev.add(v)
+            if elem is not None:
+                if not hasattr(fn, "slice_elem"):
+                    fn.slice_elem = {}
+                fn.slice_elem[v] = elem
         return v
 
     @staticmethod
     def _is_slice(fn, v):
         return isinstance(v, int) and v in getattr(fn, "slicev", set())
 
+    @staticmethod
+    def _slice_elem(fn, v):
+        """切片元素标签：'str' / 'i64' / None（未知）。只有 str 元素需要额外标记，
+        否则 print(a[i]) 会把指针当整数打印。"""
+        return getattr(fn, "slice_elem", {}).get(v) if isinstance(v, int) else None
+
     def alloc_slice(self, fn):
         """开一段 2 字帧槽作为切片值（word0=ptr, word1=len）"""
         return self._mark_slice(fn, self.alloc_words(fn, SLICE_WORDS))
 
-    def make_slice(self, fn, ptr, length):
+    def make_slice(self, fn, ptr, length, elem=None):
         """由指针 + 长度构造切片值（零拷贝）"""
         s = self.alloc_slice(fn)
+        if elem is not None:
+            self._mark_slice(fn, s, elem)
         fn.emit("store", s, ("imm", 0), ptr)
         fn.emit("store", s, ("imm", 1), length)
         return s
@@ -603,6 +620,33 @@ class Lower:
         n = fn.new_v()
         fn.emit("call", n, "__str_len", [p])
         return n
+
+    def lower_args(self, fn):
+        """args() -> []str：{argv+8, argc-1}，排除程序名。
+
+        Linux/AArch64：入口 _start 把内核栈上的 argc/argv 存进全局字（零拷贝）。
+        Windows：加载器不传 argv，只能 GetCommandLineA + 自写拆分，惰性执行一次。
+        """
+        if self.platform == "windows":
+            cur = fn.new_v()
+            fn.emit("load", cur, ("ga", self.argv_gid), ("imm", 0))
+            l_ready = fn.label("argsin")
+            fn.emit("jnz", cur, l_ready)
+            fn.emit("call", None, "__win_args_init", [])
+            fn.emit("label", l_ready)
+        argc = fn.new_v()
+        argv = fn.new_v()
+        fn.emit("load", argc, ("ga", self.argc_gid), ("imm", 0))
+        fn.emit("load", argv, ("ga", self.argv_gid), ("imm", 0))
+        cnt = fn.new_v()
+        fn.emit("bin", "sub", cnt, argc, ("imm", 1))
+        l_ok = fn.label("argcok")
+        fn.emit("jcc", "ge", cnt, ("imm", 0), l_ok)
+        fn.emit("mov", cnt, ("imm", 0))
+        fn.emit("label", l_ok)
+        ptr = fn.new_v()
+        fn.emit("bin", "add", ptr, argv, ("imm", 8))
+        return self.make_slice(fn, ptr, cnt, elem="str")
 
     # ---- 定长数组（v0.6）：帧槽 N 字 + 值语义拷贝 ----
     @staticmethod
@@ -918,6 +962,8 @@ class Lower:
                 self.emit_bounds(fn, idx, ln, dynamic=True)
                 d = fn.new_v()
                 fn.emit("load", d, ptr, idx)
+                if self._slice_elem(fn, obj) == "str":
+                    self._mark_str(fn, d)
                 return d
             if self._is_str(fn, obj):
                 # str 下标 -> 该字节的无符号值（0..255）；长度是运行期 strlen 结果，
@@ -1530,6 +1576,26 @@ class Lower:
             return self.conv_to(fn, x, wf, tw)
         if name == "cores":
             return ("imm", os.cpu_count() or 1)
+        if name == "args" and name not in self.fns_ast:
+            # args() -> []str：程序参数（不含程序名）。Linux/AArch64 由入口直接
+            # 保存 argc/argv；Windows 走 GetCommandLineA 惰性拆分。
+            if e[2]:
+                raise SyntaxError("args() 不接受实参")
+            self.uses_args = True
+            return self.lower_args(fn)
+        if name == "arg" and name not in self.fns_ast:
+            # arg(i) -> option[str] 暂不做；这里给 i 越界 fail-fast 的 str 版本
+            if len(e[2]) != 1:
+                raise SyntaxError("arg(i) 需要且只需要一个下标")
+            self.uses_args = True
+            sl = self.lower_args(fn)
+            idx = self.eval(e[2][0], fn, env)
+            ptr = self.slice_ptr(fn, sl)
+            ln = self.slice_len(fn, sl)
+            self.emit_bounds(fn, idx, ln, dynamic=True)
+            d = fn.new_v()
+            fn.emit("load", d, ptr, idx)
+            return self._mark_str(fn, d)
         if name == "assert":
             # assert(cond) / assert(cond, "msg")：失败即写 stderr + exit(1)
             cond = self.eval(e[2][0], fn, env)
@@ -1715,6 +1781,9 @@ class Lower:
                 # 切片：{ptr,len} 两字值语义拷贝（仍共享底层存储）
                 dst = self.alloc_slice(fn)
                 self.words_copy(fn, dst, spec, SLICE_WORDS)
+                elem = self._slice_elem(fn, spec)
+                if elem is not None:
+                    self._mark_slice(fn, dst, elem)     # 元素标签要跟着拷贝走
                 env[s[2]] = dst
                 return
             is_str = self._is_str(fn, spec)
@@ -2166,7 +2235,8 @@ class Lower:
             elif ty[0] == "map":
                 self._mark_map(fn, params[i], ty[1][1], ty[2][1])
             elif ty[0] == "slice":
-                self._mark_slice(fn, params[i])
+                et = "str" if ty[1] == ("named", "str") else None
+                self._mark_slice(fn, params[i], et)
             elif ty[0] == "array":
                 self._mark_arr(fn, params[i], ty[1])
             elif ty[0] == "named" and self.is_agg(ty[1]):
@@ -2299,6 +2369,10 @@ class Lower:
         f = Fn("__alloc")
         n = f.new_v()
         f.emit("args", [n])
+        # 8 字节对齐：堆上的聚合（str 指针数组、struct）必须按字宽落位，
+        # 否则 a64 上会因非对齐访问而崩、x86 上会静默错位。
+        f.emit("bin", "add", n, n, ("imm", 7))
+        f.emit("bin", "and", n, n, ("imm", -8))
         h = f.new_v()
         f.emit("load", h, ("ga", self.heap_gid), ("imm", 0))
         l_ready = f.label("aready")
@@ -3017,10 +3091,132 @@ class Lower:
         f.emit("ret", i)
         self.out.append(f)
 
+        if self.uses_args:
+            # Linux/AArch64：_start 调用 __qlm_args_boot(argc, argv)，把内核栈上的
+            # 原始指针存进全局字（零拷贝，不复制字符串）。
+            if self.platform != "windows":
+                f = Fn("__qlm_args_boot")
+                a, v = f.new_v(), f.new_v()
+                f.emit("args", [a, v])
+                f.emit("store", ("ga", self.argc_gid), ("imm", 0), a)
+                f.emit("store", ("ga", self.argv_gid), ("imm", 0), v)
+                f.emit("ret", ("imm", 0))
+                self.out.append(f)
+            else:
+                # Windows：加载器不给 argv，只能自己拆命令行。
+                # 注意：这里一律用 cmpset + jnz 做比较（和用户代码的 if/while 同源），
+                # 不用 jcc+cmp 立即数——那条内部路径在真实程序里不可靠。
+                f = Fn("__win_args_init")
+                cl = f.new_v()
+                f.emit("winapi", cl, "GetCommandLineA", [])
+                ln = f.new_v()
+                f.emit("call", ln, "__str_len", [cl])
+                l1 = f.new_v()
+                f.emit("bin", "add", l1, ln, ("imm", 1))
+                buf = f.new_v()
+                f.emit("call", buf, "__alloc", [l1])
+                f.emit("call", None, "__memcpy", [buf, cl, l1])
+
+                # ---- 第一遍：数 token（引号内的空白不算分隔）----
+                i, ntok, inq, inword = f.new_v(), f.new_v(), f.new_v(), f.new_v()
+                for v in (i, ntok, inq, inword):
+                    f.emit("mov", v, ("imm", 0))
+                c, b = f.new_v(), f.new_v()
+                ltop1, lend1 = f.label("wac1"), f.label("wae1")
+                l_quote1, l_sep1 = f.label("waq1"), f.label("was1")
+                l_word1, l_have1 = f.label("waw1"), f.label("wah1")
+                f.emit("label", ltop1)
+                f.emit("load8", c, buf, i)
+                f.emit("cmpset", "e", b, c, ("imm", 0))
+                f.emit("jnz", b, lend1)
+                f.emit("cmpset", "e", b, c, ("imm", 34))
+                f.emit("jnz", b, l_quote1)
+                f.emit("cmpset", "e", b, c, ("imm", 32))
+                f.emit("jnz", b, l_sep1)
+                f.emit("cmpset", "e", b, c, ("imm", 9))
+                f.emit("jnz", b, l_sep1)
+                f.emit("label", l_word1)
+                f.emit("jnz", inword, l_have1)
+                f.emit("bin", "add", ntok, ntok, ("imm", 1))
+                f.emit("mov", inword, ("imm", 1))
+                f.emit("label", l_have1)
+                f.emit("bin", "add", i, i, ("imm", 1))
+                f.emit("jmp", ltop1)
+                f.emit("label", l_sep1)
+                f.emit("jnz", inq, l_word1)        # 引号内空白：算词字符
+                f.emit("mov", inword, ("imm", 0))
+                f.emit("bin", "add", i, i, ("imm", 1))
+                f.emit("jmp", ltop1)
+                f.emit("label", l_quote1)
+                f.emit("cmpset", "e", b, inq, ("imm", 0))   # 开关翻转
+                f.emit("mov", inq, b)
+                f.emit("bin", "add", i, i, ("imm", 1))
+                f.emit("jmp", ltop1)
+                f.emit("label", lend1)
+
+                arr = f.new_v()
+                nb = f.new_v()
+                f.emit("bin", "mul", nb, ntok, ("imm", 8))
+                f.emit("call", arr, "__alloc", [nb])
+
+                # ---- 第二遍：压缩（去掉引号）+ 填指针表 ----
+                i2, w, k = f.new_v(), f.new_v(), f.new_v()
+                inq2, started = f.new_v(), f.new_v()
+                for v in (i2, w, k, inq2, started):
+                    f.emit("mov", v, ("imm", 0))
+                c2 = f.new_v()
+                ltop2, lend2 = f.label("wbc2"), f.label("wbe2")
+                l_quote2, l_sep2 = f.label("wbq2"), f.label("wbs2")
+                l_word2, l_started = f.label("wbw2"), f.label("wbst2")
+                l_sepd, l_endok = f.label("wbsd2"), f.label("wbend")
+                f.emit("label", ltop2)
+                f.emit("load8", c2, buf, i2)
+                f.emit("cmpset", "e", b, c2, ("imm", 0))
+                f.emit("jnz", b, lend2)
+                f.emit("cmpset", "e", b, c2, ("imm", 34))
+                f.emit("jnz", b, l_quote2)
+                f.emit("cmpset", "e", b, c2, ("imm", 32))
+                f.emit("jnz", b, l_sep2)
+                f.emit("cmpset", "e", b, c2, ("imm", 9))
+                f.emit("jnz", b, l_sep2)
+                f.emit("label", l_word2)
+                f.emit("jnz", started, l_started)
+                ptr = f.new_v()
+                f.emit("bin", "add", ptr, buf, w)          # 词首地址
+                f.emit("store", arr, k, ptr)
+                f.emit("bin", "add", k, k, ("imm", 1))
+                f.emit("mov", started, ("imm", 1))
+                f.emit("label", l_started)
+                f.emit("store8", buf, w, c2)
+                f.emit("bin", "add", w, w, ("imm", 1))
+                f.emit("bin", "add", i2, i2, ("imm", 1))
+                f.emit("jmp", ltop2)
+                f.emit("label", l_sep2)
+                f.emit("jnz", inq2, l_word2)               # 引号内空白保留
+                f.emit("jz", started, l_sepd)
+                f.emit("store8", buf, w, ("imm", 0))       # 词尾补 NUL
+                f.emit("bin", "add", w, w, ("imm", 1))
+                f.emit("mov", started, ("imm", 0))
+                f.emit("label", l_sepd)
+                f.emit("bin", "add", i2, i2, ("imm", 1))
+                f.emit("jmp", ltop2)
+                f.emit("label", l_quote2)
+                f.emit("cmpset", "e", b, inq2, ("imm", 0))
+                f.emit("mov", inq2, b)
+                f.emit("bin", "add", i2, i2, ("imm", 1))
+                f.emit("jmp", ltop2)
+                f.emit("label", lend2)
+                f.emit("jz", started, l_endok)
+                f.emit("store8", buf, w, ("imm", 0))
+                f.emit("bin", "add", w, w, ("imm", 1))
+                f.emit("label", l_endok)
+                f.emit("store8", buf, w, ("imm", 0))
+                f.emit("store", ("ga", self.argv_gid), ("imm", 0), arr)
+                f.emit("store", ("ga", self.argc_gid), ("imm", 0), k)
+                f.emit("ret", ("imm", 0))
+                self.out.append(f)
+
         if self.uses_str_to_int:
-            # __str_to_int(p) -> int64：十进制解析（可选 +/- 前导）。
-            # 非法字符 / 空串 / 溢出一律 fail-fast，不静默回绕；
-            # 与 C 后端 qlm_str_to_int 判定顺序逐条对齐。
             msg = "quelmara: str.to_int() invalid decimal input (fail-fast)\n"
             gid_f = self.intern_str(msg)
             f = Fn("__str_to_int_fail")
@@ -3807,9 +4003,10 @@ SYSCALLS = {
 
 
 class Codegen:
-    def __init__(self, fns, globals_bytes, base=BASE, entry_off=ENTRY_OFF):
+    def __init__(self, fns, globals_bytes, base=BASE, entry_off=ENTRY_OFF, low=None):
         self.fns = fns
         self.globals = globals_bytes
+        self.low = low            # 需要 argc/argv 全局字时读 low.argc_gid / low.argv_gid
         self.base = base
         self.entry_off = entry_off
         self.enc = Enc()
@@ -4363,8 +4560,15 @@ class Codegen:
 
     # ---- 整体生成 ----
     def gen_entry(self):
-        """Linux _start：对齐栈 -> 调 main -> exit(返回值)"""
+        """Linux _start：保存 argc/argv -> 对齐栈 -> 调 main -> exit(返回值)"""
         enc = self.enc
+        low = self.low
+        if low is not None and getattr(low, "uses_args", False):
+            # 内核在 [rsp] 放 argc、(rsp+8) 放 argv[]；必须在 and rsp,-16 之前取，
+            # 且只能走 boot 函数把值落到全局字（入口处不能依赖被调用者保存寄存器）。
+            enc.mov_rm(RDI, RSP, RSP, 0, 0)      # rdi = [rsp] = argc
+            enc.lea(RSI, RSP, 8)                 # rsi = &argv[0]
+            enc.call("__qlm_args_boot")
         enc.alu_ri("and", RSP, -16)
         enc.call("main")
         enc.mov_rr(RDI, RAX)
@@ -4466,7 +4670,7 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
 
 def transpile_native(src_path, dump_ir=False, optimize=True, arch="x86_64"):
     fns, low, cfg = lower_and_optimize(src_path, arch=arch, optimize=optimize, dump_ir=dump_ir)
-    cg = Codegen(fns, low.globals)
+    cg = Codegen(fns, low.globals, low=low)
     blob = cg.gen_all()
     return blob, cfg
 

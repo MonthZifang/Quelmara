@@ -56,10 +56,10 @@ def build(src, out):
     return blob, cfg
 
 
-def run(exe, timeout=120):
+def run(exe, timeout=120, args=None):
     if not IS_WIN:
         return None
-    p = subprocess.run([exe], capture_output=True, timeout=timeout)
+    p = subprocess.run([exe] + list(args or []), capture_output=True, timeout=timeout)
     return p.returncode, p.stdout, p.stderr
 
 
@@ -405,6 +405,22 @@ def main():
     case_selfcheck("str", "tests/t27_str.qma")
     case_selfcheck("to_int", "tests/t28_toint.qma")
     test_str_failfast()
+
+    print("== [3d] 命令行参数 args()/arg()（v1.0） ==")
+    out = os.path.join(ROOT, "build", "win_args.qex")
+    build(os.path.join(ROOT, "tests/t29_args.qma"), out)
+    r = run(out, args=["alpha", "beta", "two words"])
+    if r is None:
+        skip("args：非 Windows 平台")
+    else:
+        rc, stdout, stderr = r
+        lines = stdout.decode().splitlines()
+        ok("args: 参数个数 = 3") if lines and lines[0] == "3" else bad(f"args 行 {lines!r}")
+        ok("args: 逐个取值正确") if lines[1:4] == ["alpha", "beta", "two words"] \
+            else bad(f"args 值 {lines[1:4]!r}")
+        ok("arg(0) 与 args()[0] 一致") if len(lines) > 4 and lines[4] == "alpha" \
+            else bad(f"arg(0) {lines[4:5]!r}")
+        ok("args 自校验通过（assert）") if rc == 0 else bad(f"args rc={rc} stderr={stderr[-160:]!r}")
 
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])

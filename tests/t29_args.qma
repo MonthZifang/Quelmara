@@ -1,0 +1,18 @@
+// t29_args.qma：命令行参数 args() / arg(i)（v1.0）
+// 由 run_win_tests.py 带参数执行：alpha beta "two words"
+module t29
+
+fn main() {
+    let a = args()
+    // 参数个数由调用方给定，这里只打印，由测试脚本核对
+    print(len(a))
+    let mut i = 0
+    while i < len(a) {
+        print(a[i])
+        i += 1
+    }
+    // arg(i) 与 a[i] 等价
+    print(arg(0))
+    // 空参数时 len 为 0（args() 不含程序名）
+    assert(len(a) == 3, "three args")
+}

@@ -1540,6 +1540,35 @@ static void qlm_slice_bounds(int64_t i, int64_t n) {
     }
 }
 
+/* 命令行参数：main 入口把 argc/argv 交给运行时，args() 返回 {argv+1, argc-1}
+   （语义与自研后端一致：不含程序名）。 */
+static int qlm_argc = 0;
+static char **qlm_argv = 0;
+
+static void qlm_set_args(int argc, char **argv) {
+    qlm_argc = argc;
+    qlm_argv = argv;
+}
+
+static RosotoSlice qlm_args(void) {
+    int64_t n = (int64_t)qlm_argc - 1;
+    RosotoSlice s;
+    if (n < 0) n = 0;
+    s.ptr = (void *)(qlm_argv + 1);
+    s.len = n;
+    return s;
+}
+
+static const char *qlm_arg(int64_t i) {
+    int64_t n = (int64_t)qlm_argc - 1;
+    if (i < 0 || i >= n) {
+        fprintf(stderr, "quelmara: arg() index out of bounds (fail-fast)\n");
+        fflush(stdout);
+        exit(1);
+    }
+    return qlm_argv[i + 1];
+}
+
 /* str 是零结尾字节串（与 __str_eq/__str_concat 同一表示），没有长度前缀，
    str[i] 需要先求 strlen 再比对。越界与数组/切片同策略 fail-fast。 */
 static void qlm_str_bounds(int64_t i, int64_t n) {
@@ -1996,6 +2025,7 @@ class Codegen:
         self.threads = cfg["core"]["threads"] or os.cpu_count() or 1
         self.multicore = bool(cfg["core"]["multicore"]) and self.threads > 1
         self.bounds = bool(cfg["build"].get("bounds_check", True))
+        self.uses_args = False
 
     # ---- 工具 ----
     def ctype(self, t):
@@ -2139,6 +2169,17 @@ class Codegen:
                 return f"((int64_t)({acode}))", "int64_t"
             if name == "cores":
                 return "qlm_cores()", "int64_t"
+            if name == "args" and name not in self.infer.fns:
+                if e[2]:
+                    raise SyntaxError("args() 不接受实参")
+                self.uses_args = True
+                return "qlm_args()", "slice:str"
+            if name == "arg" and name not in self.infer.fns:
+                if len(e[2]) != 1:
+                    raise SyntaxError("arg(i) 需要且只需要一个下标")
+                self.uses_args = True
+                icode, _ = self.gen_expr(e[2][0], env)
+                return f"qlm_arg({icode})", "const char *"
             if name == "assert":
                 ccode, _ = self.gen_expr(e[2][0], env)
                 msg = "(no message)"
@@ -3036,7 +3077,8 @@ class Codegen:
             lines.append("")
         lines += bodies
         has_main = any(f["name"] == "qlm_main" for f in fns)
-        lines += ["int main(void) {",
+        lines += ["int main(int argc, char **argv) {",
+                  "    qlm_set_args(argc, argv);" if self.uses_args else "",
                   "    qlm_main();" if has_main else "    /* no main */",
                   "    return 0;", "}"]
         return "\n".join(lines)
