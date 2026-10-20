@@ -31,7 +31,7 @@
 - **`quelmara build --target arm64` 完全不可用**：`_build_arm64` 把
   `transpile_a64()` 的 `(blob, cfg)` 二元组直接当 `(out, size, cfg)` 返回，
   CLI 一解包就 `ValueError: not enough values to unpack (expected 3, got 2)`，
-  连 `hello.ros` 都编不过。现在补上 `write_elf_a64()` 写盘，AArch64 目标从
+  连 `hello.qma` 都编不过。现在补上 `write_elf_a64()` 写盘，AArch64 目标从
   CLI 恢复可用（t27/t28 已能在自研模拟器上跑通）。
 
 ### 验证

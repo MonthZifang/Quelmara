@@ -1,0 +1,9 @@
+// chan_double_close.qma：重复 close 必须 fail-fast（退出码非 0）
+module cdc
+
+fn main() {
+    let c = chan[int].open(4)
+    c.close()
+    c.close()
+    print("unreachable")
+}

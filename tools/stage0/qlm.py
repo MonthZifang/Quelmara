@@ -3,7 +3,7 @@
 """
 Quelmara -> C99 转译器原型 (v0.1)
 ================================
-把 Quelmara 源码 (.ros) 转译为 C99，再交给任意 C 编译器原生编译。
+把 Quelmara 源码 (.qma) 转译为 C99，再交给任意 C 编译器原生编译。
 
 已实现（对应 SPEC.md §9）：
   - module / import / fn / let / let mut / if-else / while / for-in-range / return
@@ -15,8 +15,8 @@ Quelmara -> C99 转译器原型 (v0.1)
       * [net] max_conns / recv_buffer 等资源上限注入编译产物
 
 用法：
-  python3 tools/stage0/qlm.py build examples/hello.ros -o build/hello.c
-  python3 tools/stage0/qlm.py run   examples/hello.ros
+  python3 tools/stage0/qlm.py build examples/hello.qma -o build/hello.c
+  python3 tools/stage0/qlm.py run   examples/hello.qma
 """
 
 import argparse
@@ -40,26 +40,71 @@ DEFAULT_CONFIG = {
               "bounds_check": True},
 }
 
+# 文件命名契约（唯一权威，见 docs/EXTENSIONS.md）
+CONFIG_NAME = "Quelmara.toml"
+SRC_EXT = ".qma"          # Quelmara Module：唯一源码扩展名
+LEGACY_EXT = ".ros"       # 已废弃，硬切：只用于给出迁移提示  # legacy-ok
+
+
+def require_source(path):
+    """校验源码扩展名。.ros 硬切，给出可直接执行的迁移命令。"""  # legacy-ok
+    ext = os.path.splitext(path)[1].lower()
+    if ext == LEGACY_EXT:
+        new = path[:-len(LEGACY_EXT)] + SRC_EXT
+        sys.stderr.write(
+            f"[qlm] 错误：{path} 使用已废弃的 .ros 扩展名。\n"  # legacy-ok
+            f"      Quelmara 源码扩展名为 {SRC_EXT}，请执行：\n"
+            f"      git mv {path} {new}\n")
+        raise SystemExit(2)
+    if ext != SRC_EXT:
+        sys.stderr.write(
+            f"[qlm] 错误：{path} 不是 Quelmara 源码（期望 {SRC_EXT}）。\n")
+        raise SystemExit(2)
+    return path
+
 
 def find_config(src_path):
     """从源文件目录向上（以及 cwd）查找 Quelmara.toml"""
     candidates = []
     d = os.path.dirname(os.path.abspath(src_path))
     while True:
-        candidates.append(os.path.join(d, "Quelmara.toml"))
+        candidates.append(os.path.join(d, CONFIG_NAME))
         if d == os.path.dirname(d):
             break
         d = os.path.dirname(d)
-    candidates.append(os.path.join(os.getcwd(), "Quelmara.toml"))
+    candidates.append(os.path.join(os.getcwd(), CONFIG_NAME))
     for c in candidates:
         if os.path.isfile(c):
             return c
     return None
 
 
+def find_legacy_config(src_path):
+    # legacy-ok:begin
+    """查找遗留的 Rosoto.toml（只用于给出迁移提示，不参与配置加载）"""
+    d = os.path.dirname(os.path.abspath(src_path))
+    while True:
+        c = os.path.join(d, "Rosoto.toml")
+        if os.path.isfile(c):
+            return c
+        if d == os.path.dirname(d):
+            break
+        d = os.path.dirname(d)
+    c = os.path.join(os.getcwd(), "Rosoto.toml")
+    return c if os.path.isfile(c) else None
+    # legacy-ok:end
+
+
 def load_config(src_path):
     cfg = {k: dict(v) for k, v in DEFAULT_CONFIG.items()}
     path = find_config(src_path)
+    if path is None:
+        legacy = find_legacy_config(src_path)
+        if legacy:
+            sys.stderr.write(
+                f"[qlm] 错误：发现旧配置 {legacy}，Quelmara 只读取 {CONFIG_NAME}。\n"
+                f"      请执行：git mv {legacy} {os.path.join(os.path.dirname(legacy), CONFIG_NAME)}\n")
+            raise SystemExit(2)
     if path:
         with open(path, "rb") as f:
             user = tomllib.load(f)
@@ -3143,6 +3188,7 @@ PROGRAM = None
 
 def transpile(src_path):
     global PROGRAM
+    require_source(src_path)
     with open(src_path, encoding="utf-8") as f:
         src = f.read()
     cfg = load_config(src_path)

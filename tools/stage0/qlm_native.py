@@ -15,8 +15,8 @@ Quelmara 源码 -> RosIR -> 优化passes -> 线性扫描寄存器分配 -> 自�
   cmp+jcc 融合 / 线性扫描寄存器分配(调用感知) / 帧槽复用 / mov 消除
 
 用法：
-  python3 tools/stage0/qlm_native.py build examples/fib.ros -o build/fib
-  python3 tools/stage0/qlm_native.py run   examples/loop_sum.ros
+  python3 tools/stage0/qlm_native.py build examples/fib.qma -o build/fib
+  python3 tools/stage0/qlm_native.py run   examples/loop_sum.qma
 """
 
 import argparse
@@ -28,7 +28,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from qlm import (tokenize, Parser, load_config, walk_stmts,  # noqa: E402
                     parse_source, with_test_runner, validate_match,
-                    resolve_option_patterns)
+                    resolve_option_patterns, require_source)
 
 # ---------------------------------------------------------------------------
 # x86-64 寄存器编号
@@ -4442,6 +4442,7 @@ def write_elf(path, blob):
 def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
                        platform="linux"):
     """前端共享层：解析 + 降级 + 优化（x86_64 / aarch64 发射层共用）"""
+    require_source(src_path)
     with open(src_path, encoding="utf-8") as f:
         src = f.read()
     cfg = load_config(src_path)

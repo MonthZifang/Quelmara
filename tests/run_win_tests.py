@@ -182,8 +182,8 @@ def test_single_core():
     try:
         with open(os.path.join(tmp, "Quelmara.toml"), "w", encoding="utf-8") as f:
             f.write("[core]\nmulticore = false\nthreads = 1\n")
-        shutil.copy(os.path.join(ROOT, "examples/parfor_sum.ros"), tmp)
-        src = os.path.join(tmp, "parfor_sum.ros")
+        shutil.copy(os.path.join(ROOT, "examples/parfor_sum.qma"), tmp)
+        src = os.path.join(tmp, "parfor_sum.qma")
         out = os.path.join(ROOT, "build", "win_parfor_sum_1c.exe")
         blob, cfg = qlm_pe.transpile_win(src)
         qlm_pe.write_exe(out, blob)
@@ -198,8 +198,8 @@ def test_single_core():
                 else bad(f"单核降级错误 rc={rc} out={stdout[:80]!r}")
 
         # spawn 在单核配置下必须退化为同步执行，结果不变
-        shutil.copy(os.path.join(ROOT, "tests/t13_spawn.ros"), tmp)
-        src2 = os.path.join(tmp, "t13_spawn.ros")
+        shutil.copy(os.path.join(ROOT, "tests/t13_spawn.qma"), tmp)
+        src2 = os.path.join(tmp, "t13_spawn.qma")
         out2 = os.path.join(ROOT, "build", "win_spawn_1c.exe")
         build(src2, out2)
         r = run(out2)
@@ -210,9 +210,9 @@ def test_single_core():
                 else bad(f"spawn 单核降级错误 rc={rc} out={stdout[:80]!r}")
 
         # chan 在单核配置下不跨线程，FIFO 语义必须保持
-        shutil.copy(os.path.join(ROOT, "tests/single_core/t15_chan_seq.ros"), tmp)
+        shutil.copy(os.path.join(ROOT, "tests/single_core/t15_chan_seq.qma"), tmp)
         out3 = os.path.join(ROOT, "build", "win_chan_seq.exe")
-        build(os.path.join(tmp, "t15_chan_seq.ros"), out3)
+        build(os.path.join(tmp, "t15_chan_seq.qma"), out3)
         r = run(out3)
         if r is not None:
             rc, stdout, _ = r
@@ -225,7 +225,7 @@ def test_single_core():
 def test_array_bounds():
     """越界必须 fail-fast（stderr + 非 0 退出码），不能静默读到相邻内存。"""
     out = os.path.join(ROOT, "build", "win_array_bounds.exe")
-    build(os.path.join(ROOT, "tests/array_bounds.ros"), out)
+    build(os.path.join(ROOT, "tests/array_bounds.qma"), out)
     r = run(out)
     if r is None:
         skip("数组越界：非 Windows 平台")
@@ -239,7 +239,7 @@ def test_array_bounds():
 def test_arena():
     """arena 必须真的回卷 bump 指针：1MB 上限下完成 ~4MB 分配量。"""
     out = os.path.join(ROOT, "build", "win_arena.exe")
-    build(os.path.join(ROOT, "tests/arena_lowheap/arena.ros"), out)
+    build(os.path.join(ROOT, "tests/arena_lowheap/arena.qma"), out)
     r = run(out, timeout=300)
     if r is None:
         skip("arena：非 Windows 平台，跳过执行")
@@ -251,7 +251,7 @@ def test_arena():
         else bad(f"arena 输出 {stdout!r}")
 
     out2 = os.path.join(ROOT, "build", "win_no_arena.exe")
-    build(os.path.join(ROOT, "tests/arena_lowheap/no_arena.ros"), out2)
+    build(os.path.join(ROOT, "tests/arena_lowheap/no_arena.qma"), out2)
     r = run(out2, timeout=300)
     rc, _stdout, stderr = r
     ok("无 arena 时 1MB 堆上限 fail-fast") if rc != 0 and b"heap_limit_mb" in stderr \
@@ -260,7 +260,7 @@ def test_arena():
 
 def test_assert_fail():
     out = os.path.join(ROOT, "build", "win_assert.exe")
-    build(os.path.join(ROOT, "tests/win_assert.ros"), out)
+    build(os.path.join(ROOT, "tests/win_assert.qma"), out)
     r = run(out)
     if r is None:
         skip("assert 失败路径：非 Windows 平台")
@@ -282,14 +282,14 @@ def test_cross_verify():
     if probe.returncode != 0:
         skip("交叉验证：WSL 不可用")
         return
-    cases = ["tests/divmod.ros", "tests/t8.ros", "tests/t9.ros", "tests/t11.ros",
-             "tests/t12.ros", "examples/inventory.ros", "examples/collatz.ros",
-             "examples/game_loop.ros", "tests/t19_option.ros",
-             "tests/t20_result_generic.ros", "tests/t21_slice.ros",
-             "tests/t22_map.ros", "tests/t23_float.ros",
-             "tests/t24_join_method.ros", "tests/t25_chan_close.ros",
-             "tests/t26_select.ros", "tests/t27_str.ros",
-             "tests/t28_toint.ros"]
+    cases = ["tests/divmod.qma", "tests/t8.qma", "tests/t9.qma", "tests/t11.qma",
+             "tests/t12.qma", "examples/inventory.qma", "examples/collatz.qma",
+             "examples/game_loop.qma", "tests/t19_option.qma",
+             "tests/t20_result_generic.qma", "tests/t21_slice.qma",
+             "tests/t22_map.qma", "tests/t23_float.qma",
+             "tests/t24_join_method.qma", "tests/t25_chan_close.qma",
+             "tests/t26_select.qma", "tests/t27_str.qma",
+             "tests/t28_toint.qma"]
     # 注意：hello 的 cores() 是编译期常量（Windows=物理核，WSL=4），不参与逐字节比对。
     drive = ROOT[0].lower()
     wsl_root = f"/mnt/{drive}/" + ROOT[3:].replace("\\", "/")
@@ -312,8 +312,8 @@ def test_cross_verify():
 def test_chan_close_fail():
     """close 后 send / 重复 close 必须 fail-fast（stderr + 非 0 退出码）。"""
     for name, src, needle in (
-            ("chan_close_fail", "tests/chan_close_fail.ros", "send on closed channel"),
-            ("chan_double_close", "tests/chan_double_close.ros", "double close")):
+            ("chan_close_fail", "tests/chan_close_fail.qma", "send on closed channel"),
+            ("chan_double_close", "tests/chan_double_close.qma", "double close")):
         out = os.path.join(ROOT, "build", f"win_{name}.exe")
         build(os.path.join(ROOT, src), out)
         r = run(out)
@@ -329,7 +329,7 @@ def test_chan_close_fail():
 def test_str_failfast():
     """str 下标越界、非法十进制解析、@extern 声明都必须给出明确失败/诊断。"""
     out = os.path.join(ROOT, "build", "win_str_bounds.exe")
-    build(os.path.join(ROOT, "tests/str_bounds.ros"), out)
+    build(os.path.join(ROOT, "tests/str_bounds.qma"), out)
     r = run(out)
     if r is None:
         skip("str 越界：非 Windows 平台")
@@ -341,7 +341,7 @@ def test_str_failfast():
 
     # 非法十进制：每种输入都必须退出码非 0，不能静默给出 0
     for i, lit in enumerate(("abc", "", "12x", " 12", "9223372036854775808")):
-        src = os.path.join(ROOT, "build", f"win_badint_{i}.ros")
+        src = os.path.join(ROOT, "build", f"win_badint_{i}.qma")
         with open(src, "w", encoding="utf-8") as f:
             f.write('fn main() {\n    print("%s".to_int())\n}\n' % lit)
         exe = os.path.join(ROOT, "build", f"win_badint_{i}.exe")
@@ -357,7 +357,7 @@ def test_str_failfast():
             else bad(f"stderr={stderr[:120]!r}")
 
     # @extern("C")：自研后端不解析外部符号，必须给出人话诊断而不是 Python traceback
-    src = os.path.join(ROOT, "build", "win_extern.ros")
+    src = os.path.join(ROOT, "build", "win_extern.qma")
     with open(src, "w", encoding="utf-8") as f:
         f.write('@extern("C")\nfn strlen2(s: str) -> int\n\n'
                 'fn main() {\n    print("x")\n}\n')
@@ -375,7 +375,7 @@ def test_str_failfast():
 def main():
     print("== [1] PE/COFF 结构（自研写出器，无 CRT） ==")
     out = os.path.join(ROOT, "build", "win_hello.exe")
-    build(os.path.join(ROOT, "examples/hello.ros"), out)
+    build(os.path.join(ROOT, "examples/hello.qma"), out)
     test_pe_structure(out)
 
     print("== [2] 基础语义 ==")
@@ -388,41 +388,41 @@ def main():
             and lines[2:] == ["tick 0", "tick 1", "tick 2"] else bad(f"hello 行 {lines!r}")
     else:
         skip("hello 执行")
-    case_output("fib", "examples/fib.ros", ["75025"])
-    case_output("loop_sum", "examples/loop_sum.ros", ["1199999988"])
-    case_output("utf8", "tests/win_utf8.ros", ["你好，Quelmara", "中文 + 拼接 ✓", "0", "1", "2"])
+    case_output("fib", "examples/fib.qma", ["75025"])
+    case_output("loop_sum", "examples/loop_sum.qma", ["1199999988"])
+    case_output("utf8", "tests/win_utf8.qma", ["你好，Quelmara", "中文 + 拼接 ✓", "0", "1", "2"])
 
     print("== [3] 语言 v0.2：struct / enum / match / break / continue ==")
-    for t in ("tests/t8.ros", "tests/t9.ros", "tests/t11.ros", "tests/t12.ros"):
+    for t in ("tests/t8.qma", "tests/t9.qma", "tests/t11.qma", "tests/t12.qma"):
         case_selfcheck(os.path.splitext(os.path.basename(t))[0], t)
-    case_selfcheck("traffic_light", "examples/traffic_light.ros")
+    case_selfcheck("traffic_light", "examples/traffic_light.qma")
 
     print("== [3b] 定长数组 [N]T（v0.6） ==")
-    case_output("arrays", "tests/t16_arrays.ros", ["33", "arrays ok"])
+    case_output("arrays", "tests/t16_arrays.qma", ["33", "arrays ok"])
     test_array_bounds()
 
     print("== [3c] 字符串：len / 字节下标 / 十进制解析（v0.12） ==")
-    case_selfcheck("str", "tests/t27_str.ros")
-    case_selfcheck("to_int", "tests/t28_toint.ros")
+    case_selfcheck("str", "tests/t27_str.qma")
+    case_selfcheck("to_int", "tests/t28_toint.qma")
     test_str_failfast()
 
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
-    case_output("parfor_sum", "examples/parfor_sum.ros", ["11519999978"])
-    case_selfcheck("prime_parallel", "examples/prime_parallel.ros")
-    case_selfcheck("game_loop", "examples/game_loop.ros")
-    case_selfcheck("t10", "tests/t10.ros")
-    case_output("spawn", "tests/t13_spawn.ros", ["6765", "81", "110", "spawn ok"])
-    case_output("chan", "tests/t15_chan.ros", ["749500", "chan ok"])
-    case_selfcheck("chan_close", "tests/t25_chan_close.ros")
-    case_selfcheck("select", "tests/t26_select.ros")
+    case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])
+    case_selfcheck("prime_parallel", "examples/prime_parallel.qma")
+    case_selfcheck("game_loop", "examples/game_loop.qma")
+    case_selfcheck("t10", "tests/t10.qma")
+    case_output("spawn", "tests/t13_spawn.qma", ["6765", "81", "110", "spawn ok"])
+    case_output("chan", "tests/t15_chan.qma", ["749500", "chan ok"])
+    case_selfcheck("chan_close", "tests/t25_chan_close.qma")
+    case_selfcheck("select", "tests/t26_select.qma")
     test_chan_close_fail()
-    case_selfcheck("result", "tests/t17_result.ros")
-    case_selfcheck("option", "tests/t19_option.ros")
-    case_selfcheck("result_generic", "tests/t20_result_generic.ros")
-    case_selfcheck("slice", "tests/t21_slice.ros")
-    case_selfcheck("map", "tests/t22_map.ros")
-    case_selfcheck("float", "tests/t23_float.ros")
-    case_selfcheck("join_method", "tests/t24_join_method.ros")
+    case_selfcheck("result", "tests/t17_result.qma")
+    case_selfcheck("option", "tests/t19_option.qma")
+    case_selfcheck("result_generic", "tests/t20_result_generic.qma")
+    case_selfcheck("slice", "tests/t21_slice.qma")
+    case_selfcheck("map", "tests/t22_map.qma")
+    case_selfcheck("float", "tests/t23_float.qma")
+    case_selfcheck("join_method", "tests/t24_join_method.qma")
 
     print("== [5] 单核降级（Quelmara.toml multicore=false） ==")
     test_single_core()

@@ -1,0 +1,118 @@
+// t12.qma：enum + match 核心语义（三后端交叉验证）
+// 覆盖：无载荷/标量/字符串载荷、match 表达式、match 语句块臂、通配臂、
+//       按值传参、值语义拷贝、命名/位置构造、循环内 continue/break
+module t12
+
+enum Color {
+    Red
+    Green
+    Blue
+}
+
+enum Shape {
+    Circle(radius: int)
+    Rect(w: int, h: int)
+    Tagged(name: str, id: int)
+}
+
+fn area(s: Shape) -> int {
+    return match s {
+        Shape.Circle(r) => 3 * r * r
+        Shape.Rect(w, h) => w * h
+        Shape.Tagged(name, id) => id * 100
+    }
+}
+
+fn describe(s: Shape) -> str {
+    return match s {
+        Shape.Circle(r) => "circle " + r.to_str()
+        Shape.Rect(w, h) => "rect " + w.to_str() + "x" + h.to_str()
+        Shape.Tagged(name, id) => name + "#" + id.to_str()
+    }
+}
+
+fn color_num(c: Color) -> int {
+    return match c {
+        Color.Red => 1
+        Color.Green => 2
+        Color.Blue => 3
+    }
+}
+
+fn main() {
+    // 构造：命名实参 / 位置实参 / 花括号形式 / 无载荷变体
+    let a = Shape.Circle(radius: 5)
+    let b = Shape.Rect(3, 4)
+    let c = Shape.Tagged { name: "boss", id: 7 }
+    let red = Color.Red
+
+    assert(area(a) == 75, "circle area")
+    assert(area(b) == 12, "rect area")
+    assert(area(c) == 700, "tagged area")
+    print(area(a))
+    print(area(b))
+    print(area(c))
+
+    assert(describe(a) == "circle 5", "describe circle")
+    assert(describe(b) == "rect 3x4", "describe rect")
+    assert(describe(c) == "boss#7", "describe tagged")
+    print(describe(a))
+    print(describe(b))
+    print(describe(c))
+
+    // 值语义：拷贝后与原值互不影响
+    let b2 = b
+    assert(area(b2) == 12, "copy area")
+    assert(describe(b2) == "rect 3x4", "copy describe")
+    print(describe(b2))
+
+    // match 表达式直接嵌在表达式里
+    print(color_num(Color.Blue) + 10)
+    print(color_num(red))
+
+    // match 语句（块臂）+ 通配臂
+    let col = Color.Green
+    match col {
+        Color.Red => {
+            print("red arm")
+        }
+        Color.Green => {
+            print("green arm")
+        }
+        _ => {
+            print("wild arm")
+        }
+    }
+    match col {
+        Color.Red => {
+            print("not here")
+        }
+        _ => {
+            print("wild wins")
+        }
+    }
+
+    // match 臂里 break / continue 与循环协作
+    let mut sum = 0
+    let mut i = 0
+    while i < 5 {
+        i += 1
+        let s = Shape.Rect(w: i, h: 2)
+        match s {
+            Shape.Circle(r) => {
+                sum += 1
+            }
+            Shape.Rect(w, h) => {
+                if i == 3 {
+                    continue
+                }
+                sum += w * h
+            }
+            _ => {
+                sum += 100
+            }
+        }
+    }
+    assert(sum == 24, "loop match sum")
+    print(sum)
+}

@@ -1,0 +1,73 @@
+// t21_slice.qma：切片 []T（v0.9）
+// 覆盖：数组 -> 切片零拷贝转换、len、读/写/复合赋值、动态下标、
+//       切片作函数参数/返回值、切片拷贝、别名共享、越界 fail-fast
+module t21
+
+fn total(s: []int) -> int {
+    let mut sum = 0
+    let mut i = 0
+    while i < len(s) {
+        sum += s[i]
+        i += 1
+    }
+    return sum
+}
+
+fn bump_head(s: []int) {
+    s[0] += 100
+}
+
+fn tail_of(s: []int) -> []int {
+    // 切片作返回值：{ptr, len} 两字整体返回
+    return s
+}
+
+fn main() {
+    let mut a = [1, 2, 3, 4, 5]
+    let s = slice_of(a)
+
+    // 长度 + 读取
+    assert(len(s) == 5, "len")
+    assert(s[0] == 1, "s0")
+    assert(s[4] == 5, "s4")
+
+    // 切片求和
+    assert(total(s) == 15, "sum via slice")
+
+    // 零拷贝别名：改切片 = 改数组
+    bump_head(s)
+    assert(a[0] == 101, "alias write")
+    assert(s[0] == 101, "alias read")
+
+    // 数组实参隐式转切片（零拷贝）
+    assert(total(a) == 115, "implicit array->slice")
+
+    // 切片写入 + 复合赋值
+    s[1] += 10
+    assert(a[1] == 12, "compound assign aliases array")
+    s[2] = 30
+    assert(a[2] == 30, "index assign aliases array")
+
+    // 切片拷贝：两字视图拷贝，仍然共享底层存储
+    let t = s
+    t[3] += 7
+    assert(a[3] == 11, "copied slice still aliases")
+    assert(t[3] == 11, "copy read")
+
+    // 切片作返回值
+    let u = tail_of(s)
+    assert(len(u) == 5, "returned slice len")
+    assert(u[0] == 101, "returned slice read")
+    assert(total(u) == 159, "returned slice sum")
+
+    // 动态下标
+    let mut k = 0
+    let mut acc = 0
+    while k < len(s) {
+        acc += s[k]
+        k += 1
+    }
+    assert(acc == 159, "dynamic index sum")
+
+    print("slices ok")
+}

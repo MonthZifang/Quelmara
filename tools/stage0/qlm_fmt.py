@@ -18,7 +18,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from qlm import tokenize  # noqa: E402
+from qlm import tokenize, SRC_EXT  # noqa: E402
 
 INDENT = "    "
 
@@ -159,7 +159,7 @@ def format_src(src):
 def main():
     import argparse
     ap = argparse.ArgumentParser(description="Quelmara 官方格式化器")
-    ap.add_argument("paths", nargs="*", help=".ros 文件或目录（默认当前目录）")
+    ap.add_argument("paths", nargs="*", help=".qma 文件或目录（默认当前目录）")
     ap.add_argument("--check", action="store_true",
                     help="只检查不写入；不符合规范时退出码 1")
     ap.add_argument("-q", "--quiet", action="store_true")
@@ -170,7 +170,7 @@ def main():
         if os.path.isdir(p):
             for root, dirs, files in os.walk(p):
                 dirs[:] = [d for d in dirs if d not in ("build", "__pycache__", ".git")]
-                targets += [os.path.join(root, f) for f in files if f.endswith(".ros")]
+                targets += [os.path.join(root, f) for f in files if f.endswith(SRC_EXT)]
         else:
             targets.append(p)
 

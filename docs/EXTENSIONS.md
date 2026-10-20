@@ -55,6 +55,7 @@ quelmara build examples/hello.qma --target c        # -> build/hello.c
 
 `build/` 一律 gitignore。
 
+<!-- legacy-ok:begin -->
 ## 5. 历史扩展名 `.ros`
 
 **已废弃，硬切。** 编译器遇到 `.ros` 会直接报错并给出迁移命令，不做静默兼容：
@@ -66,6 +67,7 @@ quelmara build examples/hello.qma --target c        # -> build/hello.c
 ```
 
 理由：两套扩展名长期共存会让"哪些文件还是旧格式"变成永久性的判断负担；项目还没发版，一次切干净成本最低。迁移细节见 `MIGRATION_rosoto_to_quelmara.md`。
+<!-- legacy-ok:end -->
 
 ## 6. 代码围栏标签
 
@@ -77,7 +79,7 @@ fn main() { print("hello") }
 ```
 ````
 
-不再使用 ```` ```rosoto ````。
+<!-- legacy-ok --> 不再使用 ```` ```rosoto ```` 这种旧围栏标签。
 
 ## 7. 与工具链的对应
 

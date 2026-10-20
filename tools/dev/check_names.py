@@ -45,14 +45,23 @@ def read(rel):
 
 
 def check_residue(files, verbose):
-    """旧名 / 旧扩展名残留"""
+    """旧名 / 旧扩展名残留（`legacy-ok` 标记的行/块跳过：文档与兼容检测代码）"""
     bad = 0
     for rel in files:
         if rel in ALLOW or not rel.endswith((".py", ".sh", ".md", ".toml", ".cmd",
                                              ".c", ".h", ".ros", ".qma")):
             continue
         text = read(rel)
+        in_block = False
         for i, line in enumerate(text.splitlines(), 1):
+            if "legacy-ok:begin" in line:
+                in_block = True
+                continue
+            if "legacy-ok:end" in line:
+                in_block = False
+                continue
+            if in_block or "legacy-ok" in line:
+                continue
             if OLD.search(line) or OLD_EXT.search(line):
                 print(f"  [残留] {rel}:{i}: {line.strip()[:100]}")
                 bad += 1
@@ -72,8 +81,8 @@ def generated_c_samples():
     os.chdir(ROOT)
     import qlm
     samples = []
-    for src in ("tests/t16_arrays.ros", "tests/t21_slice.ros", "tests/t22_map.ros",
-                "tests/t23_float.ros", "tests/t27_str.ros"):
+    for src in ("tests/t16_arrays.qma", "tests/t21_slice.qma", "tests/t22_map.qma",
+                "tests/t23_float.qma", "tests/t27_str.qma"):
         path = os.path.join(ROOT, src)
         if not os.path.isfile(path):
             continue
@@ -95,7 +104,7 @@ def check_runtime_symbols():
     bad = 0
     samples = generated_c_samples()
     if not samples:
-        print("  [跳过] 没有可生成的样本（.qma 尚未迁移？）")
+        print("  [跳过] 没有可生成的样本（源码缺失？）")
         return 0
     for src, code in samples:
         defined = set(DEF_RE.findall(code))

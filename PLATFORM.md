@@ -28,7 +28,7 @@
 ## 2. Windows 这一格做了什么（v0.3）
 
 ```
-.ros ──Parser──▶ AST ──Lower(platform="windows")──▶ RosIR
+.qma ──Parser──▶ AST ──Lower(platform="windows")──▶ RosIR
                                                    │
                     优化 passes（与 Linux 完全相同）│ 内联/CSE/LICM/展开/调度/DCE
                                                    ▼
@@ -152,7 +152,7 @@
 
 ## 6. 平台无关的硬约束（所有格都必须满足）
 
-- **同一份 `.ros` 源码**，不改一行即可换 target。
+- **同一份 `.qma` 源码**，不改一行即可换 target。
 - **同一套 `Quelmara.toml`**：多核/线程/网络上限/堆上限在编译期注入。
 - **交叉验证**：新平台的输出必须与 Linux 自研后端逐字节一致（浮点/CPU 信息除外）。
 - **无 CRT / 无 GC / 无隐藏分配**：启动即 main，退出即 ExitProcess。

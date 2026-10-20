@@ -1,0 +1,35 @@
+// parallel_sum.qma — 多核数据并行：parfor 自动分块、跨核归约
+// 在根目录 Quelmara.toml 中设 [core] multicore = false 即可降为单核串行，
+// 程序代码零改动、语义不变。
+module parallel_sum
+
+import std.core
+
+fn heavy(i: int) -> int {
+    // 模拟计算负载
+    let mut acc = 0
+    for k in 0..200 {
+        acc = acc + (i * 31 + k) % 97
+    }
+    return acc
+}
+
+fn main() {
+    let n = 3_000_000
+
+    // 串行参考值
+    let mut serial = 0
+    for i in 0..n {
+        serial += heavy(i)
+    }
+
+    // 并行归约：total 是 reduction 变量，运行时自动按核合并
+    let mut total = 0
+    parfor i in 0..n {
+        total += heavy(i)
+    }
+
+    print("serial  = " + serial.to_str())
+    print("parallel= " + total.to_str())
+    print("match   = " + (serial == total).to_str())
+}

@@ -8,7 +8,7 @@
 ## 1. 你好，原生机器码
 
 ```quelmara
-// examples/hello.ros
+// examples/hello.qma
 module hello
 
 fn main() {
@@ -17,7 +17,7 @@ fn main() {
 ```
 
 ```bash
-python3 tools/stage0/qlm_native.py run examples/hello.ros
+python3 tools/stage0/qlm_native.py run examples/hello.qma
 # hello, quelmara
 ```
 
@@ -29,7 +29,7 @@ python3 tools/stage0/qlm_native.py run examples/hello.ros
 ## 2. 热循环：闭式折叠赢过 gcc -O2
 
 ```quelmara
-// examples/loop_sum.ros —— 2 亿次迭代，魔数取模
+// examples/loop_sum.qma —— 2 亿次迭代，魔数取模
 module loop_sum
 
 fn work(n: int) -> int {
@@ -59,7 +59,7 @@ fn main() {
 ## 3. 多核 parfor：写循环就并行
 
 ```quelmara
-// examples/parfor_sum.ros —— 6M 任务、3 核归约
+// examples/parfor_sum.qma —— 6M 任务、3 核归约
 module parfor_sum
 
 fn heavy(i: int) -> int {
@@ -90,7 +90,7 @@ fn main() {
 ## 4. struct 值语义 + enum/match 穷尽检查
 
 ```quelmara
-// examples/inventory.ros（节选）——工程建模
+// examples/inventory.qma（节选）——工程建模
 struct Item {
     name: str
     qty: int
@@ -119,7 +119,7 @@ fn area(s: Shape) -> int {
 ## 5. Result + `?`：错误不许静默吞
 
 ```quelmara
-// examples/（回归 tests/t17_result.ros 同源）
+// examples/（回归 tests/t17_result.qma 同源）
 enum Result {
     Ok(value: int)
     Err(error: str)

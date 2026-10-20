@@ -1,0 +1,20 @@
+// parfor_sum.qma — 多核 parfor（原生后端：raw clone()；C 后端：pthread 分块）
+module parfor_sum
+
+fn heavy(i: int) -> int {
+    let mut acc = 0
+    let mut k = 0
+    while k < 40 {
+        acc = acc + (i * 31 + k) % 97
+        k = k + 1
+    }
+    return acc
+}
+
+fn main() {
+    let mut total = 0
+    parfor i in 0..6_000_000 {
+        total += heavy(i)
+    }
+    print(total)
+}

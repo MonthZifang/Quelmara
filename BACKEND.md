@@ -15,7 +15,7 @@
 ## 1. 编译管线
 
 ```
-.ros 源码
+.qma 源码
   │  Parser（词法/语法 → AST）
   ▼
 AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指令流，非 SSA）
@@ -34,7 +34,7 @@ AST ── Lower(platform=linux|windows) ──▶ RosIR（函数 = vreg + 指�
   └── AArch64 编码器 → ELF64 写出器（Linux）
 ```
 
-**双实现交叉验证**：同一份 `.ros` 源码可显式用 C 后端（gcc -O2）与自研后端编译，输出 diff 即回归——C 生成器只作为测试 oracle，不改变产品默认的自研后端路径。
+**双实现交叉验证**：同一份 `.qma` 源码可显式用 C 后端（gcc -O2）与自研后端编译，输出 diff 即回归——C 生成器只作为测试 oracle，不改变产品默认的自研后端路径。
 
 ---
 

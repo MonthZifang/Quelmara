@@ -1,0 +1,22 @@
+// t14_arena.qma：帧级 arena 的真实回收（配合 heap_limit_mb=1 验证）
+// 20 万次迭代，每次在 arena 内分配 ~20 字节字符串；若 arena 不回卷 bump 指针，
+// 总分配量约 4MB，会在 1MB 堆上限处 fail-fast。能跑完即证明回收生效。
+module t14
+
+fn main() {
+    let mut i = 0
+    let mut hits = 0
+    while i < 200000 {
+        arena {
+            let s = "v" + i.to_str()
+            if s == "v0" {
+                hits += 1
+            }
+        }
+        i += 1
+    }
+    assert(hits == 1, "arena 字符串命中一次")
+    assert(i == 200000, "arena 循环完整执行")
+    print("arena ok")
+    print(i)
+}

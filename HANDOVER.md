@@ -68,7 +68,7 @@ fn add_one(n: int) -> Result {
 - 结构体/多槽 payload 暂不接受，避免只读取一个槽导致静默错编；
 - `?` 所在函数必须返回相同的 Result enum。
 
-`t17_result.ros` 覆盖：正常传播、错误传播、`Err` 在 `Ok` 前声明的反向 tag 顺序，
+`t17_result.qma` 覆盖：正常传播、错误传播、`Err` 在 `Ok` 前声明的反向 tag 顺序，
 Linux native / Windows PE / C 三链均通过。
 
 ### 1.2 自研优化器
@@ -103,8 +103,8 @@ parfor/spawn worker 的独立栈和寄存器压力敏感，继续保留 `Fn.no_i
 
 新增：
 
-- `tests/t17_result.ros`；
-- `tests/t19_option.ros`（v0.8）；
+- `tests/t17_result.qma`；
+- `tests/t19_option.qma`（v0.8）；
 - native 回归 [12]：Result native + C 传播；[13]：option native + C；
 - Windows 回归：Result / option PE 自校验 + PE×ELF 交叉验证。
 
@@ -191,7 +191,7 @@ Windows PE 74 ✅（本机实测，[1]–[6]；[7] 需 WSL）
 | Windows PE | `tools/stage0/qlm_pe.py` | 353 | 未改（复用 RosIR） |
 | 命令行 | `tools/stage0/qlm_cli.py` | 336 | 主机架构默认 target |
 | 测试 | `tests/run_win_tests.py` | ~430 | v0.12 加 `[3c] 字符串` 段（15 条断言） |
-| 测试夹具 | `tests/t27_str.ros` / `t28_toint.ros` | 110 | 长度/下标/解析/边界/往返 |
+| 测试夹具 | `tests/t27_str.qma` / `t28_toint.qma` | 110 | 长度/下标/解析/边界/往返 |
 | 文档 | `README.md` / `SPEC.md` / `BACKEND.md` / `CHANGELOG.md` / `HANDOVER.md` | — | v0.12 同步 |
 
 **测试规模**：Windows PE 74 项（本机实测全绿）；native / C / corelib / io_uring 需 Linux。
@@ -226,22 +226,22 @@ bash tests/test_corelib.sh          # 34
 bash tests/test_uring.sh            # 26
 
 # 字符串（v0.12）
-python tools/stage0/qlm_pe.py run tests/t27_str.ros
-python tools/stage0/qlm_pe.py run tests/t28_toint.ros
-python3 tools/stage0/qlm_native.py run tests/t27_str.ros     # 需 Linux
-python3 tools/stage0/qlm.py run tests/t28_toint.ros          # 需 gcc
+python tools/stage0/qlm_pe.py run tests/t27_str.qma
+python tools/stage0/qlm_pe.py run tests/t28_toint.qma
+python3 tools/stage0/qlm_native.py run tests/t27_str.qma     # 需 Linux
+python3 tools/stage0/qlm.py run tests/t28_toint.qma          # 需 gcc
 
 # Result 三链
-python tools/stage0/qlm_pe.py run tests/t17_result.ros
-python3 tools/stage0/qlm_native.py run tests/t17_result.ros
-python3 tools/stage0/qlm.py run tests/t17_result.ros
+python tools/stage0/qlm_pe.py run tests/t17_result.qma
+python3 tools/stage0/qlm_native.py run tests/t17_result.qma
+python3 tools/stage0/qlm.py run tests/t17_result.qma
 
 # 性能审计
-python tools/stage0/qlm_cli.py bench examples/loop_sum.ros --target win --runs 5
-python tools/stage0/qlm_native.py build examples/loop_sum.ros -o build/loop
+python tools/stage0/qlm_cli.py bench examples/loop_sum.qma --target win --runs 5
+python tools/stage0/qlm_native.py build examples/loop_sum.qma -o build/loop
 
 # 调试/IR
-python tools/stage0/qlm_pe.py build tests/t17_result.ros -o build/x.exe --dump-ir --no-opt
+python tools/stage0/qlm_pe.py build tests/t17_result.qma -o build/x.exe --dump-ir --no-opt
 ```
 
 ### 新增 IR/优化改动检查表
@@ -305,7 +305,7 @@ python tools/stage0/qlm_pe.py build tests/t17_result.ros -o build/x.exe --dump-i
   README.md / SPEC.md / BACKEND.md / HANDOVER.md
 
 新增：
-  tests/t17_result.ros     Result Ok/Err、错误传播、反向 tag 顺序
+  tests/t17_result.qma     Result Ok/Err、错误传播、反向 tag 顺序
 
 v0.8 本轮改动（option[T]）：
 修改：
@@ -314,7 +314,7 @@ v0.8 本轮改动（option[T]）：
   tools/stage0/qlm_native.py   lower_match 求值式先行 + Option 模式改写（PE/AArch64 零改动）
   tests/run_native_tests.sh / tests/run_win_tests.py   登记 t19（native [13] + PE + 交叉验证）
 新增：
-  tests/t19_option.ros     option[int]/option[str] 构造、函数返回、Option.Some/None 解构
+  tests/t19_option.qma     option[int]/option[str] 构造、函数返回、Option.Some/None 解构
 
 v0.12 本轮改动（字符串 + @extern 收口）：
 修改：
@@ -326,10 +326,10 @@ v0.12 本轮改动（字符串 + @extern 收口）：
   tests/run_native_tests.sh  新增 [21] str / [22] @extern 段
   SPEC.md / CHANGELOG.md / HANDOVER.md
 新增：
-  tests/t27_str.ros        len / 字节下标 / 动态下标 / 拼接后下标 / 手写 atoi
-  tests/t28_toint.ros      正负号 / 前导零 / int64 边界 / to_str 往返 / CSV 扫描
-  tests/str_bounds.ros     str 下标越界 fail-fast（负向）
-  tests/extern_decl.ros    @extern("C") 声明（自研后端必须拒绝）
+  tests/t27_str.qma        len / 字节下标 / 动态下标 / 拼接后下标 / 手写 atoi
+  tests/t28_toint.qma      正负号 / 前导零 / int64 边界 / to_str 往返 / CSV 扫描
+  tests/str_bounds.qma     str 下标越界 fail-fast（负向）
+  tests/extern_decl.qma    @extern("C") 声明（自研后端必须拒绝）
 
 测试：
   Windows PE 74 ✅（本机实测）；native Linux / C / corelib / io_uring 需 Linux 环境

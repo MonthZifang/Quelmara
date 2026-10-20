@@ -11,8 +11,8 @@ Quelmara -> RosIR（与 x86_64 完全共享）-> 同一套优化 passes / 寄存
 对应 BACKEND.md 平台轨承诺的"每个新平台 = 一个发射器 + 一个格式写出器"。
 
 用法：
-  python3 tools/stage0/qlm_arm64.py build examples/fib.ros -o build/fib_a64
-  python3 tools/stage0/qlm_arm64.py verify examples/fib.ros   # capstone 反汇编级验证
+  python3 tools/stage0/qlm_arm64.py build examples/fib.qma -o build/fib_a64
+  python3 tools/stage0/qlm_arm64.py verify examples/fib.qma   # capstone 反汇编级验证
 
 ⚠ 本机无 qemu-aarch64：aarch64 产物的【执行级】验证需 aarch64 主机或 qemu-user；
   当前验证级别 = ELF 结构 + capstone 反汇编 + 关键序列人工核对（见 HANDOVER.md）。

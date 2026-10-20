@@ -1,0 +1,66 @@
+// t27_str.qma：字符串长度与下标（v0.12）
+// str 是零结尾字节串，len 走运行时 __str_len / C 端 strlen；
+// s[i] 返回该字节的无符号值（0..255），越界 fail-fast。
+module t27
+
+fn count_if(s: str, target: int) -> int {
+    let mut hits = 0
+    let mut i = 0
+    while i < len(s) {
+        if s[i] == target {
+            hits += 1
+        }
+        i += 1
+    }
+    return hits
+}
+
+fn main() {
+    let s = "hello"
+
+    // 长度
+    assert(len(s) == 5, "len literal")
+    assert(len("") == 0, "len empty")
+    print(len(s))
+
+    // 下标：ASCII 字节值
+    assert(s[0] == 104, "h")
+    assert(s[1] == 101, "e")
+    assert(s[4] == 111, "o")
+
+    // 动态下标
+    let mut i = 0
+    let mut sum = 0
+    while i < len(s) {
+        sum += s[i]
+        i += 1
+    }
+    assert(sum == 532, "byte sum")
+
+    // 比较（内容相等 / 字典序）
+    assert(s == "hello", "eq")
+    assert(s != "hellp", "ne")
+    assert(s < "hellp", "lt")
+
+    // 串接后长度与下标仍然成立
+    let t = s + " world"
+    assert(len(t) == 11, "concat len")
+    assert(t[5] == 32, "space")
+    assert(t[10] == 100, "d")
+
+    // 跨函数传参与返回
+    assert(count_if(t, 111) == 2, "two o")
+    assert(count_if(s, 122) == 0, "no z")
+
+    // 单字符查表：把 "abc" 解码成数字
+    let digits = "12345"
+    let mut val = 0
+    let mut k = 0
+    while k < len(digits) {
+        val = val * 10 + (digits[k] - 48)
+        k += 1
+    }
+    assert(val == 12345, "atoi by hand")
+
+    print("str ok")
+}

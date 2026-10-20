@@ -44,7 +44,7 @@ ALLOW = {
 }
 
 CODE_EXT = {".py", ".sh", ".cmd", ".toml", ".c", ".h", ".yml", ".yaml"}
-SRC_EXT = {".ros", ".qma"}
+SRC_EXT = {".qma", ".qma"}
 DOC_EXT = {".md"}
 
 SKIP_DIRS = {".git", "build", "__pycache__", ".openclaw", "archive", "node_modules", ".workbuddy"}

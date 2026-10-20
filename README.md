@@ -14,17 +14,17 @@ Quelmara/
 ├── HANDOVER.md          # 交接文档：做了什么/没做什么/差什么/写了多少/需要写什么
 ├── Quelmara.toml          # 根配置文件：多核开关、线程数、网络资源上限（唯一全局开关）
 ├── examples/
-│   ├── hello.ros              # 最小程序：函数/字符串/while
-│   ├── fib.ros                # 递归（多后端交叉验证）
-│   ├── loop_sum.ros           # 2 亿热循环基准（魔数除法）
-│   ├── collatz.ros            # 热循环 + break/continue（自校验）
-│   ├── parallel_sum.ros       # parfor 多核数据并行 + 归约（字符串版）
-│   ├── parfor_sum.ros         # parfor 多核（多后端交叉验证）
-│   ├── prime_parallel.ros     # 多核素数统计（parfor 归约，自校验）
-│   ├── game_loop.ros          # 游戏：嵌套结构体 + 帧循环 + break/continue + parfor
-│   ├── inventory.ros          # 工程建模：结构体值语义 + 字段更新（自校验）
-│   ├── traffic_light.ros      # 状态机：enum + match（自校验）
-│   └── echo_server.ros        # net.TcpServer 百万连接 echo（epoll 非阻塞，C 后端）
+│   ├── hello.qma              # 最小程序：函数/字符串/while
+│   ├── fib.qma                # 递归（多后端交叉验证）
+│   ├── loop_sum.qma           # 2 亿热循环基准（魔数除法）
+│   ├── collatz.qma            # 热循环 + break/continue（自校验）
+│   ├── parallel_sum.qma       # parfor 多核数据并行 + 归约（字符串版）
+│   ├── parfor_sum.qma         # parfor 多核（多后端交叉验证）
+│   ├── prime_parallel.qma     # 多核素数统计（parfor 归约，自校验）
+│   ├── game_loop.qma          # 游戏：嵌套结构体 + 帧循环 + break/continue + parfor
+│   ├── inventory.qma          # 工程建模：结构体值语义 + 字段更新（自校验）
+│   ├── traffic_light.qma      # 状态机：enum + match（自校验）
+│   └── echo_server.qma        # net.TcpServer 百万连接 echo（epoll 非阻塞，C 后端）
 ├── tools/
 │   ├── qlm.py          # 前端 + C 后端：Quelmara -> C99（pthread / epoll / 配置驱动降级）
 │   ├── qlm_native.py   # 自研 x86_64：Quelmara -> RosIR -> 机器码 -> 裸 ELF64（无 libc）
@@ -50,19 +50,19 @@ Quelmara/
 
 ```bash
 # 自研后端：Quelmara -> 裸 ELF64（无 libc / 无 gcc）
-python3 tools/stage0/qlm_native.py run examples/fib.ros
-python3 tools/stage0/qlm_native.py run examples/parfor_sum.ros   # 多核：raw clone()
+python3 tools/stage0/qlm_native.py run examples/fib.qma
+python3 tools/stage0/qlm_native.py run examples/parfor_sum.qma   # 多核：raw clone()
 
 # Windows：Quelmara -> PE32+（无 CRT，kernel32 导入）
-python tools/stage0/qlm_cli.py run examples/hello.ros --target win     # 产出 build/hello.exe
+python tools/stage0/qlm_cli.py run examples/hello.qma --target win     # 产出 build/hello.exe
 python tests/run_win_tests.py                                     # Windows 55 项回归
 
 # C 后端（仅显式交叉验证/自举，不是产品后端）
-python3 tools/stage0/qlm.py run examples/hello.ros
-python3 tools/stage0/qlm.py run examples/parallel_sum.ros
+python3 tools/stage0/qlm.py run examples/hello.qma
+python3 tools/stage0/qlm.py run examples/parallel_sum.qma
 
 # 网络 echo 服务器（当前网络 intrinsic 仍在 C 后端，另开终端 nc localhost 9000）
-python3 tools/stage0/qlm.py build examples/echo_server.ros --cc
+python3 tools/stage0/qlm.py build examples/echo_server.qma --cc
 ./build/echo_server
 
 # 回归测试（五套，共 183 项）

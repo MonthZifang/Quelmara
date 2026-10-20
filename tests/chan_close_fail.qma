@@ -1,0 +1,9 @@
+// chan_close_fail.qma：close 后 send 必须 fail-fast（退出码非 0）
+module ccf
+
+fn main() {
+    let c = chan[int].open(4)
+    c.close()
+    c.send(1)
+    print("unreachable")
+}

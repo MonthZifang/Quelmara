@@ -1,7 +1,7 @@
 # result[T,E] 受控单态化 —— 实现简报
 
 日期：2026-10-19
-改动范围：`tools/stage0/qlm.py`（前端 + C 后端共用前端部分）、`tests/t20_result_generic.ros`（新增）、
+改动范围：`tools/stage0/qlm.py`（前端 + C 后端共用前端部分）、`tests/t20_result_generic.qma`（新增）、
 `tests/run_native_tests.sh`、`tests/run_win_tests.py`。
 **未触碰**：`tools/stage0/qlm_native.py`、`tools/stage0/qlm_opt.py`、`tools/stage0/qlm_pe.py`（后端零改动）。
 
@@ -14,7 +14,7 @@
 ### 改动点（全部在 `tools/stage0/qlm.py`）
 
 1. **词法**：`KEYWORDS` 加入 `"result"`（与 `option`/`chan` 同级的关键字类型名）。
-   全库 grep 确认没有任何 `.ros` 源码把 `result` 当标识符用，无兼容性影响。
+   全库 grep 确认没有任何 `.qma` 源码把 `result` 当标识符用，无兼容性影响。
 
 2. **`Parser.parse_type`**：新增 `result` 分支——`result[T, E]` 解析两个类型实参
    （T=Ok 载荷，E=Err 载荷），调用 `ensure_result_enum`，返回 `("named", name)`。
@@ -43,7 +43,7 @@
 
 既有 `?` 降级（C 端 `gen_expr` 的 `try` 分支、native 端 `eval` 的 `try` 分支）本来就按
 **声明顺序**查 `Ok`/`Err` 索引（`next(i for i,(vn,_) in ... if vn == "Ok")`），不硬编码 Ok=0
-（`tests/t17_result.ros` 里 `ReversedResult` 是 Err 在前的，靠这一点通过）。合成的
+（`tests/t17_result.qma` 里 `ReversedResult` 是 Err 在前的，靠这一点通过）。合成的
 `__res_*` 是标准 `Ok/Err` 双单载荷变体枚举，直接落进该通路，两链零改动。
 
 ### 必须的校验（均已生效，见下文实测）
@@ -94,11 +94,11 @@ $ bash tests/test_corelib.sh
 ```
 
 ```
-$ python3 tools/stage0/qlm_native.py run tests/t20_result_generic.ros
+$ python3 tools/stage0/qlm_native.py run tests/t20_result_generic.qma
 result generic ok
 
-$ python3 tools/stage0/qlm.py run tests/t20_result_generic.ros
-[qlm] tests/t20_result_generic.ros -> build/t20_result_generic.c
+$ python3 tools/stage0/qlm.py run tests/t20_result_generic.qma
+[qlm] tests/t20_result_generic.qma -> build/t20_result_generic.c
 [qlm] config: .../Quelmara.toml | multicore=True threads=auto
 [qlm] cc: cc -std=gnu11 -O2 -pthread -o build/t20_result_generic build/t20_result_generic.c
 [qlm] exec build/t20_result_generic
@@ -112,7 +112,7 @@ result generic ok
 native 计数说明：基线 54 项 → 本次新增段 [14] 3 项 → 57 项，FAIL=0。
 C 后端 16 项、corelib 34 项均为原样保持。
 
-## 四、新增测试 tests/t20_result_generic.ros 覆盖点
+## 四、新增测试 tests/t20_result_generic.qma 覆盖点
 
 - `result[int,str]`：`.ok(x)`/`.err(e)` 构造、函数返回（聚合 ABI）、
   `Result.Ok(v)`/`Result.Err(e)` match 解构（Ok/Err 两分支）；
@@ -123,7 +123,7 @@ C 后端 16 项、corelib 34 项均为原样保持。
 
 登记位置：
 - `tests/run_native_tests.sh` 新增 `[14]` 段（顺延 [13]，含 native/C 双跑 + 双链 diff 共 3 个断言）；
-- `tests/run_win_tests.py`：`case_selfcheck("result_generic", "tests/t20_result_generic.ros")`
+- `tests/run_win_tests.py`：`case_selfcheck("result_generic", "tests/t20_result_generic.qma")`
   （与 t17/t19 同级登记），并加入 PE×ELF 交叉验证用例表（与 t19 同表）。
   该脚本为 Windows 专用（非 Windows 下执行级用例自动 SKIP），本机已做 `py_compile` 语法验证。
 

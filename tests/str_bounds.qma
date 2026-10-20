@@ -1,0 +1,7 @@
+// str_bounds.qma：str 下标越界负向用例
+// 长度为 3 的字符串访问下标 3 -> fail-fast（退出码非 0）
+fn main() {
+    let s = "abc"
+    let i = 3
+    print(s[i])
+}

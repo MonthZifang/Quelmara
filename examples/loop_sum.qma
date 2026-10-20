@@ -1,0 +1,16 @@
+// loop_sum.qma — 热循环基准（无调用、纯算术，测后端代码质量）
+module loop_sum
+
+fn work(n: int) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + (i * 7) % 13
+        i = i + 1
+    }
+    return acc
+}
+
+fn main() {
+    print(work(200_000_000))
+}

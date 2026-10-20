@@ -30,8 +30,8 @@ import std.net            // 导入标准库模块
 import std.core
 ```
 
-- 文件扩展名：`.ros`
-- 一个模块 = 一个 `.ros` 文件 = 一个命名空间
+- 文件扩展名：`.qma`
+- 一个模块 = 一个 `.qma` 文件 = 一个命名空间
 - 标识符：`snake_case`（变量/函数）、`PascalCase`（类型/模块）、`SCREAMING_CASE`（常量）
 - 语句以换行分隔，块用 `{}`；**没有分号**（结构即语法，减少噪音）
 
@@ -379,7 +379,7 @@ threads   = 1
 ## 8. 编译与工具链
 
 ```
-.ros 源码 ──parse──▶ AST ──lower──▶ RosIR ──opt──▶ ┌ x86_64 编码器 → 裸 ELF64（Linux）
+.qma 源码 ──parse──▶ AST ──lower──▶ RosIR ──opt──▶ ┌ x86_64 编码器 → 裸 ELF64（Linux）
                                                     ├ x86_64 编码器 → PE32+/COFF（Windows，无 CRT）
                                                     ├ AArch64 编码器 → ELF64（Linux arm64）
                                                     └ C99 转译 → 任意 C 编译器（移植/自举/网络 demo）
@@ -406,7 +406,7 @@ quelmara build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 E
 | **自研 AArch64 Linux** | 同一条 RosIR，只换发射层 → ELF64 | 🟡 模拟器执行级，待真机 |
 | C 后端 | Quelmara → C99 → 任意 C 编译器（移植/bootstrapping/网络 demo） | ✅ v0.1 |
 
-各后端对同一 `.ros` 源码交叉验证输出，互为 oracle。
+各后端对同一 `.qma` 源码交叉验证输出，互为 oracle。
 
 已实现（v0.2 / v0.3 / v0.4 / v0.5 / v0.6 / v0.7）：
 

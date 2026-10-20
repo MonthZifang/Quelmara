@@ -1,0 +1,7 @@
+// win_assert.qma：Windows 后端 assert 失败路径
+// 期望：退出码 1，stderr 含 "expected fail"
+fn main() {
+    print("before assert")
+    assert(1 == 2, "expected fail")
+    print("unreachable")
+}

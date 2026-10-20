@@ -32,7 +32,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-VERSION = "0.7.0"
+from qlm import SRC_EXT, require_source  # noqa: E402
+
+VERSION = "1.0.0"
 
 def _default_target():
     """当前主机默认只选自研后端；不把 C99 当产品默认链路。"""
@@ -98,6 +100,9 @@ def _build_win(src, out, dump_ir=False, optimize=True):
     return out, len(pe), cfg
 
 
+# 产物扩展名（docs/EXTENSIONS.md）：.qex = PE 可执行，.qel = ELF 可执行，.c = 交叉验证
+OUT_EXT = {"win": ".qex", "native": ".qel", "arm64": ".qel", "c": ".c"}
+
 BACKENDS = {
     "native": _build_native,
     "c": _build_c,
@@ -111,7 +116,7 @@ def build(src, target=DEFAULT_TARGET, out=None, dump_ir=False, optimize=True):
     if target is None:
         raise RuntimeError("当前主机没有自研默认后端；请显式指定 --target c（仅交叉验证/自举）或安装受支持的目标工具链")
     if out is None:
-        out = os.path.join("build", base + (".exe" if target == "win" else ""))
+        out = os.path.join("build", base + OUT_EXT.get(target, ""))
     fn = BACKENDS[target]
     return fn(src, out, dump_ir=dump_ir, optimize=optimize)
 
@@ -146,7 +151,7 @@ def _discover_tests(paths):
             for root, dirs, fs in os.walk(p):
                 dirs[:] = [d for d in dirs
                            if d not in ("build", "__pycache__", ".git", "single_core")]
-                files += [os.path.join(root, f) for f in fs if f.endswith(".ros")]
+                files += [os.path.join(root, f) for f in fs if f.endswith(SRC_EXT)]
         elif os.path.isfile(p):
             files.append(p)
     out = []

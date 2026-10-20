@@ -18,7 +18,7 @@
 git clone https://github.com/MonthZifang/Quelmara.git
 cd Quelmara
 # 验证安装：跑一个示例
-python3 tools/stage0/qlm_native.py run examples/hello.ros
+python3 tools/stage0/qlm_native.py run examples/hello.qma
 # hello, quelmara
 ```
 
@@ -26,7 +26,7 @@ python3 tools/stage0/qlm_native.py run examples/hello.ros
 
 ## 1. 第一个程序
 
-创建 `my.ros`：
+创建 `my.qma`：
 
 ```quelmara
 module my
@@ -38,15 +38,15 @@ fn main() {
 ```
 
 ```bash
-python3 tools/stage0/qlm_native.py run my.ros     # 编译 + 立即运行
-python3 tools/stage0/qlm_native.py build my.ros -o build/my   # 只编译
+python3 tools/stage0/qlm_native.py run my.qma     # 编译 + 立即运行
+python3 tools/stage0/qlm_native.py build my.qma -o build/my   # 只编译
 ./build/my
 ```
 
 规则先记三条：
 - 文件第一行是 `module 名`；
 - **没有分号**，换行分隔语句；
-- 一个 `.ros` 文件 = 一个模块 = 一个命名空间。
+- 一个 `.qma` 文件 = 一个模块 = 一个命名空间。
 
 ---
 
@@ -313,15 +313,15 @@ fn main() {
 
 ```bash
 # 自研后端（产品路径）
-python3 tools/stage0/qlm_native.py run   examples/hello.ros          # 编译+运行
-python3 tools/stage0/qlm_native.py build examples/hello.ros -o build/hello
-python3 tools/stage0/qlm_native.py build examples/hello.ros --dump-ir  # 看 RosIR
+python3 tools/stage0/qlm_native.py run   examples/hello.qma          # 编译+运行
+python3 tools/stage0/qlm_native.py build examples/hello.qma -o build/hello
+python3 tools/stage0/qlm_native.py build examples/hello.qma --dump-ir  # 看 RosIR
 
 # Windows（在 Windows 上）
-python tools/stage0/qlm_cli.py run examples/hello.ros --target win   # 产出 build/hello.exe
+python tools/stage0/qlm_cli.py run examples/hello.qma --target win   # 产出 build/hello.exe
 
 # C 后端（仅交叉验证/自举，不是产品后端）
-python3 tools/stage0/qlm.py build examples/hello.ros --cc
+python3 tools/stage0/qlm.py build examples/hello.qma --cc
 
 # 性能基准（best-of-3）
 bash tests/bench.sh

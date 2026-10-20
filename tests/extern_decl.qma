@@ -1,0 +1,11 @@
+// extern_decl.qma：@extern("C") 声明（v0.11 语法，v0.12 收口）
+// C 后端输出 `extern` 原型交给系统链接器；
+// 自研后端（Linux ELF / Windows PE）没有动态链接器，必须明确拒绝而不是产出坏二进制。
+module extern_decl
+
+@extern("C")
+fn c_strlen(s: str) -> int
+
+fn main() {
+    print("declared")
+}

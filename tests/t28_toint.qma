@@ -1,0 +1,53 @@
+// t28_toint.qma：str -> int 十进制解析（v0.12）
+// s.to_int() / to_int(s) 等价；非法输入与溢出一律 fail-fast。
+module t28
+
+fn add_all(s: str) -> int {
+    // "10,20,30" 风格的简单累加（无 split，手写扫描）
+    let mut total = 0
+    let mut i = 0
+    let mut acc = 0
+    let mut seen = 0
+    while i < len(s) {
+        let c = s[i]
+        if c == 44 {          // ','
+            if seen != 0 {
+                total += acc
+            }
+            acc = 0
+            seen = 0
+        } else {
+            acc = acc * 10 + (c - 48)
+            seen = 1
+        }
+        i += 1
+    }
+    if seen != 0 {
+        total += acc
+    }
+    return total
+}
+
+fn main() {
+    // 基本解析
+    assert("0".to_int() == 0, "zero")
+    assert("42".to_int() == 42, "42")
+    assert("-17".to_int() == -17, "neg")
+    assert("+9".to_int() == 9, "plus sign")
+    assert("000123".to_int() == 123, "leading zeros")
+    assert(to_int("2026") == 2026, "functional form")
+
+    // 与 to_str 往返
+    let n = -987654
+    assert(n.to_str().to_int() == n, "roundtrip")
+
+    // 边界值
+    assert("9223372036854775807".to_int() == 9223372036854775807, "max")
+    assert("-1".to_int() == 0 - 1, "minus one")
+
+    // 实际用途：从字符串里解析数字（没有 split，手写扫描）
+    assert(add_all("10,20,30") == 60, "csv sum")
+    assert(add_all("7") == 7, "single")
+
+    print("to_int ok")
+}

@@ -1,0 +1,43 @@
+// t15_chan.qma：chan[T] 有界 MPMC 通道（SPEC §4）
+// 两个生产者并发写入容量为 4 的通道，主线程消费全部消息并求和。
+// 容量 4 < 1000，必然触发「满则阻塞 / 空则阻塞」两条路径。
+module t15
+
+fn producer(ch: chan[int], n: int, base: int) {
+    let mut i = 0
+    while i < n {
+        ch.send(base + i)
+        i += 1
+    }
+}
+
+fn main() {
+    let ch = chan[int].open(4)
+    let h1 = spawn producer(ch, 500, 0)
+    let h2 = spawn producer(ch, 500, 1000)
+
+    let mut sum = 0
+    let mut got = 0
+    while got < 1000 {
+        sum += ch.recv()
+        got += 1
+    }
+    join(h1)
+    join(h2)
+
+    // 0..499 之和 124750；1000..1499 之和 624750
+    assert(sum == 749500, "chan 多生产者求和")
+    assert(got == 1000, "chan 消息数")
+
+    // FIFO 顺序（容量足够，不触发阻塞）
+    let c2 = chan[int].open(4)
+    c2.send(10)
+    c2.send(20)
+    c2.send(30)
+    assert(c2.recv() == 10, "chan fifo 1")
+    assert(c2.recv() == 20, "chan fifo 2")
+    assert(c2.recv() == 30, "chan fifo 3")
+
+    print(sum)
+    print("chan ok")
+}
