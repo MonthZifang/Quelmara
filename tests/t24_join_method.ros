@@ -1,0 +1,52 @@
+// t24_join_method.ros：h.join() 方法式语法（v0.11）
+// 覆盖：方法式 join、spawn f(x).join() 直连式、与函数式 join(h) 混用、
+//       void 任务、str 实参、单核降级后结果不变
+module t24
+
+fn fib(n: int) -> int {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn square(x: int) -> int {
+    return x * x
+}
+
+fn mark(x: int) {
+    assert(x > 0, "mark positive")
+}
+
+fn is_abc(s: str) -> int {
+    if s == "abc" {
+        return 1
+    }
+    return 0
+}
+
+fn main() {
+    // 1) 方法式 join
+    let a = spawn fib(20)
+    let b = spawn square(9)
+    assert(a.join() == 6765, "fib(20) via h.join()")
+    assert(b.join() == 81, "square(9) via h.join()")
+
+    // 2) spawn f(x).join() 直连式
+    assert(spawn fib(10).join() == 55, "fib(10) via spawn...join()")
+    print(spawn square(7).join())
+
+    // 3) 与函数式混用
+    let h1 = spawn fib(10)
+    assert(join(h1) == 55, "function form still works")
+    let h2 = spawn fib(12)
+    assert(h2.join() == 144, "method form after function form")
+
+    // 4) void 任务 + str 实参
+    let h3 = spawn mark(7)
+    assert(h3.join() == 0, "void task join")
+    let h4 = spawn is_abc("abc")
+    assert(h4.join() == 1, "str arg task true")
+
+    print("join method ok")
+}

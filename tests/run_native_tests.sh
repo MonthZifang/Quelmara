@@ -182,6 +182,39 @@ $NAT run tests/t23_float.ros 2>/dev/null | grep -v '^\[rosoto' > build/.flt23_n
 $CBE run tests/t23_float.ros 2>/dev/null | grep -v '^\[rosoto' > build/.flt23_c
 diff build/.flt23_n build/.flt23_c >/dev/null && ok "浮点 自研后端 == C 后端" || bad "浮点 双链不一致"
 
+echo "[18] h.join() 方法式语法（脱糖为内置 join）"
+$NAT run tests/t24_join_method.ros >/dev/null 2>&1 && ok "native h.join() 方法式 join 正确" || bad "native h.join() 失败"
+$CBE run tests/t24_join_method.ros >/dev/null 2>&1 && ok "C h.join() 方法式 join 正确" || bad "C h.join() 失败"
+$NAT run tests/t24_join_method.ros 2>/dev/null | grep -v '^\[rosoto' > build/.jm24_n
+$CBE run tests/t24_join_method.ros 2>/dev/null | grep -v '^\[rosoto' > build/.jm24_c
+diff build/.jm24_n build/.jm24_c >/dev/null && ok "join 方法式 自研后端 == C 后端" || bad "join 方法式 双链不一致"
+
+echo "[19] chan.close()（v0.11）：排空/零值/fail-fast，双链一致"
+$NAT run tests/t25_chan_close.ros >/dev/null 2>&1 && ok "native chan close 排空/零值正确" || bad "native chan close 失败"
+$CBE run tests/t25_chan_close.ros >/dev/null 2>&1 && ok "C chan close 排空/零值正确" || bad "C chan close 失败"
+$NAT run tests/t25_chan_close.ros 2>/dev/null | grep -v '^\[rosoto' > build/.cc25_n
+$CBE run tests/t25_chan_close.ros 2>/dev/null | grep -v '^\[rosoto' > build/.cc25_c
+diff build/.cc25_n build/.cc25_c >/dev/null && ok "chan close 自研后端 == C 后端" || bad "chan close 双链不一致"
+$NAT build tests/chan_close_fail.ros -o build/nat_ccf >/dev/null 2>&1
+timeout 30 ./build/nat_ccf >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && ok "close 后 send fail-fast（退出码非 0）" || bad "close 后 send 未失败"
+$NAT build tests/chan_double_close.ros -o build/nat_cdc >/dev/null 2>&1
+timeout 30 ./build/nat_cdc >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && ok "重复 close fail-fast（退出码非 0）" || bad "重复 close 未失败"
+$CBE build tests/chan_close_fail.ros --cc >/dev/null 2>&1; mv build/chan_close_fail build/c_ccf 2>/dev/null
+timeout 30 ./build/c_ccf >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && ok "C 侧 close 后 send fail-fast" || bad "C 侧 close 后 send 未失败"
+$CBE build tests/chan_double_close.ros --cc >/dev/null 2>&1; mv build/chan_double_close build/c_cdc 2>/dev/null
+timeout 30 ./build/c_cdc >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && ok "C 侧重复 close fail-fast" || bad "C 侧重复 close 未失败"
+
+echo "[20] chan select（v0.11）：轮询/yield、声明序优先、全关闭返回 0"
+$NAT run tests/t26_select.ros >/dev/null 2>&1 && ok "native select 各场景正确" || bad "native select 失败"
+$CBE run tests/t26_select.ros >/dev/null 2>&1 && ok "C select 各场景正确" || bad "C select 失败"
+$NAT run tests/t26_select.ros 2>/dev/null | grep -v '^\[rosoto' > build/.sel26_n
+$CBE run tests/t26_select.ros 2>/dev/null | grep -v '^\[rosoto' > build/.sel26_c
+diff build/.sel26_n build/.sel26_c >/dev/null && ok "select 自研后端 == C 后端" || bad "select 双链不一致"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

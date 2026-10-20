@@ -286,7 +286,9 @@ def test_cross_verify():
              "tests/t12.ros", "examples/inventory.ros", "examples/collatz.ros",
              "examples/game_loop.ros", "tests/t19_option.ros",
              "tests/t20_result_generic.ros", "tests/t21_slice.ros",
-             "tests/t22_map.ros", "tests/t23_float.ros"]
+             "tests/t22_map.ros", "tests/t23_float.ros",
+             "tests/t24_join_method.ros", "tests/t25_chan_close.ros",
+             "tests/t26_select.ros"]
     # 注意：hello 的 cores() 是编译期常量（Windows=物理核，WSL=4），不参与逐字节比对。
     drive = ROOT[0].lower()
     wsl_root = f"/mnt/{drive}/" + ROOT[3:].replace("\\", "/")
@@ -304,6 +306,23 @@ def test_cross_verify():
             continue
         ok(f"{name} PE 与 Linux ELF 输出逐字节一致") if win[1] == nat.stdout \
             else bad(f"{name} 输出不一致\n    win={win[1][:120]!r}\n    elf={nat.stdout[:120]!r}")
+
+
+def test_chan_close_fail():
+    """close 后 send / 重复 close 必须 fail-fast（stderr + 非 0 退出码）。"""
+    for name, src, needle in (
+            ("chan_close_fail", "tests/chan_close_fail.ros", "send on closed channel"),
+            ("chan_double_close", "tests/chan_double_close.ros", "double close")):
+        out = os.path.join(ROOT, "build", f"win_{name}.exe")
+        build(os.path.join(ROOT, src), out)
+        r = run(out)
+        if r is None:
+            skip(f"{name}：非 Windows 平台")
+            continue
+        rc, _stdout, stderr = r
+        ok(f"{name} fail-fast（退出码非 0）") if rc != 0 else bad(f"{name} 未失败 rc={rc}")
+        ok(f"{name} 消息写入 stderr") if needle.encode() in stderr \
+            else bad(f"stderr={stderr[:120]!r}")
 
 
 def main():
@@ -342,12 +361,16 @@ def main():
     case_selfcheck("t10", "tests/t10.ros")
     case_output("spawn", "tests/t13_spawn.ros", ["6765", "81", "110", "spawn ok"])
     case_output("chan", "tests/t15_chan.ros", ["749500", "chan ok"])
+    case_selfcheck("chan_close", "tests/t25_chan_close.ros")
+    case_selfcheck("select", "tests/t26_select.ros")
+    test_chan_close_fail()
     case_selfcheck("result", "tests/t17_result.ros")
     case_selfcheck("option", "tests/t19_option.ros")
     case_selfcheck("result_generic", "tests/t20_result_generic.ros")
     case_selfcheck("slice", "tests/t21_slice.ros")
     case_selfcheck("map", "tests/t22_map.ros")
     case_selfcheck("float", "tests/t23_float.ros")
+    case_selfcheck("join_method", "tests/t24_join_method.ros")
 
     print("== [5] 单核降级（Rosoto.toml multicore=false） ==")
     test_single_core()

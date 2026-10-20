@@ -1,0 +1,57 @@
+// t26_select.ros：chan select（v0.11）
+// 覆盖：单臂就绪、双臂就绪声明序优先、阻塞等待迟到的生产者、
+//       全部关闭返回 0、关闭/未关闭混合、关闭臂的缓存数据仍可取
+module t26
+
+fn slow_producer(c: chan[int], v: int, spin: int) {
+    let mut i = 0
+    while i < spin {
+        i += 1
+    }
+    c.send(v)
+}
+
+fn main() {
+    // 1) 单臂就绪
+    let c1 = chan[int].open(4)
+    c1.send(11)
+    assert(select { c1.recv() } == 11, "single ready arm")
+
+    // 2) 双臂就绪：声明序优先（先声明的臂先被 poll）
+    let a = chan[int].open(4)
+    let b = chan[int].open(4)
+    a.send(1)
+    b.send(2)
+    assert(select { a.recv(), b.recv() } == 1, "declaration order priority")
+    assert(select { a.recv(), b.recv() } == 2, "second arm drained")
+
+    // 3) 阻塞等待迟到的生产者
+    let c3 = chan[int].open(4)
+    let c4 = chan[int].open(4)
+    let h = spawn slow_producer(c4, 77, 2000000)
+    assert(select { c3.recv(), c4.recv() } == 77, "blocking select waits")
+    h.join()
+
+    // 4) 全部关闭且排空 -> 0
+    let d1 = chan[int].open(2)
+    let d2 = chan[int].open(2)
+    d1.close()
+    d2.close()
+    assert(select { d1.recv(), d2.recv() } == 0, "all closed -> zero")
+
+    // 5) 关闭/未关闭混合：关闭的空臂被跳过，未关闭臂的迟到数据可收到
+    let e1 = chan[int].open(2)
+    let e2 = chan[int].open(2)
+    e1.close()
+    let h2 = spawn slow_producer(e2, 88, 1000000)
+    assert(select { e1.recv(), e2.recv() } == 88, "closed arm skipped")
+    h2.join()
+
+    // 6) 关闭臂的缓存数据仍可取到
+    let f1 = chan[int].open(2)
+    f1.send(55)
+    f1.close()
+    assert(select { f1.recv() } == 55, "buffered in closed arm")
+
+    print("select ok")
+}

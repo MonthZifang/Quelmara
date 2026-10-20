@@ -79,7 +79,7 @@ def load_config(src_path):
 KEYWORDS = {"fn", "let", "mut", "if", "else", "while", "for", "parfor",
             "return", "module", "import", "true", "false", "test",
             "break", "continue", "struct", "enum", "match",
-            "arena", "spawn", "chan", "option", "result", "map"}
+            "arena", "spawn", "chan", "option", "result", "map", "select"}
 
 TWO_CHAR = {"->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "..", "=>"}
 ONE_CHAR = "(){}[],:.=<>+-*/%!?"
@@ -660,9 +660,20 @@ class Parser:
         if self.at("spawn"):
             # spawn f(args) -> 线程句柄（int64）；语义见 SPEC §4
             t = self.next()
-            target = self.parse_postfix()
+            target = self.parse_primary()
             if not (isinstance(target, tuple) and target[0] == "call"):
                 raise SyntaxError(f"line {t.line}: spawn 后面必须是函数调用，如 spawn work(x)")
+            # `spawn f(x).join()`：join 直接作用于 spawn 表达式（脱糖为 join(spawn f(x))）
+            if self.at("SYM", ".") and self.peek(1).kind == "NAME" \
+                    and self.peek(1).val == "join" \
+                    and self.peek(2).kind == "SYM" and self.peek(2).val == "(":
+                self.next()
+                self.next()
+                self.next()
+                jargs = self.parse_args()
+                if jargs:
+                    raise SyntaxError(f"line {t.line}: join() 不接受实参")
+                return ("call", ["join"], [("spawn", target)])
             return ("spawn", target)
         return self.parse_postfix()
 
@@ -682,7 +693,12 @@ class Parser:
                     else:
                         if any(a[0] == "namedarg" for a in args):
                             raise SyntaxError(f"line {line}: 普通函数/方法调用不支持命名实参")
-                        e = ("method", e, name, args)
+                        # `h.join()` 方法式语法：脱糖为内置 join(h)，与函数式完全等价
+                        # （用户自定义 join 函数优先，走统一 call 路径校验）
+                        if name == "join":
+                            e = ("call", ["join"], [e] + list(args))
+                        else:
+                            e = ("method", e, name, args)
                 else:
                     # 成员路径段（如 net.Action.Keep 的尾段）
                     if e[0] == "name":
@@ -719,6 +735,20 @@ class Parser:
         t = self.peek()
         if t.kind == "match":
             return self.parse_match()
+        if t.kind == "select":
+            # select { c1.recv(), c2.recv() } -> 首个就绪臂的值（v0.11）
+            # 声明序优先；轮询 + yield 等待；全部关闭且排空 -> 0
+            self.next()
+            self.eat("SYM", "{")
+            arms = []
+            while not self.at("SYM", "}"):
+                arms.append(self.parse_expr())
+                if self.at("SYM", ","):
+                    self.next()
+            self.eat("SYM", "}")
+            if not arms:
+                raise SyntaxError(f"line {t.line}: select 至少需要一个 recv 臂")
+            return ("select", arms)
         if t.kind == "chan":
             # chan[T].open(cap) -> 有界通道句柄（SPEC §4）
             self.next()
@@ -1198,6 +1228,12 @@ class Infer:
             return self.fn_ret(name)
         if k == "spawn":
             return "int64_t"
+        if k == "select":
+            for arm in e[1]:
+                if not (isinstance(arm, tuple) and arm[0] == "method"
+                        and arm[2] == "recv" and not arm[3]):
+                    raise SyntaxError("select 臂必须是 ch.recv() 形式")
+            return "int64_t"
         if k == "chanopen":
             return "int64_t"
         if k == "mapnew":
@@ -1234,6 +1270,8 @@ class Infer:
                 return "int64_t"
             if m in ("send", "recv"):
                 return "int64_t"
+            if m == "close":
+                return "void"
             if m == "to_str":
                 return "const char *"
             if m == "write":
@@ -1312,6 +1350,7 @@ CORE_RUNTIME = r"""
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <unistd.h>
 
 static int64_t rosoto_cores(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1431,13 +1470,20 @@ static int64_t rosoto_join(int64_t h) {
     return r;
 }
 
-/* 有界 MPMC 通道：固定容量、阻塞式 send/recv（SPEC §4） */
+/* 有界 MPMC 通道：固定容量、阻塞式 send/recv（SPEC §4）。
+   closed：close() 后 send fail-fast；recv 排空后返回 0（零值）。 */
 typedef struct {
     pthread_mutex_t m;
     pthread_cond_t not_empty, not_full;
-    int64_t cap, head, tail, count;
+    int64_t cap, head, tail, count, closed;
     int64_t *buf;
 } RosotoChan;
+
+static void rosoto_chan_fail(const char *what) {
+    fprintf(stderr, "rosoto: %s on closed channel (fail-fast)\n", what);
+    fflush(stdout);
+    exit(1);
+}
 
 static int64_t rosoto_chan_open(int64_t cap) {
     if (cap <= 0) cap = 1;
@@ -1445,7 +1491,7 @@ static int64_t rosoto_chan_open(int64_t cap) {
     pthread_mutex_init(&c->m, NULL);
     pthread_cond_init(&c->not_empty, NULL);
     pthread_cond_init(&c->not_full, NULL);
-    c->cap = cap; c->head = 0; c->tail = 0; c->count = 0;
+    c->cap = cap; c->head = 0; c->tail = 0; c->count = 0; c->closed = 0;
     c->buf = (int64_t *)malloc((size_t)cap * sizeof(int64_t));
     return (int64_t)(intptr_t)c;
 }
@@ -1453,7 +1499,11 @@ static int64_t rosoto_chan_open(int64_t cap) {
 static int64_t rosoto_chan_send(int64_t h, int64_t v) {
     RosotoChan *c = (RosotoChan *)(intptr_t)h;
     pthread_mutex_lock(&c->m);
-    while (c->count == c->cap) pthread_cond_wait(&c->not_full, &c->m);
+    if (c->closed) { pthread_mutex_unlock(&c->m); rosoto_chan_fail("send"); }
+    while (c->count == c->cap) {
+        if (c->closed) { pthread_mutex_unlock(&c->m); rosoto_chan_fail("send"); }
+        pthread_cond_wait(&c->not_full, &c->m);
+    }
     c->buf[c->tail] = v;
     c->tail = (c->tail + 1) % c->cap;
     c->count++;
@@ -1465,13 +1515,58 @@ static int64_t rosoto_chan_send(int64_t h, int64_t v) {
 static int64_t rosoto_chan_recv(int64_t h) {
     RosotoChan *c = (RosotoChan *)(intptr_t)h;
     pthread_mutex_lock(&c->m);
-    while (c->count == 0) pthread_cond_wait(&c->not_empty, &c->m);
+    /* 关闭后排空再返回 0；未关闭且空则等待 */
+    while (c->count == 0 && !c->closed) pthread_cond_wait(&c->not_empty, &c->m);
+    if (c->count == 0) { pthread_mutex_unlock(&c->m); return 0; }
     int64_t v = c->buf[c->head];
     c->head = (c->head + 1) % c->cap;
     c->count--;
     pthread_cond_signal(&c->not_full);
     pthread_mutex_unlock(&c->m);
     return v;
+}
+
+/* close()：幂等校验（重复关闭 fail-fast）；广播唤醒全部等待方 */
+static int64_t rosoto_chan_close(int64_t h) {
+    RosotoChan *c = (RosotoChan *)(intptr_t)h;
+    pthread_mutex_lock(&c->m);
+    if (c->closed) {
+        pthread_mutex_unlock(&c->m);
+        fprintf(stderr, "rosoto: chan double close (fail-fast)\n");
+        fflush(stdout);
+        exit(1);
+    }
+    c->closed = 1;
+    pthread_cond_broadcast(&c->not_empty);
+    pthread_cond_broadcast(&c->not_full);
+    pthread_mutex_unlock(&c->m);
+    return 0;
+}
+
+/* try_recv（v0.11 select 用）：非阻塞取一个；*ok=1 取到、0 空/已关闭排空 */
+static int64_t rosoto_chan_try_recv(int64_t h, int64_t *ok) {
+    RosotoChan *c = (RosotoChan *)(intptr_t)h;
+    pthread_mutex_lock(&c->m);
+    if (c->count == 0) {
+        pthread_mutex_unlock(&c->m);
+        *ok = 0;
+        return 0;
+    }
+    int64_t v = c->buf[c->head];
+    c->head = (c->head + 1) % c->cap;
+    c->count--;
+    pthread_cond_signal(&c->not_full);
+    pthread_mutex_unlock(&c->m);
+    *ok = 1;
+    return v;
+}
+
+static int64_t rosoto_chan_closed(int64_t h) {
+    RosotoChan *c = (RosotoChan *)(intptr_t)h;
+    pthread_mutex_lock(&c->m);
+    int64_t cl = c->closed;
+    pthread_mutex_unlock(&c->m);
+    return cl;
 }
 
 /* map[K]V：开放寻址 + 线性探测哈希表（SPEC 附录 v0.10）。
@@ -1982,6 +2077,29 @@ class Codegen:
             return f"{name}({args})", self.infer.fn_ret(name)
         if k == "spawn":
             return self.gen_spawn(e[1], env)
+        if k == "select":
+            # select { c1.recv(), c2.recv() }（v0.11）：轮询 + usleep 等待，
+            # 声明序优先；全部关闭且排空 -> 0。try_recv 非阻塞，ok 出参报捷。
+            chans = []
+            for arm in e[1]:
+                if not (arm[0] == "method" and arm[1][0] == "name"
+                        and arm[2] == "recv" and not arm[3]):
+                    raise SyntaxError("select 臂必须是 chan 变量上的 ch.recv()")
+                if not env.get("__chan__" + arm[1][1]):
+                    raise SyntaxError("select 臂只能用于 chan 通道")
+                chans.append(arm[1][1])
+            self.tmp_id += 1
+            n = self.tmp_id
+            tries = []
+            for i, ch in enumerate(chans):
+                tries.append(
+                    f"{{ int64_t _so{n}_{i}; int64_t _sv{n}_{i} = "
+                    f"rosoto_chan_try_recv({ch}, &_so{n}_{i}); "
+                    f"if (_so{n}_{i}) {{ _sr{n} = _sv{n}_{i}; break; }} }}")
+            closed = " && ".join(f"rosoto_chan_closed({ch})" for ch in chans)
+            return ("({ int64_t _sr%d = 0; for (;;) { %s "
+                    "if (%s) { _sr%d = 0; break; } usleep(100); } _sr%d; })"
+                    % (n, " ".join(tries), closed, n, n)), "int64_t"
         if k == "index":
             ocode, otype = self.gen_expr(e[1], env)
             if is_arr_env(otype):
@@ -2038,6 +2156,12 @@ class Codegen:
                     acode, _ = self.gen_expr(args[0], env)
                     return f"rosoto_chan_send({ocode}, {acode})", "int64_t"
                 return f"rosoto_chan_recv({ocode})", "int64_t"
+            if m == "close":
+                if not (obj[0] == "name" and env.get("__chan__" + obj[1])):
+                    raise SyntaxError(".close 只能用于 chan 通道")
+                if args:
+                    raise SyntaxError("ch.close() 不接受实参")
+                return f"rosoto_chan_close({ocode})", "void"
             if m == "to_str":
                 if otype == "const char *":
                     return ocode, "const char *"
@@ -2789,6 +2913,9 @@ def walk_expr(e, declared, assigned, referenced):
         walk_expr(e[1], declared, assigned, referenced)
         for a in e[3]:
             walk_expr(a, declared, assigned, referenced)
+    elif k == "select":
+        for arm in e[1]:
+            walk_expr(arm, declared, assigned, referenced)
     elif k == "binop":
         walk_expr(e[2], declared, assigned, referenced)
         walk_expr(e[3], declared, assigned, referenced)

@@ -1,0 +1,58 @@
+// t25_chan_close.ros：chan.close()（v0.11）
+// 覆盖：close 后排空 recv、空通道 close 后 recv 返回 0（零值）、
+//       close 不影响已缓存数据、普通 send/recv 不受影响、单核降级一致
+module t25
+
+fn producer(c: chan[int], n: int) {
+    let mut i = 0
+    while i < n {
+        c.send(i * 10)
+        i += 1
+    }
+    c.close()
+}
+
+fn main() {
+    // 1) 先缓存后关闭：recv 排空剩余数据，再收到 0（零值）
+    let c1 = chan[int].open(8)
+    c1.send(1)
+    c1.send(2)
+    c1.send(3)
+    c1.close()
+    assert(c1.recv() == 1, "drain 1")
+    assert(c1.recv() == 2, "drain 2")
+    assert(c1.recv() == 3, "drain 3")
+    assert(c1.recv() == 0, "closed drained -> zero")
+    assert(c1.recv() == 0, "closed drained -> zero again")
+
+    // 2) 空通道直接关闭：recv 立即返回 0
+    let c2 = chan[int].open(4)
+    c2.close()
+    assert(c2.recv() == 0, "closed empty -> zero")
+
+    // 3) close 后通道仍可继续 recv 已缓存数据（关闭只阻止新 send）
+    let c3 = chan[int].open(2)
+    c3.send(7)
+    c3.close()
+    assert(c3.recv() == 7, "buffered survives close")
+
+    // 4) 未关闭通道行为不变
+    let c4 = chan[int].open(2)
+    c4.send(42)
+    assert(c4.recv() == 42, "open chan unaffected")
+
+    // 5) 跨线程：producer 发完 3 个后 close，consumer 排空 + 收零
+    let c5 = chan[int].open(4)
+    let h = spawn producer(c5, 3)
+    let mut got = 0
+    let mut i = 0
+    while i < 3 {
+        got += c5.recv()
+        i += 1
+    }
+    assert(c5.recv() == 0, "cross-thread close -> zero")
+    h.join()
+    assert(got == 30, "cross-thread drained sum")
+
+    print("chan close ok")
+}

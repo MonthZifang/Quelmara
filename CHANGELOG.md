@@ -5,6 +5,29 @@
 
 ---
 
+## v0.11 — 2026-10-20 任务/通道语法补全（工作区，待提交）
+
+### 新特性
+
+- **`h.join()` 方法式语法**：与函数式 `join(h)` 完全等价（解析期脱糖，
+  用户自定义 join 函数优先）；支持 `spawn f(x).join()` 直连式（t24）。
+- **`chan.close()`**（t25）：控制块新增 `closed` 字（自研后端布局扩为 7 字）。
+  - close 后 `send` fail-fast（stderr + 退出码 1）；重复 close fail-fast；
+  - `recv` 排空缓存数据后返回 0（零值）；关闭只阻止新 send，不动已缓存数据；
+  - C 端广播唤醒全部等待方，自研端 spin+yield 循环重检。
+- **`chan select`**（t26）：`select { c1.recv(), c2.recv() }` 表达式，
+  返回首个就绪臂的值。轮询 + yield（C 端 usleep 100µs）；声明序优先；
+  全部关闭且排空返回 0；关闭的空臂被跳过。非阻塞取数走
+  `try_recv(h, &ok)` 出参协议（自研后端帧槽传址）。
+
+### 验证
+
+- Windows PE：59 项全绿（t24/t25/t26 + 2 个 fail-fast 退出码用例）；
+- native runner 新增 [18] join 方法式 / [19] chan close / [20] select 段
+  （native + C 双跑 + 双链 diff，需 Linux 环境执行）。
+
+---
+
 ## v0.10 — 2026-10-20 map[K]V + 浮点运算（工作区，待提交）
 
 ### 新特性

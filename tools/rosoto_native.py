@@ -964,6 +964,49 @@ class Lower:
                 return self._mark_bool(fn, d)
         if k == "binop":
             return self.lower_binop(e, fn, env)
+        if k == "select":
+            # select { c1.recv(), ... }（v0.11）：轮询 + yield，
+            # 声明序优先；全部关闭且排空 -> 0。try_recv 的 ok 走帧槽出参。
+            if not e[1]:
+                raise SyntaxError("select 至少需要一个 recv 臂")
+            self.uses_chan = True
+            slot = fn.new_struct_slot(1)
+            okp = fn.new_v()
+            fn.emit("frameaddr", okp, slot)
+            result = fn.new_v()
+            fn.emit("mov", result, ("imm", 0))
+            l_loop = fn.label("selloop")
+            l_done = fn.label("seldone")
+            l_wait = fn.label("selwait")
+            fn.emit("label", l_loop)
+            objs = []
+            for arm in e[1]:
+                if not (arm[0] == "method" and arm[2] == "recv" and not arm[3]):
+                    raise SyntaxError("select 臂必须是 ch.recv() 形式")
+                aobj = self.eval(arm[1], fn, env)
+                if not self._is_chan(fn, aobj):
+                    raise SyntaxError("select 臂只能用于 chan 通道")
+                objs.append(aobj)
+                v = fn.new_v()
+                fn.emit("call", v, "__chan_try_recv", [aobj, okp])
+                ok = fn.new_v()
+                fn.emit("load", ok, okp, ("imm", 0))
+                l_next = fn.label("selnext")
+                fn.emit("jz", ok, l_next)
+                fn.emit("mov", result, v)
+                fn.emit("jmp", l_done)
+                fn.emit("label", l_next)
+            # 全部未就绪：全部已关闭 -> 0；否则 yield 后重试
+            for aobj in objs:
+                cl = fn.new_v()
+                fn.emit("load", cl, aobj, ("imm", 6))
+                fn.emit("jz", cl, l_wait)
+            fn.emit("jmp", l_done)
+            fn.emit("label", l_wait)
+            self.emit_yield(fn)
+            fn.emit("jmp", l_loop)
+            fn.emit("label", l_done)
+            return result
         if k == "method":
             obj = self.eval(e[1], fn, env)
             mp = self._map_of(fn, obj)
@@ -980,6 +1023,13 @@ class Lower:
                     fn.emit("call", d, "__chan_send", [obj, v])
                 else:
                     fn.emit("call", d, "__chan_recv", [obj])
+                return d
+            if e[2] == "close" and self._is_chan(fn, obj):
+                if e[3]:
+                    raise SyntaxError("ch.close() 不接受实参")
+                self.uses_chan = True
+                d = fn.new_v()
+                fn.emit("call", d, "__chan_close", [obj])
                 return d
             if e[2] == "to_str":
                 if self._is_str(fn, obj):
@@ -2327,10 +2377,24 @@ class Lower:
             self.out.append(f)
 
         # ---- chan[T]（v0.5）：有界 MPMC 环形队列 + 自旋锁 + yield ----
-        # 布局（6 个 8 字节字）：[cap, head, tail, count, lock, buf]
+        # 布局（7 个 8 字节字）：[cap, head, tail, count, lock, buf, closed]
         # lock 用 xchg 原子抢锁；忙等时 yield，不把整核跑满。
+        # closed（v0.11）：close() 置 1；send 见到即 fail-fast，
+        # recv 排空后返回 0（零值）。与 C 端 RosotoChan.closed 行为一致。
         # 只在 x86_64 发射（AArch64 需要 ldaxr/stxr 版本，后续补）。
         if self.uses_chan and self.arch == "x86_64":
+            msg_cs = "rosoto: send on closed channel (fail-fast)\n"
+            gid_cs = self.intern_str(msg_cs)
+            msg_cd = "rosoto: chan double close (fail-fast)\n"
+            gid_cd = self.intern_str(msg_cd)
+
+            def chan_fail(f, gid, msg):
+                """fail-fast：stderr 写消息 + exit(1)（锁已由调用方释放）"""
+                p = f.new_v()
+                f.emit("movaddr", p, gid)
+                self.emit_write(f, 2, p, ("imm", len(msg.encode("utf-8"))))
+                self.emit_exit(f, 1)
+
             f = Fn("__chan_open")
             cap = f.new_v()
             f.emit("args", [cap])
@@ -2339,13 +2403,13 @@ class Lower:
             f.emit("mov", cap, ("imm", 1))
             f.emit("label", l_ok)
             blk = f.new_v()
-            f.emit("call", blk, "__alloc", [("imm", 48)])
+            f.emit("call", blk, "__alloc", [("imm", 56)])
             sz = f.new_v()
             f.emit("bin", "mul", sz, cap, ("imm", 8))
             buf = f.new_v()
             f.emit("call", buf, "__alloc", [sz])
             for i, val in enumerate([cap, ("imm", 0), ("imm", 0),
-                                     ("imm", 0), ("imm", 0), buf]):
+                                     ("imm", 0), ("imm", 0), buf, ("imm", 0)]):
                 f.emit("store", blk, ("imm", i), val)
             f.emit("ret", blk)
             self.out.append(f)
@@ -2365,6 +2429,14 @@ class Lower:
             self.emit_yield(f)
             f.emit("jmp", l_retry)
             f.emit("label", l_locked)
+            # closed 检查（v0.11）：初始进入与满等待重试都经由此处
+            cl = f.new_v()
+            f.emit("load", cl, h, ("imm", 6))
+            l_go = f.label("csgo")
+            f.emit("jz", cl, l_go)
+            f.emit("store", h, ("imm", 4), ("imm", 0))
+            chan_fail(f, gid_cs, msg_cs)
+            f.emit("label", l_go)
             cnt = f.new_v()
             f.emit("load", cnt, h, ("imm", 3))
             cap2 = f.new_v()
@@ -2409,6 +2481,14 @@ class Lower:
             cnt = f.new_v()
             f.emit("load", cnt, h, ("imm", 3))
             f.emit("jnz", cnt, l_data)
+            # 空：closed -> 返回 0；否则继续等
+            cl = f.new_v()
+            f.emit("load", cl, h, ("imm", 6))
+            l_wait = f.label("crwait")
+            f.emit("jz", cl, l_wait)
+            f.emit("store", h, ("imm", 4), ("imm", 0))
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_wait)
             f.emit("store", h, ("imm", 4), ("imm", 0))
             self.emit_yield(f)
             f.emit("jmp", l_retry)
@@ -2431,6 +2511,77 @@ class Lower:
             f.emit("bin", "sub", c2, cnt, ("imm", 1))
             f.emit("store", h, ("imm", 3), c2)
             f.emit("store", h, ("imm", 4), ("imm", 0))
+            f.emit("ret", v)
+            self.out.append(f)
+
+            # __chan_close(h) -> 0（v0.11）：幂等校验 + 置 closed + 放锁
+            f = Fn("__chan_close")
+            h = f.new_v()
+            f.emit("args", [h])
+            l_retry, l_locked = f.label("clretry"), f.label("cllock")
+            f.emit("label", l_retry)
+            addr = f.new_v()
+            f.emit("bin", "add", addr, h, ("imm", 32))
+            old = f.new_v()
+            f.emit("xchg", old, addr, ("imm", 1))
+            f.emit("jz", old, l_locked)
+            self.emit_yield(f)
+            f.emit("jmp", l_retry)
+            f.emit("label", l_locked)
+            cl = f.new_v()
+            f.emit("load", cl, h, ("imm", 6))
+            l_dbl = f.label("cldbl")
+            f.emit("jz", cl, l_dbl)
+            f.emit("store", h, ("imm", 4), ("imm", 0))
+            chan_fail(f, gid_cd, msg_cd)
+            f.emit("label", l_dbl)
+            f.emit("store", h, ("imm", 6), ("imm", 1))
+            f.emit("store", h, ("imm", 4), ("imm", 0))
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            # __chan_try_recv(h, okptr) -> v（v0.11 select 用）：
+            # 非阻塞取一个；[okptr] = 1 取到 / 0 空。锁协议同 recv。
+            f = Fn("__chan_try_recv")
+            h, okp = f.new_v(), f.new_v()
+            f.emit("args", [h, okp])
+            l_retry, l_locked = f.label("ctretry"), f.label("ctlock")
+            l_data, l_nowrap = f.label("ctdata"), f.label("ctnowrap")
+            f.emit("label", l_retry)
+            addr = f.new_v()
+            f.emit("bin", "add", addr, h, ("imm", 32))
+            old = f.new_v()
+            f.emit("xchg", old, addr, ("imm", 1))
+            f.emit("jz", old, l_locked)
+            self.emit_yield(f)
+            f.emit("jmp", l_retry)
+            f.emit("label", l_locked)
+            cnt = f.new_v()
+            f.emit("load", cnt, h, ("imm", 3))
+            f.emit("jnz", cnt, l_data)
+            f.emit("store", h, ("imm", 4), ("imm", 0))
+            f.emit("store", okp, ("imm", 0), ("imm", 0))
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_data)
+            head = f.new_v()
+            f.emit("load", head, h, ("imm", 1))
+            buf2 = f.new_v()
+            f.emit("load", buf2, h, ("imm", 5))
+            v = f.new_v()
+            f.emit("load", v, buf2, head)
+            h2 = f.new_v()
+            f.emit("bin", "add", h2, head, ("imm", 1))
+            cap2 = f.new_v()
+            f.emit("load", cap2, h, ("imm", 0))
+            f.emit("jcc", "ne", h2, cap2, l_nowrap)
+            f.emit("mov", h2, ("imm", 0))
+            f.emit("label", l_nowrap)
+            f.emit("store", h, ("imm", 1), h2)
+            c2 = f.new_v()
+            f.emit("bin", "sub", c2, cnt, ("imm", 1))
+            f.emit("store", h, ("imm", 3), c2)
+            f.emit("store", h, ("imm", 4), ("imm", 0))
+            f.emit("store", okp, ("imm", 0), ("imm", 1))
             f.emit("ret", v)
             self.out.append(f)
 
