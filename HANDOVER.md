@@ -1,13 +1,21 @@
 # Quelmara 交接文档（HANDOVER）
 
-> 工作区状态（2026-10-20 深夜）：**v0.9 / v0.10 已提交 `b42e0a4`，v0.11 已提交 `ade98a4`，
-> v0.12 为当前工作区内容**（字符串 + @extern 收口）。
+> 工作区状态（2026-10-20 末）：**v1.0 = 改名 Quelmara + 自举前置能力 + stage-1 词法器**。
+> 提交线：`b42e0a4` v0.9/v0.10 → `ade98a4` v0.11 → `ffadac6`/`ca3cc93` v0.12 → v1.0（见 §7）。
+> **工具链分层**：`tools/stage0/` 是 Python 引导层（待退场），`bootstrap/` 是 Quelmara 自举层，
+> `tests/`、`tools/dev/` 允许长期用 Python/Node。详见 `docs/SELFHOST.md`。
 > v0.9：`opt_modsum` 模和折叠 + 范围分析扩展 + `mul_const` 回退路径错编修复（loop_sum 11–13ms，见 CHANGELOG）。
 > v0.10：`map[K]V` 开放寻址哈希表（t22）+ 浮点实际运算（t23，修复 `__f64_to_str` 科学计数法死循环）。
 > v0.11：`h.join()` 方法式 + `chan.close()` + `select`（t24/t25/t26）。
-> 本机（Windows）验证：PE 链 [1]–[6] **74 项全绿**；[7] 交叉验证与 native/C 链需 Linux/WSL 环境
+> 本机（Windows）验证：PE 链 **86 项全绿**；词法对拍 **66/66 全等**；[7] 交叉验证与 native/C 链需 Linux/WSL 环境
 > （本机无 gcc/clang，C 后端只能验证「生成」不能验证「执行」）。
-> 代码总量：`tools/` 14.4k 行 Python + `tests/` 1.6k 行
+> 代码总量：`tools/stage0/` 15.1k 行 Python（引导层）+ `bootstrap/` 268 行 Quelmara（自举层）+ `tests/` 1.9k 行
+>
+> ### v1.0 一句话
+> 语言正式更名 **Quelmara**，源码扩展名 `.qma`、产物 `.qex`/`.qel`；Python 编译器降级为
+> stage-0 引导层。补上自举必需的 `args()` / `read_text` / `substr` / `chr` / 堆对齐，
+> 然后用 Quelmara 写出 **stage-1 流式词法器**，与 Python 词法器在全部 66 个源文件上逐行全等。
+> 自举过程中抓出两个存在已久的核心 bug：`||` 恒为真、`let` 是别名不是拷贝。
 >
 > ### v0.12 一句话
 > 补上字符串最基础的三个能力：`len(s)` 字节长度、`s[i]` 字节下标（无符号 0..255，

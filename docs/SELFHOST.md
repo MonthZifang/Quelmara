@@ -15,7 +15,7 @@
 
 | 组件 | stage-0 实现 | stage-1 目标 | 对拍口径 | 状态 |
 |---|---|---|---|---|
-| 词法 | `qlm.py::tokenize` | `bootstrap/lexer/qlm_lex.qma` | `KIND\|text\|line` 逐行 | ✅ 本轮 |
+| 词法 | `qlm.py::tokenize` | `bootstrap/lexer/qlm_lex.qma` | `KIND\|RAW\|LINE` 逐行（66/66 全等） | ✅ v1.0 |
 | 语法 | `qlm.py::Parser` | `bootstrap/parser/` | AST dump 规范化 | ⬜ 后续 |
 | 类型推断 | `qlm.py` 推断层 | `bootstrap/typeck/` | 诊断文本 + IR 类型 | ⬜ 后续 |
 | AST→IR | `qlm_native.py::Lower` | `bootstrap/ir/` | `.qir` 规范化 diff | ⬜ 后续 |

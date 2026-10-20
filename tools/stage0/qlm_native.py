@@ -1515,16 +1515,23 @@ class Lower:
         return rec
 
     def lower_logic(self, op, a, b, fn, env):
-        """短路求值 -> 0/1"""
+        """短路求值 -> 0/1
+
+        注意两条分支的「落空值」不同：
+          a && b：两个操作数都非零 才是 true  -> 两次 jz 都没跳 = 真
+          a || b：两个操作数都为零   才是 false -> 两次 jnz 都没跳 = 假
+        早期这里共用了一段 `mov d, 1` 尾巴，导致 || 恒为真（0 || 0 == true）。
+        """
         d = fn.new_v()
         l_true, l_false, l_end = fn.label("t"), fn.label("f"), fn.label("e")
         if op == "&&":
             fn.emit("jz", a, l_false)
             fn.emit("jz", b, l_false)
+            fn.emit("mov", d, ("imm", 1))
         else:
             fn.emit("jnz", a, l_true)
             fn.emit("jnz", b, l_true)
-        fn.emit("mov", d, ("imm", 1))
+            fn.emit("mov", d, ("imm", 0))
         fn.emit("jmp", l_end)
         fn.emit("label", l_true)
         fn.emit("mov", d, ("imm", 1))
@@ -1842,15 +1849,24 @@ class Lower:
                 return
             is_str = self._is_str(fn, spec)
             is_bool = s[3][0] == "bool" or (isinstance(spec, int) and spec in getattr(fn, "boolv", set()))
-            if isinstance(spec, tuple) and spec[0] in ("imm", "ga"):
-                d = fn.new_v()
-                fn.emit("mov", d, spec)
-                spec = d
+            # 标量 let 必须【拷贝到新 vreg】：早期直接把 env[name] 指向同一个 vreg，
+            # 于是 `let mut j = i` 之后 `j += 1` 会连带改掉 i（值语义被破坏）。
+            d = fn.new_v()
+            fn.emit("mov", d, spec)
+            # 拷贝出来的新 vreg 必须继承所有类型标签，否则 chan.recv()/map.get()
+            # 会因为"这个 vreg 不再是通道/表"而报错。
             if is_str:
-                self._mark_str(fn, spec)
+                self._mark_str(fn, d)
             if is_bool:
-                self._mark_bool(fn, spec)
-            env[s[2]] = spec
+                self._mark_bool(fn, d)
+            if self._is_chan(fn, spec):
+                self._mark_chan(fn, d)
+            mp = self._map_of(fn, spec)
+            if mp is not None:
+                self._mark_map(fn, d, mp[0], mp[1])
+            if self._float_of(fn, spec):
+                self._mark_float(fn, d, self._float_of(fn, spec))
+            env[s[2]] = d
             return
         if k == "assign":
             if s[1] not in env:

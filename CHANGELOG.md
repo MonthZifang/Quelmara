@@ -5,6 +5,56 @@
 
 ---
 
+## v1.0 — 2026-10-20 Quelmara 改名 + 自举前置能力 + stage-1 词法器
+
+### 改名与工具链分层
+
+- 语言/产品 Rosoto → **Quelmara**；内部符号 `qlm_*` / `Qlm*` / `QLM_*`。
+- Python 编译器整体下沉到 **`tools/stage0/`**（引导层，待退场）；自举源码放 `bootstrap/`。
+- 源码扩展名 `.ros` → **`.qma`**（硬切：`.ros` 直接退出码 2 并给出 `git mv` 命令）；
+  产物扩展名按 target 定：`win → .qex`，`native/arm64 → .qel`，`c → .c`。
+- 配置 `Rosoto.toml` → `Quelmara.toml`（检测到旧配置报错提示改名，不静默回退默认值）。
+- 新增 `docs/EXTENSIONS.md`（扩展名规范）、`docs/MIGRATION_rosoto_to_quelmara.md`、
+  `docs/SELFHOST.md`（组件退场表）；`tools/dev/check_names.py` 常驻门禁。
+
+### 新特性（自举前置能力）
+
+- **`__alloc` 8 字节对齐**：堆上聚合按字宽落位（a64 上非对齐访问会直接崩）。
+- **`args() -> []str` / `arg(i)`**：不含程序名。
+  Linux/AArch64 由 `_start` 从内核栈取 argc/argv（零拷贝）；
+  Windows 走 `GetCommandLineA` + 两遍扫描拆分（引号分组、去引号），只用 kernel32。
+- **`read_text(path) -> str`**：整文件读入（Windows `CreateFileA/ReadFile`，Linux `openat/read`），失败 fail-fast。
+- **`substr(s, lo, n)` / `chr(byte)`**：子串与单字节串，越界 fail-fast。
+- **切片元素标签**：`[]str` 的下标结果标记为 str（否则 `print(a[i])` 打成指针），
+  且 `let` 拷贝时标签随值传播。
+
+### 修复（都是自举词法器跑起来才暴露的）
+
+- **`||` 恒为真**：`lower_logic` 里 `&&` 与 `||` 共用了一段「落空即 true」的尾巴，
+  导致 `0 || 0 == true`。两条短路分支的落空值现在分开处理。
+- **`let` 是别名而不是拷贝**：`let mut j = i` 直接把 `env[j]` 指向 `i` 的同一个 vreg，
+  改 `j` 会连带改 `i`（值语义被破坏）。现在标量一律拷贝到新 vreg，
+  并传播 str/bool/chan/map/float 全部类型标签。
+- **`bin sub dst, imm, dst` 恒为 0**（v0.12 发现）：取反改用专用 `neg`。
+- **`@extern("C")` 在自研后端裸崩**（v0.12）：改为入口显式拒绝。
+
+### 自举里程碑
+
+- **`bootstrap/lexer/qlm_lex.qma`（268 行 Quelmara）**：流式词法器，
+  不依赖可变长数组/位运算/map 遍历。
+- **对拍 66/66 全等**：`tests/lexdiff.py` 用协议 `KIND|RAW|LINE` 比对
+  全部 `.qma`（含词法器自己的源码）与 Python 词法器，逐行一致。
+- `quelmara lex`：默认优先用 stage-1 自举词法器，`--stage0` 强制 Python，输出带实现标签。
+- `tools/dev/selfhost_status.py`：组件自举进度（当前 1/9，词法已就位）。
+
+### 验证
+
+- Windows PE：**86 项全绿**（v0.12 的 74 + args 4 + io 7 + logic 1）。
+- AArch64：模拟器 `t1 => 1`、t27/t28 与 x86 全等。
+- 待 Linux 环境验证：`run_tests.sh`（C99 链）、`run_native_tests.sh`（含 C 双跑）。
+
+---
+
 ## v0.12 — 2026-10-20 字符串可用性 + @extern 收口
 
 ### 新特性

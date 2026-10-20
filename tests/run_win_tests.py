@@ -442,6 +442,9 @@ def main():
         ok("回文判断（hello 取前 5 => 非回文）") if lines[5:6] == ["0"] else bad(f"pal {lines[5:6]!r}")
         ok("io 自校验通过（assert）") if rc == 0 else bad(f"io rc={rc} stderr={stderr[-160:]!r}")
 
+    print("== [3f] 逻辑运算与 let 值语义（v1.0 回归） ==")
+    case_selfcheck("logic", "tests/t31_logic.qma")
+
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])
     case_selfcheck("prime_parallel", "examples/prime_parallel.qma")

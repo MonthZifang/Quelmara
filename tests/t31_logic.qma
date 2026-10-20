@@ -1,0 +1,56 @@
+// t31_logic.qma：逻辑运算与 let 值语义回归（v1.0）
+// 这两个 bug 都是自举词法器第一次运行时暴露出来的：
+//   1) `||` 恒为真（0 || 0 == true）——两条短路分支共用了「落空即真」的尾巴
+//   2) `let mut j = i` 只是把名字指向同一个 vreg，改 j 会连带改 i
+module t31
+
+fn flip(c: int) -> bool {
+    return c == 10 || c == 32
+}
+
+fn main() {
+    // && 全组合
+    assert((0 == 0) && (1 == 1), "and tt")
+    assert(!((0 == 1) && (1 == 1)), "and ft")
+    assert(!((1 == 1) && (0 == 1)), "and tf")
+    assert(!((0 == 1) && (1 == 2)), "and ff")
+
+    // || 全组合
+    assert((1 == 1) || (1 == 1), "or tt")
+    assert((1 == 1) || (0 == 1), "or tf")
+    assert((0 == 1) || (1 == 1), "or ft")
+    assert(!((0 == 1) || (1 == 2)), "or ff")
+
+    // 混用：短路语义
+    assert((0 == 1) || ((1 == 1) && (2 == 2)), "mixed")
+    assert(flip(10), "flip newline")
+    assert(flip(32), "flip space")
+    assert(!flip(65), "flip A")
+
+    // let 值语义：拷贝而不是别名
+    let mut i = 1
+    let mut j = i
+    j = 5
+    assert(i == 1, "let copies scalar")
+    assert(j == 5, "mutated copy")
+
+    // 字符串拷贝同样不共享写
+    let a = "abc"
+    let b = a
+    assert(a == b, "str equal")
+    assert(len(a) == 3 && len(b) == 3, "str lens")
+
+    // 循环里的 let 每次都是新绑定
+    let mut k = 0
+    let mut acc = 0
+    while k < 3 {
+        let base = k
+        let mut cur = base
+        cur += 10
+        acc += cur
+        k += 1
+    }
+    assert(acc == 33, "loop-local copies")
+
+    print("logic ok")
+}

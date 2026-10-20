@@ -125,6 +125,32 @@ def build(src, target=DEFAULT_TARGET, out=None, dump_ir=False, optimize=True):
 # 子命令
 # ---------------------------------------------------------------------------
 
+SELFHOST_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "build", "selfhost")
+EXE_SUFFIX = ".qex" if os.name == "nt" else ".qel"
+
+
+def stage1_lexer():
+    """stage-1 自举词法器：存在就优先用（这才是"用 Quelmara 写编译器"的落地）"""
+    cand = os.path.join(SELFHOST_DIR, "qlm_lex" + EXE_SUFFIX)
+    return cand if os.path.isfile(cand) else None
+
+
+def cmd_lex(args):
+    require_source(args.src)
+    exe = None if args.stage0 else stage1_lexer()
+    if exe:
+        print(f"[qlm:stage1] {exe}")
+        return subprocess.call([exe, args.src])
+    print("[qlm:stage0] tools/dev/tokfmt.py")
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "dev"))
+    import tokfmt
+    src = open(args.src, encoding="utf-8").read()
+    sys.stdout.buffer.write(tokfmt.dump(src).encode("utf-8"))
+    return 0
+
+
 def cmd_build(args):
     out, size, cfg = build(args.src, args.target, args.out,
                            dump_ir=args.dump_ir, optimize=not args.no_opt)
@@ -326,6 +352,11 @@ def main(argv=None):
     p.add_argument("--check", action="store_true")
     p.add_argument("-q", "--quiet", action="store_true")
 
+    p = sub.add_parser("lex", help="词法分析（优先用 stage-1 自举词法器）")
+    p.add_argument("src")
+    p.add_argument("--stage0", action="store_true",
+                   help="强制用 stage-0（Python）词法器，用于对拍")
+
     p = sub.add_parser("bench", help="基准测试 + 回归对比")
     common(p)
     p.add_argument("--runs", type=int, default=5)
@@ -338,7 +369,8 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
     handler = {"build": cmd_build, "run": cmd_run, "test": cmd_test,
-               "fmt": cmd_fmt, "bench": cmd_bench, "version": cmd_version}[args.cmd]
+               "fmt": cmd_fmt, "bench": cmd_bench, "lex": cmd_lex,
+               "version": cmd_version}[args.cmd]
     return handler(args)
 
 
