@@ -277,6 +277,9 @@ python tools/rosoto_pe.py build tests/t17_result.ros -o build/x.exe --dump-ir --
 
 - **git remote 已配置并推送**：`origin = https://github.com/MonthZifang/Rosoto`（2026-10-20）。
 - 最新提交：
+  - `ffadac6` v0.12：字符串 len/下标/十进制解析 + @extern 收口 + aarch64 CLI 修复
+  - `ade98a4` v0.11：`h.join()` + `chan.close()` + `select`
+  - `7cda6f4` docs：远端与单文件夹约定
   - `cd6468e` archive: v0.2 快照（rosoto_old_v02.tar.gz）
   - `b42e0a4` v0.9+v0.10：modsum 折叠 + 泛型 result/切片 + map[K]V + 浮点
   - `d61c593` v0.8 option[T]
