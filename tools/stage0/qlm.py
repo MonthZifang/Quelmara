@@ -1385,6 +1385,8 @@ class Infer:
             return "int64_t"
         if t[0] == "slice":
             return "slice:" + slice_elem_tag(t[1])
+        if t[0] == "vec":
+            return "vec:" + map_kv_tag(t[1], "vec 元素类型")
         if t[0] == "array":
             if not (t[2][0] == "named" and t[2][1] in
                     ("int", "i64", "i32", "u64", "u32", "i16", "u16", "i8", "u8", "bool")):
@@ -1394,6 +1396,8 @@ class Infer:
             return "struct:" + t[1]
         if t[0] == "named" and t[1] in self.enums:
             return "enum:" + t[1]
+        if t[0] == "vec":
+            return "vec:" + map_kv_tag(t[1], "vec 元素类型")
         return CTYPE.get(t[1], "int64_t") if t[0] == "named" else "void *"
 
     def fn_ret(self, name):
@@ -1410,6 +1414,8 @@ class Infer:
                 return "slice:" + slice_elem_tag(t[1])
             if t[0] == "map":
                 return map_env_of_type(t) or "int64_t"
+            if t[0] == "vec":
+                return "vec:" + map_kv_tag(t[1], "vec 元素类型")
             return "QlmBuf" if t[1] == ("named", "byte") else "void *"
         return BUILTIN_RETS.get(name, "void")
 
@@ -2307,6 +2313,8 @@ class Codegen:
             return "int64_t"
         if t[0] == "map":
             return "int64_t"          # map 句柄：整数字（指向运行时表）
+        if t[0] == "vec":
+            return "int64_t"          # vec 句柄：QlmVec* 转成的整数
         if t[0] == "slice":
             elem = slice_elem_tag(t[1])          # 元素类型越界时在这里报错
             return "QlmBuf" if elem == "byte" else "QlmSlice"
@@ -2516,7 +2524,7 @@ class Codegen:
                     return f"qlm_vec_len({acode})", "int64_t"
                 if atype == "const char *":
                     return f"((int64_t)strlen({acode}))", "int64_t"
-                raise SyntaxError("len() 目前只支持定长数组、切片、map 或 str")
+                raise SyntaxError(f"len() 目前只支持定长数组、切片、map、vec 或 str（实参类型={atype!r}）")
             if name == "slice_of" and name not in self.infer.fns:
                 # 数组 -> 切片：零拷贝转换（SPEC §2 `[]T`）
                 if len(e[2]) != 1:
@@ -2926,6 +2934,8 @@ class Codegen:
             return map_env_of_type(t)
         if t[0] == "slice":
             return "slice:" + slice_elem_tag(t[1])
+        if t[0] == "vec":
+            return "vec:" + map_kv_tag(t[1], "vec 元素类型")
         if t[0] == "named" and t[1] in self.structs:
             return "struct:" + t[1]
         if t[0] == "named" and t[1] in self.enums:
@@ -3050,6 +3060,10 @@ class Codegen:
                 # map 句柄：int64_t（指向运行时开放寻址表）
                 env[s[2]] = t
                 return f"{pad}int64_t {s[2]} = {code};"
+            if is_vec_env(t):
+                # vec 句柄：QlmVec*（初始化表达式是整数句柄，强转即可）
+                env[s[2]] = t
+                return f"{pad}QlmVec *{s[2]} = (QlmVec *)(intptr_t)({code});"
             if t.startswith("struct:"):
                 t = t[7:]
             if t.startswith("enum:"):
