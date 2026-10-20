@@ -1540,6 +1540,60 @@ static void qlm_slice_bounds(int64_t i, int64_t n) {
     }
 }
 
+/* 字符串切片 / 单字节串 / 读文件：都用轮转静态缓冲，避免在 C 后端引入堆。 */
+static char *qlm_strslot(void) {
+    static char bufs[64][1024];
+    static int k = 0;
+    char *p = bufs[k];
+    k = (k + 1) & 63;
+    return p;
+}
+
+static const char *qlm_substr(const char *s, int64_t lo, int64_t n) {
+    int64_t len = (int64_t)strlen(s);
+    char *buf;
+    if (lo < 0 || n < 0 || lo + n > len) {
+        fprintf(stderr, "quelmara: substr() range out of bounds (fail-fast)\n");
+        fflush(stdout);
+        exit(1);
+    }
+    if (n > 1023) n = 1023;                 /* 轮转缓冲上限，超长截断 */
+    buf = qlm_strslot();
+    memcpy(buf, s + lo, (size_t)n);
+    buf[n] = 0;
+    return buf;
+}
+
+static const char *qlm_chr(int64_t b) {
+    char *buf = qlm_strslot();
+    buf[0] = (char)(b & 0xFF);
+    buf[1] = 0;
+    return buf;
+}
+
+static const char *qlm_read_text(const char *path) {
+    FILE *f = fopen(path, "rb");
+    long sz;
+    char *buf;
+    if (!f) {
+        fprintf(stderr, "quelmara: read_text() failed (fail-fast)\n");
+        fflush(stdout);
+        exit(1);
+    }
+    fseek(f, 0, SEEK_END);
+    sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    buf = (char *)malloc((size_t)sz + 1);
+    if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        fprintf(stderr, "quelmara: read_text() failed (fail-fast)\n");
+        fflush(stdout);
+        exit(1);
+    }
+    buf[sz] = 0;
+    fclose(f);
+    return buf;
+}
+
 /* 命令行参数：main 入口把 argc/argv 交给运行时，args() 返回 {argv+1, argc-1}
    （语义与自研后端一致：不含程序名）。 */
 static int qlm_argc = 0;
@@ -2169,6 +2223,23 @@ class Codegen:
                 return f"((int64_t)({acode}))", "int64_t"
             if name == "cores":
                 return "qlm_cores()", "int64_t"
+            if name == "substr" and name not in self.infer.fns:
+                if len(e[2]) != 3:
+                    raise SyntaxError("substr(s, lo, n) 需要三个实参")
+                a1, _ = self.gen_expr(e[2][0], env)
+                a2, _ = self.gen_expr(e[2][1], env)
+                a3, _ = self.gen_expr(e[2][2], env)
+                return f"qlm_substr({a1}, (int64_t)({a2}), (int64_t)({a3}))", "const char *"
+            if name == "chr" and name not in self.infer.fns:
+                if len(e[2]) != 1:
+                    raise SyntaxError("chr(x) 需要一个实参")
+                a1, _ = self.gen_expr(e[2][0], env)
+                return f"qlm_chr((int64_t)({a1}))", "const char *"
+            if name == "read_text" and name not in self.infer.fns:
+                if len(e[2]) != 1:
+                    raise SyntaxError("read_text(path) 需要一个实参")
+                a1, _ = self.gen_expr(e[2][0], env)
+                return f"qlm_read_text({a1})", "const char *"
             if name == "args" and name not in self.infer.fns:
                 if e[2]:
                     raise SyntaxError("args() 不接受实参")

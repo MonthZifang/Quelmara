@@ -466,6 +466,7 @@ class Lower:
         self.uses_str_to_int = False
         self.uses_args = False
         self.uses_io = False
+        self.uses_substr = False
         # 命令行参数（args()）：argc 字数 + argv 指针，入口期或惰性初始化填入
         self.argc_gid = self.intern_array(1)
         self.argv_gid = self.intern_array(1)
@@ -1576,6 +1577,59 @@ class Lower:
             return self.conv_to(fn, x, wf, tw)
         if name == "cores":
             return ("imm", os.cpu_count() or 1)
+        if name == "read_text" and name not in self.fns_ast:
+            # read_text(path) -> str：整文件读入（NUL 结尾）。失败 fail-fast。
+            if len(e[2]) != 1:
+                raise SyntaxError("read_text(path) 需要一个实参")
+            self.uses_io = True
+            pa = self.eval(e[2][0], fn, env)
+            d = fn.new_v()
+            fn.emit("call", d, "__read_text", [pa])
+            return self._mark_str(fn, d)
+        if name == "substr" and name not in self.fns_ast:
+            # substr(s, lo, n) -> str：越界 fail-fast（与下标同策略）
+            if len(e[2]) != 3:
+                raise SyntaxError("substr(s, lo, n) 需要三个实参")
+            self.uses_substr = True
+            src = self.eval(e[2][0], fn, env)
+            lo = self.eval(e[2][1], fn, env)
+            cnt = self.eval(e[2][2], fn, env)
+            ln = self.str_len(fn, src)
+            l_fail = fn.label("ssfail")
+            b = fn.new_v()
+            f_neg = lambda v: None
+            fn.emit("cmpset", "l", b, lo, ("imm", 0))
+            fn.emit("jnz", b, l_fail)
+            fn.emit("cmpset", "l", b, cnt, ("imm", 0))
+            fn.emit("jnz", b, l_fail)
+            end = fn.new_v()
+            fn.emit("bin", "add", end, lo, cnt)
+            fn.emit("cmpset", "g", b, end, ln)
+            fn.emit("jnz", b, l_fail)
+            ln1 = fn.new_v()
+            fn.emit("bin", "add", ln1, cnt, ("imm", 1))
+            buf = fn.new_v()
+            fn.emit("call", buf, "__alloc", [ln1])
+            sp = fn.new_v()
+            fn.emit("bin", "add", sp, src, lo)
+            fn.emit("call", None, "__memcpy", [buf, sp, cnt])
+            fn.emit("store8", buf, cnt, ("imm", 0))
+            l_ok = fn.label("ssok")
+            fn.emit("jmp", l_ok)
+            fn.emit("label", l_fail)
+            fn.emit("call", None, "__substr_fail", [])
+            fn.emit("label", l_ok)
+            return self._mark_str(fn, buf)
+        if name == "chr" and name not in self.fns_ast:
+            # chr(byte) -> str：单字节字符串（0..255）
+            if len(e[2]) != 1:
+                raise SyntaxError("chr(x) 需要一个实参")
+            v = self.eval(e[2][0], fn, env)
+            buf = fn.new_v()
+            fn.emit("call", buf, "__alloc", [("imm", 8)])
+            fn.emit("store8", buf, ("imm", 0), v)
+            fn.emit("store8", buf, ("imm", 1), ("imm", 0))
+            return self._mark_str(fn, buf)
         if name == "args" and name not in self.fns_ast:
             # args() -> []str：程序参数（不含程序名）。Linux/AArch64 由入口直接
             # 保存 argc/argv；Windows 走 GetCommandLineA 惰性拆分。
@@ -3091,6 +3145,81 @@ class Lower:
         f.emit("ret", i)
         self.out.append(f)
 
+        if self.uses_io:
+            msg = "quelmara: read_text() failed (fail-fast)\n"
+            gid_io = self.intern_str(msg)
+            f = Fn("__read_fail")
+            f.emit("args", [])
+            bp = f.new_v()
+            f.emit("movaddr", bp, gid_io)
+            self.emit_write(f, 2, bp, ("imm", len(msg.encode("utf-8"))))
+            self.emit_exit(f, 1)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            f = Fn("__read_text")
+            p = f.new_v()
+            f.emit("args", [p])
+            b = f.new_v()
+            l_fail = f.label("rdbad")
+            if self.platform == "windows":
+                # CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING,
+                #             FILE_ATTRIBUTE_NORMAL, 0)
+                h = f.new_v()
+                f.emit("winapi", h, "CreateFileA",
+                       [p, ("imm", 0x80000000), ("imm", 1), ("imm", 0),
+                        ("imm", 3), ("imm", 0x80), ("imm", 0)])
+                f.emit("cmpset", "e", b, h, ("imm", -1))
+                f.emit("jnz", b, l_fail)
+                size = f.new_v()
+                f.emit("winapi", size, "GetFileSize", [h, ("imm", 0)])
+                n1 = f.new_v()
+                f.emit("bin", "add", n1, size, ("imm", 1))
+                buf = f.new_v()
+                f.emit("call", buf, "__alloc", [n1])
+                wptr = f.new_v()
+                f.emit("movaddr", wptr, self.written_gid)
+                okv = f.new_v()
+                f.emit("winapi", okv, "ReadFile", [h, buf, size, wptr, ("imm", 0)])
+                f.emit("jz", okv, l_fail)
+                got = f.new_v()
+                f.emit("load", got, ("ga", self.written_gid), ("imm", 0))
+                f.emit("store8", buf, got, ("imm", 0))
+                f.emit("winapi", None, "CloseHandle", [h])
+                f.emit("ret", buf)
+            else:
+                fd = f.new_v()
+                f.emit("syscall", fd, self.sc["openat"],
+                       [("imm", -100), p, ("imm", 0), ("imm", 0)])
+                f.emit("cmpset", "l", b, fd, ("imm", 0))
+                f.emit("jnz", b, l_fail)
+                cap = ("imm", 1 << 20)
+                buf = f.new_v()
+                f.emit("call", buf, "__alloc", [("imm", (1 << 20) + 1)])
+                got = f.new_v()
+                f.emit("syscall", got, self.sc["read"], [fd, buf, cap])
+                f.emit("cmpset", "l", b, got, ("imm", 0))
+                f.emit("jnz", b, l_fail)
+                f.emit("store8", buf, got, ("imm", 0))
+                f.emit("syscall", None, self.sc["close"], [fd])
+                f.emit("ret", buf)
+            f.emit("label", l_fail)
+            f.emit("call", None, "__read_fail", [])
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+        if self.uses_substr:
+            msg = "quelmara: substr() range out of bounds (fail-fast)\n"
+            gid_s = self.intern_str(msg)
+            f = Fn("__substr_fail")
+            f.emit("args", [])
+            bp = f.new_v()
+            f.emit("movaddr", bp, gid_s)
+            self.emit_write(f, 2, bp, ("imm", len(msg.encode("utf-8"))))
+            self.emit_exit(f, 1)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
         if self.uses_args:
             # Linux/AArch64：_start 调用 __qlm_args_boot(argc, argv)，把内核栈上的
             # 原始指针存进全局字（零拷贝，不复制字符串）。
@@ -3996,9 +4125,9 @@ ENTRY_OFF = 0x78
 # 各架构 Linux 系统调用号（IR 层架构无关，发射层按表取用）
 SYSCALLS = {
     "x86_64": {"write": 1, "exit": 60, "mmap": 9, "clone": 56, "wait4": 61,
-               "yield": 24},
+               "yield": 24, "read": 0, "close": 3, "openat": 257},
     "aarch64": {"write": 64, "exit": 93, "mmap": 222, "clone": 220, "wait4": 260,
-                "yield": 124},
+                "yield": 124, "read": 63, "close": 57, "openat": 56},
 }
 
 

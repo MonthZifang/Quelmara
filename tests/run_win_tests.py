@@ -422,6 +422,26 @@ def main():
             else bad(f"arg(0) {lines[4:5]!r}")
         ok("args 自校验通过（assert）") if rc == 0 else bad(f"args rc={rc} stderr={stderr[-160:]!r}")
 
+    print("== [3e] 读文件 / 子串 / 单字节串（v1.0） ==")
+    out = os.path.join(ROOT, "build", "win_io.qex")
+    build(os.path.join(ROOT, "tests/t30_io.qma"), out)
+    data_path = os.path.join(ROOT, "build", "io_input.txt")
+    with open(data_path, "w", encoding="utf-8") as f:
+        f.write("hello-io")
+    r = run(out, args=[data_path])
+    if r is None:
+        skip("read_text：非 Windows 平台")
+    else:
+        rc, stdout, stderr = r
+        lines = stdout.decode().splitlines()
+        ok("read_text: 文件长度 8") if lines[:1] == ["8"] else bad(f"io 行 {lines!r}")
+        ok("substr: 前 5 字节") if lines[1:2] == ["hello"] else bad(f"substr {lines[1:2]!r}")
+        ok("substr: 偏移 6 取 2 字节") if lines[2:3] == ["io"] else bad(f"substr2 {lines[2:3]!r}")
+        ok("chr(65) = A") if lines[3:4] == ["A"] else bad(f"chr {lines[3:4]!r}")
+        ok("substr 空区间长度为 0") if lines[4:5] == ["0"] else bad(f"empty {lines[4:5]!r}")
+        ok("回文判断（hello 取前 5 => 非回文）") if lines[5:6] == ["0"] else bad(f"pal {lines[5:6]!r}")
+        ok("io 自校验通过（assert）") if rc == 0 else bad(f"io rc={rc} stderr={stderr[-160:]!r}")
+
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])
     case_selfcheck("prime_parallel", "examples/prime_parallel.qma")
