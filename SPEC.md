@@ -203,6 +203,30 @@ interface Renderable {
 
 ---
 
+### 2.9 `vec[T]` 变长数组（v1.2）
+
+```quelmara
+let v = vec[int].new(4)      // 初始容量 4（小于 4 按 4 算）
+v.push(10)                   // 追加；容量不足时按 2 倍扩容并搬旧数据
+v.push(20)
+print(len(v))                // 2
+print(v.get(0))              // 10
+v.set(1, 21)
+print(v.pop())               // 21（空表 pop 直接 fail-fast）
+v.clear()                    // 清空（容量保留）
+```
+
+- 元素类型只允许标量：`int` / `bool` / `str`（每个元素占一个 8 字节槽）。
+- **句柄语义**：`vec` 变量持有指向头部的句柄，函数内 push 对调用方可见；
+  头部三字 `{data, len, cap}`。
+- 扩容策略：`len == cap` 时 `cap *= 2`，用 `__alloc` 取新块 + `__memcpy` 搬旧数据。
+  Quelmara 没有 free，旧块由 `arena` 块结束时整体回收。
+- 内存上限受 `Quelmara.toml` 的 `[memory] heap_limit_mb` 约束，超限 fail-fast。
+
+**这就是写编译器要的可变长容器**：token 表、AST 子节点表、指令表都用它。
+
+---
+
 ## 3. 函数与控制流
 
 ```quelmara
@@ -252,6 +276,40 @@ fn load_config(path: str) -> result[Config, IoError] {
 ```
 
 ---
+
+### 3.5 遍历 `for x in <map|vec>`（v1.2）
+
+```quelmara
+for k in m {            // map：产出【键】，需要值时用 m.get(k)
+    print(k)
+}
+
+for x in v {            // vec：按下标序，稳定
+    print(x)
+}
+```
+
+- **区间循环** `for i in 0..n` 与**集合遍历**是两种语法，靠 `..` 区分。
+- map 的遍历顺序是**实现定义**（按桶序），会随插入/删除/扩容变化，**不要依赖**；
+  测试只应校验集合内容、计数与聚合值。
+- 遍历期间**不要**修改集合（push/del 会导致扩容或墓碑变化，行为未定义）。
+- `break` / `continue` 与区间循环一致。
+
+### 3.6 定长数组作参数/返回值（v1.2，自研后端）
+
+```quelmara
+fn sum4(a: [4]int) -> int { return a[0] + a[1] + a[2] + a[3] }
+
+fn make3() -> [3]int {
+    let a = [7, 8, 9]
+    return a
+}
+```
+
+- **参数按值传递**：callee 在栈帧里拷一份，函数内改动不外泄（与 struct 一致）。
+- 返回值走**隐藏出参指针**：调用方开 N 字帧槽，callee 拷入 —— 与切片/结构体返回同一套 ABI。
+- 数组实参也可以传给 `[]T` 形参（零拷贝视图），或显式写 `slice_of(a)`。
+- C99 后端（仅交叉验证）不支持这一项，会明确报错；产品链路（native/win/arm64）都支持。
 
 ## 4. 多核模型（默认开启）
 

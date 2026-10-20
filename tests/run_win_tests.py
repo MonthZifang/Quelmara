@@ -449,6 +449,11 @@ def main():
     case_selfcheck("bits", "tests/t32_bits.qma")
     case_selfcheck("subslice", "tests/t33_subslice.qma")
 
+    print("== [3h] vec / 遍历 / 数组参数（v1.2） ==")
+    case_selfcheck("vec", "tests/t34_vec.qma")
+    case_selfcheck("iter", "tests/t35_iter.qma")
+    case_selfcheck("arrparam", "tests/t36_arrparam.qma")
+
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])
     case_selfcheck("prime_parallel", "examples/prime_parallel.qma")

@@ -70,6 +70,8 @@ fn is_keyword(w: str) -> bool {
     if w == "result" { return true }
     if w == "map" { return true }
     if w == "select" { return true }
+    if w == "const" { return true }
+    if w == "vec" { return true }
     return false
 }
 

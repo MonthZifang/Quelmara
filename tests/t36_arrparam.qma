@@ -1,0 +1,54 @@
+// t36_arrparam.qma：定长数组作参数/返回值（v1.2，自研后端）
+// 语义：数组始终按值传递（callee 拿到副本），返回值走隐藏出参槽。
+module t36
+
+fn sum4(a: [4]int) -> int {
+    return a[0] + a[1] + a[2] + a[3]
+}
+
+fn clobber(a: [3]int) -> int {
+    a[0] = 100
+    a[1] = 200
+    return a[0] + a[1]
+}
+
+fn make3() -> [3]int {
+    let a = [7, 8, 9]
+    return a
+}
+
+fn reverse4(a: [4]int) -> [4]int {
+    let b = [a[3], a[2], a[1], a[0]]
+    return b
+}
+
+fn main() {
+    let x = [1, 2, 3, 4]
+    assert(sum4(x) == 10, "sum")
+    assert(x[0] == 1, "caller untouched")
+
+    // 值语义：callee 改副本，调用方不变
+    let y = [10, 20, 30]
+    assert(clobber(y) == 300, "clobber result")
+    assert(y[0] == 10, "value semantics")
+    assert(y[1] == 20, "value semantics 2")
+
+    // 返回值
+    let z = make3()
+    assert(z[0] == 7, "ret 0")
+    assert(z[2] == 9, "ret 2")
+    assert(len(z) == 3, "ret len")
+
+    // 参数 + 返回组合
+    let r = reverse4(x)
+    assert(r[0] == 4, "rev 0")
+    assert(r[3] == 1, "rev 3")
+    assert(sum4(r) == 10, "rev sum")
+
+    // 数组实参也可以传给 []T 形参（零拷贝视图）
+    let s = slice_of(x)
+    assert(len(s) == 4, "slice_of")
+    assert(s[2] == 3, "slice elem")
+
+    print("arrparam ok")
+}

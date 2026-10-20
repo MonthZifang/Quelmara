@@ -125,7 +125,7 @@ KEYWORDS = {"fn", "let", "mut", "if", "else", "while", "for", "parfor",
             "return", "module", "import", "true", "false", "test",
             "break", "continue", "struct", "enum", "match",
             "arena", "spawn", "chan", "option", "result", "map", "select",
-            "const"}
+            "const", "vec"}
 
 FOUR_CHAR = {">>>="}
 THREE_CHAR = {"<<=", ">>=", ">>>"}
@@ -471,6 +471,14 @@ class Parser:
             et = self.parse_type()
             self.eat("SYM", "]")
             return ("chan", et)
+        if self.at("vec"):
+            # vec[T]：堆上变长数组（v1.2）；元素仅标量（int/bool/str）
+            t = self.next()
+            self.eat("SYM", "[")
+            et = self.parse_type()
+            self.eat("SYM", "]")
+            map_kv_tag(et, "vec 元素类型", t.line)
+            return ("vec", et)
         if self.at("map"):
             # map[K]V：开放寻址哈希表（K/V 仅 int/bool/str 标量，SPEC 附录 v0.10）
             t = self.next()
@@ -556,10 +564,16 @@ class Parser:
             self.next()
             var = self.eat("NAME").val
             self.eat("NAME", "in")
-            lo = self.parse_expr()
-            self.eat("SYM", "..")
-            hi = self.parse_expr()
-            return ("for" if t.kind == "for" else "parfor", var, lo, hi, self.parse_block())
+            first = self.parse_expr()
+            if self.at("SYM", ".."):
+                self.next()
+                hi = self.parse_expr()
+                return ("for" if t.kind == "for" else "parfor",
+                        var, first, hi, self.parse_block())
+            if t.kind == "parfor":
+                raise SyntaxError(f"line {t.line}: parfor 只支持 parfor v in lo..hi")
+            # for x in <map|vec>：遍历（v1.2）
+            return ("foreach", var, first, self.parse_block())
         if t.kind == "return":
             self.next()
             if self.at("SYM", "}"):
@@ -931,6 +945,20 @@ class Parser:
             self.eat("SYM", "(")
             args = self.parse_args()      # parse_args 已吃掉右括号
             return ("chanopen", et, args)
+        if t.kind == "vec":
+            # vec[T].new(cap)
+            self.next()
+            self.eat("SYM", "[")
+            et = self.parse_type()
+            self.eat("SYM", "]")
+            map_kv_tag(et, "vec 元素类型", t.line)
+            self.eat("SYM", ".")
+            meth = self.eat("NAME").val
+            if meth != "new":
+                raise SyntaxError(f"line {t.line}: vec[T] 只支持 .new(cap)")
+            self.eat("SYM", "(")
+            args = self.parse_args()
+            return ("vecnew", et, args)
         if t.kind == "map":
             # map[K]V.new(cap) -> 开放寻址哈希表句柄（cap 须 2 的幂，省略默认 16）
             # 注意：值类型只取单段名字，否则 parse_type 的限定名循环会把
@@ -1258,6 +1286,15 @@ def is_map_env(t):
     return isinstance(t, str) and t.startswith("map:")
 
 
+def is_vec_env(t):
+    """环境类型串是否是 vec（`vec:<elem>`）"""
+    return isinstance(t, str) and t.startswith("vec:")
+
+
+def vec_env_elem(t):
+    return t[4:] if is_vec_env(t) else None
+
+
 def map_env_parts(t):
     """`map:<k>:<v>` -> (键标签, 值标签)；不是 map 返回 None"""
     if not is_map_env(t):
@@ -1425,6 +1462,8 @@ class Infer:
                 if elem is None:
                     elem = C_TO_ELEM.get(et, "int")
             return arr_env(elem or "int", len(e[1]))
+        if k == "vecnew":
+            return "vec:" + map_kv_tag(e[1], "vec 元素类型")
         if k == "sliceof":
             ot = self.expr(e[1], env)
             if ot == "const char *":
@@ -1446,6 +1485,13 @@ class Infer:
         if k == "method":
             obj_t = self.expr(e[1], env)
             m = e[2]
+            if is_vec_env(obj_t):
+                elem = vec_env_elem(obj_t)
+                if m in ("get", "pop"):
+                    return "const char *" if elem == "str" else "int64_t"
+                if m == "len":
+                    return "int64_t"
+                return "int64_t"          # push/set/clear 视作语句，值不用
             mp = map_env_parts(obj_t) if isinstance(obj_t, str) else None
             if mp:
                 kv, vv = mp
@@ -1666,6 +1712,55 @@ static const char *qlm_substr(const char *s, int64_t lo, int64_t n) {
     buf[n] = 0;
     return buf;
 }
+
+/* vec[T]：堆上变长数组（C 后端用 malloc/realloc；元素一律 int64_t 槽） */
+typedef struct { int64_t *data; int64_t len; int64_t cap; int64_t tag; } QlmVec;
+
+static void qlm_vec_fail(void) {
+    fprintf(stderr, "quelmara: vec index out of bounds (fail-fast)\n");
+    fflush(stdout);
+    exit(1);
+}
+
+static QlmVec *qlm_vec_new(int64_t cap) {
+    QlmVec *v = (QlmVec *)malloc(sizeof(QlmVec));
+    if (!v) qlm_vec_fail();
+    if (cap < 4) cap = 4;
+    v->data = (int64_t *)malloc(sizeof(int64_t) * (size_t)cap);
+    if (!v->data) qlm_vec_fail();
+    v->len = 0;
+    v->cap = cap;
+    v->tag = 0;
+    return v;
+}
+
+static void qlm_vec_push(QlmVec *v, int64_t x) {
+    if (v->len >= v->cap) {
+        int64_t ncap = v->cap * 2;
+        int64_t *nd = (int64_t *)realloc(v->data, sizeof(int64_t) * (size_t)ncap);
+        if (!nd) qlm_vec_fail();
+        v->data = nd;
+        v->cap = ncap;
+    }
+    v->data[v->len++] = x;
+}
+
+static void qlm_vec_bounds(QlmVec *v, int64_t i) {
+    if (i < 0 || i >= v->len) qlm_vec_fail();
+}
+
+static int64_t qlm_vec_get(QlmVec *v, int64_t i) { qlm_vec_bounds(v, i); return v->data[i]; }
+
+static void qlm_vec_set(QlmVec *v, int64_t i, int64_t x) { qlm_vec_bounds(v, i); v->data[i] = x; }
+
+static int64_t qlm_vec_pop(QlmVec *v) {
+    if (v->len <= 0) qlm_vec_fail();
+    return v->data[--v->len];
+}
+
+static int64_t qlm_vec_len(QlmVec *v) { return v->len; }
+
+static void qlm_vec_clear(QlmVec *v) { v->len = 0; }
 
 static int64_t qlm_str_cmp(const char *a, const char *b) {
     int c = strcmp(a, b);
@@ -2020,6 +2115,10 @@ static int64_t qlm_map_del(int64_t h, int64_t k) {
     return 0;                                        /* 删缺失键：无操作 */
 }
 
+static int64_t qlm_map_cap(int64_t h) { return ((QlmMap *)(intptr_t)h)->cap; }
+static int64_t qlm_map_state(int64_t h, int64_t i) { return ((QlmMap *)(intptr_t)h)->st[i]; }
+static int64_t qlm_map_key_at(int64_t h, int64_t i) { return ((QlmMap *)(intptr_t)h)->kt[i]; }
+
 static int64_t qlm_map_len(int64_t h) {
     QlmMap *m = (QlmMap *)(intptr_t)h;
     return m->count;
@@ -2200,7 +2299,10 @@ class Codegen:
     # ---- 工具 ----
     def ctype(self, t):
         if t[0] == "array":
-            raise SyntaxError("定长数组暂不支持作函数参数/返回值（v0.6 边界）")
+            # C99 只做交叉验证，数组的按值传参/返回（隐藏出参）只在自研后端实现。
+            raise SyntaxError(
+                "C99 后端不支持定长数组作参数/返回值（仅自研后端支持）；"
+                "交叉验证时请改用 slice_of(a) 或 vec[T]")
         if t[0] == "chan":
             return "int64_t"
         if t[0] == "map":
@@ -2401,6 +2503,8 @@ class Codegen:
                         return f"({arg[1]}).len", "int64_t"
                     if is_map_env(at):
                         return f"qlm_map_len({arg[1]})", "int64_t"
+                    if is_vec_env(at):
+                        return f"qlm_vec_len({arg[1]})", "int64_t"
                     if at == "const char *":
                         return f"((int64_t)strlen({arg[1]}))", "int64_t"
                 acode, atype = self.gen_expr(arg, env)
@@ -2408,6 +2512,8 @@ class Codegen:
                     return f"({acode}).len", "int64_t"
                 if is_map_env(atype):
                     return f"qlm_map_len({acode})", "int64_t"
+                if is_vec_env(atype):
+                    return f"qlm_vec_len({acode})", "int64_t"
                 if atype == "const char *":
                     return f"((int64_t)strlen({acode}))", "int64_t"
                 raise SyntaxError("len() 目前只支持定长数组、切片、map 或 str")
@@ -2503,6 +2609,14 @@ class Codegen:
                             f"((int64_t)(unsigned char)({ocode})[{tmp}]); }})", "int64_t")
                 return f"((int64_t)(unsigned char)({ocode})[({icode})])", "int64_t"
             raise SyntaxError("下标只能用于定长数组、切片或 str")
+        if k == "vecnew":
+            cap = "4"
+            if e[2]:
+                if len(e[2]) != 1:
+                    raise SyntaxError("vec[T].new(cap) 只接受一个容量实参")
+                ccode, _ = self.gen_expr(e[2][0], env)
+                cap = f"(int64_t)({ccode})"
+            return f"qlm_vec_new({cap})", "vec:" + map_kv_tag(e[1], "vec 元素类型")
         if k == "sliceof":
             ocode, otype = self.gen_expr(e[1], env)
             lcode, _ = self.gen_expr(e[2], env)
@@ -2553,6 +2667,42 @@ class Codegen:
         if k == "method":
             obj, m, args = e[1], e[2], e[3]
             ocode, otype = self.gen_expr(obj, env)
+            if is_vec_env(otype):
+                elem = vec_env_elem(otype)
+                if m == "len":
+                    if args:
+                        raise SyntaxError("vec.len() 不接受实参")
+                    return f"qlm_vec_len({ocode})", "int64_t"
+                if m == "clear":
+                    if args:
+                        raise SyntaxError("vec.clear() 不接受实参")
+                    return f"qlm_vec_clear({ocode})", "int64_t"
+                if m == "push":
+                    if len(args) != 1:
+                        raise SyntaxError("vec.push(v) 需要一个实参")
+                    acode, _ = self.gen_expr(args[0], env)
+                    return f"qlm_vec_push({ocode}, (int64_t)({acode}))", "int64_t"
+                if m == "pop":
+                    if args:
+                        raise SyntaxError("vec.pop() 不接受实参")
+                    base = f"qlm_vec_pop({ocode})"
+                    return (f"((const char *)(intptr_t){base})", "const char *") \
+                        if elem == "str" else (base, "int64_t")
+                if m == "get":
+                    if len(args) != 1:
+                        raise SyntaxError("vec.get(i) 需要一个实参")
+                    icode, _ = self.gen_expr(args[0], env)
+                    base = f"qlm_vec_get({ocode}, (int64_t)({icode}))"
+                    return (f"((const char *)(intptr_t){base})", "const char *") \
+                        if elem == "str" else (base, "int64_t")
+                if m == "set":
+                    if len(args) != 2:
+                        raise SyntaxError("vec.set(i, v) 需要两个实参")
+                    icode, _ = self.gen_expr(args[0], env)
+                    vcode, _ = self.gen_expr(args[1], env)
+                    return (f"qlm_vec_set({ocode}, (int64_t)({icode}), "
+                            f"(int64_t)({vcode}))", "int64_t")
+                raise SyntaxError(f"vec 不支持方法 {m}")
             mp = map_env_parts(otype) if is_map_env(otype) else None
             if mp:
                 return self.gen_map_method(m, ocode, mp, args, env)
@@ -3013,6 +3163,52 @@ class Codegen:
                 self.gen_block(s[4], e2, ind + 1, ret_t),
                 f"{pad}}}",
                 f"{pad}}}"])
+        if k == "foreach":
+            var, coll_e, body = s[1], s[2], s[3]
+            ccode, ctype = self.gen_expr(coll_e, env)
+            e2 = dict(env)
+            e2[var] = "int64_t"
+            if is_vec_env(ctype):
+                elem = vec_env_elem(ctype)
+                if elem == "str":
+                    e2[var] = "const char *"
+                if elem == "str":
+                    # 字符串元素：循环变量直接是 const char*
+                    out = [f"{pad}{{",
+                           f"{pad}    QlmVec *_v = (QlmVec *)(intptr_t)({ccode});",
+                           f"{pad}    for (int64_t _i = 0; _i < _v->len; _i++) {{",
+                           f"{pad}        const char *{var} = (const char *)(intptr_t)_v->data[_i];",
+                           self.gen_block(body, e2, ind + 2, ret_t),
+                           f"{pad}    }}",
+                           f"{pad}}}"]
+                    return "\n".join(out)
+                out = [f"{pad}{{",
+                       f"{pad}    QlmVec *_v = (QlmVec *)(intptr_t)({ccode});",
+                       f"{pad}    for (int64_t _i = 0; _i < _v->len; _i++) {{",
+                       f"{pad}        int64_t {var} = _v->data[_i];",
+                       self.gen_block(body, e2, ind + 2, ret_t),
+                       f"{pad}    }}",
+                       f"{pad}}}"]
+                return "\n".join(out)
+            if is_map_env(ctype):
+                ktag = map_env_parts(ctype)[0]
+                if ktag == "str":
+                    e2[var] = "const char *"
+                out = [f"{pad}{{",
+                       f"{pad}    int64_t _h = (int64_t)({ccode});",
+                       f"{pad}    int64_t _c = qlm_map_cap(_h);",
+                       f"{pad}    for (int64_t _i = 0; _i < _c; _i++) {{",
+                       f"{pad}        if (qlm_map_state(_h, _i) != 1) continue;"]
+                if ktag == "str":
+                    out.append(f"{pad}        const char *{var} = "
+                               f"(const char *)(intptr_t)qlm_map_key_at(_h, _i);")
+                else:
+                    out.append(f"{pad}        int64_t {var} = qlm_map_key_at(_h, _i);")
+                out += [self.gen_block(body, e2, ind + 2, ret_t),
+                        f"{pad}    }}",
+                        f"{pad}}}"]
+                return "\n".join(out)
+            raise SyntaxError("for x in ... 只支持 map 与 vec")
         if k == "parfor":
             return self.gen_parfor(s, env, ind, ret_t)
         if k == "return":

@@ -468,6 +468,7 @@ class Lower:
         self.uses_io = False
         self.uses_substr = False
         self.uses_str_cmp = False
+        self.uses_vec = False
         # 命令行参数（args()）：argc 字数 + argv 指针，入口期或惰性初始化填入
         self.argc_gid = self.intern_array(1)
         self.argv_gid = self.intern_array(1)
@@ -1038,6 +1039,18 @@ class Lower:
                 d = fn.new_v()
                 fn.emit("bin", "xor", d, a, ("imm", -1))
                 return d
+        if k == "vecnew":
+            self.uses_vec = True
+            et = e[1]
+            tag = "str" if et == ("named", "str") else None
+            cap = ("imm", 4)
+            if e[2]:
+                if len(e[2]) != 1:
+                    raise SyntaxError("vec[T].new(cap) 只接受一个容量实参")
+                cap = self.eval(e[2][0], fn, env)
+            d = fn.new_v()
+            fn.emit("call", d, "__vec_new", [cap])
+            return self._mark_vec(fn, d, tag)
         if k == "sliceof":
             return self.lower_sliceof(e, fn, env)
         if k == "binop":
@@ -1087,6 +1100,9 @@ class Lower:
             return result
         if k == "method":
             obj = self.eval(e[1], fn, env)
+            if self._is_vec(fn, obj):
+                return self.lower_vec_method(e[2], obj, self._vec_elem(fn, obj),
+                                             e[3], fn, env)
             mp = self._map_of(fn, obj)
             if mp:
                 return self.lower_map_method(e[2], obj, mp, e[3], fn, env)
@@ -1439,6 +1455,54 @@ class Lower:
             op = opmap[op]
         fn.emit("bin", op, d, a, b)
         return d
+
+    def lower_vec_method(self, m, obj, elem, args, fn, env):
+        """v.push/get/set/pop/len/clear（元素恒为 8 字节字）"""
+        self.uses_vec = True
+
+        def one_arg():
+            if len(args) != 1:
+                raise SyntaxError(f"vec.{m}() 需要且只需要一个实参")
+            return self.eval(args[0], fn, env)
+
+        if m == "len":
+            if args:
+                raise SyntaxError("vec.len() 不接受实参")
+            d = fn.new_v()
+            fn.emit("call", d, "__vec_len", [obj])
+            return d
+        if m == "clear":
+            if args:
+                raise SyntaxError("vec.clear() 不接受实参")
+            fn.emit("call", None, "__vec_clear", [obj])
+            return ("imm", 0)
+        if m == "push":
+            v = one_arg()
+            fn.emit("call", None, "__vec_push", [obj, v])
+            return ("imm", 0)
+        if m == "pop":
+            if args:
+                raise SyntaxError("vec.pop() 不接受实参")
+            d = fn.new_v()
+            fn.emit("call", d, "__vec_pop", [obj])
+            if elem == "str":
+                self._mark_str(fn, d)
+            return d
+        if m == "get":
+            i = one_arg()
+            d = fn.new_v()
+            fn.emit("call", d, "__vec_get", [obj, i])
+            if elem == "str":
+                self._mark_str(fn, d)
+            return d
+        if m == "set":
+            if len(args) != 2:
+                raise SyntaxError("vec.set(i, v) 需要两个实参")
+            i = self.eval(args[0], fn, env)
+            v = self.eval(args[1], fn, env)
+            fn.emit("call", None, "__vec_set", [obj, i, v])
+            return ("imm", 0)
+        raise SyntaxError(f"vec 不支持方法 {m}（可用 push/get/set/pop/len/clear）")
 
     def lower_map_method(self, m, obj, mp, args, fn, env):
         """m.set/get/has/del -> __map_* 运行时（开放寻址 + 线性探测）。
@@ -1814,6 +1878,11 @@ class Lower:
                     return ("imm", n)
                 if self._is_slice(fn, env[a[1]]):
                     return self.slice_len(fn, env[a[1]])
+                if self._is_vec(fn, env[a[1]]):
+                    self.uses_vec = True
+                    d = fn.new_v()
+                    fn.emit("call", d, "__vec_len", [env[a[1]]])
+                    return d
                 if self._map_of(fn, env[a[1]]) is not None:
                     self.uses_map = True
                     d = fn.new_v()
@@ -1825,6 +1894,11 @@ class Lower:
             av = self.eval(a, fn, env)
             if self._is_slice(fn, av):
                 return self.slice_len(fn, av)
+            if self._is_vec(fn, av):
+                self.uses_vec = True
+                d = fn.new_v()
+                fn.emit("call", d, "__vec_len", [av])
+                return d
             if self._map_of(fn, av) is not None:
                 self.uses_map = True
                 d = fn.new_v()
@@ -1852,11 +1926,19 @@ class Lower:
         for i, a in enumerate(args):
             n = self._arr_of(fn, a)
             if n is not None:
-                # 数组作实参：形参是 `[]T` 时零拷贝转切片（SPEC §2），否则报错
-                if i < len(params) and params[i][1][0] == "slice":
-                    args[i] = self.make_slice(fn, a, ("imm", n))
-                    continue
-                raise SyntaxError("定长数组暂不支持作函数实参；请用 slice_of(a) 转成切片")
+                if i < len(params):
+                    pt = params[i][1]
+                    # 形参是 `[]T`：零拷贝转切片（SPEC §2）
+                    if pt[0] == "slice":
+                        args[i] = self.make_slice(fn, a, ("imm", n))
+                        continue
+                    # 形参是 `[N]T`：传地址，callee 里按值拷一份（v1.2）
+                    if pt[0] == "array":
+                        if pt[1] != n:
+                            raise SyntaxError(
+                                f"实参数组长度 {n} 与形参 {pt[1]} 不一致")
+                        continue
+                raise SyntaxError("定长数组实参的形参必须是 [N]T 或 []T；也可用 slice_of(a)")
         # 聚合实参（结构体/枚举/切片）：拷贝到临时帧槽再传地址
         # -> 值语义与 C 后端一致（callee 改不到 caller 的切片头）
         for i, a in enumerate(args):
@@ -1881,6 +1963,10 @@ class Lower:
             tmp = self.alloc_slice(fn)
             fn.emit("call", None, name, [tmp] + args)
             return tmp
+        if ret[0] == "array":
+            tmp = self.alloc_array(fn, ret[1])
+            fn.emit("call", None, name, [tmp] + args)
+            return tmp
         if ret[0] == "named" and self.is_agg(ret[1]):
             # 聚合返回值：隐藏出参指针约定（调用方开帧槽，callee 拷入）
             tmp = self.alloc_struct(fn, ret[1])
@@ -1895,6 +1981,9 @@ class Lower:
             return self._mark_float(fn, d, rw)
         if ret and ret[0] == "map":
             return self._mark_map(fn, d, ret[1][1], ret[2][1])
+        if ret and ret[0] == "vec":
+            et = "str" if ret[1] == ("named", "str") else None
+            return self._mark_vec(fn, d, et)
         return d
 
     # ---- 布尔条件跳转 ----
@@ -1982,6 +2071,8 @@ class Lower:
             mp = self._map_of(fn, spec)
             if mp is not None:
                 self._mark_map(fn, d, mp[0], mp[1])
+            if self._is_vec(fn, spec):
+                self._mark_vec(fn, d, self._vec_elem(fn, spec))
             if self._float_of(fn, spec):
                 self._mark_float(fn, d, self._float_of(fn, spec))
             env[s[2]] = d
@@ -2030,6 +2121,9 @@ class Lower:
             else:
                 raise SyntaxError("常量不可赋值")
             return
+        if k == "foreach":
+            self.lower_foreach(s, fn, env)
+            return
         if k == "if":
             l_body, l_else, l_end = fn.label("ibody"), fn.label("ielse"), fn.label("iend")
             self.branch(s[1], fn, env, l_body, l_else)
@@ -2056,8 +2150,16 @@ class Lower:
             self.lower_for(s, fn, env, parallel=(k == "parfor"))
             return
         if k == "return":
-            if self.fn_ret[0] == "array":
-                raise SyntaxError("定长数组暂不支持作返回值（v0.6 边界）")
+            if getattr(self, "fn_ret_arr", None):
+                if s[1] is None:
+                    raise SyntaxError("返回定长数组的函数必须 return 一个数组")
+                spec = self.eval(s[1], fn, env)
+                n = self._arr_of(fn, spec)
+                if n != self.fn_ret_arr[1]:
+                    raise SyntaxError("return 的数组长度与函数返回类型不一致")
+                self.array_copy(fn, self.fn_ret_target, spec, n)
+                fn.emit("ret", ("imm", 0))
+                return
             if self.fn_ret_agg or self.fn_ret_slice:
                 if s[1] is None:
                     raise SyntaxError("聚合（结构体/枚举/切片）返回值函数必须 return 一个值")
@@ -2190,6 +2292,73 @@ class Lower:
             self.stmt(s, fn, env)
 
     # ---- for / parfor ----
+    def lower_foreach(self, s, fn, env):
+        """for x in <map|vec>：遍历。
+        - map：按桶序（实现相关但稳定），只产出【键】；需要值时用 m.get(k)
+        - vec：按下标序
+        顺序在 SPEC 里明确写为"实现定义"，测试只依赖集合内容不依赖顺序。
+        """
+        _, var, coll_e, body = s
+        coll = self.eval(coll_e, fn, env)
+        idx = fn.new_v()
+        fn.emit("mov", idx, ("imm", 0))
+        item = fn.new_v()
+        l_top, l_body, l_end = fn.label("fe.t"), fn.label("fe.b"), fn.label("fe.e")
+        l_skip = fn.label("fe.s")
+
+        mp = self._map_of(fn, coll)
+        if mp is not None:
+            self.uses_map = True
+            cap = fn.new_v()
+            st = fn.new_v()
+            kt = fn.new_v()
+            fn.emit("load", cap, coll, ("imm", 0))       # 桶数
+            fn.emit("load", st, coll, ("imm", 4))        # state 字节数组
+            fn.emit("load", kt, coll, ("imm", 5))        # 键数组
+            b = fn.new_v()
+            fn.emit("label", l_top)
+            fn.emit("cmpset", "ge", b, idx, cap)
+            fn.emit("jnz", b, l_end)
+            sv = fn.new_v()
+            fn.emit("load", sv, st, idx)          # state 是 8 字节槽（见 __map_set）
+            fn.emit("cmpset", "ne", b, sv, ("imm", 1))
+            fn.emit("jnz", b, l_skip)
+            fn.emit("load", item, kt, idx)
+            l_body = fn.label("fe.b2")
+            fn.emit("label", l_body)
+        else:
+            vec = self._is_vec(fn, coll)
+            if not vec:
+                raise SyntaxError("for x in ... 只支持 map 与 vec（区间循环用 a..b）")
+            self.uses_vec = True
+            data = fn.new_v()
+            ln = fn.new_v()
+            fn.emit("load", data, coll, ("imm", 0))
+            fn.emit("load", ln, coll, ("imm", 1))
+            b = fn.new_v()
+            fn.emit("label", l_top)
+            fn.emit("cmpset", "ge", b, idx, ln)
+            fn.emit("jnz", b, l_end)
+            fn.emit("load", item, data, idx)
+            l_body = fn.label("fe.b3")
+            fn.emit("label", l_body)
+
+        if mp is not None:
+            elem = "str" if mp[0] == "str" else None      # 键类型
+        else:
+            elem = self._vec_elem(fn, coll)
+        if elem == "str":
+            self._mark_str(fn, item)
+        inner = dict(env)
+        inner[var] = item
+        self.loop_stack.append((l_skip, l_end))
+        self.block(body, fn, inner)
+        self.loop_stack.pop()
+        fn.emit("label", l_skip)
+        fn.emit("bin", "add", idx, idx, ("imm", 1))
+        fn.emit("jmp", l_top)
+        fn.emit("label", l_end)
+
     def lower_for(self, s, fn, env, parallel):
         _, var, lo_e, hi_e, body = s
         lo = self.eval(lo_e, fn, env)
@@ -2396,6 +2565,7 @@ class Lower:
         self.fn_ret_agg = None
         self.fn_ret_target = None
         self.fn_ret_slice = False
+        self.fn_ret_arr = None
         ret = f["ret"]
         if ret[0] == "slice":
             # 切片返回值：同聚合 ABI（隐藏出参指针作第一参数）
@@ -2405,8 +2575,12 @@ class Lower:
             # 聚合返回值：ABI = 隐藏出参指针作第一参数（发射层零改动）
             self.fn_ret_agg = ret[1]
             self.fn_ret_target = fn.new_v()
+        elif ret[0] == "array":
+            # 定长数组返回值：隐藏出参指针（调用方开 N 字帧槽，callee 拷入）
+            self.fn_ret_arr = ret
+            self.fn_ret_target = fn.new_v()
         params = [fn.new_v() for _ in f["params"]]
-        if self.fn_ret_agg or self.fn_ret_slice:
+        if self.fn_ret_agg or self.fn_ret_slice or self.fn_ret_arr:
             fn.emit("args", [self.fn_ret_target] + params)
             if self.fn_ret_agg:
                 self._mark_struct(fn, self.fn_ret_target, self.fn_ret_agg)
@@ -2427,6 +2601,14 @@ class Lower:
             elif ty[0] == "slice":
                 et = "str" if ty[1] == ("named", "str") else None
                 self._mark_slice(fn, params[i], et)
+            elif ty[0] == "vec":
+                et = "str" if ty[1] == ("named", "str") else None
+                self._mark_vec(fn, params[i], et)
+            elif ty[0] == "array":
+                # 数组形参按值语义：就地拷一份，函数内改动不外泄
+                dst = self.alloc_array(fn, ty[1])
+                self.array_copy(fn, dst, params[i], ty[1])
+                env[name] = dst
             elif ty[0] == "array":
                 self._mark_arr(fn, params[i], ty[1])
             elif ty[0] == "named" and self.is_agg(ty[1]):
@@ -3281,6 +3463,155 @@ class Lower:
         f.emit("ret", i)
         self.out.append(f)
 
+        if self.uses_vec:
+            # vec[T] 头：w0=data, w1=len, w2=cap, w3=tag（元素恒 8 字节字）
+            msg = "quelmara: vec index out of bounds (fail-fast)\n"
+            gid_v = self.intern_str(msg)
+            f = Fn("__vec_fail")
+            f.emit("args", [])
+            bp = f.new_v()
+            f.emit("movaddr", bp, gid_v)
+            self.emit_write(f, 2, bp, ("imm", len(msg.encode("utf-8"))))
+            self.emit_exit(f, 1)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            f = Fn("__vec_new")
+            cap = f.new_v()
+            f.emit("args", [cap])
+            l_ok = f.label("vn.ok")
+            b0 = f.new_v()
+            f.emit("cmpset", "ge", b0, cap, ("imm", 4))     # 最小容量 4
+            f.emit("jnz", b0, l_ok)
+            f.emit("mov", cap, ("imm", 4))
+            f.emit("label", l_ok)
+            h = f.new_v()
+            f.emit("call", h, "__alloc", [("imm", 32)])
+            nb = f.new_v()
+            f.emit("bin", "shl", nb, cap, ("imm", 3))
+            data = f.new_v()
+            f.emit("call", data, "__alloc", [nb])
+            f.emit("store", h, ("imm", 0), data)
+            f.emit("store", h, ("imm", 1), ("imm", 0))
+            f.emit("store", h, ("imm", 2), cap)
+            f.emit("store", h, ("imm", 3), ("imm", 0))
+            f.emit("ret", h)
+            self.out.append(f)
+
+            f = Fn("__vec_push")
+            h, v = f.new_v(), f.new_v()
+            f.emit("args", [h, v])
+            ln = f.new_v()
+            f.emit("load", ln, h, ("imm", 1))
+            cp = f.new_v()
+            f.emit("load", cp, h, ("imm", 2))
+            l_grow, l_have = f.label("vp.g"), f.label("vp.h")
+            b1 = f.new_v()
+            f.emit("cmpset", "l", b1, ln, cp)
+            f.emit("jnz", b1, l_have)
+            # 扩容：cap*2，拷旧数据
+            ncp = f.new_v()
+            f.emit("bin", "shl", ncp, cp, ("imm", 1))
+            nb = f.new_v()
+            f.emit("bin", "shl", nb, ncp, ("imm", 3))
+            nd = f.new_v()
+            f.emit("call", nd, "__alloc", [nb])
+            od = f.new_v()
+            f.emit("load", od, h, ("imm", 0))
+            nbytes = f.new_v()
+            f.emit("bin", "shl", nbytes, ln, ("imm", 3))
+            f.emit("call", None, "__memcpy", [nd, od, nbytes])
+            f.emit("store", h, ("imm", 0), nd)
+            f.emit("store", h, ("imm", 2), ncp)
+            f.emit("label", l_have)
+            data = f.new_v()
+            f.emit("load", data, h, ("imm", 0))
+            f.emit("store", data, ln, v)
+            ln1 = f.new_v()
+            f.emit("bin", "add", ln1, ln, ("imm", 1))
+            f.emit("store", h, ("imm", 1), ln1)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            f = Fn("__vec_len")
+            h = f.new_v()
+            f.emit("args", [h])
+            d = f.new_v()
+            f.emit("load", d, h, ("imm", 1))
+            f.emit("ret", d)
+            self.out.append(f)
+
+            f = Fn("__vec_clear")
+            h = f.new_v()
+            f.emit("args", [h])
+            f.emit("store", h, ("imm", 1), ("imm", 0))
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            # get/set/pop 共用一段边界检查
+            f = Fn("__vec_get")
+            h, i = f.new_v(), f.new_v()
+            f.emit("args", [h, i])
+            ln = f.new_v()
+            f.emit("load", ln, h, ("imm", 1))
+            b = f.new_v()
+            l_bad, l_ok = f.label("vg.b"), f.label("vg.k")
+            f.emit("cmpset", "l", b, i, ("imm", 0))
+            f.emit("jnz", b, l_bad)
+            f.emit("cmpset", "ge", b, i, ln)
+            f.emit("jnz", b, l_bad)
+            data = f.new_v()
+            f.emit("load", data, h, ("imm", 0))
+            d = f.new_v()
+            f.emit("load", d, data, i)
+            f.emit("ret", d)
+            f.emit("label", l_bad)
+            f.emit("call", None, "__vec_fail", [])
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            f = Fn("__vec_set")
+            h, i, v = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [h, i, v])
+            ln = f.new_v()
+            f.emit("load", ln, h, ("imm", 1))
+            b = f.new_v()
+            l_bad2, l_ok2 = f.label("vs.b"), f.label("vs.k")
+            f.emit("cmpset", "l", b, i, ("imm", 0))
+            f.emit("jnz", b, l_bad2)
+            f.emit("cmpset", "ge", b, i, ln)
+            f.emit("jnz", b, l_bad2)
+            data = f.new_v()
+            f.emit("load", data, h, ("imm", 0))
+            f.emit("store", data, i, v)
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_bad2)
+            f.emit("call", None, "__vec_fail", [])
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            f = Fn("__vec_pop")
+            h = f.new_v()
+            f.emit("args", [h])
+            ln = f.new_v()
+            f.emit("load", ln, h, ("imm", 1))
+            b = f.new_v()
+            l_bad3, l_ok3 = f.label("vx.b"), f.label("vx.k")
+            f.emit("cmpset", "le", b, ln, ("imm", 0))
+            f.emit("jnz", b, l_bad3)
+            ln1 = f.new_v()
+            f.emit("bin", "sub", ln1, ln, ("imm", 1))
+            f.emit("store", h, ("imm", 1), ln1)
+            data = f.new_v()
+            f.emit("load", data, h, ("imm", 0))
+            d = f.new_v()
+            f.emit("load", d, data, ln1)
+            f.emit("ret", d)
+            f.emit("label", l_bad3)
+            f.emit("call", None, "__vec_fail", [])
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
         if self.uses_str_cmp:
             # __str_cmp(a, b) -> -1 / 0 / 1：按无符号字节字典序
             f = Fn("__str_cmp")
@@ -3978,6 +4309,26 @@ class Lower:
                 fn.mapv = {}
             fn.mapv[v] = (kt, vt)
         return v
+
+    @staticmethod
+    def _mark_vec(fn, v, elem):
+        if not isinstance(v, int):
+            return v
+        if not hasattr(fn, "vecv"):
+            fn.vecv = set()
+            fn.vecelem = {}
+        fn.vecv.add(v)
+        if elem is not None:
+            fn.vecelem[v] = elem
+        return v
+
+    @staticmethod
+    def _is_vec(fn, v):
+        return isinstance(v, int) and v in getattr(fn, "vecv", set())
+
+    @staticmethod
+    def _vec_elem(fn, v):
+        return getattr(fn, "vecelem", {}).get(v) if isinstance(v, int) else None
 
     @staticmethod
     def _map_of(fn, v):

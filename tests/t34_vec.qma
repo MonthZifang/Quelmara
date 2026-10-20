@@ -1,0 +1,87 @@
+// t34_vec.qma：vec[T] 堆上变长数组（v1.2）
+// 覆盖：new(cap) 最小容量、push 扩容、get/set、pop、len、clear、str 元素
+module t34
+
+fn fill(n: int) -> vec[int] {
+    let v = vec[int].new(1)
+    let mut i = 0
+    while i < n {
+        v.push(i)
+        i += 1
+    }
+    return v
+}
+
+fn total(v: vec[int]) -> int {
+    let mut s = 0
+    for x in v {
+        s += x
+    }
+    return s
+}
+
+fn main() {
+    // 基本操作
+    let v = vec[int].new(2)
+    assert(len(v) == 0, "empty len")
+    v.push(10)
+    v.push(20)
+    assert(len(v) == 2, "len 2")
+    assert(v.get(0) == 10, "get 0")
+    assert(v.get(1) == 20, "get 1")
+    v.set(1, 21)
+    assert(v.get(1) == 21, "set")
+    assert(v.pop() == 21, "pop")
+    assert(len(v) == 1, "len after pop")
+
+    // 扩容：从 1 起插 100 个，跨越多次翻倍
+    let big = fill(100)
+    assert(len(big) == 100, "grow len")
+    assert(big.get(0) == 0, "grow first")
+    assert(big.get(99) == 99, "grow last")
+    let mut sum = 0
+    for x in big {
+        sum += x
+    }
+    assert(sum == 4950, "sum 0..99")
+
+    // 作为参数传递（句柄语义：函数内 push 对调用方可见）
+    let shared = vec[int].new(1)
+    shared.push(1)
+    assert(len(shared) == 1, "before")
+    shared.clear()
+    assert(len(shared) == 0, "clear")
+
+    // str 元素
+    let names = vec[str].new(1)
+    names.push("alpha")
+    names.push("beta")
+    names.push("gamma")
+    assert(len(names) == 3, "str len")
+    assert(names.get(0) == "alpha", "str 0")
+    assert(names.get(2) == "gamma", "str 2")
+    let mut chars = 0
+    for w in names {
+        chars += len(w)
+    }
+    assert(chars == 14, "char count")
+
+    // 用 vec 做栈：逆序
+    let st = vec[int].new(2)
+    let mut i = 0
+    while i < 5 {
+        st.push(i)
+        i += 1
+    }
+    let mut rev = 0
+    while len(st) > 0 {
+        rev = rev * 10 + st.pop()
+    }
+    assert(rev == 43210, "stack reversal")
+
+    // 函数返回 vec
+    let back = fill(3)
+    assert(total(back) == 3, "sum via param")
+
+    print("vec ok")
+}

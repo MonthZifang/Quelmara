@@ -7,9 +7,14 @@
 > v0.9：`opt_modsum` 模和折叠 + 范围分析扩展 + `mul_const` 回退路径错编修复（loop_sum 11–13ms，见 CHANGELOG）。
 > v0.10：`map[K]V` 开放寻址哈希表（t22）+ 浮点实际运算（t23，修复 `__f64_to_str` 科学计数法死循环）。
 > v0.11：`h.join()` 方法式 + `chan.close()` + `select`（t24/t25/t26）。
-> 本机（Windows）验证：PE 链 **88 项全绿**；词法对拍 **68/68 全等**；跨平台基线 win+arm64 输出一致；[7] 交叉验证与 native/C 链需 Linux/WSL 环境
+> 本机（Windows）验证：PE 链 **91 项全绿**；词法对拍 **71/71 全等**；跨平台基线 win+arm64 输出一致；[7] 交叉验证与 native/C 链需 Linux/WSL 环境
 > （本机无 gcc/clang，C 后端只能验证「生成」不能验证「执行」）。
 > 代码总量：`tools/stage0/` 15.1k 行 Python（引导层）+ `bootstrap/` 268 行 Quelmara（自举层）+ `tests/` 1.9k 行
+>
+> ### v1.2 一句话
+> 补齐自举 parser 的三块地基：`vec[T]`（可增长容器）、`for x in <map|vec>`（可枚举符号表）、
+> `[N]T` 作参数/返回值（按值拷贝 + 隐藏出参）。至此"写编译器的语言能力"基本齐了，
+> 下一步可以开工 `bootstrap/parser/`。
 >
 > ### v1.1 一句话
 > 补齐"写编译器真正需要"的语法：位运算（含 `>>>`）、进制字面量、子切片 `a[lo..hi]`、
@@ -155,8 +160,9 @@ Windows PE 74 ✅（本机实测，[1]–[6]；[7] 需 WSL）
 | 进制字面量 `0x/0b/0o` | ✅ v1.1 三链 | — |
 | 字符串字典序 `< <= > >=` | ✅ v1.1 修正（此前是指针比较） | — |
 | `eprint` / `exit` | ✅ v1.1 | — |
-| `vec[T]` 变长数组 | ❌ 需要堆上 realloc 与容量管理 | **高** |
-| `for k in m` 遍历 map | ❌ 只有 set/get/has/del/len | **高** |
+| `vec[T]` 变长数组 | ✅ v1.2 push/get/set/pop/len/clear + 2 倍扩容 | — |
+| `for k in m` 遍历 map / `for x in v` | ✅ v1.2（顺序实现定义，SPEC 写明不要依赖） | — |
+| `[N]T` 作参数/返回值 | ✅ v1.2 值语义拷贝 + 隐藏出参（仅自研后端） | — |
 | 泛型 / interface | ❌ | 中 |
 | 所有权 + 借用检查 | ❌ arena/spawn/array 依赖约定 | 中 |
 | `@simd` / `@no_preempt` / `@rc[T]` | ❌ | 中 |

@@ -1,0 +1,66 @@
+// t35_iter.qma：for x in <map|vec>（v1.2）
+// 遍历顺序是「实现定义」，测试只依赖集合内容与计数，不依赖顺序。
+module t35
+
+fn main() {
+    let m = map[int]int.new(8)
+    let mut i = 0
+    while i < 50 {
+        m.set(i, i * 2)
+        i += 1
+    }
+    let mut n = 0
+    let mut vs = 0
+    let mut ks = 0
+    for k in m {
+        n += 1
+        ks += k
+        vs += m.get(k)
+    }
+    assert(n == 50, "map count")
+    assert(ks == 1225, "key sum")
+    assert(vs == 2450, "value sum")
+
+    // 删除后（墓碑）不应被遍历到
+    m.del(0)
+    m.del(1)
+    m.del(2)
+    let mut n2 = 0
+    for k in m {
+        n2 += 1
+    }
+    assert(n2 == 47, "after del")
+
+    // str 键：遍历出来的键必须能直接当 str 用
+    let s = map[str]int.new(4)
+    s.set("a", 1)
+    s.set("bb", 2)
+    s.set("ccc", 3)
+    let mut total_len = 0
+    let mut vsum = 0
+    for k in s {
+        total_len += len(k)
+        vsum += s.get(k)
+    }
+    assert(total_len == 6, "str key lens")
+    assert(vsum == 6, "str value sum")
+
+    // vec 遍历（下标序，稳定）
+    let v = vec[int].new(2)
+    let mut j = 0
+    while j < 5 {
+        v.push(j * j)
+        j += 1
+    }
+    let mut acc = 0
+    let mut seen = 0
+    for x in v {
+        acc = acc * 10 + x
+        seen += 1
+    }
+    assert(seen == 5, "vec count")
+    assert(acc == 1506, "vec order 0,1,4,9,16 逐位拼装 => 1506")
+
+    // 嵌套：vec 里放 map 句柄不可行，但可以遍历 map 再用值查 vec
+    print("iter ok")
+}
