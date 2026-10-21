@@ -8,39 +8,67 @@ import std.url
 import std.json
 
 fn main() {
-    // ---------- SHA-256：1MB 单遍 ----------
+    // ---------- SHA-256：1MB 单遍（3 遍取最小，本机 VBS 噪声 ±50%） ----------
     let unit = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     let big = str_repeat(unit, 16384)          // 64B × 16384 = 1 MiB
     assert(len(big) == 1048576, "big size")
-    let t0 = now_ns()
-    let hex = sha256_hex(big)
-    let t1 = now_ns()
-    assert(len(hex) == 64, "sha len")
-    let sha_ms = (t1 - t0) / 1000000
-    print("sha256 1MiB: " + sha_ms.to_str() + " ms")
-
-    // ---------- 字符串：1MB split + join ----------
-    let t2 = now_ns()
-    let rows = str_split(big, "ab")
-    let joined = str_join(rows, "ab")
-    let t3 = now_ns()
-    assert(len(joined) == len(big), "join size")
-    print("split+join 1MiB: " + ((t3 - t2) / 1000000).to_str() + " ms, parts=" + len(rows).to_str())
-
-    // ---------- URL：10 万次解析 + 取值 ----------
-    let u = "https://user@example.com:8443/a/b?q=hello%20world&x=1#frag"
-    let t4 = now_ns()
-    let mut acc = 0
-    let mut i = 0
-    while i < 100000 {
-        acc = acc + url_port(u) + len(url_query_get(u, "q"))
-        i = i + 1
+    let mut sha_best = 0 - 1
+    let mut r = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let hex = sha256_hex(big)
+        let t1 = now_ns()
+        assert(len(hex) == 64, "sha len")
+        let ms = (t1 - t0) / 1000000
+        if sha_best < 0 || ms < sha_best {
+            sha_best = ms
+        }
+        r = r + 1
     }
-    let t5 = now_ns()
-    assert(acc == 844300000 + 1100000, "url acc")
-    print("url parse×100k: " + ((t5 - t4) / 1000000).to_str() + " ms")
+    print("sha256 1MiB: " + sha_best.to_str() + " ms (min of 3)")
 
-    // ---------- JSON：2000 个对象的数组，解析 + 遍历 ----------
+    // ---------- 字符串：1MB split + join（3 遍取最小） ----------
+    let mut sj_best = 0 - 1
+    let mut parts = vec[str].new(4)
+    let mut r = 0
+    while r < 3 {
+        let t2 = now_ns()
+        let rows = str_split(big, "ab")
+        let joined = str_join(rows, "ab")
+        let t3 = now_ns()
+        assert(len(joined) == len(big), "join size")
+        parts = rows
+        let ms = (t3 - t2) / 1000000
+        if sj_best < 0 || ms < sj_best {
+            sj_best = ms
+        }
+        r = r + 1
+    }
+    print("split+join 1MiB: " + sj_best.to_str() + " ms (min of 3), parts=" + len(parts).to_str())
+
+    // ---------- URL：10 万次解析 + 取值（3 遍取最小） ----------
+    let u = "https://user@example.com:8443/a/b?q=hello%20world&x=1#frag"
+    let mut url_best = 0 - 1
+    let mut r = 0
+    while r < 3 {
+        let mut acc = 0
+        let mut i = 0
+        let t4 = now_ns()
+        while i < 100000 {
+            acc = acc + url_port(u) + len(url_query_get(u, "q"))
+            i = i + 1
+        }
+        let t5 = now_ns()
+        assert(acc == 844300000 + 1100000, "url acc")
+        let ms = (t5 - t4) / 1000000
+        if url_best < 0 || ms < url_best {
+            url_best = ms
+        }
+        r = r + 1
+    }
+    print("url parse×100k: " + url_best.to_str() + " ms (min of 3)")
+
+    // ---------- JSON：2000 个对象的数组，解析 + 遍历（3 遍取最小） ----------
     let h = json_new(65536)
     json_begin_arr(h)
     let mut k = 0
@@ -54,24 +82,38 @@ fn main() {
     }
     json_end_arr(h)
     let doc = json_done(h)
-    let t6 = now_ns()
-    let d = json_parse(doc)
-    let t7 = now_ns()
-    assert(json_ok(d), "json ok")
-    let root = json_root(d)
-    assert(json_arr_len(d, root) == 2000, "json len")
+    let mut parse_best = 0 - 1
+    let mut walk_best = 0 - 1
+    let mut r = 0
+    while r < 3 {
+        let t6 = now_ns()
+        let d = json_parse(doc)
+        let t7 = now_ns()
+        assert(json_ok(d), "json ok")
+        let root = json_root(d)
+        assert(json_arr_len(d, root) == 2000, "json len")
 
-    let t8 = now_ns()
-    let mut sum = 0
-    let mut j = 0
-    while j < json_arr_len(d, root) {
-        let one = json_arr_at(d, root, j)
-        sum = sum + json_int(d, json_obj_get(d, one, "id"))
-        j = j + 1
+        let t8 = now_ns()
+        let mut sum = 0
+        let mut j = 0
+        while j < json_arr_len(d, root) {
+            let one = json_arr_at(d, root, j)
+            sum = sum + json_int(d, json_obj_get(d, one, "id"))
+            j = j + 1
+        }
+        let t9 = now_ns()
+        assert(sum == 1999000, "json sum")
+        let pm = (t7 - t6) / 1000000
+        let wm = (t9 - t8) / 1000000
+        if parse_best < 0 || pm < parse_best {
+            parse_best = pm
+        }
+        if walk_best < 0 || wm < walk_best {
+            walk_best = wm
+        }
+        r = r + 1
     }
-    let t9 = now_ns()
-    assert(sum == 1999000, "json sum")
-    print("json parse " + len(doc).to_str() + "B: " + ((t7 - t6) / 1000000).to_str() + " ms")
-    print("json walk 2000 objs: " + ((t9 - t8) / 1000000).to_str() + " ms")
+    print("json parse " + len(doc).to_str() + "B: " + parse_best.to_str() + " ms (min of 3)")
+    print("json walk 2000 objs: " + walk_best.to_str() + " ms (min of 3)")
     print("p0_bench ok")
 }

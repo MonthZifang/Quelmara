@@ -549,6 +549,7 @@ class Lower:
         self.uses_net = False
         self.uses_net_serve = False
         self.uses_sfb = False
+        self.uses_strmem = False
         self.uses_memcpy = False
         self.uses_substr = False
         self.uses_str_cmp = False
@@ -1587,6 +1588,12 @@ class Lower:
         if op == "+" and (self._is_str(fn, a) or self._is_str(fn, b)):
             if wa or wb:
                 raise SyntaxError("字符串与浮点不能拼接；请用 to_str()")
+            if not (self._is_str(fn, a) and self._is_str(fn, b)):
+                # v1.14：str + int 从"静默把 int 当 str 句柄读"改为编译期
+                # fail-fast（此前直接 __str_concat(a, b)，运行期段错误）。
+                # 库内部的指针算术请用 mem_ptr(p, off)（返回纯 int）。
+                raise SyntaxError(
+                    "字符串与 int 拼接需 to_str()；指针偏移用 mem_ptr(p, off)")
             d = fn.new_v()
             fn.emit("call", d, "__str_concat", [a, b])
             return self._mark_str(fn, d)
@@ -2202,6 +2209,17 @@ class Lower:
             else:
                 fn.emit("load", d, vals[0], vals[1])
             return d
+        if name == "mem_ptr" and name not in self.fns_ast:
+            # mem_ptr(p, off) -> int：纯 int 指针偏移（v1.14）。
+            # str 值是 int 形态，`s + n` 会被 str 拼接劫持（v1.14 起 str+int
+            # 直接编译报错）——std 库内部的指针算术统一用这个原语，
+            # 返回值**不带任何标记**（纯 int，+ - 等算术走整数路径）。
+            if len(e[2]) != 2:
+                raise SyntaxError("mem_ptr(p, off) 需要两个实参")
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            d = fn.new_v()
+            fn.emit("bin", "add", d, vals[0], vals[1])
+            return d
         if name == "mem_copy" and name not in self.fns_ast:
             if len(e[2]) != 3:
                 raise SyntaxError("mem_copy(dst, src, n) 需要三个实参")
@@ -2262,6 +2280,35 @@ class Lower:
             va = self.eval(e[2][0], fn, env)
             d = fn.new_v()
             fn.emit("call", d, "__str_from_bytes", [va])
+            return self._mark_str(fn, d)
+        if name == "str_alloc" and name not in self.fns_ast:
+            # str_alloc(n) -> str：分配一个长度为 n 的可写空串（v1.14）。
+            # 返回**数据指针**（str 值约定），len 头已写 0，NUL 已置；
+            # 配合 mem_copy/mem_store8 批量填充——join/split/gzip 等
+            # 批量构造场景替代逐字节 vec push（O(n) 且无每字节 call）。
+            if len(e[2]) != 1:
+                raise SyntaxError("str_alloc(n) 需要一个实参")
+            if self.arch != "x86_64":
+                raise SyntaxError("str_alloc 目前只在 x86_64 后端实现")
+            self.uses_strmem = True
+            na = self.eval(e[2][0], fn, env)
+            d = fn.new_v()
+            fn.emit("call", d, "__str_alloc", [na])
+            return self._mark_str(fn, d)
+        if name == "str_from_mem" and name not in self.fns_ast:
+            # str_from_mem(data, n) -> str：从内存区间 O(n) 构造 str（v1.14）。
+            # data 是字节数据地址（str 值本身、mem 指针算术均可）；
+            # [n][bytes][NUL] 布局，一次分配一次拷贝——split/join 的
+            # 每段构造原语。语义边界：区间与目标不重叠（mem_copy 同约定）。
+            if len(e[2]) != 2:
+                raise SyntaxError("str_from_mem(data, n) 需要两个实参")
+            if self.arch != "x86_64":
+                raise SyntaxError("str_from_mem 目前只在 x86_64 后端实现")
+            self.uses_strmem = True
+            da = self.eval(e[2][0], fn, env)
+            na = self.eval(e[2][1], fn, env)
+            d = fn.new_v()
+            fn.emit("call", d, "__str_from_mem", [da, na])
             return self._mark_str(fn, d)
         if name in ("tcp_listen", "tcp_accept", "tcp_send", "tcp_recv",
                     "tcp_close") and name not in self.fns_ast:
@@ -4983,6 +5030,46 @@ class Lower:
             f.emit("label", l_fail)
             f.emit("call", None, "__write_fail", [])
             f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+        if self.uses_strmem:
+            # __str_alloc(n) -> str：分配 [n][bytes][NUL] 块，len 头写 0、
+            # NUL 已置，返回数据指针（str 值约定）。调用方用 mem_copy /
+            # mem_store8 批量填内容后即可当 str 用。
+            # __str_from_mem(data, n) -> str：从内存区间拷贝构造。
+            # 两者都是 str ABI 的正规批量构造器（v1.14），O(n) 且零逐字节 call。
+            f = Fn("__str_alloc")
+            nn = f.new_v()
+            f.emit("args", [nn])
+            tot = f.new_v()
+            f.emit("bin", "add", tot, nn, ("imm", 9))
+            h = f.new_v()
+            f.emit("call", h, "__alloc", [tot])
+            # 约定：str 值 = 数据指针（h+8），len 头在数据指针前 8 字节（h）
+            f.emit("store", h, ("imm", 0), nn)
+            end = f.new_v()
+            f.emit("bin", "add", end, h, nn)
+            f.emit("store8", end, ("imm", 8), ("imm", 0))
+            dp = f.new_v()
+            f.emit("bin", "add", dp, h, ("imm", 8))
+            f.emit("ret", dp)
+            self.out.append(f)
+
+            f = Fn("__str_from_mem")
+            sp, sn = f.new_v(), f.new_v()
+            f.emit("args", [sp, sn])
+            tot2 = f.new_v()
+            f.emit("bin", "add", tot2, sn, ("imm", 9))
+            h2 = f.new_v()
+            f.emit("call", h2, "__alloc", [tot2])
+            f.emit("store", h2, ("imm", 0), sn)
+            dst = f.new_v()
+            f.emit("bin", "add", dst, h2, ("imm", 8))
+            f.emit("call", None, "__memcpy", [dst, sp, sn])
+            end2 = f.new_v()
+            f.emit("bin", "add", end2, dst, sn)
+            f.emit("store8", end2, ("imm", 0), ("imm", 0))
+            f.emit("ret", dst)
             self.out.append(f)
 
         if self.uses_sfb:

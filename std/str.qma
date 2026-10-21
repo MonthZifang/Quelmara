@@ -42,20 +42,27 @@ fn str_find_from(s: str, from: int, needle: str) -> int {
     if from < 0 {
         return -1
     }
+    // v1.14 两阶段：首字节预筛（1 次下标出局大多数 miss），m==1 直接扫
+    let first = needle[0]
     let mut i = from
     while i + m <= n {
-        let mut k = 0
-        let mut ok = 1
-        while k < m {
-            if s[i + k] != needle[k] {
-                ok = 0
-                k = m
-            } else {
-                k = k + 1
+        if s[i] == first {
+            if m == 1 {
+                return i
             }
-        }
-        if ok == 1 {
-            return i
+            let mut k = 1
+            let mut ok = 1
+            while k < m {
+                if s[i + k] != needle[k] {
+                    ok = 0
+                    k = m
+                } else {
+                    k = k + 1
+                }
+            }
+            if ok == 1 {
+                return i
+            }
         }
         i = i + 1
     }
@@ -282,25 +289,24 @@ fn str_join(parts: vec[str], sep: str) -> str {
         i = i + 1
     }
     total = total + sl * (n - 1)
-    let b = _sb_new(total + 1)
+    // v1.14：一次 str_alloc + mem_copy 批量拼接（替代每字节 vec push——
+    // 1MiB 的 join 从 ~100 万次 push call 变成 n 次 memcpy）。
+    // 游标用 mem_ptr 取纯 int（str 值的 + 是拼接，不能做指针算术）。
+    let out = str_alloc(total)
+    let w = mem_ptr(out, 0)
     let mut j = 0
     while j < n {
         let p = parts.get(j)
-        let mut k = 0
-        while k < len(p) {
-            b.push(p[k])
-            k = k + 1
-        }
+        let pn = len(p)
+        mem_copy(w, p, pn)
+        w = w + pn
         if j + 1 < n {
-            let mut q = 0
-            while q < sl {
-                b.push(sep[q])
-                q = q + 1
-            }
+            mem_copy(w, sep, sl)
+            w = w + sl
         }
         j = j + 1
     }
-    return _sb_str(b)
+    return out
 }
 
 // ---------------------------------------------------------------------------
@@ -334,19 +340,22 @@ fn str_split(s: str, sep: str) -> vec[str] {
         return out
     }
     let n = len(s)
-    let cur = vec[int].new(16)
+    // v1.14：每段用 str_from_mem 批量构造（替代逐字节 vec 累积 +
+    // str_from_bytes——1MiB 的 split 从每字节 1 次 push call 变成
+    // 每段 1 次 alloc + 1 次 memcpy）
+    let first = sep[0]
+    let mut start = 0
     let mut i = 0
-    while i < n {
-        if _match_at(s, i, sep) {
-            out.push(str_from_bytes(cur))
-            cur.clear()
+    while i + m <= n {
+        if s[i] == first && _match_at(s, i, sep) {
+            out.push(str_from_mem(mem_ptr(s, start), i - start))
             i = i + m
+            start = i
         } else {
-            cur.push(s[i])
             i = i + 1
         }
     }
-    out.push(str_from_bytes(cur))
+    out.push(str_from_mem(mem_ptr(s, start), n - start))
     return out
 }
 
