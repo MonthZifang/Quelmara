@@ -502,6 +502,7 @@ fn parse_primary(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
                 first = 0
             }
         }
+        expect(src, n, k, 93)                  // 末元素退出路径不经过顶部 `]`
         return out + ")"
     }
     if c == 34 {                                       // 字符串
@@ -551,6 +552,7 @@ fn parse_primary(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
             }
             let mut out = "(vec " + tname
             if args != "" { out = out + args }
+            expect(src, n, k, 41)              // 同直接调用：末实参补吃 `)`
             return out + ")"
         }
         if w == "map" && cur_get(k) < n && src[cur_get(k)] == 91 {
@@ -582,6 +584,7 @@ fn parse_primary(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
                     }
                 }
             }
+            expect(src, n, k, 125)             // 同款：末字段退出路径补吃 `}`
             return out + ")"
         }
         return "(name " + w + ")"
@@ -635,6 +638,10 @@ fn parse_postfix(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
                 pure = 0
                 k.set("lk", 3)
                 ks.set("ln", "")
+                // 实参循环的 `)` 消费只在循环顶部；单实参/末实参的退出
+                // 路径不经过顶部——退出后必须补吃（v1.13 修：遗留 `)` 会让
+                // 后面的 `+ 1` 被切成独立语句，整函数 SKIP）
+                expect(src, n, k, 41)
             } else if c == 46 {                        // .name 后缀
                 cur_set(k, cur_get(k) + 1)
                 let nm = read_name(src, n, k)
@@ -672,6 +679,8 @@ fn parse_postfix(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
                         } else {
                             out = "(method " + out + " " + nm + args + ")"
                         }
+                        // 同直接调用：末实参退出路径不经过循环顶部的 `)` 检查
+                        expect(src, n, k, 41)
                     } else if pure == 1 {
                         dotted = dotted + "." + nm
                         out = "(path " + dotted + ")"
@@ -691,11 +700,13 @@ fn parse_postfix(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
                 let e = parse_expr(src, n, k, ks)
                 if skip_on(k) { return "" }
                 expect(src, n, k, 93)
+                // lb 存 index **之前**的 base（与 stage-0 的 assigni 协议对齐：
+                // (assigni (name a) (num 0) = ...)，而非完整 index 表达式）
+                ks.set("lb", out)
+                ks.set("li", e)
                 out = "(index " + out + " " + e + ")"
                 dotted = ""
                 pure = 0
-                ks.set("lb", out)
-                ks.set("li", e)
             } else {
                 go = 0
             }
@@ -970,34 +981,39 @@ fn parse_stmt(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
         }
     }
     if op == "<=" || op == ">=" { op = "" }        // 比较符不是赋值
-    if op != "" && k.get("lk") != 3 {
-        cur_set(k, i2 + len(op))
-        let rhs = parse_expr(src, n, k, ks)
-        if skip_on(k) { return "" }
-        let lk = k.get("lk")
-        let ln = ks.get("ln")
-        if lk == 1 {
-            return "(assign " + ln + " " + op + " " + rhs + ")"
-        }
-        if lk == 2 && len(ln) > 0 {
-            let mut hasdot = 0
-            let mut q = 0
-            while q < len(ln) {
-                if ln[q] == 46 { hasdot = 1 }
-                q += 1
-            }
-            if hasdot == 1 {
-                return "(assignf " + ln + " " + op + " " + rhs + ")"
-            }
-            return "(assign " + ln + " " + op + " " + rhs + ")"
-        }
-    }
-    if op != "" && k.get("lk") == 3 {
+    if op != "" {
+        // 左值类别必须在 **rhs 解析前**取：rhs 末尾是数字/调用时 postfix
+        // 无条件设 lk=3，会把 `k = k + 1` 误判成下标赋值（v1.13 修）。
+        // lb/li 同理是 lhs 下标分支的产物，跨语句残留必须以 lhs 快照为准。
+        let lhs_lk = k.get("lk")
+        let lhs_ln = ks.get("ln")
+        let lhs_lb = ks.get("lb")
+        let lhs_li = ks.get("li")
         cur_set(k, i2 + len(op))
         k.set("noslit", 0)
         let rhs = parse_expr(src, n, k, ks)
         if skip_on(k) { return "" }
-        return "(assigni " + ks.get("lb") + " " + ks.get("li") + " " + op + " " + rhs + ")"
+        if lhs_lk != 3 {
+            if lhs_lk == 1 {
+                return "(assign " + lhs_ln + " " + op + " " + rhs + ")"
+            }
+            if lhs_lk == 2 && len(lhs_ln) > 0 {
+                let mut hasdot = 0
+                let mut q = 0
+                while q < len(lhs_ln) {
+                    if lhs_ln[q] == 46 { hasdot = 1 }
+                    q += 1
+                }
+                if hasdot == 1 {
+                    return "(assignf " + lhs_ln + " " + op + " " + rhs + ")"
+                }
+                return "(assign " + lhs_ln + " " + op + " " + rhs + ")"
+            }
+        }
+        if lhs_lk == 3 && len(lhs_lb) > 0 {
+            // 下标左值：lb = 基础名（index 前的 base），li = 下标表达式
+            return "(assigni " + lhs_lb + " " + lhs_li + " " + op + " " + rhs + ")"
+        }
     }
     cur_set(k, saved)
     k.set("noslit", 0)
