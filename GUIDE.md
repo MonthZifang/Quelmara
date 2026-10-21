@@ -51,10 +51,10 @@ bounds_check = true  # 越界 fail-fast（默认开；可证明安全的检查�
 
 | 门禁 | 命令 | 口径 |
 |---|---|---|
-| 改名残留 | `python tools/dev/check_names.py` | 旧名/.ros 零残留 + C 运行时符号自洽 |
+| 改名残留 | `python tools/dev/check_names.py` | 旧名零残留 + C 运行时符号自洽 |
 | 原创性 | `python tools/dev/check_origin.py` | 仅标准库、无第三方产物 |
-| 自举对拍 | `tests/lexdiff.py` 等 | 词法 92/92、声明级 AST 87/87、QuIR 50/50、发射 10/10 |
-| PE 回归 | `python tests/run_win_tests.py` | 92 项（执行级 + fail-fast + 单核降级） |
+| 自举对拍 | `tests/lexdiff.py` 等 | 词法 99/99、声明级 AST 90/90（1 显式跳过）、QuIR 59/59（22 skip）、发射 10/10 |
+| PE 回归 | `python tests/run_win_tests.py` | 113 项（执行级 + fail-fast + 单核降级 + v1.8 正/负夹具） |
 | 自举进度 | `python tools/dev/selfhost_status.py` | 组件归属 / 对拍 / 行数占比 |
 | CI | `.github/workflows/ci.yml` | Linux + Windows 双平台矩阵 |
 
@@ -159,8 +159,10 @@ fn main() {
 | 多文件 import、文件读写、阻塞 TCP、多核、arena、Result/`?` | ✅ |
 | 目录 API（exists/mkdir/列目录）、追加写 | ⬜ 下一步 |
 | reactor 网络（epoll/IOCP + 回调） | ⬜ tcp_* 地基已通 |
-| 泛型 / interface / 借用检查 | ⬜ 规范已定，代码未写 |
-| vec 元素限标量、chan 载荷 8 字节、parfor 归约仅 `+=` | ⬜ 边界见 SPEC |
+| interface / impl | 🟡 v1.8 静态分发（契约 + 校验 + 方法调用）；动态分发未实现 |
+| 所有权 / 借用检查 | 🟡 v1.8 只查 `rc[T]` 句柄（use-after-drop / double-free / move） |
+| 用户泛型、闭包、FFI | ⬜ 规范已定，代码未写 |
+| `vec[vec[T]]`、chan 载荷 8 字节、parfor 归约仅 `+=` | ⬜ 边界见 SPEC / `docs/GAPS.md` |
 
 ---
 

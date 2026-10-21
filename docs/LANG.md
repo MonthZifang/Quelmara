@@ -239,6 +239,9 @@ impl Circle : Shape {
 | `let s: Shape = ...`（装进接口变量） | ❌ **未实现** |
 | `vec[Shape]` / 跨类型数组 / vtable | ❌ **未实现** |
 
+> 另外：`interface` 与它的 `impl` 必须**在同一个源文件里**声明（一致性检查在解析期按文件做，
+> 跨 `import` 的 impl 还不支持）。
+
 > 所以现在 `interface` 的定位是"带检查的方法定义 + 类型级命名空间"，
 > **不是**多态。动态分发的设计（`{data, tid}` + per-method 派发函数）
 > 记在 `docs/GAPS.md §2`，是语言层下一个大项。

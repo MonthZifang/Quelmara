@@ -143,7 +143,7 @@ impl Circle : Shape {
 | Windows x86-64（PE32+） | ✅ 主平台 | `tests/run_win_tests.py` 113 项 | 无 CRT，只导入 kernel32/ws2_32 |
 | Linux x86-64（ELF64） | ✅ | `tests/run_native_tests.sh`（CI ubuntu） | 需 Linux 环境；本机沙箱被 WSL 黑名单拦住 → 交叉验证 SKIP |
 | Linux io_uring | ✅ | `tests/test_uring.sh`（CI） | 仅 5.1+ 内核 |
-| AArch64（ELF） | 🟡 | `tests/run_native_tests.sh` 模拟器执行级 | 无 chan/map/spawn（19 项 skip） |
+| AArch64（ELF） | 🟡 | `tests/run_native_tests.sh` 模拟器执行级 | 无 chan/map/spawn；v1.8 新增 IR（`trunc`/`vsum`）尚未进 A64 发射层 → IR 对拍里显式 SKIP（22 项） |
 | macOS（Mach-O / kqueue） | ❌ | `docs/PLATFORM.md` 候选 | 无 |
 | wasm32/64 | ❌ | 路线图 | 无 |
 | TLS（https / wss） | 🟡 Phase A 2/3 | `docs/TLS.md` | SHA-256+HMAC ✅、AES-128-GCM ✅、X25519 ❌、握手 ❌ |
