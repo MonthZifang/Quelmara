@@ -1,6 +1,6 @@
 # Quelmara 状态总表（语言 / 工程化 / 性能 / 平台）
 
-> 口径：2026-10-21，`v1.8` 工作区（未提交内容含 v1.3 / v1.5 / v1.6 / v1.8）。
+> 口径：2026-10-21，`v1.9` 工作区（未提交内容含 v1.3 / v1.5 / v1.6 / v1.8 / v1.9）。
 > **本文只回答"现在到哪了"**。缺口的详细论证在 `docs/GAPS.md`，
 > 每个特性的精确语义在 `docs/LANG.md`，版本变更在 `CHANGELOG.md`。
 >
@@ -11,13 +11,15 @@
 
 ## 0. 一句话结论
 
-> **后端像 1.0，语言像 0.6，工程化像 0.4，生态像 0.1。**
+> **后端像 1.0，语言像 0.7，工程化像 0.4，生态像 0.1。**
 >
 > 编译器本体（手写 x86-64 编码、ELF/PE 写出、IOCP reactor、四套自举对拍）
 > 比绝大多数 hobby 项目扎实一个数量级；但**语言层长期欠账**（泛型、接口动态分发、
 > 所有权检查）和**工程化欠账**（包管理、调试器、LSP）才是"能不能用来写真实项目"的分水岭。
 > v1.8 把语言层从 0.4 拉到 0.6：整数宽度、`@simd`、`@no_preempt`、`rc[T]`、
 > 所有权检查、`interface`（静态分发）都落地了，并且修掉了三个必现误编译。
+> v1.9 补上最后一块语言拼图：**接口值的 vtable 动态分发**（`let s: Shape = Circle{..}`、
+> `vec[Shape]`、接口形参/返回值），现在"多态"真的能用了。
 
 ---
 
@@ -42,7 +44,7 @@
 | **`@no_preempt`** | ✅ **v1.8** | `tests/t50_simd.qma` | 抑制编译器插入的 `sched_yield`；不是内核抢占 |
 | **`rc[T]`** | ✅ **v1.8** | `tests/t51_rc.qma` | 载荷仅具名 struct；不自动 drop |
 | **所有权 / 借用检查** | 🟡 **v1.8** | `tests/bad/own_*.qma`（必须编译失败） | **只查 `rc[T]` 句柄**的 use-after-drop / double-drop / move-then-use；不漏检堆/引用别名 |
-| **`interface` / `impl`** | 🟡 **v1.8** | `tests/t52_iface.qma` | 契约 + 一致性检查 + **静态分发**；**动态分发（trait object）未实现** |
+| **`interface` / `impl`** | ✅ **v1.9** | `tests/t52_iface.qma`（静态）、`t54_iface_dyn.qma`（动态） | 契约 + 校验 + 静态分发 + **vtable 动态分发**（接口值 / 接口形参 / 返回值 / `vec[Shape]`） |
 | 用户泛型（`fn f[T]`） | ❌ | `docs/GAPS.md §2` | 只有 `option/result/vec/map/rc` 受控单态化 |
 | 闭包 / 捕获 | ❌ | 同上 | 只能传函数名 |
 | FFI（`@extern("C")`） | ❌ 自研后端 | `CHANGELOG` v0.12 | C 后端有原型；自研后端显式拒绝（无动态链接器） |
@@ -63,30 +65,31 @@
 未覆盖：struct 字段存窄值时**不截断**（字段类型目前只用于布局），
 `vec[u8]` 元素等价于 8 字节槽。两条都记在 `docs/GAPS.md §2`。
 
-### 1.3 `interface` 到底做到哪一步
+### 1.3 `interface` 做到哪一步（v1.9 起：真多态）
 
 ```quelmara
-interface Shape {
-    fn area(self) -> int
-    fn scaled(self, k: int) -> int
-}
+interface Shape { fn area(self) -> int }
 
-impl Circle : Shape {
-    fn area(c: Circle) -> int { return c.r * c.r * 3 }
-    fn scaled(c: Circle, k: int) -> int { return c.area() * k }
-}
+let s: Shape = Circle { r: 3 }   // 隐式装箱 {data, vt}
+print(s.area())                  // vt[slot] -> callr（运行期派发）
+
+let v = vec[Shape].new(4)        // 异构容器
+v.push(Circle { r: 1 })
+v.push(Rect { w: 2, h: 3 })
+for x in v { print(x.area()) }   // 各回各家
 ```
 
-- ✅ 契约声明、`impl` 完整性检查（缺方法 / 参数类型 / 返回类型不匹配 → 编译失败）
-- ✅ 方法调用语法 `c.area()`，接收者类型编译期已知 ⇒ **直接调用，零开销**
-- ❌ `let s: Shape = ...`（把具体类型装进接口变量）——**未实现**
-- ❌ vtable / trait object / 跨类型数组
+- ✅ 契约声明、`impl` 完整性/签名检查（缺方法、参数、返回类型不匹配 → 编译失败）
+- ✅ **静态分发**：接收者类型编译期已知 ⇒ 直接调用，零开销
+- ✅ **动态分发**：接口值 = `{data, vt}` 两字；`vt[slot]` 取函数指针 + `callr`
+- ✅ 隐式装箱四处：`let` 标注、函数实参、`vec[Shape].push`、`return`
+- ✅ `vec[Shape]` / 接口形参 / 接口返回值 / 方法返回聚合 / 链式 `pick().area()`
+- ❌ 装箱内存不释放（无引用计数、无 drop；需要共享请用 `rc[T]`）
+- ❌ 同一类型在两个接口里同名方法 → 编译错误（无消歧义规则）
+- ❌ C 后端（`--target c`）不支持 `interface`/`impl`
 
-> 结论：现在能把它当"带检查的方法定义 + 命名空间"用；**不能**当多态用。
-> 动态分发的前置是把 `interface` 值定义成 `{data, tid}` 两字结构 +
-> 生成 per-method 派发函数（设计写在 `docs/GAPS.md §2`）。
-
----
+> 结论：**能当多态用了**。代价是装箱时一次 `__alloc` + payload 拷贝，
+> 且这些内存随进程存活（当前无回收）。
 
 ## 2. 工程化状态
 
@@ -94,7 +97,7 @@ impl Circle : Shape {
 |---|---|---|---|
 | 编译驱动 | ✅ | `tools/stage0/qlm_cli.py`（build/run/test/fmt） | 增量编译、并行编译 |
 | 构建配置 | ✅ | `Quelmara.toml`（内存上限/核数/越界检查） | 依赖声明、profile、交叉编译目标 |
-| 回归 | ✅ | PE **113 项**、词法 99/99、声明级 90/90（1 跳过）、IR 50/50、发射 10/10 | 协议库回归、压测进 CI |
+| 回归 | ✅ | PE **113 项**、词法 102/102、声明级 88/88（2 跳过）、IR 50/50、发射 10/10 | 协议库回归、压测进 CI |
 | 门禁 | ✅ | `check_names` / `check_origin` / `check_docs`（均进 CI 双 job） | 性能回归门禁（防劣化） |
 | CI | ✅ | `.github/workflows/ci.yml`：Linux 五套 + Windows PE | 无覆盖率、无 fuzz、无 nightly bench |
 | 自举 | 🟡 2/9 | 词法 + 声明级 parser 已对拍；1770/18909 行 = 8.6% | 函数体 parser、typeck、IR、编码器 |
@@ -143,7 +146,7 @@ impl Circle : Shape {
 | Windows x86-64（PE32+） | ✅ 主平台 | `tests/run_win_tests.py` 113 项 | 无 CRT，只导入 kernel32/ws2_32 |
 | Linux x86-64（ELF64） | ✅ | `tests/run_native_tests.sh`（CI ubuntu） | 需 Linux 环境；本机沙箱被 WSL 黑名单拦住 → 交叉验证 SKIP |
 | Linux io_uring | ✅ | `tests/test_uring.sh`（CI） | 仅 5.1+ 内核 |
-| AArch64（ELF） | 🟡 | `tests/run_native_tests.sh` 模拟器执行级 | 无 chan/map/spawn；v1.8 新增 IR（`trunc`/`vsum`）尚未进 A64 发射层 → IR 对拍里显式 SKIP（22 项） |
+| AArch64（ELF） | 🟡 | `tests/run_native_tests.sh` 模拟器执行级 | 无 chan/map/spawn；v1.8 新增 IR（`trunc`/`vsum`）与 v1.9 vtable 动态分发尚未进 A64 发射层 → IR 对拍里显式 SKIP（22 项）；A64 遇接口值编译期明确报错（`qlm_arm64.py` gen_all 拦截） |
 | macOS（Mach-O / kqueue） | ❌ | `docs/PLATFORM.md` 候选 | 无 |
 | wasm32/64 | ❌ | 路线图 | 无 |
 | TLS（https / wss） | 🟡 Phase A 2/3 | `docs/TLS.md` | SHA-256+HMAC ✅、AES-128-GCM ✅、X25519 ❌、握手 ❌ |
@@ -168,7 +171,8 @@ impl Circle : Shape {
 - **LICM 默认关闭**：x64 分配器布局敏感的段错误未根修（`QLM_ENABLE_LICM=1` 可开）。
 - **`@simd` 不是向量化器**：只识别单一归约形状；切片 / `vec` / 浮点未覆盖。
 - **`rc[T]` 不自动 drop**：所有权检查器只做线性检查，泄漏以**编译警告**给出。
-- **接口无动态分发**：见 §1.3。
+- **接口装箱不释放**：每次 `let s: Shape = Circle{..}` 都 `__alloc` 一份 payload，
+  没有回收路径；热点循环里频繁装箱会涨堆（需要池化/改 `rc[T]`）。
 
 ---
 
@@ -179,13 +183,15 @@ impl Circle : Shape {
 python tools/stage0/qlm_cli.py run tests/t49_width.qma  --target win   # 整数宽度
 python tools/stage0/qlm_cli.py run tests/t50_simd.qma   --target win   # @simd / @no_preempt
 python tools/stage0/qlm_cli.py run tests/t51_rc.qma     --target win   # rc[T]
-python tools/stage0/qlm_cli.py run tests/t52_iface.qma  --target win   # interface（静态）
+python tools/stage0/qlm_cli.py run tests/t52_iface.qma  --target win   # interface 静态分发
+python tools/stage0/qlm_cli.py run tests/t54_iface_dyn.qma --target win # interface 动态分发（vtable）
 python tools/stage0/qlm_cli.py run tests/t53_regress.qma --target win  # 三个误编译的回归
 
 # 负向：下面三条必须编译失败（所有权检查）
 python tools/stage0/qlm_cli.py build tests/bad/own_use_after_drop.qma --target win
 python tools/stage0/qlm_cli.py build tests/bad/own_double_drop.qma    --target win
 python tools/stage0/qlm_cli.py build tests/bad/own_move_use.qma       --target win
+python tools/stage0/qlm_cli.py build tests/bad/iface_no_impl.qma      --target win
 
 # 全量
 python tests/run_win_tests.py          # PE 回归
@@ -200,9 +206,10 @@ python tools/dev/check_docs.py         # 文档漂移门禁
 
 ## 7. 下一步（按收益排序）
 
-1. **接口动态分发**（`{data, tid}` + 派发函数）：让 `interface` 真正能多态 —— 语言层最后一个大洞。
+1. **用户泛型**（`fn f[T]` 单态化）：`vec/option/result/rc/interface` 之外，
+   写自己的通用容器/算法。语言层最后一个大件。
 2. **重开 LICM 并压测**：性能闸门，需要先补最小复现的回归网。
-3. **用户泛型**（`fn f[T]` 单态化）：`vec[T]` 之外写通用容器/算法。
+3. **接口装箱回收**：给装箱接 `rc` 或加 arena 作用域，否则热点路径会涨堆。
 4. **文件系统 / 时间 / 随机 / 排序**最小集：工具类应用的前置（`docs/GAPS.md §3`）。
 5. **X25519 + TLS 记录层**：https/wss 的最后一层。
 6. **包管理**：`import` 之上做依赖图与版本，否则第三方库无从获取。

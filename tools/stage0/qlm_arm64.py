@@ -531,6 +531,13 @@ class CodegenA64:
     # ---- 整体 ----
     def gen_all(self):
         enc = self.enc
+        # v1.9 interface 动态分发（vtable）尚未进 A64 发射层：
+        # 与 trunc/vsum 同一条边界。这里显式拦下（否则 __vt_* 标签
+        # 未定义会以 KeyError 栈收场，报错不可读）。
+        if getattr(self.low, "vtables", None):
+            raise SyntaxError(
+                "AArch64 发射层暂不支持 interface 动态分发（vtable）；"
+                "请用 x86_64 后端编译，或改用静态分发（直接调用具体类型方法）")
         # _start：先保存内核栈上的 argc/argv（若程序用到 args()），再 BL main
         if self.low is not None and getattr(self.low, "uses_args", False):
             enc.ldr(X0, SP, 0)          # x0 = [sp] = argc

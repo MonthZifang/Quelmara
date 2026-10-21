@@ -466,6 +466,11 @@ class Parser:
                     msigs.append((mname, ptypes, rty))
                 self.eat("SYM", "}")
                 self.interfaces[iname] = msigs
+                # 接口值 = {data, vt} 两字（v1.9 动态分发）：
+                #   data = 堆上装箱的 payload 指针；vt = vtable 地址（代码段）
+                # 注册成 struct 后，布局/复制/vec[Shape] 元素全部复用既有机制。
+                self.structs[iname] = [("data", ("named", "int")),
+                                       ("vt", ("named", "int"))]
                 self.decl_order.append(("interface", iname))
             elif self.at("impl"):
                 # impl Type : Interface { fn m(...) { ... } ... }
@@ -482,11 +487,25 @@ class Parser:
                     bodies[fd["name"]] = fd
                 self.eat("SYM", "}")
                 self.impls[(iname, tname)] = bodies
+                sig = {m: (pt, rt) for m, pt, rt in self.interfaces[iname]}
                 for mname, fd in bodies.items():
                     # 方法落成普通函数 Circle__area(c, ...)；方法调用语法
                     # 在后端 eval 的 method 分支里解析成直接调用。
                     fd["name"] = f"{tname}__{mname}"
                     fd["self_type"] = tname
+                    fd["impl_iface"] = iname
+                    fd["impl_method"] = mname
+                    # 接口方法顺序（vtable 槽位）与签名（动态调用的返回类型）
+                    fd["iface_order"] = [m for m, _pt, _rt in self.interfaces[iname]]
+                    fd["iface_sig"] = sig
+                    prev = self.methods.get((tname, mname))
+                    if prev is not None and prev.get("impl_iface") != iname:
+                        # 同一类型在两个接口里有同名方法：mangling 会撞车，
+                        # 现在没有消歧义规则，直接报错比静默覆盖好。
+                        raise SyntaxError(
+                            f"{tname}.{mname} 同时出现在 impl {tname} : "
+                            f"{prev.get('impl_iface')} 与 impl {tname} : {iname} 里；"
+                            f"同名方法跨接口暂不支持（请改名）")
                     self.methods[(tname, mname)] = fd
                     fns.append(fd)
             elif self.at("struct"):

@@ -1,0 +1,105 @@
+// t54_iface_dyn.qma：interface 动态分发（v1.9）
+// 接口值 = {data, vt} 两个字；data 指向堆上装箱的 payload，vt 指向 vtable
+// （代码段里一张函数指针表）。obj.m() 走 vt[slot] + callr，真正的运行期派发。
+// 覆盖：接口变量 / 接口形参 / 接口返回值 / vec[Shape] / 返回聚合的方法。
+module t54
+
+struct Box { v: int }
+
+interface Shape {
+    fn area(self) -> int
+    fn name(self) -> str
+    fn scaled(self, k: int) -> int
+}
+
+struct Circle { r: int }
+struct Rect { w: int, h: int }
+
+impl Circle : Shape {
+    fn area(c: Circle) -> int { return c.r * c.r * 3 }
+    fn name(c: Circle) -> str { return "circle" }
+    fn scaled(c: Circle, k: int) -> int { return c.area() * k }
+}
+
+impl Rect : Shape {
+    fn area(r: Rect) -> int { return r.w * r.h }
+    fn name(r: Rect) -> str { return "rect" }
+    fn scaled(r: Rect, k: int) -> int { return r.area() * k }
+}
+
+interface Producer {
+    fn make(self, k: int) -> Box
+}
+
+struct Gen { base: int }
+
+impl Gen : Producer {
+    fn make(g: Gen, k: int) -> Box { return Box { v: g.base + k } }
+}
+
+fn describe(s: Shape) -> str {
+    return s.name() + ":" + s.area().to_str()
+}
+
+fn pick(flag: int) -> Shape {
+    if flag == 0 {
+        return Circle { r: 2 }
+    }
+    return Rect { w: 3, h: 4 }
+}
+
+fn main() {
+    // 1) 接口变量：同一个表达式、不同具体类型，派发到不同方法
+    let c: Shape = Circle { r: 3 }
+    let r: Shape = Rect { w: 4, h: 5 }
+    assert(c.area() == 27, "circle via interface")
+    assert(r.area() == 20, "rect via interface")
+    assert(c.name() == "circle", "name dispatch")
+    assert(r.name() == "rect", "name dispatch 2")
+    assert(c.scaled(2) == 54, "method with arg via interface")
+
+    // 2) 接口形参（调用点隐式装箱）
+    assert(describe(Circle { r: 5 }) == "circle:75", "iface param 1")
+    assert(describe(Rect { w: 2, h: 7 }) == "rect:14", "iface param 2")
+
+    // 3) 接口返回值
+    let a: Shape = pick(0)
+    let b: Shape = pick(1)
+    assert(a.area() == 12, "return circle")
+    assert(b.area() == 12, "return rect")
+
+    // 4) vec[Shape]：异构容器（这是静态分发做不到的）
+    let v = vec[Shape].new(4)
+    v.push(Circle { r: 1 })
+    v.push(Rect { w: 2, h: 3 })
+    v.push(Circle { r: 4 })
+    assert(len(v) == 3, "vec len")
+    let mut i = 0
+    let mut total = 0
+    let mut names = 0
+    while i < len(v) {
+        let s = v.get(i)
+        if s.name() == "circle" { names = names + 1 }
+        total = total + s.area()
+        i = i + 1
+    }
+    assert(total == 57, "heterogeneous sum")   // 3 + 6 + 48
+    assert(names == 2, "two circles")
+
+    // 5) 方法返回聚合（隐藏出参 + callr）
+    let p: Producer = Gen { base: 7 }
+    assert(p.make(5).v == 12, "agg-returning method")
+    assert(p.make(-7).v == 0, "agg-returning method 2")
+
+    // 6) 链式：函数返回接口值后直接调用；for-in 遍历接口容器
+    assert(pick(0).area() == 12, "chained call")
+    let mut sum2 = 0
+    for s in v { sum2 = sum2 + s.area() }
+    assert(sum2 == 57, "for-in over vec[Shape]")
+
+    // 7) 具体类型仍走静态分发（零开销路径不受影响）
+    let cc = Circle { r: 6 }
+    assert(cc.area() == 108, "static dispatch still works")
+
+    print("iface dyn ok")
+}

@@ -1,0 +1,20 @@
+// 负向夹具：同一类型在两个接口里有同名方法 -> mangling 撞车，必须报错
+module iface_dup_method
+
+interface A {
+    fn f(self) -> int
+}
+interface B {
+    fn f(self) -> int
+}
+
+struct T { x: int }
+
+impl T : A {
+    fn f(t: T) -> int { return t.x }
+}
+impl T : B {
+    fn f(t: T) -> int { return t.x + 1 }
+}
+
+fn main() { }

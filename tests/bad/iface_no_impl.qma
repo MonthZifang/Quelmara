@@ -1,0 +1,18 @@
+// 负向夹具：把没有实现接口的类型装进接口变量，必须编译失败
+module iface_no_impl
+
+interface Shape {
+    fn area(self) -> int
+}
+
+struct Circle { r: int }
+struct Blob { x: int }
+
+impl Circle : Shape {
+    fn area(c: Circle) -> int { return c.r * c.r * 3 }
+}
+
+fn main() {
+    let s: Shape = Blob { x: 1 }
+    print(s.area())
+}

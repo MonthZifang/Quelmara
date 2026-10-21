@@ -1,7 +1,7 @@
 # Quelmara 交接文档（HANDOVER）
 
 > 工作区状态（2026-10-21）：**已发布 v1.2；v1.3（自举）+ v1.4/v1.5（reactor + 性能 + 协议库）
-> + v1.6（标准库六件）+ v1.8（语言特性大补）在工作区落地待提交**。  
+> + v1.6（标准库六件）+ v1.8（语言特性大补）+ v1.9（interface 动态分发）在工作区落地待提交**。  
 > 各版本特性、修复与回归项数的**权威记录**在 `CHANGELOG.md`；本文只保留  
 > 当前快照、差距清单与下一步排期，不再按轮复述。  
 > **完整能力边界（含"文档与代码不符"逐条核对、标准库缺口全表、优先级路线）见 `docs/GAPS.md`。**  
@@ -37,7 +37,19 @@
 | 词法 / 声明 / IR / 发射 | 99/99、90/90（1 跳过）、50/50（19 skip）、10/10 | `tests/lexdiff.py` 等 |
 | 三件门禁 | check_names / check_origin / check_docs 全 PASS | `tools/dev/check_*.py` |
 
-### 本轮（v1.8 工作区）新增：语言特性补全
+### 本轮（v1.9 工作区）新增：interface 动态分发
+
+| 特性 | 语义 | 夹具 | 边界 |
+|---|---|---|---|
+| 接口值（v1.9） | `{data, vt}` 两字；`obj.m()` = `vt[slot] -> callr` 运行期派发 | `tests/t54_iface_dyn.qma` | 装箱是拷贝且不释放 |
+| 隐式装箱四处 | `let` 标注 / 函数实参 / `vec[Shape].push` / `return` | 同上 | 大量短命装箱涨堆 |
+| 异构容器 | `vec[Shape]` + for-in 逐元素派发 | 同上 | — |
+| 负向检查 ×2 | 未实现接口 / 跨接口同名方法 → 编译失败 | `tests/bad/iface_no_impl.qma` / `iface_dup_method.qma` | — |
+
+语义与内存布局见 `docs/LANG.md §7.3`；AArch64 发射层未接 vtable
+（编译期明确报错，`qlm_arm64.py` gen_all 拦截）。静态分发零开销路径不变。
+
+### 上一轮（v1.8 工作区）新增：语言特性补全
 
 | 特性 | 语义 | 夹具 | 边界 |
 |---|---|---|---|
@@ -47,7 +59,7 @@
 | `@no_preempt` | 抑制编译器插入的 `sched_yield` | 同上 | 不是内核抢占 |
 | `rc[T]` | `[refcount][payload]`，`rc_new/clone/get/drop/count` | `tests/t51_rc.qma` | 载荷仅具名 struct |
 | 所有权检查 | use-after-drop / double-free / move-then-use | `tests/bad/own_*.qma` | 只查 `rc` 句柄 |
-| `interface`/`impl` | 契约 + 校验 + **静态分发** | `tests/t52_iface.qma` | **无动态分发** |
+| `interface`/`impl` | 契约 + 校验 + 静态分发 | `tests/t52_iface.qma` | 动态分发 → **v1.9 已补**（见上表） |
 
 新增 IR 指令：`('trunc', dst, a, bits, signed)`、`('vsum', dst, base, count)`。
 **加新 IR 指令的纪律**：必须同时登记到 `qlm_opt.vreg_mentions`、`qlm_native._map_ins`、
@@ -107,11 +119,11 @@
 
 ### 下一步三件事（按顺序，不要跳）
 
-1. **接口动态分发**：接口值 = `{data, tid}` 两字结构；每个 (interface, method) 生成
-   一个派发函数 `if tid == k { call Type__m }`。做完 `let s: Shape = Circle{..}` 才成立。
-2. **重开 LICM 并压测**：默认关闭是因为 x64 分配器布局敏感的段错误未根修；
+1. **重开 LICM 并压测**：默认关闭是因为 x64 分配器布局敏感的段错误未根修；
    先补最小复现的回归网，再开 `QLM_ENABLE_LICM=1` 跑全量 + bench。
-3. **用户泛型**（`fn f[T]` 单态化）：`vec/option/result/rc` 之外的通用容器与算法。
+2. **用户泛型**（`fn f[T]` 单态化）：`vec/option/result/rc` 之外的通用容器与算法。
+3. **装箱生命周期**：v1.9 接口装箱不释放（堆只涨不减）；接 rc 计数或 arena
+   挂钩，否则长服务进程里大量短命装箱会涨堆。
 
 并行可做（不阻塞上面三条）：`std/gzip` 解码、X25519 + TLS 记录层、
 文件系统/时间/随机/排序最小集（`docs/GAPS.md §3.3`）。
@@ -122,8 +134,8 @@
 - 跑完任何改动，至少复跑：`run_win_tests.py` + `parsediff.py` + 三道门禁。
 - **新增 IR 指令的检查表**（`docs/GAPS.md §6.5.1`）：`vreg_mentions`、`_map_ins`、
   `_EFF`（访存类）三处必须同时登记，否则就是"开优化才错"的静默误编译。
-- 大改动前先 `git status`：工作区常有大量未提交内容（v1.3–v1.8），别误判。
-- 提交粒度：按 `CHANGELOG.md` 的版本节各打一个 commit（v1.3 → v1.5 → v1.6 → v1.8），
+- 大改动前先 `git status`：工作区常有大量未提交内容（v1.3–v1.9），别误判。
+- 提交粒度：按 `CHANGELOG.md` 的版本节各打一个 commit（v1.3 → v1.5 → v1.6 → v1.8 → v1.9），
   不要攒成一坨。
 
 ---

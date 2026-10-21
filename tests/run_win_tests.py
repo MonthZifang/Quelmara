@@ -561,13 +561,16 @@ def main():
     case_selfcheck("t51_rc", "tests/t51_rc.qma")
     case_selfcheck("t52_iface", "tests/t52_iface.qma")
     case_selfcheck("t53_regress", "tests/t53_regress.qma")
+    case_selfcheck("t54_iface_dyn", "tests/t54_iface_dyn.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),
             ("own_double_drop", "double-free", "所有权检查"),
             ("own_move_use", "move-then-use", "所有权检查"),
             ("iface_missing", "impl 缺方法", "缺少方法"),
-            ("iface_rettype", "impl 返回类型不符", "返回类型与接口声明不一致")):
+            ("iface_rettype", "impl 返回类型不符", "返回类型与接口声明不一致"),
+            ("iface_no_impl", "类型未实现接口", "没有实现接口"),
+            ("iface_dup_method", "跨接口同名方法", "同名方法跨接口暂不支持")):
         try:
             build(os.path.join(ROOT, f"tests/bad/{nm}.qma"),
                   os.path.join(ROOT, "build", f"bad_{nm}.exe"))

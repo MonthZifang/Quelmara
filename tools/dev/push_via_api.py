@@ -3,7 +3,7 @@
 """用 GitHub REST API 推送当前树（github.com:443 被代理拦截时的备用通道）。
 
 背景：本机代理只放行 api.github.com，`git push` 会 502；而远端 master 停在很早的
-Rosoto 快照（.ros/旧名），增量 diff 套不上去（会 422 GitRPC::BadObjectState）。
+Rosoto 快照（.ros/旧名），增量 diff 套不上去（会 422 GitRPC::BadObjectState）。  # legacy-ok
 
 做法：
 1. `git ls-tree -r HEAD` 取**完整树**（path/mode/sha）；
@@ -21,7 +21,7 @@ import sys
 import urllib.error
 import urllib.request
 
-REPO = "MonthZifang/Rosoto"
+REPO = "MonthZifang/Rosoto"  # legacy-ok：GitHub 仓库名即此，非旧名残留
 API = "https://api.github.com"
 
 

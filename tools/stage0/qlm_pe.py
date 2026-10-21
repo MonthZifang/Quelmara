@@ -59,8 +59,9 @@ def align(n, a):
 
 
 class WinCodegen(Codegen):
-    def __init__(self, fns, globals_bytes):
-        super().__init__(fns, globals_bytes, base=IMAGE_BASE, entry_off=TEXT_RVA)
+    def __init__(self, fns, globals_bytes, low=None):
+        super().__init__(fns, globals_bytes, base=IMAGE_BASE, entry_off=TEXT_RVA,
+                         low=low)
         self.api_fixups = []       # (patch_pos, api_name)
 
     # ---- 导入调用：call qword ptr [rip + disp32] ----
@@ -119,6 +120,7 @@ class WinCodegen(Codegen):
     def gen_all_pe(self):
         self.gen_entry()
         self.gen_functions()
+        self.gen_vtables()
         enc = self.enc
         enc.resolve()
         code = bytearray(enc.buf)
@@ -337,7 +339,7 @@ def build_pe(code, data, reloc_offsets, imports, api_fixups):
 def transpile_win(src_path, dump_ir=False, optimize=True):
     fns, low, cfg = lower_and_optimize(src_path, optimize=optimize,
                                        dump_ir=dump_ir, platform="windows")
-    cg = WinCodegen(fns, low.globals)
+    cg = WinCodegen(fns, low.globals, low=low)   # vtable 需要 low.vtables
     code, data, relocs, imports, api_fixups = cg.gen_all_pe()
     pe = build_pe(code, data, relocs, imports, api_fixups)
     return pe, cfg

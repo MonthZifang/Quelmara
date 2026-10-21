@@ -22,7 +22,9 @@ EXE = os.path.join(ROOT, "build", "qlm_parse.qex")
 
 # stage-1 parser 的语法缺口（v1.8）：这些文件跳过声明级对拍。
 # 补进 bootstrap/parser/qlm_parse.qma 后把这里清空，数字自然回升。
-PARSE1_PENDING = {"t52_iface.qma", "iface_missing.qma", "iface_rettype.qma"}
+PARSE1_PENDING = {"t52_iface.qma", "t54_iface_dyn.qma",
+                  "iface_missing.qma", "iface_rettype.qma", "iface_no_impl.qma",
+                  "iface_dup_method.qma"}
 
 
 def collect():

@@ -6,13 +6,54 @@
 
 ---
 
-> **版本号顺序说明**：下面并列的四节都是工作区未提交内容，按主题分组（v1.8 = 语言特性，
+> **版本号顺序说明**：下面并列的五节按主题分组（v1.9 = 接口动态分发，v1.8 = 语言特性，
 > v1.6 = 标准库 P0，v1.5 = 性能 + 协议库，v1.3 = 自举 + 可用性边界），
-> **物理顺序不代表版本先后**。提交时按 v1.3 → v1.5 → v1.6 → v1.8 各打一个 commit；
-> v1.4（IOCP reactor）已提交（`d769435` / `b3e0fe2`）。
-> 各节的回归/对拍项数是**当轮口径**，会随夹具增加而增长（例如 lexdiff 现 92/92、parsediff 现 87/87）；
+> **物理顺序不代表版本先后**。v1.8 已提交（`e340962`），v1.4（IOCP reactor）已提交
+> （`d769435` / `b3e0fe2`）；v1.9 本轮提交；v1.3 / v1.5 / v1.6 仍待按节各打一个 commit。
+> 各节的回归/对拍项数是**当轮口径**，会随夹具增加而增长（例如 lexdiff 现 92/92、parsediff 现 88/88）；
 > 需要"当前实测值"请看 `HANDOVER.md §0` 或直接跑脚本。
 > 能力边界与缺口全表见 `docs/GAPS.md`。
+
+## 未发布（v1.9，工作区进行中）
+
+> 主题：**interface 动态分发（trait object）**——v1.8 落地静态分发后，
+> 这是语言层最后一块多态拼图。接口值 = `{data, vt}` 两字结构，
+> `obj.m()` 走 `vt[slot] -> callr`，运行期派发到具体类型的实现。
+>
+> 状态总表见 `docs/STATUS.md`，语义与内存布局见 `docs/LANG.md §7.3`。
+
+### 语言（全部有夹具）
+
+- **接口值与 vtable 动态分发**：`interface` 声明自动注册成 2 字结构体
+  `{data, vt}`（data = 堆上装箱的 payload 指针，vt = 代码段里按方法声明顺序排布的
+  函数指针表）；`obj.m()` 降级为 `vt = obj[1]; fp = vt[slot]; callr fp, [obj[0], ...]`。
+  vtable 在代码段末尾生成（`gen_vtables`），方法地址由 `code_fixups` 回填，
+  ELF 与 PE 共用同一机制（PE 额外登记 DIR64 重定位）。
+- **隐式装箱四处**（编译器自动完成）：`let s: Shape = Circle{..}`（类型标注）、
+  函数实参（接口形参）、`vec[Shape].push(Circle{..})`、`return`（接口返回类型）。
+  装箱 = 结构体按值拷入堆块 + 存 vtable 地址。
+- **异构容器**：`vec[Shape]` 现在可用（静态分发做不到），`for-in` 遍历逐元素派发。
+- **接口返回聚合**：方法可返回 struct（隐藏出参指针 + `callr`，与直接调用同 ABI）。
+- **静态分发不受影响**：接收者类型编译期已知时仍走直接调用（零开销路径）。
+- **两个新负向检查**：类型未实现接口（`impl` 缺失 → 编译失败，
+  `tests/bad/iface_no_impl.qma`）；同一类型在两个接口里有同名方法（mangling
+  撞车，暂无消歧义规则 → 编译报错，`tests/bad/iface_dup_method.qma`）。
+
+### 边界（明确写死）
+
+- 装箱是**拷贝**且**不释放**（无引用计数 / drop；需要共享语义用 `rc[T]`）；
+- `interface` 与 `impl` 必须同源文件；C 后端不支持 `interface`/`impl`；
+- **AArch64 发射层未接 vtable**：遇接口值编译期明确报错
+  （此前会是 KeyError 栈；`trunc`/`vsum` 同条边界，见 `docs/STATUS.md` 平台表）。
+
+### 验证
+
+- 夹具 `tests/t54_iface_dyn.qma`：7 类场景（接口变量 / 形参 / 返回值 /
+  `vec[Shape]` 求和与计数 / 方法返回聚合 / 链式 `pick(0).area()` / for-in 容器 /
+  静态分发回归确认）。
+- PE 回归 **113 → 116 项**（+1 动态分发 +2 负向）全绿；lexdiff 102/102、
+  parsediff 88/88、emitdiff 10/10；三道门禁 PASS
+  （`check_names` 修复 `push_via_api.py` 的 GitHub 仓库名误报，行级 `legacy-ok` 豁免）。
 
 ## 未发布（v1.8，工作区进行中）
 

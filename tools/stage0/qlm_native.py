@@ -1311,6 +1311,9 @@ class Lower:
                     # ("vreg", n) 让已求值的接收者原样穿过 lower_call 的实参处理
                     args = [("vreg", obj)] + list(e[3])
                     return self.lower_call(("call", [mname], args), fn, env)
+                if self._is_iface(sname):
+                    # 接口值：vt[slot] 取出函数指针 -> callr（真正的 vtable 派发）
+                    return self.lower_iface_call(sname, obj, e[2], e[3], fn, env)
             raise SyntaxError(
                 f"方法 {e[2]} 未定义（原生后端只支持 vec/map/chan/str 内建方法与 "
                 f"impl 里声明的方法）")
@@ -1748,6 +1751,11 @@ class Lower:
             return ("imm", 0)
         if m == "push":
             v = one_arg()
+            if (isinstance(elem, tuple) and elem[0] == "agg"
+                    and self._is_iface(elem[1])):
+                sn = self._struct_of(fn, v)
+                if sn is not None and sn != elem[1]:
+                    v = self.box_iface(fn, v, sn, elem[1])   # vec[Shape].push(Circle)
             if isinstance(elem, tuple) and elem[0] == "agg":
                 fn.emit("call", None, "__vec_push_n", [obj, v])
             else:
@@ -2445,9 +2453,22 @@ class Lower:
                 continue
             sname = self._struct_of(fn, a)
             if sname is not None:
+                if (i < len(params) and params[i][1][0] == "named"
+                        and self._is_iface(params[i][1][1])
+                        and sname != params[i][1][1]):
+                    a = self.box_iface(fn, a, sname, params[i][1][1])
+                    sname = params[i][1][1]
                 tmp = self.alloc_struct(fn, sname)
                 self.struct_copy(fn, tmp, a, sname)
                 args[i] = tmp
+        # 接口形参必须收到结构体（否则运行期 vt 是垃圾）
+        for i, a in enumerate(args):
+            if (i < len(params) and params[i][1][0] == "named"
+                    and self._is_iface(params[i][1][1])
+                    and self._struct_of(fn, a) is None):
+                raise SyntaxError(
+                    f"函数 {name} 的第 {i + 1} 个形参是接口 {params[i][1][1]}，"
+                    f"实参不是结构体（需要传实现了该接口的类型）")
         # 标量实参按形参类型转换（浮点宽度 / 整数<->浮点，与 C 隐式转换一致）
         for i, a in enumerate(args):
             if i < len(params):
@@ -2617,6 +2638,99 @@ class Lower:
         if errs:
             raise SyntaxError("所有权检查失败：\n  " + "\n  ".join(errs))
 
+    # ---- interface 动态分发（v1.9）----
+    # 接口值 = {data, vt} 两个字：
+    #   data -> 堆上装箱的 payload（结构体按值拷进去，生命周期跟接口值走）
+    #   vt   -> vtable 地址（代码段里一张函数指针表，按接口方法声明顺序）
+    # 调用 obj.m(...) 时：vt = load obj[1]; fp = load vt[slot]; callr fp, [data, ...]
+    def build_iface_meta(self, fns_ast):
+        self.iface_names = set()
+        self.iface_m = {}      # iface -> {m: (slot, ret_ty, params)}
+        self.vtables = {}      # (iface, type) -> [fn name per slot]
+        impls = {}             # (iface) -> {type: {m: fn name}}
+        for f in fns_ast:
+            iname = f.get("impl_iface")
+            if not iname:
+                continue
+            self.iface_names.add(iname)
+            slots = self.iface_m.setdefault(iname, {})
+            for i, m in enumerate(f.get("iface_order") or []):
+                pt, rt = f.get("iface_sig", {}).get(m, ([], ("named", "void")))
+                slots.setdefault(m, (i, rt, pt))
+            impls.setdefault(iname, {}).setdefault(f["self_type"], {})[
+                f["impl_method"]] = f["name"]
+        for iname, by_type in impls.items():
+            order = [m for m, (_s, _r, _p) in
+                     sorted(self.iface_m[iname].items(), key=lambda kv: kv[1][0])]
+            for tname, table in by_type.items():
+                self.vtables[(iname, tname)] = [table[m] for m in order]
+
+    def _is_iface(self, name):
+        return name in getattr(self, "iface_names", set())
+
+    def box_iface(self, fn, spec, sname, iname):
+        """把具体结构体装箱成接口值；spec 已经是接口值则只复制。"""
+        if sname == iname:
+            dst = self.alloc_struct(fn, iname)
+            self.struct_copy(fn, dst, spec, iname)
+            return dst
+        key = (iname, sname)
+        if key not in self.vtables:
+            raise SyntaxError(
+                f"{sname} 没有实现接口 {iname}（需要一个 `impl {sname} : {iname} {{ ... }}`）")
+        w = self.struct_size(sname)
+        raw = fn.new_v()
+        fn.emit("call", raw, "__alloc", [("imm", 8 * w)])
+        i = 0
+        while i < w:
+            v = fn.new_v()
+            fn.emit("load", v, spec, ("imm", i))
+            fn.emit("store", raw, ("imm", i), v)
+            i = i + 1
+        dst = self.alloc_struct(fn, iname)
+        fn.emit("store", dst, ("imm", 0), raw)
+        vt = fn.new_v()
+        fn.emit("mov", vt, ("fnaddr", f"__vt_{iname}__{sname}"))
+        fn.emit("store", dst, ("imm", 1), vt)
+        return self._mark_struct(fn, dst, iname)
+
+    def lower_iface_call(self, iname, obj, mname, arg_exprs, fn, env):
+        info = self.iface_m.get(iname, {}).get(mname)
+        if info is None:
+            raise SyntaxError(f"接口 {iname} 没有方法 {mname}")
+        slot, ret, ptypes = info
+        vt = fn.new_v()
+        fn.emit("load", vt, obj, ("imm", 1))
+        fp = fn.new_v()
+        fn.emit("load", fp, vt, ("imm", slot))
+        data = fn.new_v()
+        fn.emit("load", data, obj, ("imm", 0))
+        args = [data] + [self.eval(a, fn, env) for a in arg_exprs]
+        # 实参侧：接口形参 / 浮点宽度按签名转换（与直接调用一致）
+        for i, a in enumerate(args):
+            if i < len(ptypes):
+                sname = self._struct_of(fn, a)
+                if (sname is not None and ptypes[i][0] == "named"
+                    and self._is_iface(ptypes[i][1])):
+                    args[i] = self.box_iface(fn, a, sname, ptypes[i][1])
+        if ret[0] == "named" and ret[1] in ("void",):
+            fn.emit("callr", None, fp, args)
+            return ("imm", 0)
+        if ret[0] == "slice" or (ret[0] == "named" and self.is_agg(ret[1])):
+            # 聚合/切片返回：隐藏出参指针作第一个实参（同直接调用 ABI）
+            tmp = (self.alloc_slice(fn) if ret[0] == "slice"
+                   else self.alloc_struct(fn, ret[1]))
+            fn.emit("callr", None, fp, [tmp] + args)
+            return tmp
+        d = fn.new_v()
+        fn.emit("callr", d, fp, args)
+        if ret == ("named", "str"):
+            return self._mark_str(fn, d)
+        rw = self._ty_float_w(ret)
+        if rw:
+            return self._mark_float(fn, d, rw)
+        return d
+
     # ---- rc[T] 内建 ----
     def lower_rc(self, name, e, fn, env):
         """布局：[refcount 8B][payload n*8B]；句柄指向 payload。
@@ -2743,9 +2857,15 @@ class Lower:
         if k == "let":
             spec = self.eval(s[3], fn, env)
             if len(s) > 4 and s[4][0] == "as":
-                nb = self.narrow_of(s[4][1])
+                at = s[4][1]
+                nb = self.narrow_of(at)
                 if nb is not None:
                     spec = self.trunc_to(fn, spec, nb)
+                elif at[0] == "named" and self._is_iface(at[1]):
+                    # let s: Shape = Circle{..} —— 隐式装箱
+                    sn = self._struct_of(fn, spec)
+                    if sn is not None:
+                        spec = self.box_iface(fn, spec, sn, at[1])
             n = self._arr_of(fn, spec)
             if n is not None:
                 if s[3][0] == "arraylit":
@@ -2827,7 +2947,10 @@ class Lower:
                 if s[2] != "=":
                     raise SyntaxError("结构体只支持 = 整体赋值")
                 spec = self.eval(s[3], fn, env)
-                if self._struct_of(fn, spec) != sname:
+                src_n = self._struct_of(fn, spec)
+                if src_n is not None and src_n != sname and self._is_iface(sname):
+                    spec = self.box_iface(fn, spec, src_n, sname)   # 装箱
+                elif self._struct_of(fn, spec) != sname:
                     raise SyntaxError("结构体赋值两侧类型不一致")
                 self.struct_copy(fn, cur, spec, sname)
                 return
@@ -2917,7 +3040,11 @@ class Lower:
                         raise SyntaxError("函数返回类型是切片，return 的表达式类型不匹配")
                     self.words_copy(fn, self.fn_ret_target, spec, SLICE_WORDS)
                 else:
-                    if self._struct_of(fn, spec) != self.fn_ret_agg:
+                    src_n = self._struct_of(fn, spec)
+                    if (src_n is not None and src_n != self.fn_ret_agg
+                            and self._is_iface(self.fn_ret_agg)):
+                        spec = self.box_iface(fn, spec, src_n, self.fn_ret_agg)
+                    elif self._struct_of(fn, spec) != self.fn_ret_agg:
                         raise SyntaxError(
                             f"函数返回类型是 {self.fn_ret_agg}，return 的表达式类型不匹配")
                     # 值语义：拷进调用方提供的隐藏出参槽，再返回
@@ -6558,6 +6685,7 @@ class Lower:
                 raise SyntaxError(
                     f"函数 {f['name']} 没有函数体：无函数体的声明必须带 "
                     f'@extern("C") 注解')
+        self.build_iface_meta(fns_ast)
         # 先降级用户函数，再按需发射运行库：只把真正用到的
         # arena/join/chan 运行时塞进产物（省体积、省导入）。
         for f in fns_ast:
@@ -7556,9 +7684,21 @@ class Codegen:
             self.emit_epilogue()
             enc.ret()
 
+    def gen_vtables(self):
+        """接口 vtable = 代码段里一张函数指针表（每槽 8 字节）。
+        放在所有函数之后，用 code_fixups 回填方法地址（ELF/PE 都能处理）。"""
+        enc = self.enc
+        for (iname, tname), fnames in sorted(
+                (getattr(self.low, "vtables", None) or {}).items()):
+            enc.labels[f"__vt_{iname}__{tname}"] = enc.pos()
+            for fname in fnames:
+                self.code_fixups.append((enc.pos(), fname))
+                enc.emit(b"\x00" * 8)
+
     def gen_all(self):
         self.gen_entry()
         self.gen_functions()
+        self.gen_vtables()
         enc = self.enc
         enc.resolve()
         code = bytes(enc.buf)

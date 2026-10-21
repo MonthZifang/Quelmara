@@ -222,6 +222,21 @@ impl Circle : Shape {
 - 接口方法的第一个参数写 `self`（不写类型），其余参数带类型；
 - `impl` 里的方法第一个参数必须是接收者（类型 = impl 的结构体）。
 
+用接口值（v1.9 起）：
+
+```quelmara
+let s: Shape = Circle { r: 3 }     // 隐式装箱：{data, vt}
+print(s.area())                    // 动态派发：vt[slot] -> callr
+
+let v = vec[Shape].new(4)          // 异构容器
+v.push(Circle { r: 1 })
+v.push(Rect { w: 2, h: 3 })
+for x in v { print(x.area()) }     // 每个元素派发到自己的实现
+
+fn describe(s: Shape) -> str { return s.name() }   // 接口形参（调用点装箱）
+fn pick(f: int) -> Shape { ... }                    // 接口返回值
+```
+
 ### 7.2 编译期检查
 
 | 错误 | 结果 |
@@ -231,27 +246,48 @@ impl Circle : Shape {
 | 返回类型不符 | 编译失败：`T.a: 返回类型与接口声明不一致` |
 | `impl` 的类型未声明 | 编译失败 |
 
-### 7.3 分发方式（重要）
+### 7.3 分发方式：静态优先，接口值走 vtable
 
-| 场景 | 状态 |
-|---|---|
-| `c.area()`，`c: Circle`（接收者类型编译期已知） | ✅ **静态分发**，直接调用 `Circle__area`，零开销 |
-| `let s: Shape = ...`（装进接口变量） | ❌ **未实现** |
-| `vec[Shape]` / 跨类型数组 / vtable | ❌ **未实现** |
+| 场景 | 分发方式 | 开销 |
+|---|---|---|
+| `c.area()`，`c: Circle`（接收者类型编译期已知） | **静态**：直接 `call Circle__area` | 零（可内联） |
+| `s.area()`，`s: Shape`（接口值） | **动态**：`vt = s[1]; fp = vt[slot]; callr fp, [s[0]]` | 两次 load + 一次间接调用 |
+| `vec[Shape].push(Circle{..})` | 装箱后按 2 字元素存 | 一次 `__alloc` + 拷贝 |
+| `f(Circle{..})`，形参是 `Shape` | 调用点隐式装箱 | 同上 |
 
-> 另外：`interface` 与它的 `impl` 必须**在同一个源文件里**声明（一致性检查在解析期按文件做，
-> 跨 `import` 的 impl 还不支持）。
+**接口值的内存布局**（`interface` 声明时自动注册成 2 字结构体）：
 
-> 所以现在 `interface` 的定位是"带检查的方法定义 + 类型级命名空间"，
-> **不是**多态。动态分发的设计（`{data, tid}` + per-method 派发函数）
-> 记在 `docs/GAPS.md §2`，是语言层下一个大项。
+```
++0  data : 指向堆上装箱的 payload（结构体按值拷进去）
++8  vt   : 指向 vtable（代码段里的一张函数指针表，槽位 = 接口方法声明顺序）
+```
+
+**vtable** 在代码段末尾生成，每槽 8 字节，内容由 `code_fixups` 回填方法地址
+（ELF 与 PE 走同一套绝对地址 + 重定位机制，PE 同时登记 DIR64 重定位）。
+
+**隐式装箱的四个位置**（都已实现并有夹具）：
+`let s: Shape = Circle{..}`、函数实参、`vec[Shape].push`、`return`（接口返回类型）。
+
+### 7.3.1 边界（明确写死，不要当成 Rust trait object）
+
+- **装箱是拷贝**：`payload` 会被复制到堆上，之后改原变量不影响接口值；
+- **不释放**：装箱内存随进程生命周期（没有引用计数、没有 drop），
+  大量短命装箱会涨堆；需要共享/释放语义请用 `rc[T]` 或自己管 arena；
+- **同一类型在两个接口里有同名方法 → 编译错误**（mangling 是 `Type__method`，
+  现在没有消歧义规则）；
+- **`interface` 与其 `impl` 必须在同一个源文件**（一致性检查按文件做）；
+- **C 后端（`--target c`）不支持** `interface`/`impl`，只支持自研后端；
+- 接口方法可以返回聚合（走隐藏出参 + `callr`），但没有默认方法、没有关联类型。
 
 ### 7.4 夹具
 
 ```bash
-python tools/stage0/qlm_cli.py run   tests/t52_iface.qma            --target win   # iface ok
+python tools/stage0/qlm_cli.py run   tests/t52_iface.qma            --target win   # 静态分发
+python tools/stage0/qlm_cli.py run   tests/t54_iface_dyn.qma        --target win   # 动态分发
 python tools/stage0/qlm_cli.py build tests/bad/iface_missing.qma   --target win   # 必须失败
 python tools/stage0/qlm_cli.py build tests/bad/iface_rettype.qma   --target win   # 必须失败
+python tools/stage0/qlm_cli.py build tests/bad/iface_no_impl.qma   --target win   # 必须失败
+python tools/stage0/qlm_cli.py build tests/bad/iface_dup_method.qma --target win  # 必须失败
 ```
 
 ---
