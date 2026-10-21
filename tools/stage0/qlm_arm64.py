@@ -177,6 +177,12 @@ class EncA64:
         self.fixups.append((self.pos(), label, "b26"))
         self.emit(0x94000000)
 
+    def blr(self, reg):
+        # BLR Xn：1101 0110 0011 1111 0000 01 Rn（间接调用，链接返回地址到 x30）
+        # 注意与 BR（0xD61F0000，不链接）区分——曾把 BLR 写成 BR 的编码，
+        # 返回地址丢失、callr 一返回就跳飞。
+        self.emit(0xD63F0000 | ((reg & 31) << 5))
+
     def bcond(self, cond, label):
         self.fixups.append((self.pos(), label, "b19"))
         self.emit(0x54000000 | cond)
@@ -220,6 +226,7 @@ class CodegenA64:
         self.globals = globals_bytes
         self.enc = EncA64()
         self.global_fixups = []   # (word_index, gid) —— movz/movk 序列起点
+        self.code_fixups = []     # (word_index, fname, reg) —— 函数地址（fnaddr）加载点
 
     # ---- 操作数 ----
     def fetch(self, target, spec):
@@ -231,6 +238,12 @@ class CodegenA64:
             return target
         if spec[0] == "imm":
             self.enc.mov_imm(target, spec[1])
+            return target
+        if spec[0] == "fnaddr":
+            # 函数地址（间接调用目标 / 回调）：mov_imm 占位 + 代码回填
+            start = self.enc.pos()
+            self.enc.mov_imm(target, 0)                   # 占位 4 字窗口
+            self.code_fixups.append((start, spec[1], target))
             return target
         start = self.enc.pos()
         self.enc.mov_imm(target, 0)                       # ('ga', gid)：占位 4 字窗口
@@ -306,6 +319,15 @@ class CodegenA64:
             self.global_fixups.append((start, src[1], target))
             if dst[0] == "m":
                 self.enc.stur(SCRATCH, X29, -dst[1])
+        elif src[0] == "fnaddr":
+            # 函数地址（let 绑定函数名 / 函数名作实参）：mov_imm 占位 +
+            # 代码段回填（与 fetch 的 fnaddr 分支同一条修复路径）
+            target = dst[1] if dst[0] == "r" else SCRATCH
+            start = self.enc.pos()
+            self.enc.mov_imm(target, 0)
+            self.code_fixups.append((start, src[1], target))
+            if dst[0] == "m":
+                self.enc.stur(SCRATCH, X29, -dst[1])
 
     # ---- 指令 ----
     def gen_instr(self, ins):
@@ -353,6 +375,17 @@ class CodegenA64:
             moves = [(self.src_move(arg), ("r", ARG_REGS[i])) for i, arg in enumerate(ins[3])]
             self.parallel_move(moves)
             enc.bl(ins[2])
+            if ins[1] is not None:
+                self.commit(ins[1], ACC)
+        elif op == "callr":
+            # 间接调用（自研 ABI）：函数地址先物化进 SCRATCH2（IP1，不在
+            # 分配池），参数进 X0-X5 后 BLR（fnaddr/ga 在 fetch 里回填）。
+            fr = self.fetch(SCRATCH2, ins[2])
+            if fr != SCRATCH2:
+                self.enc.mov_rr(SCRATCH2, fr)
+            moves = [(self.src_move(arg), ("r", ARG_REGS[i])) for i, arg in enumerate(ins[3])]
+            self.parallel_move(moves)
+            enc.blr(SCRATCH2)
             if ins[1] is not None:
                 self.commit(ins[1], ACC)
         elif op == "ret":
@@ -496,6 +529,16 @@ class CodegenA64:
             off = sum(len(g) for g in self.globals[:gid])
             addr = BASE + ENTRY_OFF + code_len + off
             # 重写 movz/movk 占位（固定 4 字窗口）
+            v = addr
+            chunks = [(v >> (16 * h)) & 0xFFFF for h in range(4)]
+            words = [0xD2800000 | (chunks[0] << 5) | rd]
+            for h in (1, 2, 3):
+                words.append(0xF2800000 | (h << 21) | (chunks[h] << 5) | rd)
+            for i, w in enumerate(words):
+                struct.pack_into("<I", blob, (patch + i) * 4, w)   # patch 为字索引
+        for patch, fname, rd in self.code_fixups:
+            # 函数地址 = 代码段基址 + 标签偏移（label 为字索引）
+            addr = BASE + ENTRY_OFF + enc.labels[fname] * 4
             v = addr
             chunks = [(v >> (16 * h)) & 0xFFFF for h in range(4)]
             words = [0xD2800000 | (chunks[0] << 5) | rd]

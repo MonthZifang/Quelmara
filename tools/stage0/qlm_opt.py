@@ -75,6 +75,8 @@ def vreg_mentions(ins):
         return [], ints([ins[2], ins[3]])
     if op == "call":
         return ints([ins[1]]), ints(ins[3])
+    if op == "callr":
+        return ints([ins[1]]), ints([ins[2]]) + ints(ins[3])
     if op == "ret":
         return [], ints([ins[1]])
     if op in ("load", "load8"):
@@ -553,14 +555,15 @@ def opt_strength_reduce(fn, rounds=3):
 # ---------------------------------------------------------------------------
 _LAT = {"mov": 1, "neg": 1, "not": 1, "cmpset": 2,
         "load": 5, "load8": 5, "store": 1, "store8": 1,
-        "movaddr": 1, "call": 6, "syscall": 20, "winapi": 12, "args": 1,
-        "winargs": 1, "spawn_child": 8, "xchg": 6}
+        "movaddr": 1, "call": 6, "callr": 6, "syscall": 20, "winapi": 12,
+        "args": 1, "winargs": 1, "spawn_child": 8, "xchg": 6}
 _BIN_LAT = {"add": 1, "sub": 1, "and": 1, "or": 1, "xor": 1,
             "shl": 1, "shr": 1, "sar": 1,
             "mul": 3, "umulhi": 5, "div": 25, "mod": 25}
 # 有副作用/访存的指令：必须保持原有相对顺序
-# （winapi 是系统调用：CreateThread/WaitForSingleObject 与访存绝不能重排）
-_EFF = ("call", "syscall", "winapi", "spawn_child", "xchg", "ret",
+# （winapi 是系统调用：CreateThread/WaitForSingleObject 与访存绝不能重排；
+#   callr 是间接调用——调用前后重排会改变观测顺序，同理保序）
+_EFF = ("call", "callr", "syscall", "winapi", "spawn_child", "xchg", "ret",
         "store", "store8", "load", "load8")
 # 基本块终止符。注意 args 必须独占一块：它从硬件参数寄存器（rdi/rsi/rdx/
 # rcx/r8/r9）搬值进 vreg，而变量移位量会用掉 rcx——一旦被调度到它后面
@@ -657,12 +660,33 @@ def opt_schedule(fn):
 _GROUND_OPS = ("mov", "cmpset")
 
 
-def analyze_nonneg(fn):
-    """返回在所有执行路径上都 >= 0 的 vreg 集合（保守）。
+def _const_before(fn, before, vreg):
+    """在 instrs[before] 之前向前找 vreg 的唯一定义；必须是紧邻的 imm 载入，
+    途中遇到 label / 分支（控制流汇合）返回 None——保守。"""
+    for j in range(before - 1, max(-1, before - 257), -1):
+        p = fn.instrs[j]
+        if p[0] in BRANCHES or p[0] == "label":
+            return None
+        defs, _uses = vreg_mentions(p)
+        if vreg in defs:
+            if p[0] == "mov" and p[1] == vreg and _is_imm(p[2]):
+                return j, p[2][1]
+            return None
+    return None
 
-    只在有上界证明时传播算术范围。循环归纳变量由生成器提供的
-    ``i < hi`` 形状建立上界，之后可以安全证明 ``i*C``、``i+C`` 非负；
-    这正是长整数循环里消除有符号魔数除法修正链的关键。
+
+def analyze_ranges(fn):
+    """保守范围分析：返回 (ranges, preset_nn)。
+
+    ranges: {vreg: 证明上界}，所有值都 >= 0（在所有执行路径上成立）。
+    preset_nn: 外部预置的非负 vreg（如强度削减写入的 fn.nn），只有非负
+    性、没有上界，调用方做"非负判定"时要并进去。
+
+    循环归纳变量由 ``i < hi`` 形状建立上界。guard 两种条件码都接受：
+    for 形态 ``jcc ge i, hi, End``（真则退出）与 while 形态
+    ``jcc l i, hi, Body``（真则进体）——两者 body 都在 ``i < hi`` 下执行。
+    这正是长整数循环里消除有符号魔数除法修正链、以及
+    ``opt_bounds_elim`` 消除越界检查的关键。
     """
     limit = 2 ** 62
     ranges = {}
@@ -681,18 +705,6 @@ def analyze_nonneg(fn):
         elif p[0] == "cmpset":
             ranges[p[2]] = max(ranges.get(p[2], -1), 1)
 
-    def const_before(before, vreg):
-        for j in range(before - 1, max(-1, before - 257), -1):
-            p = fn.instrs[j]
-            if p[0] in BRANCHES or p[0] == "label":
-                return None
-            defs, _uses = vreg_mentions(p)
-            if vreg in defs:
-                if p[0] == "mov" and p[1] == vreg and _is_imm(p[2]):
-                    return j, p[2][1]
-                return None
-        return None
-
     # 识别严格递增循环：只接受一个常量初始化、一个循环步进定义、
     # 常量上界且无其他写入。上界和末次步进都纳入最大值，避免把循环后的
     # 归纳变量错误地当成仅 <= hi-1。
@@ -702,14 +714,14 @@ def analyze_nonneg(fn):
             continue
         guard, body, step_ins, _exit, _while = shape
         ivar, hi_spec = guard[2], guard[3]
-        if guard[1] != "l" or any(ivar in vreg_mentions(p)[0] for p in body):
+        if guard[1] not in ("l", "ge") or any(ivar in vreg_mentions(p)[0] for p in body):
             continue
         step = next((p[4][1] for p in step_ins
                      if p[0] == "bin" and p[1] == "add"
                      and _is_imm(p[4]) and p[3] == ivar), None)
         if step is None or step <= 0:
             continue
-        init = const_before(h, ivar)
+        init = _const_before(fn, h, ivar)
         if init is None:
             continue
         init_idx, lo = init
@@ -717,7 +729,7 @@ def analyze_nonneg(fn):
         if _is_imm(hi_spec):
             hi = hi_spec[1]
         else:
-            hi_def = const_before(h, hi_spec)
+            hi_def = _const_before(fn, h, hi_spec)
             if hi_def is None:
                 continue
             _hi_idx, hi = hi_def
@@ -784,7 +796,15 @@ def analyze_nonneg(fn):
                     changed = True
         if not changed:
             break
-    return nn
+    # nn 的成员 = preset ∪ ranges 的全部键（ranges 的值恒 >= 0）。
+    # 返回拆开的两份：有上界的 ranges 供消除判定用，preset 只保证非负。
+    return ranges, nn - set(ranges)
+
+
+def analyze_nonneg(fn):
+    """兼容包装：返回在所有执行路径上都 >= 0 的 vreg 集合（保守）。"""
+    ranges, preset = analyze_ranges(fn)
+    return set(ranges) | preset
 
 
 def _match_divmod_window(w):
@@ -863,6 +883,120 @@ def opt_signed_divmod_simplify(fn):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 越界检查消除：用范围证明删掉必然通过的 bounds 窗口
+#
+# emit_bounds（qlm_native）生成固定窗口（__bounds_fail 可能已被内联展开，
+# 所以首条 jcc 与 l_ok label 之间的内容不参与匹配，证明成立时整块删除）：
+#     jcc ge idx, nval, l_fail      # idx >= n -> fail
+#     jcc ge idx, 0, l_ok           # idx < 0 -> fail
+#     ...fail 路径...
+#     label l_ok
+# 消除条件（下界+上界必须同时可证，一次性删整窗）：
+#   静态：nval 是立即数 n 且 ranges[idx] < n（上界证明已含循环后的取值）；
+#   动态：nval 与循环 guard 的 hi 是同一个 vreg、idx 就是该 guard 的归纳
+#         变量、窗口严格落在循环体区间内（step 之后 ivar 可能 == hi，不碰），
+#         且 idx 已证非负。hi 在循环内被重定义时放弃。
+# label 引用计数兜底：窗口内任何 label 被窗口外跳转引用时放弃删除。
+# ---------------------------------------------------------------------------
+
+def opt_bounds_elim(fn):
+    ins = fn.instrs
+    ranges, _preset = analyze_ranges(fn)
+
+    # 循环 guard 表：[(ivar, hi_vreg, hi_const, body_start, body_end)]。
+    # 循环级证明是**局部**的：init 紧邻可追溯且 >= 0（下界）+ step 唯一且
+    # > 0 + body 内无归纳变量重定义（单调）+ guard（上界）⇒ body 执行期间
+    # 0 <= ivar < hi。不要求 ivar 全函数唯一定义（多个循环共享 i 的常见
+    # 形态也能证明——每个循环各自成立即可）。窗口落在 body 区间内才可用。
+    guards = []
+    for h, b, lab in loop_regions(fn):
+        shape = _loop_shape(fn, h, b, lab)
+        if shape is None:
+            continue
+        guard, body, step_ins, _exit, _isw = shape
+        if guard[0] != "jcc" or guard[1] not in ("l", "ge"):
+            continue
+        ivar, hi_spec = guard[2], guard[3]
+        if not isinstance(ivar, int):
+            continue
+        if any(ivar in vreg_mentions(p)[0] for p in body):
+            continue                        # body 内重定义归纳变量，单调性失效
+        init = _const_before(fn, h, ivar)
+        if init is None or not (0 <= init[1] < 2 ** 62):
+            continue                        # 下界不可追溯（或为负）
+        body_start = b - len(step_ins) - len(body)
+        body_end = b - len(step_ins)        # step 之后的取值可能 == hi
+        if _is_imm(hi_spec):
+            guards.append((ivar, None, hi_spec[1], body_start, body_end))
+        elif isinstance(hi_spec, int):
+            if any(hi_spec in vreg_mentions(p)[0] for p in body + step_ins):
+                continue                    # hi 在循环内被重定义，不可依赖
+            hc = _const_before(fn, h, hi_spec)
+            guards.append((ivar, hi_spec, hc[1] if hc else None,
+                           body_start, body_end))
+
+    uses = {}
+    for p in ins:
+        if p[0] in ("jcc", "jnz", "jmp") and isinstance(p[-1], str):
+            uses[p[-1]] = uses.get(p[-1], 0) + 1
+
+    killed = 0
+    i = len(ins) - 2
+    while i >= 0:                           # 从后往前：删除不影响未扫下标
+        p = ins[i]
+        q = ins[i + 1]
+        if not (p[0] == "jcc" and p[1] == "ge" and isinstance(p[2], int)
+                and q[0] == "jcc" and q[1] == "ge" and q[2] == p[2]
+                and _is_imm(q[3], 0)):
+            i -= 1
+            continue
+        idx, nval, l_fail = p[2], p[3], p[4]
+        l_ok = q[4]
+        k = i + 2                           # 窗口尾：第一个 label l_ok
+        while k < len(ins) and not (ins[k][0] == "label" and ins[k][1] == l_ok):
+            k += 1
+        if k >= len(ins):
+            i -= 1
+            continue
+        # 窗口内的 label 只能被窗口内的跳转引用
+        win_jumps = [ins[j][-1] for j in range(i, k + 1)
+                     if ins[j][0] in ("jcc", "jnz", "jmp")]
+        ok = True
+        for t in set(t for t in win_jumps if isinstance(t, str)):
+            if uses.get(t, 0) > win_jumps.count(t):
+                ok = False
+                break
+        if not ok:
+            i -= 1
+            continue
+        # 证明判定
+        provable = False
+        if _is_imm(nval):
+            nv = nval[1]
+            mx = ranges.get(idx)
+            if mx is not None and mx < nv:
+                provable = True             # 全局上界（已含循环后的取值）
+            else:
+                for (ivar, _hv, hc, s, e) in guards:
+                    if ivar == idx and hc is not None \
+                            and hc <= nv and s <= i < e:
+                        provable = True     # 循环内：0 <= ivar < hi <= n 恒真
+                        break
+        elif isinstance(nval, int):
+            for (ivar, hv, _hc, s, e) in guards:
+                if ivar == idx and hv == nval and s <= i < e:
+                    provable = True         # 循环内：0 <= ivar < hi == nval 恒真
+                    break
+        if not provable:
+            i -= 1
+            continue
+        del ins[i:k + 1]
+        killed += 1
+        i -= 1
+    return fn
+
+
 def opt_dce(fn):
     """死代码消除(全局使用集 + 不动点,兼容循环回边)"""
     for _ in range(4):
@@ -918,6 +1052,8 @@ def _subst_vregs(ins, sub):
         return ("jcc", ins[1], S(ins[2]), S(ins[3]), ins[4])
     if op == "call":
         return ("call", sub(ins[1]) if ins[1] is not None else None, ins[2], L(ins[3]))
+    if op == "callr":
+        return ("callr", sub(ins[1]) if ins[1] is not None else None, S(ins[2]), L(ins[3]))
     if op == "ret":
         return ("ret", S(ins[1]) if ins[1] is not None else None)
     if op in ("load", "load8"):
@@ -1001,6 +1137,9 @@ def opt_all(fn, unroll=True):
         opt_dce(fn)
         if len(fn.instrs) == before:
             break
+    # 越界检查消除：收敛完成后跑一次（窗口是纯控制流，删除后无新优化机会；
+    # 放在展开之后，展开复制的每份窗口都能吃到证明）。
+    opt_bounds_elim(fn)
     # 调度放最后：避免打乱内联/CSE/展开的形态匹配
     opt_schedule(fn)
     return fn

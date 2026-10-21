@@ -277,8 +277,12 @@ def test_cross_verify():
     if not IS_WIN:
         skip("交叉验证：需要 Windows + WSL")
         return
-    probe = subprocess.run(["wsl.exe", "-d", "Ubuntu", "-u", "root", "--", "bash", "-lc",
-                            "python3 --version"], capture_output=True)
+    try:
+        probe = subprocess.run(["wsl.exe", "-d", "Ubuntu", "-u", "root", "--", "bash", "-lc",
+                                "python3 --version"], capture_output=True)
+    except OSError as _e:                    # wsl.exe 被策略/环境禁止启动
+        skip(f"交叉验证：WSL 不可用（{_e.__class__.__name__}）")
+        return
     if probe.returncode != 0:
         skip("交叉验证：WSL 不可用")
         return
@@ -453,6 +457,10 @@ def main():
     case_selfcheck("vec", "tests/t34_vec.qma")
     case_selfcheck("iter", "tests/t35_iter.qma")
     case_selfcheck("arrparam", "tests/t36_arrparam.qma")
+    case_selfcheck("vecagg", "tests/t37_vecagg.qma")
+
+    print("== [3i] 函数名作值 + callr 间接调用（v1.4 地基） ==")
+    case_selfcheck("callr", "tests/t38_callr.qma")
 
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])

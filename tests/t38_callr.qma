@@ -1,0 +1,48 @@
+// t38_callr.qma：callr 间接调用 + 函数名作值（v1.4 地基）
+// 语言层能力（函数值在 IR 里就是代码地址，标注 int 即可）：
+//   1. 函数名作实参（fnaddr -> 参数寄存器，调用方零拷贝传代码地址）
+//   2. let 绑定函数名（mov 走 movabs + 回填；PE 下生成 DIR64 重定位）
+//   3. 通过值调用：持有函数地址的变量直接调用 -> callr
+module t38
+
+fn double(x: int) -> int {
+    return x * 2
+}
+
+fn triple(x: int) -> int {
+    return x * 3
+}
+
+fn add3(a: int, b: int, c: int) -> int {
+    return a * 100 + b * 10 + c
+}
+
+fn apply(f: int, x: int) -> int {
+    return f(x) + 1
+}
+
+fn pick(i: int, x: int) -> int {
+    // 同一调用点两种目标：分派表经值传递
+    let g = double
+    if i == 0 { return g(x) }
+    return triple(x)
+}
+
+fn main() {
+    // 1. 函数名直接作实参
+    assert(apply(double, 10) == 21, "fnarg-double")
+    assert(apply(triple, 7) == 22, "fnarg-triple")
+    // 2. let 绑定函数名再调用
+    let g = triple
+    assert(g(4) == 12, "let-fn")
+    // 3. 通过变量间接调用
+    let mut h = double
+    assert(h(5) == 10, "var-indirect")
+    // 4. 多实参间接调用（自研 ABI 全寄存器参数）
+    let a3 = add3
+    assert(a3(1, 2, 3) == 123, "multi-arg")
+    // 5. 分派：同一变量持不同函数地址
+    assert(pick(0, 6) == 12, "dispatch-a")
+    assert(pick(1, 6) == 18, "dispatch-b")
+    print("callr ok")
+}

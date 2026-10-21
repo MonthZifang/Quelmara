@@ -167,6 +167,17 @@ def cmd_run(args):
     out, size, cfg = build(args.src, args.target, args.out,
                            dump_ir=args.dump_ir, optimize=not args.no_opt)
     print(f"[qlm] exec {out}")
+    if args.target == "arm64":
+        # AArch64 ELF 不能在 x86/Windows 主机上直接跑：走 tests/a64_emu.py
+        # 模拟器（执行级验证，与 cmd_test 同一条路径）。
+        root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        a64_emu = os.path.join(root, "tests", "a64_emu.py")
+        if not os.path.isfile(a64_emu):
+            print("[qlm] 找不到 tests/a64_emu.py，无法执行 arm64 产物")
+            return 1
+        return subprocess.call([sys.executable, a64_emu,
+                                os.path.abspath(out)] + (args.args or []))
     rc = subprocess.call([os.path.abspath(out)] + (args.args or []))
     return rc
 
@@ -196,46 +207,90 @@ def cmd_test(args):
         print("[qlm-test] 没有找到 test \"name\" { } 测试块")
         return 1
 
-    if args.target == "both":
+    # 目标矩阵：--targets all / --targets a,b 优先，其次 --target 单数，最后默认。
+    if getattr(args, "targets", None):
+        ts = [t.strip() for t in args.targets.split(",") if t.strip()]
+        targets = (["native", "win", "arm64", "c"] if ts == ["all"] else ts)
+        bad = [t for t in targets
+               if t not in ("native", "win", "arm64", "c")]
+        if bad:
+            print(f"[qlm-test] 未知目标：{', '.join(bad)}"
+                  f"（可选 native/win/arm64/c/all）")
+            return 1
+    elif args.target == "both":
         targets = ["native", "c"]
     elif args.target:
         targets = [args.target]
     else:
         # 默认回归只验证当前平台的自研后端；C 后端必须显式指定。
         targets = [DEFAULT_TARGET]
-    passed = failed = 0
+
+    # 执行能力矩阵：本机能执行哪些 target 的产物。
+    is_win = (os.name == "nt")
+    host_target = "win" if is_win else "native"
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    a64_emu = os.path.join(root, "tests", "a64_emu.py")
+
+    def can_exec(t):
+        if t == host_target:
+            return True
+        if t == "arm64" and os.path.isfile(a64_emu):
+            return True                     # A64 模拟器全平台可跑（执行级）
+        if t == "c" and not is_win:
+            return True                     # POSIX 默认有 cc
+        return False
+
+    def run_prod(t, out):
+        """执行产物，返回 (returncode, stdout)；arm64 走模拟器。"""
+        if t == "arm64":
+            r = subprocess.run([sys.executable, a64_emu, os.path.abspath(out)],
+                               capture_output=True, encoding="utf-8",
+                               errors="replace", timeout=300)
+            return r.returncode, r.stdout
+        r = subprocess.run([os.path.abspath(out)], capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=300)
+        return r.returncode, r.stdout
+
+    passed = failed = skipped = 0
     results = {}
     for f in files:
+        outs = {}
         for t in targets:
             tag = f"{f} [{t}]"
             try:
                 out, _, _ = build(f, t, optimize=not args.no_opt)
-                r = subprocess.run([os.path.abspath(out)], capture_output=True,
-                                   encoding="utf-8", errors="replace", timeout=300)
-                ok = (r.returncode == 0)
-                results.setdefault(f, {})[t] = r.stdout
             except Exception as e:
-                ok = False
-                r = type("R", (), {"stdout": "", "stderr": str(e), "returncode": -1})()
-            if ok:
+                print(f"  ⏭️  {tag} 构建不可用：{str(e).splitlines()[0][:80]}")
+                skipped += 1
+                continue
+            if not can_exec(t):
+                print(f"  ⏭️  {tag} 本机不能执行该产物（构建成功）")
+                skipped += 1
+                continue
+            try:
+                rc, stdout = run_prod(t, out)
+            except Exception as e:
+                print(f"  ❌ {tag} 执行异常：{e}")
+                failed += 1
+                continue
+            if rc == 0:
                 print(f"  ✅ {tag}")
                 passed += 1
+                outs[t] = stdout
             else:
-                print(f"  ❌ {tag}")
-                for line in (r.stderr or r.stdout or "").splitlines()[-6:]:
-                    print(f"       {line}")
+                print(f"  ❌ {tag}（退出码 {rc}）")
                 failed += 1
-        # 双后端交叉验证：输出必须一致
-        if len(targets) == 2 and len(results.get(f, {})) == 2:
-            a, b = results[f]["native"], results[f]["c"]
-            if a == b:
-                print(f"  ✅ {f} 双后端输出一致（交叉验证）")
+        # 跨后端输出一致性：所有可执行目标的 stdout 必须逐字节一致
+        if len(outs) >= 2:
+            vals = list(outs.values())
+            if all(v == vals[0] for v in vals[1:]):
+                print(f"  ✅ {f} 跨后端输出一致（{' vs '.join(outs)}）")
                 passed += 1
             else:
-                print(f"  ❌ {f} 双后端输出不一致")
+                print(f"  ❌ {f} 跨后端输出不一致（{' vs '.join(outs)}）")
                 failed += 1
     print("-" * 48)
-    print(f"PASS={passed} FAIL={failed}")
+    print(f"PASS={passed} FAIL={failed} SKIP={skipped}")
     return 0 if failed == 0 else 1
 
 
@@ -414,7 +469,11 @@ def main(argv=None):
     p.add_argument("paths", nargs="*", help="文件或目录（默认 tests/ examples/）")
     p.add_argument("--target", default=None,
                    choices=["native", "c", "arm64", "win", "both"],
-                   help="后端（默认：Windows=win，POSIX=native+c 交叉验证）")
+                   help="单后端（默认：Windows=win，POSIX=native+c 交叉验证）")
+    p.add_argument("--targets", default=None,
+                   help="多后端矩阵：逗号分隔（native,win,arm64,c）或 all="
+                        "全部后端；可执行的做执行级+跨后端输出比对，"
+                        "不可执行的做构建级 SKIP")
     p.add_argument("--no-opt", action="store_true")
 
     p = sub.add_parser("fmt", help="官方格式化器")

@@ -28,7 +28,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from qlm import (tokenize, Parser, load_config, walk_stmts,  # noqa: E402
                     parse_source, with_test_runner, validate_match,
-                    resolve_option_patterns, require_source)
+                    resolve_option_patterns, require_source, load_program)
 
 # ---------------------------------------------------------------------------
 # x86-64 寄存器编号
@@ -344,6 +344,11 @@ class Enc:
         self.fixups.append((self.pos(), label))
         self.emit(b"\x00\x00\x00\x00")
 
+    def call_reg(self, reg):
+        # FF /2：间接调用（call rax 形态）。modrm reg 字段 = 2（/2 = CALL），
+        # rm 字段 = 目标寄存器；reg >= 8 时 REX.B 扩展 rm。
+        self.emit(rex(b=reg), b"\xff", modrm_reg(2, reg))
+
     def ret(self):
         self.emit(b"\xc3")
 
@@ -392,6 +397,7 @@ class Enc:
 #   ('cmpset', cc, dst, a, b)          dst = (a cc b) ? 1 : 0
 #   ('label', L) ('jmp', L) ('jz', a, L) ('jnz', a, L) ('jcc', cc, a, b, L)
 #   ('call', dst|None, fname, [args])
+#   ('callr', dst|None, fnspec, [args])  间接调用：fnspec 为 vreg / ('fnaddr',name) / ('ga',gid)
 #   ('ret', op|None)
 #   ('load'/'load8', dst, base, idx)   dst = [base + idx*8] / 字节
 #   ('store'/'store8', base, idx, src)
@@ -466,6 +472,9 @@ class Lower:
         self.uses_str_to_int = False
         self.uses_args = False
         self.uses_io = False
+        self.uses_net = False
+        self.uses_sfb = False
+        self.uses_memcpy = False
         self.uses_substr = False
         self.uses_str_cmp = False
         self.uses_vec = False
@@ -937,6 +946,11 @@ class Lower:
             return ("ga", self.intern_str(e[1]))
         if k == "name":
             if e[1] not in env:
+                # 函数名作值：已知函数名 -> 代码地址操作数（fnaddr）。可作实参
+                # 传给间接调用目标（如网络回调），或 let 绑定（mov 走
+                # movabs + 回填；PE 下生成 DIR64 重定位，ASLR 安全）。
+                if e[1] in self.fns_ast:
+                    return ("fnaddr", e[1])
                 raise SyntaxError(f"未定义变量 {e[1]}")
             return env[e[1]]
         if k == "call":
@@ -1042,14 +1056,19 @@ class Lower:
         if k == "vecnew":
             self.uses_vec = True
             et = e[1]
-            tag = "str" if et == ("named", "str") else None
+            if et == ("named", "str"):
+                tag = "str"
+            elif et[0] == "named" and self.is_agg(et[1]):
+                tag = ("agg", et[1])
+            else:
+                tag = None
             cap = ("imm", 4)
             if e[2]:
                 if len(e[2]) != 1:
                     raise SyntaxError("vec[T].new(cap) 只接受一个容量实参")
                 cap = self.eval(e[2][0], fn, env)
             d = fn.new_v()
-            fn.emit("call", d, "__vec_new", [cap])
+            fn.emit("call", d, "__vec_new", [cap, ("imm", self.type_words(et))])
             return self._mark_vec(fn, d, tag)
         if k == "sliceof":
             return self.lower_sliceof(e, fn, env)
@@ -1229,6 +1248,10 @@ class Lower:
             return self._mark_struct(fn, d, ftype[1])
         d = fn.new_v()
         fn.emit("load", d, obj, ("imm", off))
+        # 字段的类型标签必须跟着值走：早期漏了 str，导致 print(p.name) 打印指针
+        if ftype == ("named", "str"):
+            self._mark_str(fn, d)
+            return d
         fw = self._ty_float_w(ftype)
         if fw:
             self._mark_float(fn, d, fw)
@@ -1299,7 +1322,52 @@ class Lower:
         raise SyntaxError("子切片 a[lo..hi] 只支持 str、切片与定长数组")
 
     def lower_binop(self, e, fn, env):
+        if e[1] == "+" and self._has_str_lit(e):
+            # v1.3 concat 链融合：a+b+c+... 单次分配（str `+` 累积 O(n^2) 的编译器级解）
+            leaves = []
+            self._collect_str_chain(e, leaves)
+            if len(leaves) >= 3:
+                regs = []
+                for leaf in leaves:
+                    v = self.eval(leaf, fn, env)
+                    if not self._is_str(fn, v):
+                        raise SyntaxError("字符串与 int 拼接需 to_str()/chr()（typeck 前的显式报错）")
+                    regs.append(v)
+                self.uses_memcpy = True
+                total = fn.new_v()
+                fn.emit("mov", total, ("imm", 0))
+                lens = []
+                for v in regs:
+                    l = fn.new_v()
+                    fn.emit("call", l, "__str_len", [v])
+                    fn.emit("bin", "add", total, total, l)
+                    lens.append(l)
+                n1 = fn.new_v()
+                fn.emit("bin", "add", n1, total, ("imm", 1))
+                dst = fn.new_v()
+                fn.emit("call", dst, "__alloc", [n1])
+                pos = fn.new_v()
+                fn.emit("mov", pos, ("imm", 0))
+                for v, l in zip(regs, lens):
+                    fn.emit("call", None, "__memcopy", [dst, pos, v, l])
+                    fn.emit("bin", "add", pos, pos, l)
+                fn.emit("store8", dst, total, ("imm", 0))
+                return self._mark_str(fn, dst)
         return self.arith(e[1], self.eval(e[2], fn, env), self.eval(e[3], fn, env), fn, env)
+
+    def _has_str_lit(self, e):
+        """链中是否含 str 字面量叶（融合的静态预判——解析器输出全以此形态出现）"""
+        if isinstance(e, tuple) and e[0] == "binop" and e[1] == "+":
+            return self._has_str_lit(e[2]) or self._has_str_lit(e[3])
+        return isinstance(e, tuple) and e[0] == "str"
+
+    def _collect_str_chain(self, e, leaves):
+        """收集 str `+` 链的叶子 AST（左->右）；遇到非 + 节点即叶。"""
+        if isinstance(e, tuple) and e[0] == "binop" and e[1] == "+":
+            self._collect_str_chain(e[2], leaves)
+            self._collect_str_chain(e[3], leaves)
+            return
+        leaves.append(e)
 
     def make_fnum(self, fn, v, width):
         """浮点字面量：IEEE754 位模式存进通用寄存器，并打上浮点标记"""
@@ -1411,6 +1479,19 @@ class Lower:
             if mag:
                 M, sh = mag
                 x = a
+                if self._is_nonneg(fn, x):
+                    # 值域已知非负：跳过符号修正（省 4 条/迭代，v1.3 值域分析）
+                    t = fn.new_v()
+                    fn.emit("bin", "umulhi", t, x, ("imm", M))
+                    fn.emit("bin", "sar", t, t, ("imm", sh))     # t = x / d
+                    q = t
+                    if op == "/":
+                        return q
+                    qd = fn.new_v()
+                    fn.emit("bin", "mul", qd, q, ("imm", b[1]))
+                    r = fn.new_v()
+                    fn.emit("bin", "sub", r, x, qd)              # r = x - q*d
+                    return r
                 mask = fn.new_v()
                 fn.emit("bin", "sar", mask, x, ("imm", 63))     # mask = x < 0 ? -1 : 0
                 ax = fn.new_v()
@@ -1446,6 +1527,13 @@ class Lower:
         if op == "-" and isinstance(b, tuple) and b[0] == "imm" and b[1] == 0:
             fn.emit("mov", d, a)
             return d
+        # 非负值域传播（v1.3 通用值域分析最小版：只标确凿模式）
+        if op == "+" and self._is_nonneg(fn, a) and self._is_nonneg(fn, b):
+            self._mark_nonneg(fn, d)
+        if op == "*" and self._is_nonneg(fn, a) and self._is_nonneg(fn, b):
+            self._mark_nonneg(fn, d)
+        if op == "mod" and isinstance(b, tuple) and b[0] == "imm" and b[1] > 0:
+            self._mark_nonneg(fn, d)                       # 模非负
         if op not in ("add", "sub", "mul", "div", "mod", "and", "or", "xor", "shl", "shr", "sar"):
             opmap = {"+": "add", "-": "sub", "*": "mul", "/": "div", "%": "mod",
                      "&": "and", "|": "or", "^": "xor",
@@ -1478,11 +1566,18 @@ class Lower:
             return ("imm", 0)
         if m == "push":
             v = one_arg()
-            fn.emit("call", None, "__vec_push", [obj, v])
+            if isinstance(elem, tuple) and elem[0] == "agg":
+                fn.emit("call", None, "__vec_push_n", [obj, v])
+            else:
+                fn.emit("call", None, "__vec_push", [obj, v])
             return ("imm", 0)
         if m == "pop":
             if args:
                 raise SyntaxError("vec.pop() 不接受实参")
+            if isinstance(elem, tuple) and elem[0] == "agg":
+                dst = self.alloc_struct(fn, elem[1])
+                fn.emit("call", None, "__vec_pop_n", [obj, dst])
+                return self._mark_struct(fn, dst, elem[1])
             d = fn.new_v()
             fn.emit("call", d, "__vec_pop", [obj])
             if elem == "str":
@@ -1490,6 +1585,10 @@ class Lower:
             return d
         if m == "get":
             i = one_arg()
+            if isinstance(elem, tuple) and elem[0] == "agg":
+                dst = self.alloc_struct(fn, elem[1])
+                fn.emit("call", None, "__vec_get_n", [obj, i, dst])
+                return self._mark_struct(fn, dst, elem[1])
             d = fn.new_v()
             fn.emit("call", d, "__vec_get", [obj, i])
             if elem == "str":
@@ -1500,7 +1599,10 @@ class Lower:
                 raise SyntaxError("vec.set(i, v) 需要两个实参")
             i = self.eval(args[0], fn, env)
             v = self.eval(args[1], fn, env)
-            fn.emit("call", None, "__vec_set", [obj, i, v])
+            if isinstance(elem, tuple) and elem[0] == "agg":
+                fn.emit("call", None, "__vec_set_n", [obj, i, v])
+            else:
+                fn.emit("call", None, "__vec_set", [obj, i, v])
             return ("imm", 0)
         raise SyntaxError(f"vec 不支持方法 {m}（可用 push/get/set/pop/len/clear）")
 
@@ -1775,6 +1877,51 @@ class Lower:
             d = fn.new_v()
             fn.emit("call", d, "__read_text", [pa])
             return self._mark_str(fn, d)
+        if name == "write_text" and name not in self.fns_ast:
+            # write_text(path, content) -> int：整文件写入（覆盖），返回写入
+            # 字节数。打开/写入失败一律 fail-fast。
+            if len(e[2]) != 2:
+                raise SyntaxError("write_text(path, content) 需要两个实参")
+            self.uses_io = True
+            pa = self.eval(e[2][0], fn, env)
+            ca = self.eval(e[2][1], fn, env)
+            d = fn.new_v()
+            fn.emit("call", d, "__write_text", [pa, ca])
+            return d
+        if name == "str_from_bytes" and name not in self.fns_ast:
+            # str_from_bytes(v: vec[int]) -> str：字节缓冲 O(n) 成串（v1.3，
+            # 自举解析器实测 str+ 累积 O(n^2) 短板的对症内建）。
+            if len(e[2]) != 1:
+                raise SyntaxError("str_from_bytes(v) 需要一个实参")
+            self.uses_vec = True
+            self.uses_sfb = True
+            va = self.eval(e[2][0], fn, env)
+            d = fn.new_v()
+            fn.emit("call", d, "__str_from_bytes", [va])
+            return self._mark_str(fn, d)
+        if name in ("tcp_listen", "tcp_accept", "tcp_send", "tcp_recv",
+                    "tcp_close") and name not in self.fns_ast:
+            # 原生 socket 第一格（v1.3，过程式阻塞模型）：
+            #   tcp_listen(port) -> fd     绑定 0.0.0.0:port 并监听
+            #   tcp_accept(fd) -> conn     阻塞等待连接
+            #   tcp_send(fd, str) -> n     发送，返回字节数
+            #   tcp_recv(fd, cap) -> str   接收（对端关闭返回空串）
+            #   tcp_close(fd) -> 0
+            # 失败（初始化/创建/绑定/监听/发送）一律 fail-fast。
+            # SPEC 的 net.TcpServer reactor（回调结构体）仍是目标模型，
+            # 这一组是它的地基：同一条 QuIR，Windows 走 ws2_32，
+            # Linux 走 raw syscall。
+            self.uses_net = True
+            nargs = {"tcp_listen": 1, "tcp_accept": 1, "tcp_send": 2,
+                     "tcp_recv": 2, "tcp_close": 1}[name]
+            if len(e[2]) != nargs:
+                raise SyntaxError(f"{name} 需要 {nargs} 个实参")
+            as_ = [self.eval(a, fn, env) for a in e[2]]
+            d = fn.new_v()
+            fn.emit("call", d, "__" + name, as_)
+            if name == "tcp_recv":
+                return self._mark_str(fn, d)
+            return d
         if name == "substr" and name not in self.fns_ast:
             # substr(s, lo, n) -> str：越界 fail-fast（与下标同策略）
             if len(e[2]) != 3:
@@ -1920,6 +2067,21 @@ class Lower:
                 raise SyntaxError("slice_of() 目前只支持定长数组变量（零拷贝转换）")
             return self.make_slice(fn, av, ("imm", n))
         if name not in self.fns_ast:
+            if len(e[1]) == 1 and name in env:
+                # 通过值调用：标识符是持有函数地址的局部变量（fnaddr 或 vreg）
+                # -> callr 间接调用。无形参类型信息：实参原样传递（标量/str），
+                # 不做隐式转换；返回值按标量处理。
+                callee = env[name]
+                args = [self.eval(a, fn, env) for a in e[2]]
+                for a in args:
+                    if self._struct_of(fn, a) is not None or self._is_slice(fn, a):
+                        raise SyntaxError(
+                            "间接调用暂不支持结构体/切片实参（标量与 str 可以）")
+                if len(args) > 6:
+                    raise SyntaxError("间接调用最多 6 个实参（自研 ABI 参数寄存器上限）")
+                d = fn.new_v()
+                fn.emit("callr", d, callee, args)
+                return d
             raise SyntaxError(f"未定义函数 {name}")
         args = [self.eval(a, fn, env) for a in e[2]]
         params = self.fns_ast[name]["params"]
@@ -2066,6 +2228,10 @@ class Lower:
                 self._mark_str(fn, d)
             if is_bool:
                 self._mark_bool(fn, d)
+            if self._is_nonneg(fn, spec):
+                self._mark_nonneg(fn, d)
+            else:
+                self._unmark_nonneg(fn, d)
             if self._is_chan(fn, spec):
                 self._mark_chan(fn, d)
             mp = self._map_of(fn, spec)
@@ -2108,6 +2274,10 @@ class Lower:
                     fn.emit("mov", cur, spec)
                     if self._is_str(fn, spec):
                         self._mark_str(fn, cur)
+                    if self._is_nonneg(fn, spec):
+                        self._mark_nonneg(fn, cur)
+                    else:
+                        self._unmark_nonneg(fn, cur)
                 else:
                     binop = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
                              "&=": "&", "|=": "|", "^=": "^",
@@ -2118,6 +2288,12 @@ class Lower:
                     fn.emit("mov", cur, tmp)
                     if self._is_str(fn, tmp):
                         self._mark_str(fn, cur)
+                    if binop == "+=" and self._is_nonneg(fn, tmp) and self._is_nonneg(fn, cur):
+                        self._mark_nonneg(fn, cur)
+                    elif binop == "%=":
+                        self._mark_nonneg(fn, cur)
+                    else:
+                        self._unmark_nonneg(fn, cur)
             else:
                 raise SyntaxError("常量不可赋值")
             return
@@ -2349,6 +2525,11 @@ class Lower:
             elem = self._vec_elem(fn, coll)
         if elem == "str":
             self._mark_str(fn, item)
+        elif isinstance(elem, tuple) and elem[0] == "agg":
+            # 聚合元素：每轮把第 idx 个元素拷进一个帧槽，循环变量绑到这个槽
+            slot = self.alloc_struct(fn, elem[1])
+            fn.emit("call", None, "__vec_get_n", [coll, idx, slot])
+            item = self._mark_struct(fn, slot, elem[1])
         inner = dict(env)
         inner[var] = item
         self.loop_stack.append((l_skip, l_end))
@@ -3464,7 +3645,8 @@ class Lower:
         self.out.append(f)
 
         if self.uses_vec:
-            # vec[T] 头：w0=data, w1=len, w2=cap, w3=tag（元素恒 8 字节字）
+            # vec[T] 头：w0=data, w1=len, w2=cap, w3=ew（每个元素的 8 字节槽数）
+            # 标量 ew=1 走 __vec_push/get 的快速路径；聚合 ew>1 走 *_n 变体（memcpy）。
             msg = "quelmara: vec index out of bounds (fail-fast)\n"
             gid_v = self.intern_str(msg)
             f = Fn("__vec_fail")
@@ -3477,10 +3659,10 @@ class Lower:
             self.out.append(f)
 
             f = Fn("__vec_new")
-            cap = f.new_v()
-            f.emit("args", [cap])
-            l_ok = f.label("vn.ok")
+            cap, ew = f.new_v(), f.new_v()
+            f.emit("args", [cap, ew])
             b0 = f.new_v()
+            l_ok = f.label("vn.ok")
             f.emit("cmpset", "ge", b0, cap, ("imm", 4))     # 最小容量 4
             f.emit("jnz", b0, l_ok)
             f.emit("mov", cap, ("imm", 4))
@@ -3488,45 +3670,81 @@ class Lower:
             h = f.new_v()
             f.emit("call", h, "__alloc", [("imm", 32)])
             nb = f.new_v()
-            f.emit("bin", "shl", nb, cap, ("imm", 3))
+            f.emit("bin", "mul", nb, cap, ew)
+            f.emit("bin", "shl", nb, nb, ("imm", 3))
             data = f.new_v()
             f.emit("call", data, "__alloc", [nb])
             f.emit("store", h, ("imm", 0), data)
             f.emit("store", h, ("imm", 1), ("imm", 0))
             f.emit("store", h, ("imm", 2), cap)
-            f.emit("store", h, ("imm", 3), ("imm", 0))
+            f.emit("store", h, ("imm", 3), ew)
             f.emit("ret", h)
+            self.out.append(f)
+
+            # __vec_grow(h)：len==cap 时容量翻倍并搬旧数据（返回 data 指针）
+            f = Fn("__vec_grow")
+            h = f.new_v()
+            f.emit("args", [h])
+            ln, cp, ew = f.new_v(), f.new_v(), f.new_v()
+            f.emit("load", ln, h, ("imm", 1))
+            f.emit("load", cp, h, ("imm", 2))
+            f.emit("load", ew, h, ("imm", 3))
+            data = f.new_v()
+            f.emit("load", data, h, ("imm", 0))
+            b1 = f.new_v()
+            l_ret, l_g = f.label("vg.r"), f.label("vg.g")
+            f.emit("cmpset", "l", b1, ln, cp)
+            f.emit("jnz", b1, l_ret)
+            ncp = f.new_v()
+            f.emit("bin", "shl", ncp, cp, ("imm", 1))
+            nb = f.new_v()
+            f.emit("bin", "mul", nb, ncp, ew)
+            f.emit("bin", "shl", nb, nb, ("imm", 3))
+            nd = f.new_v()
+            f.emit("call", nd, "__alloc", [nb])
+            nbytes = f.new_v()
+            f.emit("bin", "mul", nbytes, ln, ew)
+            f.emit("bin", "shl", nbytes, nbytes, ("imm", 3))
+            f.emit("call", None, "__memcpy", [nd, data, nbytes])
+            f.emit("store", h, ("imm", 0), nd)
+            f.emit("store", h, ("imm", 2), ncp)
+            f.emit("ret", nd)
+            f.emit("label", l_ret)
+            f.emit("ret", data)
             self.out.append(f)
 
             f = Fn("__vec_push")
             h, v = f.new_v(), f.new_v()
             f.emit("args", [h, v])
+            data = f.new_v()
+            f.emit("call", data, "__vec_grow", [h])
             ln = f.new_v()
             f.emit("load", ln, h, ("imm", 1))
-            cp = f.new_v()
-            f.emit("load", cp, h, ("imm", 2))
-            l_grow, l_have = f.label("vp.g"), f.label("vp.h")
-            b1 = f.new_v()
-            f.emit("cmpset", "l", b1, ln, cp)
-            f.emit("jnz", b1, l_have)
-            # 扩容：cap*2，拷旧数据
-            ncp = f.new_v()
-            f.emit("bin", "shl", ncp, cp, ("imm", 1))
-            nb = f.new_v()
-            f.emit("bin", "shl", nb, ncp, ("imm", 3))
-            nd = f.new_v()
-            f.emit("call", nd, "__alloc", [nb])
-            od = f.new_v()
-            f.emit("load", od, h, ("imm", 0))
-            nbytes = f.new_v()
-            f.emit("bin", "shl", nbytes, ln, ("imm", 3))
-            f.emit("call", None, "__memcpy", [nd, od, nbytes])
-            f.emit("store", h, ("imm", 0), nd)
-            f.emit("store", h, ("imm", 2), ncp)
-            f.emit("label", l_have)
-            data = f.new_v()
-            f.emit("load", data, h, ("imm", 0))
             f.emit("store", data, ln, v)
+            ln1 = f.new_v()
+            f.emit("bin", "add", ln1, ln, ("imm", 1))
+            f.emit("store", h, ("imm", 1), ln1)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            # __vec_push_n(h, src)：聚合元素，按 ew*8 字节拷贝
+            f = Fn("__vec_push_n")
+            h, src = f.new_v(), f.new_v()
+            f.emit("args", [h, src])
+            data = f.new_v()
+            f.emit("call", data, "__vec_grow", [h])
+            ln = f.new_v()
+            f.emit("load", ln, h, ("imm", 1))
+            ew = f.new_v()
+            f.emit("load", ew, h, ("imm", 3))
+            off = f.new_v()
+            f.emit("bin", "mul", off, ln, ew)
+            f.emit("bin", "shl", off, off, ("imm", 3))
+            dst = f.new_v()
+            f.emit("bin", "add", dst, data, off)
+            nbytes = f.new_v()
+            f.emit("bin", "shl", nbytes, ew, ("imm", 3))
+            f.emit("call", None, "__memcpy", [dst, src, nbytes])
             ln1 = f.new_v()
             f.emit("bin", "add", ln1, ln, ("imm", 1))
             f.emit("store", h, ("imm", 1), ln1)
@@ -3548,7 +3766,7 @@ class Lower:
             f.emit("ret", ("imm", 0))
             self.out.append(f)
 
-            # get/set/pop 共用一段边界检查
+            # 边界检查内联到 get/set/pop（都用 cmpset+jnz，避免 jcc+cmp 立即数）
             f = Fn("__vec_get")
             h, i = f.new_v(), f.new_v()
             f.emit("args", [h, i])
@@ -3570,22 +3788,80 @@ class Lower:
             f.emit("ret", ("imm", 0))
             self.out.append(f)
 
-            f = Fn("__vec_set")
-            h, i, v = f.new_v(), f.new_v(), f.new_v()
-            f.emit("args", [h, i, v])
+            f = Fn("__vec_get_n")
+            h, i, dstp = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [h, i, dstp])
             ln = f.new_v()
             f.emit("load", ln, h, ("imm", 1))
             b = f.new_v()
-            l_bad2, l_ok2 = f.label("vs.b"), f.label("vs.k")
+            l_bad2, l_ok2 = f.label("vgn.b"), f.label("vgn.k")
             f.emit("cmpset", "l", b, i, ("imm", 0))
             f.emit("jnz", b, l_bad2)
             f.emit("cmpset", "ge", b, i, ln)
             f.emit("jnz", b, l_bad2)
             data = f.new_v()
             f.emit("load", data, h, ("imm", 0))
+            ew = f.new_v()
+            f.emit("load", ew, h, ("imm", 3))
+            off = f.new_v()
+            f.emit("bin", "mul", off, i, ew)
+            f.emit("bin", "shl", off, off, ("imm", 3))
+            src = f.new_v()
+            f.emit("bin", "add", src, data, off)
+            nbytes = f.new_v()
+            f.emit("bin", "shl", nbytes, ew, ("imm", 3))
+            f.emit("call", None, "__memcpy", [dstp, src, nbytes])
+            f.emit("ret", dstp)
+            f.emit("label", l_bad2)
+            f.emit("call", None, "__vec_fail", [])
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            f = Fn("__vec_set")
+            h, i, v = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [h, i, v])
+            ln = f.new_v()
+            f.emit("load", ln, h, ("imm", 1))
+            b = f.new_v()
+            l_bad3, _l_ok3 = f.label("vs.b"), f.label("vs.k")
+            f.emit("cmpset", "l", b, i, ("imm", 0))
+            f.emit("jnz", b, l_bad3)
+            f.emit("cmpset", "ge", b, i, ln)
+            f.emit("jnz", b, l_bad3)
+            data = f.new_v()
+            f.emit("load", data, h, ("imm", 0))
             f.emit("store", data, i, v)
             f.emit("ret", ("imm", 0))
-            f.emit("label", l_bad2)
+            f.emit("label", l_bad3)
+            f.emit("call", None, "__vec_fail", [])
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            f = Fn("__vec_set_n")
+            h, i, srcp = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [h, i, srcp])
+            ln = f.new_v()
+            f.emit("load", ln, h, ("imm", 1))
+            b = f.new_v()
+            l_bad4 = f.label("vsn.b")
+            f.emit("cmpset", "l", b, i, ("imm", 0))
+            f.emit("jnz", b, l_bad4)
+            f.emit("cmpset", "ge", b, i, ln)
+            f.emit("jnz", b, l_bad4)
+            data = f.new_v()
+            f.emit("load", data, h, ("imm", 0))
+            ew = f.new_v()
+            f.emit("load", ew, h, ("imm", 3))
+            off = f.new_v()
+            f.emit("bin", "mul", off, i, ew)
+            f.emit("bin", "shl", off, off, ("imm", 3))
+            dst = f.new_v()
+            f.emit("bin", "add", dst, data, off)
+            nbytes = f.new_v()
+            f.emit("bin", "shl", nbytes, ew, ("imm", 3))
+            f.emit("call", None, "__memcpy", [dst, srcp, nbytes])
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_bad4)
             f.emit("call", None, "__vec_fail", [])
             f.emit("ret", ("imm", 0))
             self.out.append(f)
@@ -3596,9 +3872,9 @@ class Lower:
             ln = f.new_v()
             f.emit("load", ln, h, ("imm", 1))
             b = f.new_v()
-            l_bad3, l_ok3 = f.label("vx.b"), f.label("vx.k")
+            l_bad5 = f.label("vx.b")
             f.emit("cmpset", "le", b, ln, ("imm", 0))
-            f.emit("jnz", b, l_bad3)
+            f.emit("jnz", b, l_bad5)
             ln1 = f.new_v()
             f.emit("bin", "sub", ln1, ln, ("imm", 1))
             f.emit("store", h, ("imm", 1), ln1)
@@ -3607,7 +3883,37 @@ class Lower:
             d = f.new_v()
             f.emit("load", d, data, ln1)
             f.emit("ret", d)
-            f.emit("label", l_bad3)
+            f.emit("label", l_bad5)
+            f.emit("call", None, "__vec_fail", [])
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            f = Fn("__vec_pop_n")
+            h, dstp = f.new_v(), f.new_v()
+            f.emit("args", [h, dstp])
+            ln = f.new_v()
+            f.emit("load", ln, h, ("imm", 1))
+            b = f.new_v()
+            l_bad6 = f.label("vxn.b")
+            f.emit("cmpset", "le", b, ln, ("imm", 0))
+            f.emit("jnz", b, l_bad6)
+            ln1 = f.new_v()
+            f.emit("bin", "sub", ln1, ln, ("imm", 1))
+            f.emit("store", h, ("imm", 1), ln1)
+            data = f.new_v()
+            f.emit("load", data, h, ("imm", 0))
+            ew = f.new_v()
+            f.emit("load", ew, h, ("imm", 3))
+            off = f.new_v()
+            f.emit("bin", "mul", off, ln1, ew)
+            f.emit("bin", "shl", off, off, ("imm", 3))
+            src = f.new_v()
+            f.emit("bin", "add", src, data, off)
+            nbytes = f.new_v()
+            f.emit("bin", "shl", nbytes, ew, ("imm", 3))
+            f.emit("call", None, "__memcpy", [dstp, src, nbytes])
+            f.emit("ret", dstp)
+            f.emit("label", l_bad6)
             f.emit("call", None, "__vec_fail", [])
             f.emit("ret", ("imm", 0))
             self.out.append(f)
@@ -3702,6 +4008,386 @@ class Lower:
                 f.emit("ret", buf)
             f.emit("label", l_fail)
             f.emit("call", None, "__read_fail", [])
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            # __write_fail：写文件失败统一走这里（stderr + exit 1）
+            msg_w = "quelmara: write_text() failed (fail-fast)\n"
+            gid_w = self.intern_str(msg_w)
+            f = Fn("__write_fail")
+            f.emit("args", [])
+            bp = f.new_v()
+            f.emit("movaddr", bp, gid_w)
+            self.emit_write(f, 2, bp, ("imm", len(msg_w.encode("utf-8"))))
+            self.emit_exit(f, 1)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            # __write_text(path, content) -> written：覆盖写整文件。
+            # 与 __read_text 同构：Windows winapi / POSIX raw syscall，
+            # 其余逻辑架构无关（同一 QuIR，a64 只换 syscall 号与发射层）。
+            f = Fn("__write_text")
+            p = f.new_v()
+            c = f.new_v()
+            f.emit("args", [p, c])
+            b = f.new_v()
+            l_fail = f.label("wrbad")
+            if self.platform == "windows":
+                # CreateFileA(path, GENERIC_WRITE, 0, 0, CREATE_ALWAYS,
+                #             FILE_ATTRIBUTE_NORMAL, 0)
+                h = f.new_v()
+                f.emit("winapi", h, "CreateFileA",
+                       [p, ("imm", 0x40000000), ("imm", 0), ("imm", 0),
+                        ("imm", 2), ("imm", 0x80), ("imm", 0)])
+                f.emit("cmpset", "e", b, h, ("imm", -1))
+                f.emit("jnz", b, l_fail)
+                n = f.new_v()
+                f.emit("call", n, "__str_len", [c])
+                wptr = f.new_v()
+                f.emit("movaddr", wptr, self.written_gid)
+                okv = f.new_v()
+                f.emit("winapi", okv, "WriteFile", [h, c, n, wptr, ("imm", 0)])
+                f.emit("jz", okv, l_fail)
+                got = f.new_v()
+                f.emit("load", got, ("ga", self.written_gid), ("imm", 0))
+                f.emit("winapi", None, "CloseHandle", [h])
+                f.emit("ret", got)
+            else:
+                # openat(AT_FDCWD, path, O_WRONLY|O_CREAT|O_TRUNC, 0644)
+                fd = f.new_v()
+                f.emit("syscall", fd, self.sc["openat"],
+                       [("imm", -100), p, ("imm", 0x241), ("imm", 0o644)])
+                f.emit("cmpset", "l", b, fd, ("imm", 0))
+                f.emit("jnz", b, l_fail)
+                n2 = f.new_v()
+                f.emit("call", n2, "__str_len", [c])
+                got2 = f.new_v()
+                f.emit("syscall", got2, self.sc["write"], [fd, c, n2])
+                f.emit("cmpset", "l", b, got2, ("imm", 0))
+                f.emit("jnz", b, l_fail)
+                f.emit("syscall", None, self.sc["close"], [fd])
+                f.emit("ret", got2)
+            f.emit("label", l_fail)
+            f.emit("call", None, "__write_fail", [])
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+        if self.uses_sfb:
+            # __str_from_bytes(v: vec[int]) -> str：取各槽低字节拼成 NUL 结尾串。
+            # O(n) 一次分配——替代 str `+` 累积的 O(n^2)（自举解析器热点）。
+            f = Fn("__str_from_bytes")
+            v = f.new_v()
+            f.emit("args", [v])
+            ln = f.new_v()
+            f.emit("load", ln, v, ("imm", 1))
+            ptr = f.new_v()
+            f.emit("load", ptr, v, ("imm", 0))
+            n1 = f.new_v()
+            f.emit("bin", "add", n1, ln, ("imm", 1))
+            buf = f.new_v()
+            f.emit("call", buf, "__alloc", [n1])
+            iv = f.new_v()
+            f.emit("mov", iv, ("imm", 0))
+            l_loop = f.label("sfb")
+            l_done = f.label("sfbd")
+            f.emit("label", l_loop)
+            f.emit("jcc", "ge", iv, ln, l_done)
+            off = f.new_v()
+            f.emit("bin", "shl", off, iv, ("imm", 3))
+            addr = f.new_v()
+            f.emit("bin", "add", addr, ptr, off)
+            b = f.new_v()
+            f.emit("load8", b, addr, ("imm", 0))
+            f.emit("store8", buf, iv, b)
+            f.emit("bin", "add", iv, iv, ("imm", 1))
+            f.emit("jmp", l_loop)
+            f.emit("label", l_done)
+            f.emit("store8", buf, ln, ("imm", 0))
+            f.emit("ret", buf)
+            self.out.append(f)
+
+        if self.uses_memcpy:
+            # __memcopy(dst, off, src, n)：dst[off..off+n) <- src[0..n)
+            f = Fn("__memcopy")
+            dst = f.new_v()
+            off = f.new_v()
+            s = f.new_v()
+            cnt = f.new_v()
+            f.emit("args", [dst, off, s, cnt])
+            iv = f.new_v()
+            f.emit("mov", iv, ("imm", 0))
+            l_loop = f.label("mc")
+            l_done = f.label("mcd")
+            f.emit("label", l_loop)
+            f.emit("jcc", "ge", iv, cnt, l_done)
+            saddr = f.new_v()
+            f.emit("bin", "add", saddr, s, iv)     # src 是 str：字节连续，直接 +i
+            b = f.new_v()
+            f.emit("load8", b, saddr, ("imm", 0))
+            doff = f.new_v()
+            f.emit("bin", "add", doff, off, iv)
+            f.emit("store8", dst, doff, b)
+            f.emit("bin", "add", iv, iv, ("imm", 1))
+            f.emit("jmp", l_loop)
+            f.emit("label", l_done)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+        if self.uses_net:
+            # ---- 原生 socket 运行时（同一条 QuIR：Windows winapi / Linux syscall）----
+            # 每步独立 fail 函数（无参 + exit(1)，与 __read_fail 同款；
+            # 消息文本区分失败步骤，stderr 直接可读）
+            for tag in ("socket", "bind", "listen", "accept", "send", "recv"):
+                msg_n = "quelmara: tcp_" + tag + "() failed (fail-fast)\n"
+                gid_nf = self.intern_str(msg_n)
+                f = Fn("__net_fail_" + tag)
+                f.emit("args", [])
+                if self.platform == "windows":
+                    err = f.new_v()
+                    f.emit("winapi", err, "WSAGetLastError", [])
+                    f.emit("call", None, "__print_i64", [err])   # stdout 错误码
+                bp = f.new_v()
+                f.emit("movaddr", bp, gid_nf)
+                self.emit_write(f, 2, bp, ("imm", len(msg_n.encode("utf-8"))))
+                self.emit_exit(f, 1)
+                f.emit("ret", ("imm", 0))
+                self.out.append(f)
+
+            def net_fail(f, lb, tag):
+                f.emit("label", lb)
+                f.emit("call", None, "__net_fail_" + tag, [])
+                f.emit("ret", ("imm", 0))
+
+            # __tcp_listen(port) -> fd
+            f = Fn("__tcp_listen")
+            p = f.new_v()
+            f.emit("args", [p])
+            b = f.new_v()
+            l_fs = f.label("netfs")     # socket 失败 -> __net_fail_socket
+            l_fb = f.label("netfb")     # bind 失败   -> __net_fail_bind
+            l_fl = f.label("netfl")     # listen 失败 -> __net_fail_listen
+            if self.platform == "windows":
+                gid_wsa = self.intern_array(8)      # WSADATA（64B，内容不读）
+                wsa = f.new_v()
+                f.emit("movaddr", wsa, gid_wsa)
+                sw = f.new_v()
+                f.emit("winapi", sw, "WSAStartup", [("imm", 0x202), wsa])
+                f.emit("jnz", sw, l_fs)             # 非 0 = 失败（码 11 同类）
+                s = f.new_v()
+                f.emit("winapi", s, "socket",
+                       [("imm", 2), ("imm", 1), ("imm", 0)])   # AF_INET, SOCK_STREAM
+                # Win64 API 的 int 返回值只写 eax（高 32 位 0 扩展）：
+                # SOCKET_ERROR 落在 rax 里是 0x00000000FFFFFFFF 而不是 64 位 -1，
+                # 直接与 -1 比较会漏检（踩过：bind/listen 失败被放过，accept 才炸）。
+                # 一律先截断到 32 位再与 0xFFFFFFFF 比较。
+                # Win64 int 返回值经 shl32+sar32 符号扩展后与 -1 比较
+
+                s32 = f.new_v()
+
+                f.emit("bin", "shl", s32, s, ("imm", 32))
+
+                s322 = f.new_v()
+
+                f.emit("bin", "sar", s322, s32, ("imm", 32))
+
+                f.emit("cmpset", "e", b, s322, ("imm", -1))
+
+                f.emit("jnz", b, l_fs)
+            else:
+                s = f.new_v()
+                f.emit("syscall", s, self.sc["socket"],
+                       [("imm", 2), ("imm", 1), ("imm", 0)])
+                f.emit("cmpset", "l", b, s, ("imm", 0))
+                f.emit("jnz", b, l_fs)
+            # sockaddr_in（16B）：用 __alloc 堆缓冲构造（堆指针 store 与
+            # read_text 的 store8 buf 同模式；movaddr+store 全局路径实测
+            # bind 收到的 family 字节不对，见 CHANGELOG v1.3 调试记录）。
+            sinb = f.new_v()
+            f.emit("call", sinb, "__alloc", [("imm", 16)])
+            if isinstance(p, tuple) and p[0] == "imm":
+                port_v = p[1]
+                port_be = ((port_v & 0xFF) << 8) | ((port_v >> 8) & 0xFF)
+                w0v = 2 | (port_be << 16)
+                f.emit("store", sinb, ("imm", 0), ("imm", w0v))
+                f.emit("store", sinb, ("imm", 1), ("imm", 0))
+            else:
+                hp = f.new_v()
+                f.emit("bin", "and", hp, p, ("imm", 0xFF))
+                hp2 = f.new_v()
+                f.emit("bin", "shl", hp2, hp, ("imm", 8))
+                hb = f.new_v()
+                f.emit("bin", "shr", hb, p, ("imm", 8))
+                hb2 = f.new_v()
+                f.emit("bin", "and", hb2, hb, ("imm", 0xFF))
+                hp3 = f.new_v()
+                f.emit("bin", "or", hp3, hp2, hb2)
+                # w0 = family(2) | htons(port)<<16 —— family 在低 16 位，
+                # port 在位 16-31（此前写成 hp3 | (2<<16)，family 落到了
+                # 字节 2-3、port 占了字节 0-1，bind 报 10047 EAFNOSUPPORT）
+                sh16 = f.new_v()
+                f.emit("bin", "shl", sh16, hp3, ("imm", 16))
+                w0 = f.new_v()
+                f.emit("bin", "or", w0, sh16, ("imm", 2))
+                f.emit("store", sinb, ("imm", 0), w0)
+                f.emit("store", sinb, ("imm", 1), ("imm", 0))
+            sin = sinb
+            if self.platform == "windows":
+                br = f.new_v()
+                f.emit("winapi", br, "bind", [s, sin, ("imm", 16)])
+                # Win64 int 返回值经 shl32+sar32 符号扩展后与 -1 比较
+
+                br32 = f.new_v()
+
+                f.emit("bin", "shl", br32, br, ("imm", 32))
+
+                br322 = f.new_v()
+
+                f.emit("bin", "sar", br322, br32, ("imm", 32))
+
+                f.emit("cmpset", "e", b, br322, ("imm", -1))
+
+                f.emit("jnz", b, l_fb)
+                lr = f.new_v()
+                f.emit("winapi", lr, "listen", [s, ("imm", 16)])
+                # Win64 int 返回值经 shl32+sar32 符号扩展后与 -1 比较
+
+                lr32 = f.new_v()
+
+                f.emit("bin", "shl", lr32, lr, ("imm", 32))
+
+                lr322 = f.new_v()
+
+                f.emit("bin", "sar", lr322, lr32, ("imm", 32))
+
+                f.emit("cmpset", "e", b, lr322, ("imm", -1))
+
+                f.emit("jnz", b, l_fl)
+            else:
+                br = f.new_v()
+                f.emit("syscall", br, self.sc["bind"], [s, sin, ("imm", 16)])
+                f.emit("cmpset", "l", b, br, ("imm", 0))
+                f.emit("jnz", b, l_fb)
+                lr = f.new_v()
+                f.emit("syscall", lr, self.sc["listen"], [s, ("imm", 16)])
+                f.emit("cmpset", "l", b, lr, ("imm", 0))
+                f.emit("jnz", b, l_fl)
+            f.emit("ret", s)
+            net_fail(f, l_fs, "socket")
+            net_fail(f, l_fb, "bind")
+            net_fail(f, l_fl, "listen")
+            self.out.append(f)
+
+            # __tcp_accept(fd) -> conn（阻塞）
+            f = Fn("__tcp_accept")
+            fd = f.new_v()
+            f.emit("args", [fd])
+            b = f.new_v()
+            l_fail = f.label("netbad")
+            if self.platform == "windows":
+                c = f.new_v()
+                f.emit("winapi", c, "accept", [fd, ("imm", 0), ("imm", 0)])
+                # Win64 int 返回值经 shl32+sar32 符号扩展后与 -1 比较
+
+                c32 = f.new_v()
+
+                f.emit("bin", "shl", c32, c, ("imm", 32))
+
+                c322 = f.new_v()
+
+                f.emit("bin", "sar", c322, c32, ("imm", 32))
+
+                f.emit("cmpset", "e", b, c322, ("imm", -1))
+
+                f.emit("jnz", b, l_fail)
+            else:
+                c = f.new_v()
+                f.emit("syscall", c, self.sc["accept"],
+                       [fd, ("imm", 0), ("imm", 0)])
+                f.emit("cmpset", "l", b, c, ("imm", 0))
+                f.emit("jnz", b, l_fail)
+            f.emit("ret", c)
+            net_fail(f, l_fail, "accept")
+            self.out.append(f)
+
+            # __tcp_send(fd, str) -> n
+            f = Fn("__tcp_send")
+            fd = f.new_v()
+            c = f.new_v()
+            f.emit("args", [fd, c])
+            b = f.new_v()
+            l_fail = f.label("netbad")
+            n = f.new_v()
+            f.emit("call", n, "__str_len", [c])
+            if self.platform == "windows":
+                r = f.new_v()
+                f.emit("winapi", r, "send", [fd, c, n, ("imm", 0)])
+                # Win64 int 返回值经 shl32+sar32 符号扩展后与 -1 比较
+
+                r32 = f.new_v()
+
+                f.emit("bin", "shl", r32, r, ("imm", 32))
+
+                r322 = f.new_v()
+
+                f.emit("bin", "sar", r322, r32, ("imm", 32))
+
+                f.emit("cmpset", "e", b, r322, ("imm", -1))
+
+                f.emit("jnz", b, l_fail)
+            else:
+                r = f.new_v()
+                f.emit("syscall", r, self.sc["sendto"],
+                       [fd, c, n, ("imm", 0), ("imm", 0), ("imm", 0)])
+                f.emit("cmpset", "l", b, r, ("imm", 0))
+                f.emit("jnz", b, l_fail)
+            f.emit("ret", r)
+            net_fail(f, l_fail, "send")
+            self.out.append(f)
+
+            # __tcp_recv(fd, cap) -> str（对端关闭返回空串）
+            f = Fn("__tcp_recv")
+            fd = f.new_v()
+            cap = f.new_v()
+            f.emit("args", [fd, cap])
+            b = f.new_v()
+            l_fail = f.label("netbad")
+            buf = f.new_v()
+            f.emit("call", buf, "__alloc", [cap])
+            if self.platform == "windows":
+                n = f.new_v()
+                f.emit("winapi", n, "recv", [fd, buf, cap, ("imm", 0)])
+                # Win64 int 返回值经 shl32+sar32 符号扩展后与 -1 比较
+
+                n32 = f.new_v()
+
+                f.emit("bin", "shl", n32, n, ("imm", 32))
+
+                n322 = f.new_v()
+
+                f.emit("bin", "sar", n322, n32, ("imm", 32))
+
+                f.emit("cmpset", "e", b, n322, ("imm", -1))
+
+                f.emit("jnz", b, l_fail)
+            else:
+                n = f.new_v()
+                f.emit("syscall", n, self.sc["recvfrom"],
+                       [fd, buf, cap, ("imm", 0), ("imm", 0), ("imm", 0)])
+                f.emit("cmpset", "l", b, n, ("imm", 0))
+                f.emit("jnz", b, l_fail)
+            f.emit("store8", buf, n, ("imm", 0))
+            f.emit("ret", buf)
+            net_fail(f, l_fail, "recv")
+            self.out.append(f)
+
+            # __tcp_close(fd) -> 0
+            f = Fn("__tcp_close")
+            fd = f.new_v()
+            f.emit("args", [fd])
+            if self.platform == "windows":
+                f.emit("winapi", None, "closesocket", [fd])
+            else:
+                f.emit("syscall", None, self.sc["close"], [fd])
             f.emit("ret", ("imm", 0))
             self.out.append(f)
 
@@ -4267,6 +4953,27 @@ class Lower:
             return getattr(fn, "floatv", {}).get(x)
         return None
 
+    # ---- 非负值域跟踪（v1.3 通用值域分析最小版：只标确凿模式）----
+    @staticmethod
+    def _is_nonneg(fn, x):
+        if isinstance(x, tuple) and x and x[0] == "imm":
+            return x[1] >= 0
+        return isinstance(x, int) and x in getattr(fn, "nnv", set())
+
+    @staticmethod
+    def _mark_nonneg(fn, v):
+        if isinstance(v, int):
+            if not hasattr(fn, "nnv"):
+                fn.nnv = set()
+            fn.nnv.add(v)
+        return v
+
+    @staticmethod
+    def _unmark_nonneg(fn, v):
+        if isinstance(v, int) and hasattr(fn, "nnv"):
+            fn.nnv.discard(v)
+        return v
+
     # ---- 字符串值跟踪（非 SSA：在 Fn 上记一个集合）----
     @staticmethod
     def _is_str(fn, x):
@@ -4406,6 +5113,8 @@ def _map_ins(ins, f):
         return ("jcc", ins[1], S(ins[2]), S(ins[3]), ins[4])
     if op == "call":
         return ("call", V(ins[1]) if ins[1] is not None else None, ins[2], L(ins[3]))
+    if op == "callr":
+        return ("callr", V(ins[1]) if ins[1] is not None else None, S(ins[2]), L(ins[3]))
     if op == "ret":
         return ("ret", S(ins[1]) if ins[1] is not None else None)
     if op in ("load", "load8"):
@@ -4535,7 +5244,7 @@ def allocate(fn, pool=POOL, callee_saved=CALLEE_SAVED):
     last = [-1] * n
     call_sites = []
     for idx, ins in enumerate(fn.instrs):
-        if ins[0] in ("call", "syscall", "winapi"):
+        if ins[0] in ("call", "syscall", "winapi", "callr"):
             call_sites.append(idx)
         defs, uses = vreg_mentions(ins)
         for v in defs + uses:
@@ -4642,9 +5351,13 @@ ENTRY_OFF = 0x78
 # 各架构 Linux 系统调用号（IR 层架构无关，发射层按表取用）
 SYSCALLS = {
     "x86_64": {"write": 1, "exit": 60, "mmap": 9, "clone": 56, "wait4": 61,
-               "yield": 24, "read": 0, "close": 3, "openat": 257},
+               "yield": 24, "read": 0, "close": 3, "openat": 257,
+               "socket": 41, "bind": 49, "listen": 50, "accept": 43,
+               "sendto": 44, "recvfrom": 45},
     "aarch64": {"write": 64, "exit": 93, "mmap": 222, "clone": 220, "wait4": 260,
-                "yield": 124, "read": 63, "close": 57, "openat": 56},
+                "yield": 124, "read": 63, "close": 57, "openat": 56,
+                "socket": 198, "bind": 200, "listen": 201, "accept": 202,
+                "sendto": 206, "recvfrom": 207},
 }
 
 
@@ -4934,6 +5647,18 @@ class Codegen:
                 moves.append((self.src_move(arg), ("r", ARG_REGS[i])))
             self.parallel_move(moves)
             enc.call(ins[2])
+            if ins[1] is not None:
+                self.commit(ins[1], ACC)
+        elif op == "callr":
+            # 间接调用（自研 ABI，与 call 同参数寄存器）。函数地址先物化进
+            # SCRATCH2（r10 不在分配池，不会被随后的参数搬移覆盖；
+            # fnaddr/ga 操作数在此走 movabs + 回填，PE 下生成 DIR64 重定位）。
+            freg = self.mat(SCRATCH2, ins[2])
+            moves = []
+            for i, arg in enumerate(ins[3]):
+                moves.append((self.src_move(arg), ("r", ARG_REGS[i])))
+            self.parallel_move(moves)
+            enc.call_reg(SCRATCH2)
             if ins[1] is not None:
                 self.commit(ins[1], ACC)
         elif op == "ret":
@@ -5293,10 +6018,8 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
                        platform="linux"):
     """前端共享层：解析 + 降级 + 优化（x86_64 / aarch64 发射层共用）"""
     require_source(src_path)
-    with open(src_path, encoding="utf-8") as f:
-        src = f.read()
     cfg = load_config(src_path)
-    mod, _imports, fns_ast, tests, structs, enums, _order = parse_source(src)
+    mod, _imports, fns_ast, tests, structs, enums, _order = load_program(src_path)
     fns_ast = with_test_runner(fns_ast, tests)   # test "name" { } -> 测试入口
     low = Lower(fns_ast, cfg, arch=arch, structs=structs, enums=enums,
                 platform=platform)

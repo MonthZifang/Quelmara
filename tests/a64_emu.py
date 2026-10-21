@@ -131,6 +131,17 @@ class A64:
         if w == 0xD65F03C0:
             self.pc = self.get(30)
             return
+        # BLR Xn（间接调用：链接返回地址到 x30，跳 Xn）
+        if (w & 0xFFFFFC1F) == 0xD63F0000:
+            rn = (w >> 5) & 31
+            self.put(30, self.pc)
+            self.pc = self.get(rn) & ~3
+            return
+        # BR Xn（间接跳转，无链接）
+        if (w & 0xFFFFFC1F) == 0xD61F0000:
+            rn = (w >> 5) & 31
+            self.pc = self.get(rn) & ~3
+            return
         # B / BL
         if (w & 0xFC000000) == 0x14000000 or (w & 0xFC000000) == 0x94000000:
             off = self.sext(w & 0x3FFFFFF, 26) * 4
