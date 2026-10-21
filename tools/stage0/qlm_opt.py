@@ -42,7 +42,7 @@ COMMUTATIVE = ("add", "mul", "and", "or", "xor")
 # 绝不陷入的纯运算:可被投机执行(LICM 安全集)
 NON_TRAPPING = ("add", "sub", "mul", "and", "or", "xor", "shl", "shr", "sar", "umulhi")
 PURE = {"mov", "bin", "neg", "not", "cmpset", "load", "load8", "movaddr", "frameaddr",
-        "fbin", "fneg", "fcmpset", "fcvt"}
+        "fbin", "fneg", "fcmpset", "fcvt", "cssub"}
 
 
 def vreg_mentions(ins):
@@ -67,6 +67,10 @@ def vreg_mentions(ins):
         return [ins[1]], ints([ins[2]])
     if op == "cmpset":
         return [ins[2]], ints([ins[3], ins[4]])
+    if op == "trunc":
+        return [ins[1]], ints([ins[2]])
+    if op == "vsum":
+        return [ins[1]], ints([ins[2], ins[3]])
     if op in ("label", "jmp"):
         return [], []
     if op in ("jz", "jnz"):
@@ -77,6 +81,8 @@ def vreg_mentions(ins):
         return ints([ins[1]]), ints(ins[3])
     if op == "callr":
         return ints([ins[1]]), ints([ins[2]]) + ints(ins[3])
+    if op == "cssub":
+        return ints([ins[1]]), ints([ins[2], ins[3]])
     if op == "ret":
         return [], ints([ins[1]])
     if op in ("load", "load8"):
@@ -134,6 +140,118 @@ def loop_regions(fn):
                 out.append((h, i, ins[1]))
     out.sort()
     return out
+
+
+# ---------------------------------------------------------------------------
+# 字符串长度外提 / 循环内 CSE：把 s[i] 与 len(s) 的 O(n²) 拉回 O(n)
+#
+# str 是零结尾字节串（SPEC §2.2），所以 `len(s)` 和 `s[i]` 的越界检查都要
+# 走 `__str_len` 扫一遍。循环体里对同一个不变指针反复求长，总代价就是
+# O(n²)（实测 16 KB 扫描 85.9 ms、32 KB 328 ms、1 MB 跑不完）。
+#
+# 这个 pass 只动**纯**运行时调用 `call d, __str_len, [p]`：
+#   * p 在循环内没有定义（指针不变；str 不可变，内容也不会变）；
+#   * d 全函数只定义一次，且所有使用都在循环体内（循环外读不到旧值）；
+#   * 同一次扫描里对同一 p 的重复求长收敛成一条 mov（循环内 CSE）。
+# 满足条件的调用提到循环头标签之前，只执行一次。
+#
+# 合并规则（v1.5.1）：循环前已有同指针 p 的 `call d0, __str_len, [p]` 且
+#   * d0 全函数只定义一次（不会被改写）；
+#   * 该调用与循环头之间没有「从更早位置跳来」的 label（即它支配循环头）；
+# 则不重复求长，提一条 `mov d, d0`。str 不可变 ⇒ 同指针长度恒等。
+# 这一步让 `let n = len(s)` 与 `while i < n { s[i] }` 的 guard 上界和
+# 越界检查 bound 收敛到**同一个 vreg**，opt_bounds_elim 的「循环级动态」
+# 证明（guard 的 hi 就是检查的 n）才能删除每字节两条分支——否则两层
+# 各自求长，检查永远消不掉（strscan 实测卡在 4× 的根因）。
+#
+# 必须在**内联之前**跑：内联会把 __str_len 的扫描循环整个搬进循环体，
+# 之后就再没有可外提的调用点了（性能报告 §4.1 的根因链）。
+# ---------------------------------------------------------------------------
+
+def opt_strlen_hoist(fn, rounds=6):
+    if not fn.instrs:
+        return fn
+    def_count = {}
+    for ins in fn.instrs:
+        for d in vreg_mentions(ins)[0]:
+            def_count[d] = def_count.get(d, 0) + 1
+
+    for _ in range(rounds):
+        moved = False
+        for (h, b, _lab) in loop_regions(fn):
+            region = fn.instrs[h:b + 1]
+            defs_in_loop = set()
+            for ins in region:
+                defs_in_loop.update(vreg_mentions(ins)[0])
+
+            cand = []                     # [(offset, dst, ptr)]
+            for off, ins in enumerate(region):
+                if ins[0] != "call" or ins[2] != "__str_len" or len(ins) != 4:
+                    continue
+                dst, args = ins[1], ins[3]
+                if len(args) != 1 or not isinstance(args[0], int):
+                    continue
+                p = args[0]
+                if p in defs_in_loop:      # 指针每轮都变，不能提
+                    continue
+                if def_count.get(dst, 0) != 1:
+                    continue
+                if any(dst in vreg_mentions(x)[1]
+                       for x in fn.instrs[:h] + fn.instrs[b + 1:]):
+                    continue
+                cand.append((off, dst, p))
+            if not cand:
+                continue
+
+            first = {}                    # ptr -> 第一个 dst
+            keep, repl = [], {}
+            for off, dst, p in cand:
+                if p in first:
+                    repl[off] = first[p]
+                else:
+                    first[p] = dst
+                    keep.append(off)
+
+            new_region = []
+            for off, ins in enumerate(region):
+                if off in repl:
+                    new_region.append(("mov", ins[1], repl[off]))
+                elif off in keep:
+                    continue
+                else:
+                    new_region.append(ins)
+            # 合并：循环前同指针的既有求长（见文件头「合并规则」）。
+            # 先收集每条跳转的 (来源下标, 目标 label)，用于判定「调用支配
+            # 循环头」：调用与循环头之间的 label 只能被 [调用位置, 循环头)
+            # 或循环内部的跳转引用才安全；被更早的跳转引用 ⇒ 调用被绕过。
+            jumps = [(idx, x[-1]) for idx, x in enumerate(fn.instrs)
+                     if x[0] in ("jcc", "jnz", "jmp") and isinstance(x[-1], str)]
+            hoisted = []
+            for off in keep:
+                ins = region[off]
+                p = ins[3][0]
+                merge_dst = None
+                for j, x in enumerate(fn.instrs[:h]):
+                    if (x[0] == "call" and x[2] == "__str_len" and len(x) == 4
+                            and len(x[3]) == 1 and x[3][0] == p
+                            and x[1] is not None and def_count.get(x[1], 0) == 1):
+                        between = {y[1] for y in fn.instrs[j + 1:h]
+                                   if y[0] == "label"}
+                        unsafe = any(t in between and (src < j or src > b)
+                                     for src, t in jumps)
+                        if not unsafe:
+                            merge_dst = x[1]
+                        break
+                if merge_dst is not None:
+                    hoisted.append(("mov", ins[1], merge_dst))
+                else:
+                    hoisted.append(ins)
+            fn.instrs = fn.instrs[:h] + hoisted + new_region + fn.instrs[b + 1:]
+            moved = True
+            break
+        if not moved:
+            break
+    return fn
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +455,25 @@ def _loop_shape(fn, h, b, lab):
     return guard, body, step_ins, guard[4], False
 
 
-def opt_loop_unroll(fn, factor=4, max_body=64, min_trip=1024, rounds=2):
+def _non_imm_defs(fn, v, limit):
+    """v 在 fn.instrs[:limit] 里的定义次数，且必须是 `mov v, imm` 形态。
+    返回 1 表示"循环前恰好一次、且为常量 mov"——展开可安全采信；
+    0（无定义）/ >1（多重定义）/ 非 mov-imm 定义都返回 != 1。"""
+    n = 0
+    ok = True
+    for p in fn.instrs[:limit]:
+        if v in vreg_mentions(p)[0]:
+            n += 1
+            if not (p[0] == "mov" and isinstance(p[2], tuple)
+                    and p[2][0] == "imm"):
+                ok = False
+                break
+    if n != 1 or not ok:
+        return -1
+    return 1
+
+
+def opt_loop_unroll(fn, factor=4, max_body=64, min_trip=8, rounds=2):
     """展开 `for i in lo..hi` / `while i < n`(lo/hi 编译期常量且 (hi-lo) % factor == 0)。
 
     展开后每次回边执行 factor 个原迭代体,回边开销降为 1/factor。
@@ -359,8 +495,18 @@ def opt_loop_unroll(fn, factor=4, max_body=64, min_trip=1024, rounds=2):
 
             # 前置块里的编译期常量:ivar 初值 lo、上界 hi
             # (lower_for 会生成 `mov hi_v, ('imm',N)`,因此 hi 常常是 vreg 而非字面量)
+            #
+            # 常量溯源必须严谨（v1.5.1 修复）：曾经往回扫 60 条、把窗口内
+            # 任何 `mov X, imm` 都收进表——LICM 外提改变定义布局后，guard
+            # 上界的 vreg 会匹配到**别的常量**（实测：__memcpy 内联副本的
+            # 字块循环 mw=8 被匹配成字节长度 66 → trip 错 → 展开越界拷贝
+            # → 段错误）。现在两条铁律：
+            #   * 窗口收紧到 12 条（lower_for 的 mov hi, imm 紧邻循环头）；
+            #   * hi/lo 若是 vreg，其在循环前必须有**恰好一次**定义且该
+            #     定义就是 mov imm——有算术/load 定义（如 mw = m >> 3）或
+            #     多重定义一律不展开。
             consts = {}
-            for j in range(h - 1, max(-1, h - 60), -1):
+            for j in range(h - 1, max(-1, h - 12), -1):
                 p = fn.instrs[j]
                 if p[0] == "mov" and isinstance(p[2], tuple) and p[2][0] == "imm":
                     consts.setdefault(p[1], p[2][1])
@@ -370,12 +516,23 @@ def opt_loop_unroll(fn, factor=4, max_body=64, min_trip=1024, rounds=2):
             hi_v = hi[1] if _is_imm(hi) else consts.get(hi)
             if lo is None or hi_v is None:
                 continue
+            # 定义唯一性验证（保守：宁可漏掉也不错换）
+            if not _is_imm(hi) and _non_imm_defs(fn, hi, h) != 1:
+                continue
+            if not _is_imm(guard[2]) and _non_imm_defs(fn, guard[2], h) != 1:
+                continue
 
             trip = hi_v - lo
             if trip <= 0 or trip % factor != 0 or trip < max(factor, min_trip):
                 continue
 
             # 归纳变量在体内不能被重定义;体内不能有跳回循环头的 continue
+            # 体内不能含 label（嵌套循环，v1.5.1 修复，实测段错误）：
+            #   循环体内联过 memcpy 等运行时函数时 body 自带内层循环，
+            #   展开 = renameset 复制内层循环多个副本 + 与 LICM 外提交互，
+            #   实测触发 x64 发射层布局敏感 bug（licm 关同样展开却正常，
+            #   A64 模拟器正常——纯 x64 编码/分配问题，根因待独立轮次）。
+            #   嵌套循环展开收益低、风险高，直接不展开。
             bad = False
             for p in body:
                 d, _ = vreg_mentions(p)
@@ -383,6 +540,9 @@ def opt_loop_unroll(fn, factor=4, max_body=64, min_trip=1024, rounds=2):
                     bad = True
                     break
                 if p[0] in ("jmp", "jz", "jnz", "jcc") and p[-1] == lab:
+                    bad = True
+                    break
+                if p[0] == "label":
                     bad = True
                     break
             if bad:
@@ -555,8 +715,8 @@ def opt_strength_reduce(fn, rounds=3):
 # ---------------------------------------------------------------------------
 _LAT = {"mov": 1, "neg": 1, "not": 1, "cmpset": 2,
         "load": 5, "load8": 5, "store": 1, "store8": 1,
-        "movaddr": 1, "call": 6, "callr": 6, "syscall": 20, "winapi": 12,
-        "args": 1, "winargs": 1, "spawn_child": 8, "xchg": 6}
+        "movaddr": 1, "call": 6, "callr": 6, "cssub": 2, "syscall": 20,
+        "winapi": 12, "args": 1, "winargs": 1, "spawn_child": 8, "xchg": 6}
 _BIN_LAT = {"add": 1, "sub": 1, "and": 1, "or": 1, "xor": 1,
             "shl": 1, "shr": 1, "sar": 1,
             "mul": 3, "umulhi": 5, "div": 25, "mod": 25}
@@ -564,7 +724,10 @@ _BIN_LAT = {"add": 1, "sub": 1, "and": 1, "or": 1, "xor": 1,
 # （winapi 是系统调用：CreateThread/WaitForSingleObject 与访存绝不能重排；
 #   callr 是间接调用——调用前后重排会改变观测顺序，同理保序）
 _EFF = ("call", "callr", "syscall", "winapi", "spawn_child", "xchg", "ret",
-        "store", "store8", "load", "load8")
+        "store", "store8", "load", "load8",
+        # vsum 读一整段内存（最多 count*8 字节）：必须与访存保持原序，
+        # 否则调度器会把它挪到数组初始化之前（v1.8 实测：归约少一个元素）。
+        "vsum")
 # 基本块终止符。注意 args 必须独占一块：它从硬件参数寄存器（rdi/rsi/rdx/
 # rcx/r8/r9）搬值进 vreg，而变量移位量会用掉 rcx——一旦被调度到它后面
 # 就会拿到被污染的参数。因此 args 只能永远排在函数最前面。
@@ -771,6 +934,21 @@ def analyze_ranges(fn):
                     mx = ranges[p[3]] >> (p[4][1] & 63)
                     if mx < limit:
                         ranges[p[2]] = max(ranges.get(p[2], -1), mx)
+            elif op == "bin" and p[1] in ("and", "mod"):
+                # x & M（M >= 0）恒在 [0, M]；x % D（D > 0）恒在 [0, D-1]。
+                # 这是环形下标 i & 63 / 取模散列最常见的形态，此前不建模，
+                # 导致越界检查整窗保留（实测 64.7% 开销，见性能报告 §4.3）。
+                a, b = p[3], p[4]
+                if p[1] == "and":
+                    if _is_imm(b) and 0 <= b[1] < limit:
+                        ranges[p[2]] = max(ranges.get(p[2], -1), b[1])
+                    elif _is_imm(a) and 0 <= a[1] < limit:
+                        ranges[p[2]] = max(ranges.get(p[2], -1), a[1])
+                else:
+                    if _is_imm(b) and 0 < b[1] < limit:
+                        ranges[p[2]] = max(ranges.get(p[2], -1), b[1] - 1)
+                    elif _is_imm(a) and 0 < a[1] < limit:
+                        ranges[p[2]] = max(ranges.get(p[2], -1), a[1] - 1)
             elif op == "bin" and p[1] in ("add", "mul", "shl", "umulhi"):
                 a, b = p[3], p[4]
                 mx = None
@@ -879,10 +1057,150 @@ def opt_signed_divmod_simplify(fn):
 
 
 # ---------------------------------------------------------------------------
-# 死代码消除 / 复制传播
+# 模归纳削减：循环里的 `t % D` 魔数窗口 -> 累加器 + 单次条件回绕（cmov/sel）
+#
+# 形态来源：强度削减把 `t = ivar * C` 变成循环归纳变量（循环外初值 +
+# 循环内 `t += C*S`，fn.nn 标记 t 非负）；常量除数的 `%` 在降级期展开成
+# 魔数除法的 4 条连续指令（符号修正已被 opt_signed_divmod_simplify 收缩）：
+#     q  = umulhi t, M        # floor(t / D)（魔数乘高位）
+#     q  = sar   q, sh
+#     qd = mul   q, D
+#     r  = sub   t, qd        # r = t % D
+# umulhi(5c) + mul(3c) 是 ~10 周期的串行依赖链，而 t 每迭代只递增 C'。
+# 数学上 v = t % D 本身是归纳量：v' = v + C'，C' < D 时一次条件回绕即回 [0, D)：
+#     v += C' ; v = (v >= D) ? v - D : v
+# 变换后每迭代省掉 umulhi+sar+mul，换成 cmpset+sub+sel（CMOV，无分支）。
+# 保守前提（缺一即跳过该窗口，绝不错换）：
+#   * 4 条连续指令严格匹配形态，且 (M, sh) 验证确为 D 的魔数；
+#   * t 非负（fn.nn / analyze_nonneg）-> v_init ∈ [0, D)；
+#   * t 在循环内只有一条常量增量 `t += C'` 且 0 < C' < D；
+#   * r（窗口结果）在函数内唯一定义；q / qd 不出窗口。
 # ---------------------------------------------------------------------------
 
+def _verify_magic_pair(M, s, d):
+    """校验 (M, s) 确为 d 的魔数（与 qlm_native._verify_magic 同口径；
+    为避免循环依赖在此复刻最小验证集）。"""
+    if not (0 < M < (1 << 64)) or not (0 <= s < 64):
+        return False
+    UM = 1 << (64 + s)
+    for x in (0, 1, 2, 3, d - 1, d, d + 1, 2**32 - 1, 2**32, 2**63 - 1,
+              2**64 - 1, 2**64 - d, 2**64 - d - 1):
+        if 0 <= x < (1 << 64) and (x * M) // UM != x // d:
+            return False
+    return True
 
+
+def opt_mod_inductive(fn):
+    # 非负来源合并：opt 级范围分析（含强度削减写入的 fn.nn）+
+    # 降级期非负链条 fn.nnv（既有约定：无符号魔数除法同样以它跳过符号
+    # 修正，本变换的前提与它完全一致——t 恒非负）。
+    nn = (analyze_nonneg(fn) | set(getattr(fn, "nnv", ()))
+          | set(getattr(fn, "nn", ())))
+    ins = fn.instrs
+    # 每条 vreg 的定义次数与所在指令集合（q/qd 不出窗口、r 唯一定义）
+    def_count = {}
+    at = {}
+    for i, p in enumerate(ins):
+        for d in vreg_mentions(p)[0]:
+            def_count[d] = def_count.get(d, 0) + 1
+        for x in set(vreg_mentions(p)[0]) | set(vreg_mentions(p)[1]):
+            at.setdefault(x, set()).add(i)
+    edits = []          # (h, body_idx, pre_instrs, body_instrs)
+    for (h, b, lab) in loop_regions(fn):
+        region = ins[h:b + 1]
+        # t 的循环内定义：必须恰有一条 `bin add t, t, ('imm', C')`
+        incs = {}
+        for off, p in enumerate(region):
+            for d in vreg_mentions(p)[0]:
+                incs.setdefault(d, []).append(p)
+        for off in range(len(region) - 3):
+            p1, p2, p3, p4 = region[off:off + 4]
+            # 形态：umulhi q,t,M ; sar q,q,sh ; mul qd,q,D ; sub r,t,qd
+            if not (p1[0] == "bin" and p1[1] == "umulhi" and _is_imm(p1[4])
+                    and p2[0] == "bin" and p2[1] == "sar" and _is_imm(p2[4])
+                    and p2[2] == p2[3] == p1[2]
+                    and p3[0] == "bin" and p3[1] == "mul" and _is_imm(p3[4])
+                    and p3[3] == p1[2]
+                    and p4[0] == "bin" and p4[1] == "sub" and p4[4] == p3[2]
+                    and p4[3] == p1[3]):
+                continue
+            t, q, qd, r = p1[3], p1[2], p3[2], p4[2]
+            M, sh, D = p1[4][1], p2[4][1], p3[4][1]
+            if D <= 0 or not _verify_magic_pair(M, sh, D):
+                continue                       # 不是真魔数：窗口不是 t % D
+            if t not in nn:
+                continue                       # t 非负未证：v_init 可能为负
+            # t 的唯一定义必须是本循环内的常量自增
+            tdefs = incs.get(t, [])
+            if len(tdefs) != 1:
+                continue
+            td = tdefs[0]
+            if not (td[0] == "bin" and td[1] == "add" and td[2] == td[3] == t
+                    and _is_imm(td[4])):
+                continue
+            c = td[4][1]
+            if not (0 < c < D):
+                continue                       # 单次回绕不够（c >= D）或无进展
+            # q / qd 只允许出现在本窗口（q 被窗口前三条的 def/use 合法引用：
+            # umulhi 定义、sar 原地更新、mul 当乘数）；r 必须唯一定义
+            if at[q] != {h + off, h + off + 1, h + off + 2} \
+                    or at[qd] != {h + off + 2, h + off + 3}:
+                continue
+            if def_count.get(r, 0) != 1:
+                continue
+            # ---- 构造替换（preheader 初值 + 循环内累加/回绕）----
+            v, vq, vqd = fn.new_v(), fn.new_v(), fn.new_v()
+            pre = [
+                ("bin", "umulhi", vq, t, ("imm", M)),
+                ("bin", "sar", vq, vq, ("imm", sh)),
+                ("bin", "mul", vqd, vq, ("imm", D)),
+                ("bin", "sub", v, t, vqd),
+            ]
+            body = [
+                ("mov", r, v),
+                ("bin", "add", v, v, ("imm", c)),
+                ("cssub", v, v, ("imm", D)),
+            ]
+            edits.append((h, h + off, pre, body))
+            # t 在循环内的其他使用（窗口与增量自身之外）——用于判定增量是否可删
+            win_span = {h + off + k for k in range(4)}
+            upd_idx = h + region.index(td)
+            other_t_uses = ({i for i in at[t] if h <= i <= b}
+                            - win_span - {upd_idx})
+            if not other_t_uses and not any(i > b for i in at[t]):
+                # 窗口是循环内唯一使用，且循环后无读取：`t += C'` 整条死亡
+                edits.append((h, upd_idx, None, None))
+    if not edits:
+        return fn
+    # 统一按指令下标从大到小应用（replace 净增 1 条，若分趟应用会令后续
+    # delete 下标漂移——曾把 acc 更新误删成结果 0）。preheader 插入点在
+    # 循环头（最小下标），同轮最后执行，不受体部变更影响。
+    pres = {}                      # h -> preheader 指令列表（同循环多窗口合并）
+    for h, bi, pre, body in edits:
+        if pre is not None:
+            pres.setdefault(h, []).extend(pre)
+    ops = []
+    for h, bi, pre, body in edits:
+        if body is not None:
+            ops.append((bi, "replace", body))
+        else:
+            ops.append((bi, "delete", None))
+    for h, pre in pres.items():
+        ops.append((h, "insert", pre))
+    for idx, kind, payload in sorted(ops, key=lambda o: -o[0]):
+        if kind == "insert":
+            ins = ins[:idx] + payload + ins[idx:]
+        elif kind == "replace":
+            ins = ins[:idx] + payload + ins[idx + 4:]
+        else:
+            ins = ins[:idx] + ins[idx + 1:]
+    fn.instrs = ins
+    return fn
+
+
+# ---------------------------------------------------------------------------
+# 死代码消除 / 复制传播
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # 越界检查消除：用范围证明删掉必然通过的 bounds 窗口
 #
@@ -997,6 +1315,78 @@ def opt_bounds_elim(fn):
     return fn
 
 
+def opt_bounds_dedupe(fn):
+    """同一基本块内重复的越界检查只留第一次。
+
+    `a[k] += 1` 的降级是「读一次 + 写一次」，各带一整套窗口（4 条分支），
+    而两次检查的 (idx, n) 完全相同。范围证明覆盖不到的动态下标（切片长度
+    是运行期 vreg）因此白付一倍。这里在**直线块内**做去重：
+      * 遇到被跳转引用的 label 视为块边界，清空已检查集合（控制流可能汇入）；
+      * idx / n 任一被重新定义就失效该条记录；
+      * 重复窗口只删两条 jcc 与失败路径，保留 l_ok 标签（外部跳转仍合法）。
+    """
+    ins = fn.instrs
+    uses = {}
+    jmp_src = {}
+    for j, p in enumerate(ins):
+        if p[0] in ("jcc", "jnz", "jmp") and isinstance(p[-1], str):
+            uses[p[-1]] = uses.get(p[-1], 0) + 1
+            jmp_src.setdefault(p[-1], []).append(j)
+
+    seen = {}
+    killed = 0
+    i = 0
+    block_start = 0
+    while i < len(ins) - 1:
+        p, q = ins[i], ins[i + 1]
+        if p[0] == "label":
+            # 只有「从块外跳进来」（前向跨块）或回边（后向）才是块边界；
+            # 窗口内部失败路径的前向跳转不破坏直线性。
+            if any(j < block_start or j > i for j in jmp_src.get(p[1], ())):
+                seen.clear()
+                block_start = i + 1
+            i += 1
+            continue
+        # 记录失效：本指令重定义 idx / n
+        defs, _ = vreg_mentions(p)
+        if defs and seen:
+            for key in list(seen):
+                if key[0] in defs or key[1] in defs:
+                    del seen[key]
+        if not (p[0] == "jcc" and p[1] == "ge" and isinstance(p[2], int)
+                and q[0] == "jcc" and q[1] == "ge" and q[2] == p[2]
+                and _is_imm(q[3], 0)):
+            i += 1
+            continue
+        idx, nval, l_fail, l_ok = p[2], p[3], p[4], q[4]
+        k = i + 2
+        while k < len(ins) and not (ins[k][0] == "label" and ins[k][1] == l_ok):
+            k += 1
+        if k >= len(ins):
+            i += 1
+            continue
+        win_jumps = [ins[j][-1] for j in range(i, k + 1)
+                     if ins[j][0] in ("jcc", "jnz", "jmp")]
+        ok = True
+        for t in set(t for t in win_jumps if isinstance(t, str)):
+            if uses.get(t, 0) > win_jumps.count(t):
+                ok = False
+                break
+        if not ok:
+            i += 1
+            continue
+        key = (idx, nval if not isinstance(nval, int) else nval)
+        if key in seen:
+            # 保留 l_ok 标签，只删两条 jcc 与失败路径
+            del ins[i:k]
+            ins.insert(i, ("label", l_ok))
+            killed += 1
+            continue
+        seen[key] = i
+        i = k + 1
+    return fn
+
+
 def opt_dce(fn):
     """死代码消除(全局使用集 + 不动点,兼容循环回边)"""
     for _ in range(4):
@@ -1054,6 +1444,8 @@ def _subst_vregs(ins, sub):
         return ("call", sub(ins[1]) if ins[1] is not None else None, ins[2], L(ins[3]))
     if op == "callr":
         return ("callr", sub(ins[1]) if ins[1] is not None else None, S(ins[2]), L(ins[3]))
+    if op == "cssub":
+        return ("cssub", sub(ins[1]), S(ins[2]), S(ins[3]))
     if op == "ret":
         return ("ret", S(ins[1]) if ins[1] is not None else None)
     if op in ("load", "load8"):
@@ -1115,38 +1507,85 @@ def opt_copy_prop(fn):
 # 统一入口
 # ---------------------------------------------------------------------------
 
+import os as _os
+
+
+def _skip_pass(name):
+    """QLM_SKIP_PASSES=a,b,c：调试用 pass 级跳过开关。
+    二分优化器引入的坏变换时用（如：QLM_SKIP_PASSES=opt_bounds_elim）。
+
+    opt_licm 默认禁用（v1.5.1，实测段错误）：licm 的外提在 QuIR 层
+    语义等价（A64 模拟器同程序全绿），但触发 x64 线性扫描分配器的
+    布局敏感 bug——外提改变指令布局后，某些 vreg 的寄存器/溢出槽
+    分配出错，表现为越界写段错误（复现：循环体内含内联 memcpy 的
+    程序，数据量跨过某阈值）。根修需要独立的分配器验证轮次，
+    在此之前正确性优先：licm 只在 QLM_ENABLE_LICM=1 时启用。
+    """
+    if name == "opt_licm":
+        return "1" not in _os.environ.get("QLM_ENABLE_LICM", "").split(",")
+    return name in _os.environ.get("QLM_SKIP_PASSES", "").split(",")
+
 
 def opt_all(fn, unroll=True):
     """单函数收尾优化(内联之后调用)"""
+    # 字符串求长外提（若调用方没在 inline 前跑过，这里兜一次）
+    if not _skip_pass("opt_strlen_hoist"):
+        opt_strlen_hoist(fn)
     for _ in range(3):
         before = len(fn.instrs)
-        opt_copy_prop(fn)
-        opt_cse(fn)
-        opt_licm(fn)
+        if not _skip_pass("opt_copy_prop"):
+            opt_copy_prop(fn)
+        if not _skip_pass("opt_cse"):
+            opt_cse(fn)
+        if not _skip_pass("opt_licm"):
+            opt_licm(fn)
         # 强度削减在展开之前：展开会把 `t = i*C` 复制成多份，
         # 反而让削减条件（体内只出现一次）失效。
-        opt_strength_reduce(fn)
-        opt_signed_divmod_simplify(fn)
+        if not _skip_pass("opt_strength_reduce"):
+            opt_strength_reduce(fn)
+        if not _skip_pass("opt_signed_divmod_simplify"):
+            opt_signed_divmod_simplify(fn)
         # 紧跟着做一次复制传播：把刚收缩出的 `a = x` / `q = t` 塌掉，
         # 否则循环展开会把这些 mov 复制多份，def_count > 1 就再也推不掉。
-        opt_copy_prop(fn)
-        if unroll:
-            opt_loop_unroll(fn)
-        opt_cse(fn)
-        opt_dce(fn)
-        opt_dce(fn)
+        if not _skip_pass("opt_copy_prop"):
+            opt_copy_prop(fn)
+        # 模归纳削减要在强度削减 + 收缩 + 复制传播之后（干净的 4 条窗口），
+        # 展开之前（展开复制的是已变换形态，每段各回绕一次，语义正确）。
+        if not _skip_pass("opt_mod_inductive"):
+            opt_mod_inductive(fn)
+        if not _skip_pass("opt_cse"):
+            opt_cse(fn)
+        if not _skip_pass("opt_dce"):
+            opt_dce(fn)
+            opt_dce(fn)
         if len(fn.instrs) == before:
             break
+    # 循环展开放收敛循环**之后**跑一次（v1.5.1 修复，实测段错误）：
+    # 展开曾经放在收敛循环内，展开副本在下一轮被 LICM 的别名替换
+    # 处理——alias 表在展开区域上把 vreg 错误污染（实测 rep * ulen
+    # 变成 rep * 别的 vreg、内联 memcpy 的字块循环 guard 从字数变
+    # 字节数）→ 展开次数错 → 越界拷贝 → 段错误。展开副本是"成品"，
+    # 不该再被变换型 pass 触碰。
+    if unroll and not _skip_pass("opt_loop_unroll"):
+        opt_loop_unroll(fn)
+        if not _skip_pass("opt_dce"):
+            opt_dce(fn)
     # 越界检查消除：收敛完成后跑一次（窗口是纯控制流，删除后无新优化机会；
     # 放在展开之后，展开复制的每份窗口都能吃到证明）。
-    opt_bounds_elim(fn)
+    if not _skip_pass("opt_bounds_elim"):
+        opt_bounds_elim(fn)
+    if not _skip_pass("opt_bounds_dedupe"):
+        opt_bounds_dedupe(fn)
     # 调度放最后：避免打乱内联/CSE/展开的形态匹配
-    opt_schedule(fn)
+    if not _skip_pass("opt_schedule"):
+        opt_schedule(fn)
     return fn
 
 
 def run_pipeline(fns, inline=True, unroll=True):
-    """全部函数的优化管线:内联 -> 逐函数收敛"""
+    """全部函数的优化管线:字符串求长外提 -> 内联 -> 逐函数收敛"""
+    for fn in fns:                       # 必须在内联之前（见 opt_strlen_hoist）
+        opt_strlen_hoist(fn)
     if inline:
         from qlm_native import opt_inline     # 局部导入避免环依赖
         opt_inline(fns)

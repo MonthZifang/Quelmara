@@ -2,6 +2,328 @@
 
 > 产品后端 = 自研后端（Linux x86_64 ELF / Windows PE32+ / AArch64）；
 > C99 后端仅作交叉验证。格式：每版本记录「特性 / 优化 / 修复 / 回归规模」。
+> 本文是各版本特性与回归项数的**唯一权威记录**。
+
+---
+
+> **版本号顺序说明**：下面并列的四节都是工作区未提交内容，按主题分组（v1.8 = 语言特性，
+> v1.6 = 标准库 P0，v1.5 = 性能 + 协议库，v1.3 = 自举 + 可用性边界），
+> **物理顺序不代表版本先后**。提交时按 v1.3 → v1.5 → v1.6 → v1.8 各打一个 commit；
+> v1.4（IOCP reactor）已提交（`d769435` / `b3e0fe2`）。
+> 各节的回归/对拍项数是**当轮口径**，会随夹具增加而增长（例如 lexdiff 现 92/92、parsediff 现 87/87）；
+> 需要"当前实测值"请看 `HANDOVER.md §0` 或直接跑脚本。
+> 能力边界与缺口全表见 `docs/GAPS.md`。
+
+## 未发布（v1.8，工作区进行中）
+
+> 主题：**语言层补全 + 三个必现误编译修复**。v1.6 把标准库补齐到"能交付 JSON API"，
+> v1.8 把语言层从"玩具语法"推到"能写中型程序"：真实整数宽度、`@simd`、`@no_preempt`、
+> `rc[T]`、所有权检查、`interface`（静态分发）。
+>
+> 状态总表见 `docs/STATUS.md`，特性语义见 `docs/LANG.md`。
+
+### 语言（全部有夹具）
+
+- **真实整数宽度 `u8/u16/u32/u64/i8/i16/i32`**：值统一 64 位承载，
+  在 `let` 标注 / 形参入口 / 返回值出口 / 赋值四处按声明宽度截断
+  （uN 零扩展、iN 符号扩展）；表达式内部按 C 语义提升到 64 位，不中途回绕。
+  新 IR 指令 `('trunc', dst, a, bits, signed)`（`movzx/movsx/mov r32,r32`）。
+  夹具：`tests/t49_width.qma`。
+- **`let x: T` 类型标注**：解析器支持（此前语法上不存在）。目前只有宽度类型参与语义，
+  非宽度标注仅作可读性。
+- **`@simd`**：把 `acc = acc + a[i]` / `acc += a[i]` 形状的 `[N]int` 归约
+  编译成 SSE2（`paddq` 两路 + `movdqu` + 水平求和 + 标量尾）。新 IR 指令
+  `('vsum', dst, base, count)`。实测 4096 元素 ×200：标量 3µs → **1µs（≈3×）**。
+  语义差异：**跳过逐元素越界检查**（调用方保证区间），形状不匹配直接编译报错。
+  夹具：`tests/t50_simd.qma`。
+- **`@no_preempt`**：函数级 / 语句级注解，抑制编译器插入的 `sched_yield` /
+  `SwitchToThread`（自旋、无锁临界区、确定性延迟场景）。
+- **`rc[T]` 引用计数句柄**：布局 `[refcount 8B][payload n*8B]`，句柄指向 payload；
+  `rc_new/rc_get/rc_clone/rc_drop/rc_count`。载荷仅支持具名 struct。
+  夹具：`tests/t51_rc.qma`。
+- **所有权 / 借用检查**（只针对 `rc[T]` 句柄）：语句级线性扫描 + 分支合并，
+  三类**编译错误**（use-after-drop / double-free / move-then-use）+ 两类**编译警告**
+  （函数结束仍存活、覆盖活句柄）。负向夹具：`tests/bad/own_*.qma`。
+- **`interface` / `impl`**：契约声明、实现完整性检查（缺方法 / 参数类型 / 返回类型），
+  方法调用语法 `c.area()` 解析成 `Type__method` 直接调用（**静态分发，零开销**）。
+  **动态分发未实现**（`let s: Shape = ...` 不支持）。夹具：`tests/t52_iface.qma`；
+  负向：`tests/bad/iface_*.qma`。
+
+### 修复：三个必现误编译（v1.6 遗留）
+
+- **#1/#3 根因相同**：`gen_bin` 的就地路径里，`a` 溢出到栈时把 `[rbp-8]` 的
+  **偏移 8** 当成了 **R8 寄存器号 8**，于是"a 已在 dst 寄存器"判断误判为真、
+  跳过 fetch，运算吃到上一条指令的残值。
+  修法：区分 `("r", reg)` 与 `("m", off)`。
+  影响：循环内 `substr` 用调用结果算长度、一个表达式里两次调用 + 下标，两类形状
+  不再需要规避写法。回归：`tests/t53_regress.qma`。
+- **#2**：`"\xNN"`（≥0x80）被当 Unicode 码点再 UTF-8 编码（`"\xe4"` → 2 字节）。
+  修法：词法器用 surrogateescape 区（U+DC80..U+DCFF）承载原始字节，
+  发射端 `encode("utf-8", "surrogateescape")`。
+  影响：可以直接写字面量二进制（HTTP 帧、哈希夹具）。
+  回归：`tests/t53_regress.qma`。
+- 旧的 `tests/known_bugs/` 目录移除（三条全部转正）。
+
+### 自举对拍
+
+- 词法 **99/99**、声明级 **90/90**（**显式跳过 1 个** file：`t52_iface.qma`，
+  stage-1 parser 尚未实现 `interface`/`impl`；跳过的文件会被打印出来，不是静默忽略）。
+- `bootstrap/lexer/qlm_lex.qma` 关键字表补 `rc` / `interface` / `impl`；
+  `bootstrap/parser/qlm_parse.qma` 补 `rc[T]` 类型渲染（两侧必须一致）。
+- QuIR 架构无关 59/59（22 skip：a64 无 chan/map/spawn，以及新增的 `vsum`/`trunc`
+  AArch64 发射层尚未实现 → 显式 SKIP）。
+
+### 工程化
+
+- `tests/parsediff.py` 增加 `PARSE1_PENDING` 显式跳过名单（打印原因），
+  避免"新语法悄悄拉低对拍数字"。
+- `tests/run_win_tests.py` 新增 `[3j]` 段：3 个特性正测 + 5 个负向夹具
+  （断言错误信息包含关键字，避免"因别的原因失败"被当成通过"）。
+- 新增 `docs/STATUS.md`（语言/工程化/性能/平台四维状态总表，唯一"现在到哪了"口径）、
+  `docs/LANG.md`（v1.8 特性精确语义与边界）。
+
+### 验证
+
+- Windows PE 回归 **113 项全绿**（FAIL=0，SKIP=1 为 WSL 被沙箱拦）。
+- 词法 99/99、声明级 90/90（1 跳过）、IR 59/59（22 skip）、发射 10/10。
+- 三道门禁 PASS（check_names / check_origin / check_docs）。
+
+---
+
+## 未发布（v1.6，工作区进行中）
+
+> 主题：**标准库 P0 四件套 + 文档漂移治理**。目标是把"HTTP 服务能对外交付"从
+> 五缺五变成三缺二（JSON / 字符串 / URL 已就位，gzip 与 TLS 仍缺）。
+
+### 标准库（全部 Quelmara 自实现，零 Python/Node 运行时）
+
+- **`std/sha256.qma`**：SHA-256 + HMAC-SHA256。FIPS 180-4 与 RFC 4231（case 1/2/6，
+  含 131 字节超块长 key）向量全过；1MiB 单遍 71ms（≈14.7 MB/s，标量实现）。
+  轮常量改用 6 层判定树（线性 64 次比较会让每块多四千次分支）。
+- **`std/str.qma`**：26 个函数——查找/判定/裁剪/大小写/拆分/拼接/替换/填充/切片包装。
+  全部 `str_` 前缀（扁平合并下 `join` 已被任务句柄占用）；`str_split` 单遍扫描，
+  1MiB 文本拆分+拼接往返 30ms。
+- **`std/url.qma`**：14 个函数——scheme/host/port/path/query/fragment 分段、query 取值、
+  百分号编解码（`+` 语义区分 query/path）、IPv6 字面量、非法端口返回 -1 而非退出进程。
+- **`std/json.qma`**：DOM 式解析 + builder 序列化（无泛型/反射，明确不做 `to_json<T>`）。
+  节点池 6 字/节点、字符串与数字原文存字节缓冲、对象保持源顺序、错误记位置不 fail-fast、
+  嵌套深度上限 64；`\uXXXX` 覆盖 BMP 与代理对。
+- **`std/gzip.qma`**：DEFLATE（LZ77 3 字节哈希链 + **固定 Huffman**）+ gzip 封装 + CRC-32。
+  1 MiB 重复文本 7,658 B（137×）/ 117 ms；`tests/gzip_interop.py` 用 Python zlib 解压
+  7 个样本（含 0x00/0xFF 二进制与 671 KB 大输入）逐字节一致。
+- **`std/aes.qma`**：AES-128 分组加解密 + **GCM**（CTR + GHASH + tag 校验）。
+  FIPS-197 C.1、NIST SP 800-38D GCM case 2/3（含 AAD）全过；另有往返、
+  篡改 1 bit 必须失败、AAD 不匹配必须失败。S-box 运行时按 GF(2^8) 生成
+  （不用字面量表，绕开 `\xNN` 已知误编译），缓存于 `static_word(12)`。
+- **`std/http.qma` 增加压缩协商**：`http_accepts_gzip` / `http_respond_gzip` /
+  `http_respond_auto` / `http_json_auto` / `http_html_auto`（<256 B 不压，带 `Vary`）。
+  示例 `examples/http_gzip.qma` + 端到端测试 `tests/gzip_http_test.py`：1420 B → 101 B。
+- **`bench/p0_bench.qma`**：四件套进程内微基准（sha256 1MiB / split+join 1MiB /
+  url×100k / json 2000 对象）。
+
+### 修复 / 发现：两个误编译
+
+- **循环内 `substr` 的长度来自调用结果、结果又 push 进 `vec[str]`**：`--no-opt` 正常、
+  开优化必现，越界或错串（`str_split` 因此改为单遍扫描）。
+- **`"\xNN"`（≥0x80）被当 Unicode 码点再 UTF-8 编码**：`"\xe4"` 得到 2 字节。
+- **循环内一个表达式里两次调用 + 下标**（`f(s[2i])*16 + f(s[2i+1])`）→ 结果整体偏移。
+- 三条均已在本轮修掉，夹具转正为 `tests/t53_regress.qma`（详见 v1.8 节）。
+
+### 工程化
+
+- **`tools/dev/check_docs.py`**（新增，进 CI 双 job）：拦"过期断言"
+  （`import 只做语法保留` / `元素仅标量` / `vec[Struct] 暂不支持` / `没有长度前缀`），
+  并强制 README / HANDOVER / SPEC 链接 `docs/GAPS.md`。
+- **`QLM_NO_INLINE=1`**：排查内联相关误编译的开关（与 `QLM_SKIP_PASSES` / `QLM_ENABLE_LICM` 同族）。
+- 修 `tests/bodydiff.py` 死代码 import（曾让 `check_origin.py` 一直 FAIL）。
+- **文档**：新增 `docs/GAPS.md`（能力边界登记册）、`docs/P0_LIBS.md`（四件套 API/实测）、
+  `docs/SELFHOST_PLAN.md`（后端自举 7 阶段排期）；HANDOVER 增加「AI 接力包」记忆注入节。
+
+### 验证
+
+- Windows PE 回归 **103 项全绿**（v1.5 时点 96 + 标准库 6 项 + gzip 互操作 1 项；
+  SKIP=1 为 WSL 被沙箱拦）。
+- 三道门禁 PASS（check_names / check_origin / check_docs）；对拍 92/92、87/87、50/50、10/10。
+
+---
+
+## 未发布（v1.5，工作区进行中）
+
+> 本版本主题：**性能报告全项落地 + 协议库三件套**。
+> 上一轮（v1.4，已提交 d769435/b3e0fe2）：Windows PE IOCP 高并发 reactor
+> （net_serve + callr 间接调用）。以下为工作区已落地、尚未提交内容。
+
+### 协议库三件套（全部 Quelmara 自实现，零 Python/Node）
+
+- **`std/http.qma`**：HTTP/1.1 服务端。keep-alive + 流水线（一次 on_data
+  派发多个请求）、Content-Length 请求体、头部增量解析（\r\n\r\n 扫描位置
+  跨段持久，整请求只扫一遍）、Connection: close / HTTP/1.0 语义。
+  明确 fail-fast：chunked → 501、头部超限 → 431、请求行非法 → 400。
+  响应单次组包单次 send；零拷贝体访问（`http_body_ptr`）。
+- **`std/ws.qma`**：WebSocket（RFC 6455）服务端。握手
+  Sec-WebSocket-Accept = base64(sha1(key+GUID))（std/sha1 + std/b64 闭环）、
+  帧层全量：7/16/64 位长度、客户端帧强制掩码（1002）、分片消息重组
+  （控制帧交错合法）、ping/pong、close 握手、单消息 1MB 上限（1009）。
+- **`std/sse.qma`**：Server-Sent Events。W3C event 编码（event/data/id/retry、
+  多行 data 拆分）、心跳注释行、`sse_broadcast` 遍历槽位层活跃连接广播。
+- **`std/net/core.qma`**：协议共用连接层——定长槽位（640 B/连接，
+  十万连接 = 64 MB 常驻、O(1) 归还复用）+ fdtab 开放寻址 + 自旋锁
+  （mem_xchg）+ 溢出缓冲自动扩容（上限 1MB/连接）。
+- 示例：`examples/http_demo.qma` / `ws_demo.qma` / `sse_demo.qma`
+  （本机 Python 客户端实测全绿：200/404/POST 体/流水线；握手校验/
+  文本与 70000 字节帧 echo/分片/控制帧交错/close；SSE 建流/retry/
+  事件/广播）。
+- **修复**：`conn_open` 此前只初始化 w0–w5，协议私有字（扫描位置/分片
+  状态）读到 slab 脏页——HTTP 头搜索从垃圾偏移开始永远找不到
+  \r\n\r\n。整槽清零。
+- **修复**：`std/net/core.qma` 缺 `import std.mem`（flat-merge 下未定义符号）。
+
+### 编译器：性能报告七项优化（对应 Quelmara-性能分析.html）
+
+- **v1.5.1 str 长度前缀 ABI**（报告项 #1，收益最大）：str 值指向
+  `[len][字节][NUL]`，`len(s)`/`s[i]` O(1)，越界检查不再内联 strlen。
+  实测 16KB 逐字节扫描 85.9ms → **22µs**（~3900×）；
+  配套 `opt_strlen_hoist` 跨段合并。
+- **2 的幂除法/取模特化**（#2）：`x/2^k`、`x%2^k` 走移位/掩码
+  （非负 1 条指令），collatz 300k 203ms → 172ms。
+- **掩码值域建模 + 越界检查合并**（#3）：`analyze_ranges` 建模
+  `and`/`mod-imm` 上界；`opt_bounds_dedupe` 同一下标读写合并检查。
+- **8 字节字块 memcpy**（#4）：字符串拼接 437.5ms → 137ms（3.2×）。
+- **内联热函数白名单**（#5）：`__map_hash/__map_find/__map_len` 阈值 160。
+- **短循环展开阈值 1024 → 8**（#6）。
+- **分配器回收**（#7）：`__realloc` 顶端块原地延展（`__vec_grow` 不再
+  泄漏旧块）；`mem_free` 尺寸类归还；sha1 工作区即用即还。
+
+### 编译器：const 跨 import 可见（两遍解析）
+
+- 顶层 const 此前只在单文件解析期内联——std 库的槽位布局常量
+  （`std/net/core.qma` 的 SLOT_*/ST_*）对使用方不可见。
+  `load_program` 现为两遍解析：第一遍收集全部顶层 const（同名不同值
+  报错），第二遍带全集重解析主文件与全部被导入模块。
+- **系统级内建（v1.5）**：`now_ns`（单调纳秒，用户侧微基准不再缺位）、
+  `mem_alloc/free/load8/store8/load64/store64/copy/zero/cmp/str`、
+  `mem_xchg`（x86_64 原子交换）、`tcp_send_n/recv_n`（零拷贝变体）。
+
+### 修复：两个通用形状基准抓出的编译器 bug（v1.5.1）
+
+- **LICM 外提触发 x64 分配器布局敏感段错误**（复现：循环体内含内联
+  memcpy 的程序，数据量跨阈值）：QuIR 语义等价、A64 模拟器全绿，
+  纯 x64 线性扫描分配器问题。**licm 默认禁用**（QLM_ENABLE_LICM=1
+  可开），根修另立轮次（docs/PERF.md §4）。
+- **循环展开常量溯源**：60 条宽窗口把别的 mov imm 误当循环上界
+  （实测 __memcpy 字块循环 mw=8 被匹配成字节长度 66 → 展开越界）；
+  展开副本被下一轮 LICM 二次处理。修复：窗口收紧 12 条、上界定义
+  唯一性验证、unroll 移出收敛循环、body 含内层循环 label 不展开。
+- **通用形状基准** `bench/gbench.qma`：8 个从未参与调优的代码形状
+  （tokenizer/状态机/str 哈希表/日志组装/模式搜索/矩阵/散列链）——
+  通用性的裁判是这些形状，不是调优期用例（docs/PERF.md §1-2）。
+- **网络负载工具** `bench/loadgen.py`（临时 Python 工具）：短连接/
+  长连接流水线/并发；keep-alive 流水线 0.3µs/请求量级，短连接通道
+  功能验证通过（沙箱注入使绝对值不可信）。百万连接内存账与配置
+  指南：docs/PERF.md §3（rec 惰性分配短连接零累积；百万长连接
+  recv_buffer=512 → 总账 ~1.2 GB）。
+
+### 验证
+
+- Windows PE 回归 **96 项全绿**（v1.2 时点 91 → 96）。
+- 基准复测（进程内 now_ns，扣除启动开销）：见上文各项实测数字。
+- TLS（https/wss）路线定稿：`docs/TLS.md`——Phase A 密码学地基
+  （sha256/hmac → aes-gcm → x25519）→ Phase B TLS 1.3 服务端 →
+  Phase C 接线，协议层回调签名不变。
+
+---
+
+## 未发布（v1.3，工作区进行中）
+
+> 以下内容已在工作区落地、尚未提交为正式版本；完成后随 v1.3 正式入栏。
+
+### 优化：基于范围证明的越界检查消除 `opt_bounds_elim`
+
+- **通用优化**（非模式特化）：数组/切片/str 下标的越界检查窗口
+  （`jcc ge idx, n, fail` × 2 + fail 路径）在**可证明恒通过**时整窗删除。
+- 三条证明路径：
+  1. **全局上界**：`analyze_ranges` 证明的 `idx` 上界 < n（静态 n）；
+  2. **循环级静态**：窗口在规范循环体内、`idx` 是该 guard 的归纳变量、
+     guard 上界（可追溯常量）<= n——循环内 `0 <= ivar < hi <= n` 恒真；
+  3. **循环级动态**：`n` 与 guard 的 `hi` 是同一个 vreg（如 `for i in 0..n`
+     驱动 `buf[i]` 的场景待 CSE 合并 len 后接入，见已知限制）。
+- **循环级证明是局部的**：init 紧邻可追溯且 >= 0、step 唯一且 > 0、
+  body 内无归纳变量重定义、窗口严格在 body 区间（step 后 `ivar` 可能 == hi）。
+  多个循环共享 `i` 的常见形态各自独立成立——不再被全函数 def 唯一性挡住。
+- label 引用计数兜底：窗口内 label 被窗口外跳转引用时放弃删除。
+- **实测**（Windows PE，1.92 亿次定长数组读写）：`bounds_check=true + 消除`
+  642.7ms vs `bounds_check=false`（UB 上限）641.9ms——**检查开销 19.3% → 0.1%**，
+  fail-fast 安全性与热循环性能兼得。
+- **顺带修复**：`analyze_ranges`（原 `analyze_nonneg`）的循环识别此前只接受
+  while 形态的 `jcc l` guard，**所有 for 形态（`jcc ge`）被跳过**——for 循环的
+  魔数除法符号修正链收缩因此从未生效。现在两种 guard 条件码统一识别。
+- 验证：负向场景（step≠1 的循环、循环外下标、无证明的 vreg）窗口全部保留；
+  越界运行时仍 fail-fast（退出码 1）；PE 回归 92 项全绿。
+- **已知限制**：切片/str/vec 的动态长度窗口暂不消除——`len(s)` 二次求值
+  产生不同 vreg，guard 的 `hi` 与窗口的 `n` 不同源；需要跨块 CSE 合并
+  同 (base, off) load 或 LICM 有条件外提 load 后接入（下一轮）。
+
+### 自举：parser 函数体 Phase 1（核心子集对拍，进行中）
+
+- **协议**：函数体 S 表达式逐语句行（`(let mut x (num 0))` / `(binop < ...)` 等），
+  str 用 hex 编码、fnum SKIP（Phase 2），未支持形态函数级 SKIP（两侧同判即对拍绿）。
+- **两侧实现**：`tools/dev/astbody.py`（stage-0 协议 dump，含 Phase 1 白名单）+
+  `bootstrap/parser/qlm_parse.qma` 扩展 `--body` 模式（**Quelmara 写的函数体解析器**
+  ~950 行：11 层优先级链、postfix 调用/下标/字段/`?`、SKIP 信号游标盒、回溯）。
+- **对拍门禁**：`tests/bodydiff.py`（函数级匹配统计：dump 一致 / SKIP 同步 / 不同步）。
+  当前：**77 行 dump 逐字节一致**、SKIP 同步 21——核心子集真实工作。
+- **剩余（下一步，bug 模式已定位）**：while+call 条件解析失败、match 表达式拦截、
+  若干空格细节——按 bodydiff 的 MISMATCH 清单逐个修即可清零。
+- 调试方法学沉淀：错误码打印 + 分步 fail 函数 + ctypes 参照 + capstone 反汇编 +
+  monkey-patch eval 定位 + 逐语句 eprint 探针。
+
+### 三条可用性边界补齐（v1.3 本轮）
+
+> 之前"能写单文件计算程序"的三条硬边界（无标准库 / 只读不写 / 自研后端无网络）全部打通。
+
+- **`write_text(path, content) -> int` 三链**：覆盖写整文件、返回写入字节数、失败 fail-fast。
+  Windows 走 CreateFileA/WriteFile，Linux 走 openat/write（x64/a64 同一 QuIR），C 走 fwrite。
+  写后读回比对测试通过（19 字节往返）。
+- **`import` 实装（扁平合并）**：`import std.net` / `import mymod` 递归加载
+  `std/`（仓库根，随编译器分发）与主文件同目录的 `.qma`，顶层 fn/struct/enum/test
+  扁平合并进主 AST——**后端零改动**（C/native/a64 通用）。名字冲突、循环 import、
+  被导入文件定义 main 一律报错。标准库雏形 `std/core.qma`（abs/max2/min2/pow2k）、
+  `std/net.qma`（tcp_* 的过程式包装）随仓库分发。既有源码的 `import std.core/net`
+  从语法保留变为真实加载。
+- **原生 socket 第一格（tcp_* 内建）**：`tcp_listen/accept/send/recv/close` 阻塞式过程
+  API。Windows PE 走 **ws2_32 导入**（导入表重构为多 DLL：kernel32 + ws2_32 按函数
+  白名单分组）；Linux native 走 raw syscall（socket/bind/listen/accept/sendto/recvfrom，
+  x64+a64 号表），CI ubuntu 验证。**本机 echo 实测打通**：listen(19527) → accept →
+  recv → send 回显 → close，客户端 19 字节原样返回。
+  调试过程中抓出三个新坑（见 HANDOVER 累计教训）。
+- **验证**：PE 回归 PASS=92 FAIL=0 SKIP=1；门禁双 PASS。
+
+### 工程化：测试矩阵与 CI
+
+- **`quelmara test --targets all`**：多后端测试矩阵——`native`/`win` 在本机执行级验证，
+  `arm64` 走 **A64 模拟器执行级**（`tests/a64_emu.py`），全部可执行目标的输出
+  **逐字节比对**（跨后端/跨架构交叉验证自动化）；不可执行的目标做构建级 SKIP
+  并说明原因。`--targets native,win` 逗号分隔子集同样支持。
+- **CI 接入**（`.github/workflows/ci.yml`）：Linux job（门禁 + 自举对拍四件套 +
+  五套回归，含 AArch64 模拟器与 io_uring）与 Windows job（门禁 + PE 回归 +
+  对拍 + `test --targets all`），push/PR 触发。
+- **`qlm_fmt` 新语法覆盖确认**：全量冒烟 62/62 个 `.qma`（含位运算/vec/for-in/
+  子切片/vec 聚合）零崩溃——fmt 是 token 级重排，新语法天然适用。
+- **默认多核口径确认（无代码改动）**：`[core] multicore = true` / `threads = 0`
+  （自动物理核数）即出厂默认，`parfor` 自动分块、`spawn` 自动并行——
+  用户程序不需要手写循环拆分或指定核心数；单核是显式 opt-out。
+
+### 自举：parser 声明级
+
+- **parser 声明级自举**：`bootstrap/parser/qlm_parse.qma` 与 stage-0 声明级 AST
+  对拍 **68/68 全等**（`tests/parsediff.py`，辅以 `tools/dev/astdecl.py`）。
+- **新增对拍脚本**：`tests/irdiff.py`（QuIR 架构无关 46/46，14 skip：a64 无 chan/map）、
+  `tests/emitdiff.py`（发射层确定性 10/10 + ELF/PE「无 CRT」结构自检）。
+- **自举进度 2/9**：词法 ✅（v1.0）、语法声明级 ✅（本节）；自举代码 774 行，
+  占引导层 16.3k 行的 4.5%（`tools/dev/selfhost_status.py`）。
+- **`vec[Struct]` 聚合元素**：工作区夹具 `tests/t37_vecagg.qma` 验证 struct 元素
+  按值拷贝进出（改副本不影响表内元素），为 AST 节点表铺路。
+- 下一步：parser 函数体对拍（AST 逐层比对）→ `bootstrap/typeck/`。
 
 ---
 

@@ -1,0 +1,257 @@
+// std/net/core.qma —— 协议库共用的连接层（十万连接的账在这里算清）
+//
+// 模型：net_serve 的 reactor 每来一个连接分配一个**定长槽位**，槽位里既有
+// 连接元数据也有内联收发缓冲。连接关闭立刻归还槽位（O(1)，空闲链复用），
+// 所以常驻内存 = 活跃连接数 × slot_bytes，不随历史连接数增长、没有 GC 停顿。
+//
+// 槽位布局（字 = 8 字节）：
+//   w0  fd          w1  状态(0=空闲 1=打开 2=关闭中)
+//   w2  已收字节数   w3  标志位
+//   w4  溢出缓冲ptr  w5  溢出缓冲cap（0 = 数据在内联区）
+//   w6..w15  协议私有（方法/长度/分片状态/大缓冲指针…）
+//   w16..    内联接收缓冲（(slot_words-16)*8 字节）
+//
+// 默认 slot_words = 80 -> 640 字节/连接（512 字节内联缓冲）：
+//   十万连接 = 64 MB 槽位 + reactor 侧 rec 记录（80+recv_buffer）
+//   对比"每连接一线程"模型（默认 1 MB 栈）是 1/2000 的量级。
+//   内联缓冲满时自动溢出到堆（倍增扩容，上限 CONN_MAX_BUF），
+//   所以任意分片/任意大小的协议报文都不会丢数据。
+//
+// 进程级状态：每个协议把自己的 state 指针存进 static_word(i)，
+// 因为 reactor 的回调只传 (fd, data)，没有 user-data 通道。
+// static_word 占用约定：0-10 = 协议库（ws/http/sse），11 = 全局自旋锁，
+// 12-31 保留给用户代码。
+
+import std.mem
+
+const SLOT_FD = 0
+const SLOT_STATE = 1
+const SLOT_RECVLEN = 2
+const SLOT_FLAGS = 3
+const SLOT_SPILL = 4
+const SLOT_SPILL_CAP = 5
+const SLOT_PROTO = 6
+const SLOT_BUF = 16
+
+const CONN_OPEN = 1
+const CONN_CLOSING = 2
+
+const CONN_MAX_BUF = 1048576      // 单连接累积上限 1MB（超限协议层关闭）
+const CONN_LOCK_W = 11            // static_word(11) = 协议库全局自旋锁
+
+// 状态块布局（字）
+const ST_SLAB = 0
+const ST_FDTAB = 1
+const ST_SLOTW = 2
+const ST_MAXCONN = 3
+const ST_ACCEPTED = 4
+const ST_CLOSED = 5
+const ST_MSGS = 6
+const ST_BYTES_IN = 7
+const ST_BYTES_OUT = 8
+const ST_H0 = 9        // 协议回调 0（on_open / handler）
+const ST_H1 = 10       // 协议回调 1（on_message / on_close）
+const ST_H2 = 11
+const ST_AUX = 12      // 协议私有（如 ws 最大消息长度、sse 订阅表）
+
+fn conn_state_new(max_conns: int, slot_words: int) -> int {
+    let st = mem_alloc(128)
+    mem_zero(st, 128)
+    // fd 表容量取 2 倍连接数（负载因子 50%），向上取 2 的幂
+    let mut cap = 16
+    while cap < max_conns * 2 {
+        cap = cap * 2
+    }
+    mem_store64(st, ST_SLAB, slab_new(max_conns, slot_words))
+    mem_store64(st, ST_FDTAB, fdtab_new(cap))
+    mem_store64(st, ST_SLOTW, slot_words)
+    mem_store64(st, ST_MAXCONN, max_conns)
+    return st
+}
+
+fn conn_max_conns(st: int) -> int {
+    return mem_load64(st, ST_MAXCONN)
+}
+
+fn conn_accepted(st: int) -> int {
+    return mem_load64(st, ST_ACCEPTED)
+}
+
+fn conn_closed(st: int) -> int {
+    return mem_load64(st, ST_CLOSED)
+}
+
+fn conn_msgs(st: int) -> int {
+    return mem_load64(st, ST_MSGS)
+}
+
+fn conn_bytes_in(st: int) -> int {
+    return mem_load64(st, ST_BYTES_IN)
+}
+
+fn conn_bytes_out(st: int) -> int {
+    return mem_load64(st, ST_BYTES_OUT)
+}
+
+// ---------------------------------------------------------------------------
+// 自旋锁（多 io 线程安全）
+// reactor 的 N 个 io 线程并发派发回调：on_connect 在主线程（acceptor），
+// on_data/on_close 在 io 线程。slab 空闲链与 fdtab 是共享结构， mutation
+// 必须在锁内。mem_xchg 是 x86_64 原子交换（后端 xchg 指令，v1.5）。
+// 持锁时间是微秒级（O(1) 空闲链操作），无系统调用、无让渡。
+// ---------------------------------------------------------------------------
+
+fn conn_lock() -> int {
+    let lp = static_word(CONN_LOCK_W)
+    while mem_xchg(lp, 1) != 0 {
+        // 自旋等锁（持锁方几个指令内就释放）
+    }
+    return 0
+}
+
+fn conn_unlock() -> int {
+    let lp = static_word(CONN_LOCK_W)
+    mem_store64(lp, 0, 0)
+    return 0
+}
+
+// 新连接：分配槽位并登记 fd -> 槽位。超上限返回 -1（fail-fast 语义：
+// 调用方应直接关闭连接，不静默膨胀）。
+fn conn_open(st: int, fd: int) -> int {
+    conn_lock()
+    let slab = mem_load64(st, ST_SLAB)
+    let idx = slab_alloc(slab)
+    if idx < 0 {
+        conn_unlock()
+        return -1
+    }
+    let p = slab_ptr(slab, idx)
+    // 整槽清零：协议私有字（w6..w15）也必须是确定值——slab 内存是
+    // bump 分配的脏页，扫描位置/分片状态残留垃圾会让协议层直接失灵
+    // （实测：HP_SCAN 残留 -> \r\n\r\n 搜索从垃圾偏移开始 -> 永远找不到头）。
+    mem_zero(p, mem_load64(st, ST_SLOTW) * 8)
+    mem_store64(p, SLOT_FD, fd)
+    mem_store64(p, SLOT_STATE, CONN_OPEN)
+    mem_store64(p, SLOT_RECVLEN, 0)
+    mem_store64(p, SLOT_FLAGS, 0)
+    mem_store64(p, SLOT_SPILL, 0)
+    mem_store64(p, SLOT_SPILL_CAP, 0)
+    fdtab_put(mem_load64(st, ST_FDTAB), fd, idx)
+    conn_unlock()
+    mem_store64(st, ST_ACCEPTED, mem_load64(st, ST_ACCEPTED) + 1)
+    return idx
+}
+
+fn conn_slot(st: int, fd: int) -> int {
+    let idx = fdtab_get(mem_load64(st, ST_FDTAB), fd)
+    if idx < 0 {
+        return 0
+    }
+    return slab_ptr(mem_load64(st, ST_SLAB), idx)
+}
+
+fn conn_close(st: int, fd: int) -> int {
+    conn_lock()
+    let fdt = mem_load64(st, ST_FDTAB)
+    let idx = fdtab_get(fdt, fd)
+    if idx >= 0 {
+        fdtab_del(fdt, fd)
+        let p = slab_ptr(mem_load64(st, ST_SLAB), idx)
+        let sp = mem_load64(p, SLOT_SPILL)
+        if sp != 0 {
+            mem_free(sp, mem_load64(p, SLOT_SPILL_CAP))   // 归还溢出缓冲
+        }
+        slab_free(mem_load64(st, ST_SLAB), idx)
+    }
+    conn_unlock()
+    mem_store64(st, ST_CLOSED, mem_load64(st, ST_CLOSED) + 1)
+    return 0
+}
+
+// 数据区指针：溢出时用堆缓冲，否则用槽位内联区
+fn conn_buf_ptr(p: int) -> int {
+    let sp = mem_load64(p, SLOT_SPILL)
+    if sp != 0 {
+        return sp
+    }
+    return p + SLOT_BUF * 8
+}
+
+fn conn_buf_cap(st: int, p: int) -> int {
+    let sp = mem_load64(p, SLOT_SPILL)
+    if sp != 0 {
+        return mem_load64(p, SLOT_SPILL_CAP)
+    }
+    return (mem_load64(st, ST_SLOTW) - SLOT_BUF) * 8
+}
+
+// 把 reactor 投递的一段数据追加到连接缓冲；返回新的总长度。
+// 内联区满时自动溢出到堆缓冲（倍增扩容，上限 CONN_MAX_BUF）。
+// 缓冲满返回 -1（调用方按协议返回 413/关闭，绝不静默截断）。
+fn conn_append(st: int, p: int, data: str) -> int {
+    let have = mem_load64(p, SLOT_RECVLEN)
+    let n = len(data)
+    let cap = conn_buf_cap(st, p)
+    if have + n > cap {
+        // 慢路径：需要扩容（溢出到堆）
+        if have + n > CONN_MAX_BUF {
+            return -1
+        }
+        let mut newcap = cap * 2
+        while newcap < have + n {
+            newcap = newcap * 2
+        }
+        let nb = mem_alloc(newcap)
+        let ob = conn_buf_ptr(p)
+        mem_copy(nb, ob, have)                 // 旧数据搬进新缓冲
+        let osp = mem_load64(p, SLOT_SPILL)
+        if osp != 0 {
+            mem_free(osp, cap)                 // 旧堆缓冲归还（尺寸类复用）
+        }
+        mem_store64(p, SLOT_SPILL, nb)
+        mem_store64(p, SLOT_SPILL_CAP, newcap)
+    }
+    let buf = conn_buf_ptr(p)
+    let mut i = 0
+    while i < n {
+        mem_store8(buf, have + i, data[i])
+        i = i + 1
+    }
+    let total = have + n
+    mem_store64(p, SLOT_RECVLEN, total)
+    mem_store64(st, ST_BYTES_IN, mem_load64(st, ST_BYTES_IN) + n)
+    return total
+}
+
+// 把 [from, len) 搬到缓冲头部（处理完一个请求后剩下的半包）
+fn conn_shift(p: int, from: int) -> int {
+    let len = mem_load64(p, SLOT_RECVLEN)
+    if from <= 0 {
+        return len
+    }
+    if from >= len {
+        mem_store64(p, SLOT_RECVLEN, 0)
+        return 0
+    }
+    let buf = conn_buf_ptr(p)
+    mem_copy(buf, buf + from, len - from)
+    let rest = len - from
+    mem_store64(p, SLOT_RECVLEN, rest)
+    return rest
+}
+
+// 发送一段缓冲区（零拷贝：指针 + 长度直接进 send）
+fn conn_send(st: int, fd: int, ptr: int, n: int) -> int {
+    if n <= 0 {
+        return 0
+    }
+    let w = tcp_send_n(fd, ptr, n)
+    if w > 0 {
+        mem_store64(st, ST_BYTES_OUT, mem_load64(st, ST_BYTES_OUT) + w)
+    }
+    return w
+}
+
+fn conn_send_str(st: int, fd: int, s: str) -> int {
+    return conn_send(st, fd, s, len(s))
+}

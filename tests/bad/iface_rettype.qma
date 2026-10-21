@@ -1,0 +1,8 @@
+// 负向夹具：impl 返回类型与接口声明不一致，必须编译失败
+module iface_rettype
+interface S { fn a(self) -> int }
+struct T { x: int }
+impl T : S {
+    fn a(t: T) -> str { return "x" }
+}
+fn main() { }

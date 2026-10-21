@@ -1,0 +1,1016 @@
+// std/json.qma —— JSON 解析 / 序列化（DOM 式），Quelmara 自实现
+//
+// 为什么是 DOM 式：语言目前没有用户泛型、没有反射，写不出 to_json<T>。
+// 所以这里给的是"显式树"API：解析得到文档句柄，按路径取值；序列化用显式
+// builder 拼装。等泛型/trait 落地后可以在这一层之上加类型化编解码，
+// 底层数据表示不用改。
+//
+// 表示（全部放在一个文档句柄里，无全局变量）：
+//   doc 布局（槽索引，每槽 8 字节）：
+//     0 pool   vec[int]：节点池，每节点 6 字 [tag, a, b, c, d, e]
+//     1 buf    vec[int]：所有字符串/数字的字节（避免 str 存不进 vec[int]）
+//     2 kids   vec[int]：子节点索引（数组=元素；对象=键值成对）
+//     3 cur    解析游标
+//     4 root   根节点索引（失败 -1）
+//     5 err    错误位置（1-based，0 = 成功）
+//     6 src    源串
+//     7 n      源长度
+//     8 pool_n 已用槽数 / 9 buf_n 已用字节数 / 10 kids_n 已用槽数
+//   tag：0 null / 1 bool / 2 num / 3 str / 4 arr / 5 obj
+//   str、num：a = buf 起点，b = 长度（num 保留原始文本，不丢精度）
+//   arr、obj：a = kids 起点，b = 元素个数（obj 的 kids 是 2*count 个：键,值）
+//
+// 边界（明确写死，不做惊喜）：
+//   * 数字按原始文本保存，json_int 取整数部分（不四舍五入），要浮点请取 json_num_raw；
+//   * \uXXXX 只处理 BMP + 常规代理对，孤立代理替换为 U+FFFD；
+//   * 嵌套深度上限 64（防栈溢出，超限报错而不是崩）；
+//   * 解析失败不 fail-fast：err 记位置，root = -1，调用方自行决定 400 还是忽略。
+
+const JNULL = 0
+const JBOOL = 1
+const JNUM = 2
+const JSTR = 3
+const JARR = 4
+const JOBJ = 5
+
+// 注意：mem_load64/mem_store64 的偏移是**槽索引（×8）**，不是字节偏移。
+// 踩过：把字节偏移当槽索引用会写到块外，先污染堆、再在别处段错误。
+const JDOM_POOL = 0
+const JDOM_BUF = 1
+const JDOM_KIDS = 2
+const JDOM_CUR = 3
+const JDOM_ROOT = 4
+const JDOM_ERR = 5
+const JDOM_SRC = 6
+const JDOM_N = 7
+const JDOM_PN = 8
+const JDOM_BN = 9
+const JDOM_KN = 10
+
+// ---------------------------------------------------------------------------
+// 文档与节点原语
+// ---------------------------------------------------------------------------
+
+fn _pool(d: int) -> vec[int] {
+    return mem_load64(d, JDOM_POOL)
+}
+
+fn _buf(d: int) -> vec[int] {
+    return mem_load64(d, JDOM_BUF)
+}
+
+fn _kids(d: int) -> vec[int] {
+    return mem_load64(d, JDOM_KIDS)
+}
+
+fn _cur(d: int) -> int {
+    return mem_load64(d, JDOM_CUR)
+}
+
+fn _setcur(d: int, v: int) -> int {
+    mem_store64(d, JDOM_CUR, v)
+    return 0
+}
+
+fn _src(d: int) -> str {
+    return mem_load64(d, JDOM_SRC)
+}
+
+fn _slen(d: int) -> int {
+    return mem_load64(d, JDOM_N)
+}
+
+fn _err(d: int) -> int {
+    return mem_load64(d, JDOM_ERR)
+}
+
+// 记录首个错误位置并返回 -1
+fn _fail(d: int) -> int {
+    if mem_load64(d, JDOM_ERR) == 0 {
+        mem_store64(d, JDOM_ERR, _cur(d) + 1)
+    }
+    return -1
+}
+
+fn _pn(d: int) -> int {
+    return mem_load64(d, JDOM_PN)
+}
+
+fn _bn(d: int) -> int {
+    return mem_load64(d, JDOM_BN)
+}
+
+fn _kn(d: int) -> int {
+    return mem_load64(d, JDOM_KN)
+}
+
+fn _bpush(d: int, b: int) -> int {
+    let v = _buf(d)
+    v.push(b)
+    mem_store64(d, JDOM_BN, mem_load64(d, JDOM_BN) + 1)
+    return 0
+}
+
+fn _kpush(d: int, v: int) -> int {
+    let k = _kids(d)
+    k.push(v)
+    mem_store64(d, JDOM_KN, mem_load64(d, JDOM_KN) + 1)
+    return 0
+}
+
+fn _node_new(d: int, tag: int) -> int {
+    let p = _pool(d)
+    let idx = _pn(d) / 6
+    let mut i = 0
+    while i < 6 {
+        p.push(0)
+        i = i + 1
+    }
+    mem_store64(d, JDOM_PN, _pn(d) + 6)
+    p.set(idx * 6, tag)
+    return idx
+}
+
+fn _node_get(d: int, idx: int, w: int) -> int {
+    if idx < 0 {
+        return 0
+    }
+    let p = _pool(d)
+    return p.get(idx * 6 + w)
+}
+
+fn _node_set(d: int, idx: int, w: int, v: int) -> int {
+    if idx < 0 {
+        return 0
+    }
+    let p = _pool(d)
+    p.set(idx * 6 + w, v)
+    return 0
+}
+
+fn _tag(d: int, idx: int) -> int {
+    return _node_get(d, idx, 0)
+}
+
+// ---------------------------------------------------------------------------
+// 解析
+// ---------------------------------------------------------------------------
+
+fn _skip_ws(d: int) -> int {
+    let s = _src(d)
+    let n = _slen(d)
+    let mut i = _cur(d)
+    while i < n {
+        let c = s[i]
+        if c == 32 || c == 9 || c == 10 || c == 13 {
+            i = i + 1
+        } else {
+            _setcur(d, i)
+            return 0
+        }
+    }
+    _setcur(d, i)
+    return 0
+}
+
+fn _hex4(d: int) -> int {
+    let s = _src(d)
+    let n = _slen(d)
+    let mut i = _cur(d)
+    let mut v = 0
+    let mut k = 0
+    while k < 4 {
+        if i >= n {
+            return _fail(d)
+        }
+        let c = s[i]
+        let mut h = -1
+        if c >= 48 && c <= 57 {
+            h = c - 48
+        } else if c >= 65 && c <= 70 {
+            h = c - 55
+        } else if c >= 97 && c <= 102 {
+            h = c - 87
+        }
+        if h < 0 {
+            return _fail(d)
+        }
+        v = v * 16 + h
+        i = i + 1
+        k = k + 1
+    }
+    _setcur(d, i)
+    return v
+}
+
+// UTF-8 编码一个码点进 buf（返回 0；代理/越界码点写成 U+FFFD）
+fn _put_utf8(d: int, cp: int) -> int {
+    let b = _buf(d)
+    if cp < 0 || cp > 0x10FFFF {
+        cp = 0xFFFD
+    }
+    if cp < 0x80 {
+        _bpush(d, cp)
+        return 0
+    }
+    if cp < 0x800 {
+        _bpush(d, 0xC0 | (cp >> 6))
+        _bpush(d, 0x80 | (cp & 0x3F))
+        return 0
+    }
+    if cp >= 0xD800 && cp <= 0xDFFF {
+        // 孤立代理：替换
+        _bpush(d, 0xEF)
+        _bpush(d, 0xBF)
+        _bpush(d, 0xBD)
+        return 0
+    }
+    if cp < 0x10000 {
+        _bpush(d, 0xE0 | (cp >> 12))
+        _bpush(d, 0x80 | ((cp >> 6) & 0x3F))
+        _bpush(d, 0x80 | (cp & 0x3F))
+        return 0
+    }
+    _bpush(d, 0xF0 | (cp >> 18))
+    _bpush(d, 0x80 | ((cp >> 12) & 0x3F))
+    _bpush(d, 0x80 | ((cp >> 6) & 0x3F))
+    _bpush(d, 0x80 | (cp & 0x3F))
+    return 0
+}
+
+// 解析字符串（游标在引号上），返回节点；字符串字节进 buf
+fn _parse_str(d: int) -> int {
+    let n = _slen(d)
+    let b = _buf(d)
+    let start = _bn(d)
+    let s = _src(d)
+    _setcur(d, _cur(d) + 1)          // 跳过开引号
+    while true {
+            let i = _cur(d)
+        if i >= n {
+            return _fail(d)
+        }
+        let c = s[i]
+        if c == 34 {                  // 闭引号
+            _setcur(d, i + 1)
+            let node = _node_new(d, JSTR)
+            _node_set(d, node, 1, start)
+            _node_set(d, node, 2, _bn(d) - start)
+            return node
+        }
+        if c == 92 {                  // 反斜杠
+            _setcur(d, i + 1)
+            let e = _cur(d)
+            if e >= n {
+                return _fail(d)
+            }
+            let ec = s[e]
+            if ec == 110 {                  // n
+                _bpush(d, 10)
+                _setcur(d, e + 1)
+            } else if ec == 116 {           // t
+                _bpush(d, 9)
+                _setcur(d, e + 1)
+            } else if ec == 114 {           // r
+                _bpush(d, 13)
+                _setcur(d, e + 1)
+            } else if ec == 98 {            // b
+                _bpush(d, 8)
+                _setcur(d, e + 1)
+            } else if ec == 102 {           // f
+                _bpush(d, 12)
+                _setcur(d, e + 1)
+            } else if ec == 34 {            // "
+                _bpush(d, 34)
+                _setcur(d, e + 1)
+            } else if ec == 92 {            // backslash
+                _bpush(d, 92)
+                _setcur(d, e + 1)
+            } else if ec == 47 {            // /
+                _bpush(d, 47)
+                _setcur(d, e + 1)
+            } else if ec == 117 {           // uXXXX
+                _setcur(d, e + 1)
+                let cp = _hex4(d)
+                if cp < 0 {
+                    return -1
+                }
+                // 代理对：高代理后必须跟 \uDC00-\uDFFF
+                if cp >= 0xD800 && cp <= 0xDBFF {
+                    let save = _cur(d)
+                    if save + 1 < n && s[save] == 92 && s[save + 1] == 117 {
+                        _setcur(d, save + 2)
+                        let lo = _hex4(d)
+                        if lo < 0 {
+                            return -1
+                        }
+                        if lo >= 0xDC00 && lo <= 0xDFFF {
+                            let full = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+                            _put_utf8(d, full)
+                        } else {
+                            _setcur(d, save)
+                            _put_utf8(d, cp)
+                        }
+                    } else {
+                        _put_utf8(d, cp)
+                    }
+                } else {
+                    _put_utf8(d, cp)
+                }
+            } else {
+                return _fail(d)
+            }
+        } else {
+            _bpush(d, c)
+            _setcur(d, i + 1)
+        }
+    }
+    return -1
+}
+
+// ---------------------------------------------------------------------------
+// 容器 / 值
+// ---------------------------------------------------------------------------
+
+fn _parse_value(d: int, depth: int) -> int {
+    if depth > 64 {
+        return _fail(d)
+    }
+    _skip_ws(d)
+    let s = _src(d)
+    let n = _slen(d)
+    let i = _cur(d)
+    if i >= n {
+        return _fail(d)
+    }
+    let c = s[i]
+    if c == 123 {                     // {
+        return _parse_obj(d, depth)
+    }
+    if c == 91 {                      // [
+        return _parse_arr(d, depth)
+    }
+    if c == 34 {                      // "
+        return _parse_str(d)
+    }
+    if c == 116 {                     // true
+        if i + 4 <= n && s[i + 1] == 114 && s[i + 2] == 117 && s[i + 3] == 101 {
+            _setcur(d, i + 4)
+            let node = _node_new(d, JBOOL)
+            _node_set(d, node, 1, 1)
+            return node
+        }
+        return _fail(d)
+    }
+    if c == 102 {                     // false
+        if i + 5 <= n && s[i + 1] == 97 && s[i + 2] == 108 && s[i + 3] == 115 && s[i + 4] == 101 {
+            _setcur(d, i + 5)
+            let node = _node_new(d, JBOOL)
+            _node_set(d, node, 1, 0)
+            return node
+        }
+        return _fail(d)
+    }
+    if c == 110 {                     // null
+        if i + 4 <= n && s[i + 1] == 117 && s[i + 2] == 108 && s[i + 3] == 108 {
+            _setcur(d, i + 4)
+            return _node_new(d, JNULL)
+        }
+        return _fail(d)
+    }
+    return _parse_number(d)
+}
+
+fn _parse_number(d: int) -> int {
+    let s = _src(d)
+    let n = _slen(d)
+    let b = _buf(d)
+    let from = _cur(d)
+    let mut i = from
+    if i < n && (s[i] == 45 || s[i] == 43) {
+        i = i + 1
+    }
+    let ds = i
+    while i < n && s[i] >= 48 && s[i] <= 57 {
+        i = i + 1
+    }
+    if i == ds {
+        return _fail(d)
+    }
+    // 小数部分
+    if i < n && s[i] == 46 {
+        i = i + 1
+        let fs = i
+        while i < n && s[i] >= 48 && s[i] <= 57 {
+            i = i + 1
+        }
+        if i == fs {
+            return _fail(d)
+        }
+    }
+    // 指数部分（不完整则回退到指数前）
+    if i < n && (s[i] == 101 || s[i] == 69) {
+        let save = i
+        i = i + 1
+        if i < n && (s[i] == 43 || s[i] == 45) {
+            i = i + 1
+        }
+        let es = i
+        while i < n && s[i] >= 48 && s[i] <= 57 {
+            i = i + 1
+        }
+        if i == es {
+            i = save
+        }
+    }
+    let start = _bn(d)
+    let mut k = from
+    while k < i {
+        _bpush(d, s[k])
+        k = k + 1
+    }
+    _setcur(d, i)
+    let node = _node_new(d, JNUM)
+    _node_set(d, node, 1, start)
+    _node_set(d, node, 2, i - from)
+    return node
+}
+
+fn _parse_arr(d: int, depth: int) -> int {
+    let node = _node_new(d, JARR)
+    let mine = vec[int].new(4)
+    let mut cnt = 0
+    _setcur(d, _cur(d) + 1)           // 跳过 [
+    _skip_ws(d)
+    let s = _src(d)
+    let n = _slen(d)
+    if _cur(d) < n && s[_cur(d)] == 93 {   // ]
+        _setcur(d, _cur(d) + 1)
+        _node_set(d, node, 1, _kn(d))
+        _node_set(d, node, 2, 0)
+        return node
+    }
+    while true {
+        let v = _parse_value(d, depth + 1)
+        if v < 0 {
+            return -1
+        }
+        mine.push(v)
+        cnt = cnt + 1
+        _skip_ws(d)
+        let i = _cur(d)
+        if i >= n {
+            return _fail(d)
+        }
+        let c = s[i]
+        if c == 44 {                  // ,
+            _setcur(d, i + 1)
+        } else if c == 93 {           // ]
+            _setcur(d, i + 1)
+            // 子容器解析期间也往全局 kids 里写过，因此本容器的区间必须
+            // 在"全部子节点解析完之后"才开始，否则区间会被孙节点污染。
+            let start = _kn(d)
+            let mut j = 0
+            while j < cnt {
+                _kpush(d, mine.get(j))
+                j = j + 1
+            }
+            _node_set(d, node, 1, start)
+            _node_set(d, node, 2, cnt)
+            return node
+        } else {
+            return _fail(d)
+        }
+    }
+    return -1
+}
+
+fn _parse_obj(d: int, depth: int) -> int {
+    let node = _node_new(d, JOBJ)
+    let mine = vec[int].new(4)
+    let mut cnt = 0
+    _setcur(d, _cur(d) + 1)           // 跳过 {
+    _skip_ws(d)
+    let s = _src(d)
+    let n = _slen(d)
+    if _cur(d) < n && s[_cur(d)] == 125 {  // }
+        _setcur(d, _cur(d) + 1)
+        _node_set(d, node, 1, _kn(d))
+        _node_set(d, node, 2, 0)
+        return node
+    }
+    while true {
+        _skip_ws(d)
+        let i = _cur(d)
+        if i >= n || s[i] != 34 {
+            return _fail(d)
+        }
+        let k = _parse_str(d)
+        if k < 0 {
+            return -1
+        }
+        _skip_ws(d)
+        let j = _cur(d)
+        if j >= n || s[j] != 58 {     // :
+            return _fail(d)
+        }
+        _setcur(d, j + 1)
+        let v = _parse_value(d, depth + 1)
+        if v < 0 {
+            return -1
+        }
+        mine.push(k)
+        mine.push(v)
+        cnt = cnt + 2
+        _skip_ws(d)
+        let q = _cur(d)
+        if q >= n {
+            return _fail(d)
+        }
+        let c = s[q]
+        if c == 44 {                  // ,
+            _setcur(d, q + 1)
+        } else if c == 125 {          // }
+            _setcur(d, q + 1)
+            let start = _kn(d)
+            let mut m = 0
+            while m < cnt {
+                _kpush(d, mine.get(m))
+                m = m + 1
+            }
+            _node_set(d, node, 1, start)
+            _node_set(d, node, 2, cnt / 2)
+            return node
+        } else {
+            return _fail(d)
+        }
+    }
+    return -1
+}
+
+// ---------------------------------------------------------------------------
+// 对外：解析与取值
+// ---------------------------------------------------------------------------
+
+// json_parse(s) -> doc 句柄。失败时 json_ok(doc) == false。
+// 句柄不自动回收（一个文档一个块）；长驻进程请 mem_free(doc, 72) 并在
+// 之前释放 pool/buf/kids（当前不提供 json_free，见 docs/GAPS.md）。
+fn json_parse(s: str) -> int {
+    let d = mem_alloc(88)
+    mem_store64(d, JDOM_POOL, vec[int].new(32))
+    mem_store64(d, JDOM_BUF, vec[int].new(64))
+    mem_store64(d, JDOM_KIDS, vec[int].new(32))
+    mem_store64(d, JDOM_PN, 0)
+    mem_store64(d, JDOM_BN, 0)
+    mem_store64(d, JDOM_KN, 0)
+    mem_store64(d, JDOM_CUR, 0)
+    mem_store64(d, JDOM_ROOT, -1)
+    mem_store64(d, JDOM_ERR, 0)
+    mem_store64(d, JDOM_SRC, s)
+    mem_store64(d, JDOM_N, len(s))
+    let root = _parse_value(d, 0)
+    if root >= 0 {
+        _skip_ws(d)
+        if _cur(d) != _slen(d) {
+            _fail(d)
+            root = -1
+        }
+    }
+    mem_store64(d, JDOM_ROOT, root)
+    return d
+}
+
+fn json_ok(d: int) -> bool {
+    if d == 0 {
+        return false
+    }
+    if mem_load64(d, JDOM_ERR) != 0 {
+        return false
+    }
+    return mem_load64(d, JDOM_ROOT) >= 0
+}
+
+// 错误位置（1-based 字节偏移；0 = 无错）
+fn json_error_pos(d: int) -> int {
+    return mem_load64(d, JDOM_ERR)
+}
+
+fn json_root(d: int) -> int {
+    return mem_load64(d, JDOM_ROOT)
+}
+
+fn json_type(d: int, node: int) -> int {
+    return _tag(d, node)
+}
+
+fn json_is_null(d: int, node: int) -> bool {
+    return _tag(d, node) == JNULL
+}
+
+fn json_is_bool(d: int, node: int) -> bool {
+    return _tag(d, node) == JBOOL
+}
+
+fn json_is_num(d: int, node: int) -> bool {
+    return _tag(d, node) == JNUM
+}
+
+fn json_is_str(d: int, node: int) -> bool {
+    return _tag(d, node) == JSTR
+}
+
+fn json_is_arr(d: int, node: int) -> bool {
+    return _tag(d, node) == JARR
+}
+
+fn json_is_obj(d: int, node: int) -> bool {
+    return _tag(d, node) == JOBJ
+}
+
+// 从 buf 的 [start,len) 取字节成串
+fn _buf_slice(d: int, start: int, n: int) -> str {
+    let b = _buf(d)
+    let out = vec[int].new(n + 1)
+    let mut i = 0
+    while i < n {
+        out.push(b.get(start + i))
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+fn json_bool(d: int, node: int) -> bool {
+    return _node_get(d, node, 1) == 1
+}
+
+// 整数部分：取小数点/指数之前的文本（"−2.75e2" -> -2），不四舍五入。
+// 实现上走 str 工具而不是自己扫 vec：v1.5 实测"局部量跨调用后读错槽位"
+// 的 codegen 问题会把这种循环算错（见 docs/GAPS.md 已知问题）。
+fn json_int(d: int, node: int) -> int {
+    if _tag(d, node) != JNUM {
+        return 0
+    }
+    let raw = json_num_raw(d, node)
+    let n = len(raw)
+    let mut end = n
+    let mut i = 0
+    while i < n {
+        let c = raw[i]
+        if c == 46 || c == 101 || c == 69 {
+            end = i
+            i = n
+        } else {
+            i = i + 1
+        }
+    }
+    if end == 0 {
+        return 0
+    }
+    let head = substr(raw, 0, end)
+    return head.to_int()
+}
+
+// 原始数字文本（保留小数/指数，便于上层自己转 float）
+fn json_num_raw(d: int, node: int) -> str {
+    if _tag(d, node) != JNUM {
+        return ""
+    }
+    return _buf_slice(d, _node_get(d, node, 1), _node_get(d, node, 2))
+}
+
+fn json_str(d: int, node: int) -> str {
+    if _tag(d, node) != JSTR {
+        return ""
+    }
+    return _buf_slice(d, _node_get(d, node, 1), _node_get(d, node, 2))
+}
+
+fn json_arr_len(d: int, node: int) -> int {
+    if _tag(d, node) != JARR {
+        return 0
+    }
+    return _node_get(d, node, 2)
+}
+
+fn json_arr_at(d: int, node: int, i: int) -> int {
+    if _tag(d, node) != JARR {
+        return -1
+    }
+    let n = _node_get(d, node, 2)
+    if i < 0 || i >= n {
+        return -1
+    }
+    return _kids(d).get(_node_get(d, node, 1) + i)
+}
+
+fn json_obj_len(d: int, node: int) -> int {
+    if _tag(d, node) != JOBJ {
+        return 0
+    }
+    return _node_get(d, node, 2)
+}
+
+fn _obj_kid(d: int, node: int, i: int, which: int) -> int {
+    if _tag(d, node) != JOBJ {
+        return -1
+    }
+    let n = _node_get(d, node, 2)
+    if i < 0 || i >= n {
+        return -1
+    }
+    return _kids(d).get(_node_get(d, node, 1) + i * 2 + which)
+}
+
+fn json_obj_key(d: int, node: int, i: int) -> str {
+    return json_str(d, _obj_kid(d, node, i, 0))
+}
+
+fn json_obj_val(d: int, node: int, i: int) -> int {
+    return _obj_kid(d, node, i, 1)
+}
+
+// 按 key 取子节点（不存在返回 -1）
+fn json_obj_get(d: int, node: int, key: str) -> int {
+    let n = json_obj_len(d, node)
+    let mut i = 0
+    while i < n {
+        if json_obj_key(d, node, i) == key {
+            return json_obj_val(d, node, i)
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// 路径取值（单层便捷版）：json_path(doc, "a.b") 暂不支持，保持 API 最小。
+
+// ---------------------------------------------------------------------------
+// 序列化：显式 builder
+//
+// 句柄 h：+0 buf(vec[int]) / +8 stack(vec[int]) / +16 栈深
+// stack 元素编码 = count*2 + awaiting_value
+//   * key  : 若栈顶 count>0 先写 ','，count++，置 awaiting=1
+//   * value: 若 awaiting 则清标志（不写逗号），否则 count>0 写 ','，count++
+// ---------------------------------------------------------------------------
+
+fn json_new(cap: int) -> int {
+    let h = mem_alloc(24)
+    mem_store64(h, 0, vec[int].new(cap))
+    mem_store64(h, 1, vec[int].new(8))
+    mem_store64(h, 2, 0)
+    return h
+}
+
+fn _out(h: int) -> vec[int] {
+    return mem_load64(h, 0)
+}
+
+fn _stack(h: int) -> vec[int] {
+    return mem_load64(h, 1)
+}
+
+fn _depth(h: int) -> int {
+    return mem_load64(h, 2)
+}
+
+fn _top(h: int) -> int {
+    let dp = _depth(h)
+    if dp == 0 {
+        return 0
+    }
+    let st = _stack(h)
+    return st.get(dp - 1)
+}
+
+fn _set_top(h: int, v: int) -> int {
+    let dp = _depth(h)
+    if dp == 0 {
+        return 0
+    }
+    let st = _stack(h)
+    st.set(dp - 1, v)
+    return 0
+}
+
+fn _put(h: int, b: int) -> int {
+    let o = _out(h)
+    o.push(b)
+    return 0
+}
+
+fn _put_str(h: int, s: str) -> int {
+    let o = _out(h)
+    let n = len(s)
+    let mut i = 0
+    while i < n {
+        o.push(s[i])
+        i = i + 1
+    }
+    return 0
+}
+
+// 逗号守卫：value 语义
+fn _pre_value(h: int) -> int {
+    let st = _stack(h)
+    let dp = _depth(h)
+    if dp == 0 {
+        return 0
+    }
+    let t = st.get(dp - 1)
+    let await = t - (t / 2) * 2
+    if await == 1 {
+        st.set(dp - 1, t - 1)        // 清 awaiting
+        return 0
+    }
+    let count = t / 2
+    if count > 0 {
+        _put(h, 44)
+    }
+    st.set(dp - 1, count * 2 + 2)
+    return 0
+}
+
+fn json_escape_into(h: int, s: str) -> int {
+    let o = _out(h)
+    let n = len(s)
+    let mut i = 0
+    while i < n {
+        let c = s[i]
+        if c == 34 {
+            o.push(92)
+            o.push(34)
+        } else if c == 92 {
+            o.push(92)
+            o.push(92)
+        } else if c == 10 {
+            o.push(92)
+            o.push(110)
+        } else if c == 13 {
+            o.push(92)
+            o.push(114)
+        } else if c == 9 {
+            o.push(92)
+            o.push(116)
+        } else if c == 8 {
+            o.push(92)
+            o.push(98)
+        } else if c == 12 {
+            o.push(92)
+            o.push(102)
+        } else if c < 32 {
+            o.push(92)
+            o.push(117)
+            o.push(48)
+            o.push(48)
+            let hi = c >> 4
+            let lo = c & 15
+            if hi < 10 {
+                o.push(48 + hi)
+            } else {
+                o.push(87 + hi)
+            }
+            if lo < 10 {
+                o.push(48 + lo)
+            } else {
+                o.push(87 + lo)
+            }
+        } else {
+            o.push(c)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn json_escape(s: str) -> str {
+    let h = json_new(len(s) * 2 + 8)
+    json_escape_into(h, s)
+    return json_done(h)
+}
+
+fn _push_level(h: int) -> int {
+    let st = _stack(h)
+    st.push(0)
+    mem_store64(h, 2, _depth(h) + 1)
+    return 0
+}
+
+fn json_begin_obj(h: int) -> int {
+    _pre_value(h)
+    _put(h, 123)
+    _push_level(h)
+    return 0
+}
+
+fn json_end_obj(h: int) -> int {
+    if _depth(h) > 0 {
+        let st = _stack(h)
+        st.pop()
+        mem_store64(h, 2, _depth(h) - 1)
+    }
+    _put(h, 125)
+    return 0
+}
+
+fn json_begin_arr(h: int) -> int {
+    _pre_value(h)
+    _put(h, 91)
+    _push_level(h)
+    return 0
+}
+
+fn json_end_arr(h: int) -> int {
+    if _depth(h) > 0 {
+        let st = _stack(h)
+        st.pop()
+        mem_store64(h, 2, _depth(h) - 1)
+    }
+    _put(h, 93)
+    return 0
+}
+
+// key：写 "key":（逗号在此处决定）
+fn json_key(h: int, k: str) -> int {
+    let st = _stack(h)
+    let dp = _depth(h)
+    if dp == 0 {
+        return -1
+    }
+    let t = st.get(dp - 1)
+    let count = t / 2
+    if count > 0 {
+        _put(h, 44)
+    }
+    st.set(dp - 1, (count + 1) * 2 + 1)        // awaiting value = 1
+    _put(h, 34)
+    json_escape_into(h, k)
+    _put(h, 34)
+    _put(h, 58)
+    return 0
+}
+
+fn json_val_str(h: int, v: str) -> int {
+    _pre_value(h)
+    _put(h, 34)
+    json_escape_into(h, v)
+    _put(h, 34)
+    return 0
+}
+
+fn json_val_int(h: int, v: int) -> int {
+    _pre_value(h)
+    let s = v.to_str()
+    _put_str(h, s)
+    return 0
+}
+
+fn json_val_bool(h: int, v: bool) -> int {
+    _pre_value(h)
+    if v {
+        _put_str(h, "true")
+    } else {
+        _put_str(h, "false")
+    }
+    return 0
+}
+
+fn json_val_null(h: int) -> int {
+    _pre_value(h)
+    _put_str(h, "null")
+    return 0
+}
+
+// 原样插入（调用方保证是合法 JSON 片段；解析出的 num_raw 可用它回写）
+fn json_val_raw(h: int, raw: str) -> int {
+    _pre_value(h)
+    _put_str(h, raw)
+    return 0
+}
+
+fn json_key_str(h: int, k: str, v: str) -> int {
+    json_key(h, k)
+    json_val_str(h, v)
+    return 0
+}
+
+fn json_key_int(h: int, k: str, v: int) -> int {
+    json_key(h, k)
+    json_val_int(h, v)
+    return 0
+}
+
+fn json_key_bool(h: int, k: str, v: bool) -> int {
+    json_key(h, k)
+    json_val_bool(h, v)
+    return 0
+}
+
+fn json_key_null(h: int, k: str) -> int {
+    json_key(h, k)
+    json_val_null(h)
+    return 0
+}
+
+fn json_done(h: int) -> str {
+    return str_from_bytes(_out(h))
+}

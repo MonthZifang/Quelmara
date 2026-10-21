@@ -1,0 +1,649 @@
+// std/aes.qma —— AES-128 分组密码 + GCM（NIST SP 800-38D），Quelmara 自实现
+//
+// 为什么需要它：TLS 1.3 唯一强制套件是 TLS_AES_128_GCM_SHA256。没有 AEAD，
+// https/wss 无从谈起。这是 docs/TLS.md Phase A 的第二块地基（第一块是 std/sha256）。
+//
+// 实现要点：
+//   * S-box **不写字面量表**（\xNN 高位字节有已知误编译），改为运行时按
+//     GF(2^8) 求逆 + 仿射变换生成，缓存到 static_word(12) 指向的 512 字节块；
+//   * GF(2^128) 乘法用逐位算法（两个 64 位字 + 0xE1 归约），128 次/块——
+//     正确性优先，性能留给后续轮次；
+//   * 只做 128 位密钥（TLS 1.3 强制套件），AES-192/256 未做。
+//
+// static_word 占用：0–11 已归协议库（见 std/net/core.qma），本库用 12。
+
+const AES_TAB_W = 12          // static_word(12) = sbox/inv_sbox 表指针
+
+// ---------------------------------------------------------------------------
+// 表生成（GF(2^8)，生成元 3）
+// ---------------------------------------------------------------------------
+
+fn _xtime(a: int) -> int {
+    let v = (a << 1) & 0xFF
+    if (a & 0x80) != 0 {
+        v = v ^ 0x1B
+    }
+    return v
+}
+
+fn _rotl8(x: int, n: int) -> int {
+    return ((x << n) | (x >> (8 - n))) & 0xFF
+}
+
+// 建表：base[0..256) = sbox，base[256..512) = inv_sbox
+fn _build_tables() -> int {
+    let base = mem_alloc(512)
+    let exp = mem_alloc(256)
+    let log = mem_alloc(256)
+    mem_zero(log, 256)
+    let mut x = 1
+    let mut i = 0
+    while i < 255 {
+        mem_store8(exp, i, x)
+        mem_store8(log, x, i)
+        x = x ^ _xtime(x)          // 乘 3
+        i = i + 1
+    }
+    let mut a = 0
+    while a < 256 {
+        let mut inv = 0
+        if a != 0 {
+            let l = mem_load8(log, a)
+            let mut idx = 255 - l
+            if idx >= 255 {
+                idx = idx - 255          // 255 ≡ 0 (mod 255)：a=1 时 log=0
+            }
+            inv = mem_load8(exp, idx)
+        }
+        // 仿射：b ^ rotl(b,1) ^ rotl(b,2) ^ rotl(b,3) ^ rotl(b,4) ^ 0x63
+        let s = (inv ^ _rotl8(inv, 1) ^ _rotl8(inv, 2) ^ _rotl8(inv, 3)
+                 ^ _rotl8(inv, 4) ^ 0x63) & 0xFF
+        mem_store8(base, a, s)
+        mem_store8(base, 256 + s, a)
+        a = a + 1
+    }
+    mem_free(exp, 256)
+    mem_free(log, 256)
+    return base
+}
+
+fn _tables() -> int {
+    let p = mem_load64(static_word(AES_TAB_W), 0)
+    if p != 0 {
+        return p
+    }
+    let t = _build_tables()
+    mem_store64(static_word(AES_TAB_W), 0, t)
+    return t
+}
+
+fn _sbox(b: int) -> int {
+    return mem_load8(_tables(), b)
+}
+
+fn _inv_sbox(b: int) -> int {
+    return mem_load8(_tables(), 256 + b)
+}
+
+// ---------------------------------------------------------------------------
+// 密钥扩展：16 字节 key -> 176 字节轮密钥（11 组）
+// ---------------------------------------------------------------------------
+
+fn _rcon(i: int) -> int {
+    // 1,2,4,8,16,32,64,128,27,54
+    let mut v = 1
+    let mut k = 1
+    while k < i {
+        v = _xtime(v)
+        k = k + 1
+    }
+    return v
+}
+
+fn aes128_expand(key: str, rk: int) -> int {
+    let mut i = 0
+    while i < 16 {
+        mem_store8(rk, i, key[i])
+        i = i + 1
+    }
+    let mut w = 4
+    while w < 44 {
+        let b0 = mem_load8(rk, (w - 1) * 4)
+        let b1 = mem_load8(rk, (w - 1) * 4 + 1)
+        let b2 = mem_load8(rk, (w - 1) * 4 + 2)
+        let b3 = mem_load8(rk, (w - 1) * 4 + 3)
+        let mut t0 = b0
+        let mut t1 = b1
+        let mut t2 = b2
+        let mut t3 = b3
+        if (w - (w / 4) * 4) == 0 {
+            // rotword + subword + rcon
+            t0 = _sbox(b1) ^ _rcon(w / 4)
+            t1 = _sbox(b2)
+            t2 = _sbox(b3)
+            t3 = _sbox(b0)
+        }
+        mem_store8(rk, w * 4, mem_load8(rk, (w - 4) * 4) ^ t0)
+        mem_store8(rk, w * 4 + 1, mem_load8(rk, (w - 4) * 4 + 1) ^ t1)
+        mem_store8(rk, w * 4 + 2, mem_load8(rk, (w - 4) * 4 + 2) ^ t2)
+        mem_store8(rk, w * 4 + 3, mem_load8(rk, (w - 4) * 4 + 3) ^ t3)
+        w = w + 1
+    }
+    return 0
+}
+
+// 状态按列主序：st[4*c + r]（AES 规范输入顺序即字节序）
+fn _add_round_key(st: int, rk: int, round: int) -> int {
+    let mut i = 0
+    while i < 16 {
+        mem_store8(st, i, mem_load8(st, i) ^ mem_load8(rk, round * 16 + i))
+        i = i + 1
+    }
+    return 0
+}
+
+fn _sub_bytes(st: int) -> int {
+    let mut i = 0
+    while i < 16 {
+        mem_store8(st, i, _sbox(mem_load8(st, i)))
+        i = i + 1
+    }
+    return 0
+}
+
+fn _inv_sub_bytes(st: int) -> int {
+    let mut i = 0
+    while i < 16 {
+        mem_store8(st, i, _inv_sbox(mem_load8(st, i)))
+        i = i + 1
+    }
+    return 0
+}
+
+fn _shift_rows(st: int) -> int {
+    let tmp = mem_alloc(16)
+    let mut c = 0
+    while c < 4 {
+        let mut r = 0
+        while r < 4 {
+            mem_store8(tmp, 4 * c + r, mem_load8(st, 4 * ((c + r) - ((c + r) / 4) * 4) + r))
+            r = r + 1
+        }
+        c = c + 1
+    }
+    let mut i = 0
+    while i < 16 {
+        mem_store8(st, i, mem_load8(tmp, i))
+        i = i + 1
+    }
+    mem_free(tmp, 16)
+    return 0
+}
+
+fn _inv_shift_rows(st: int) -> int {
+    let tmp = mem_alloc(16)
+    let mut c = 0
+    while c < 4 {
+        let mut r = 0
+        while r < 4 {
+            // 右移 r：源列 = (c - r + 4) % 4
+            let mut sc = c - r
+            if sc < 0 {
+                sc = sc + 4
+            }
+            mem_store8(tmp, 4 * c + r, mem_load8(st, 4 * sc + r))
+            r = r + 1
+        }
+        c = c + 1
+    }
+    let mut i = 0
+    while i < 16 {
+        mem_store8(st, i, mem_load8(tmp, i))
+        i = i + 1
+    }
+    mem_free(tmp, 16)
+    return 0
+}
+
+fn _gmul(a: int, b: int) -> int {
+    let mut p = 0
+    let mut x = a
+    let mut y = b
+    let mut i = 0
+    while i < 8 {
+        if (y & 1) != 0 {
+            p = p ^ x
+        }
+        x = _xtime(x)
+        y = y >> 1
+        i = i + 1
+    }
+    return p & 0xFF
+}
+
+fn _mix_columns(st: int) -> int {
+    let mut c = 0
+    while c < 4 {
+        let a0 = mem_load8(st, 4 * c)
+        let a1 = mem_load8(st, 4 * c + 1)
+        let a2 = mem_load8(st, 4 * c + 2)
+        let a3 = mem_load8(st, 4 * c + 3)
+        mem_store8(st, 4 * c, _gmul(a0, 2) ^ _gmul(a1, 3) ^ a2 ^ a3)
+        mem_store8(st, 4 * c + 1, a0 ^ _gmul(a1, 2) ^ _gmul(a2, 3) ^ a3)
+        mem_store8(st, 4 * c + 2, a0 ^ a1 ^ _gmul(a2, 2) ^ _gmul(a3, 3))
+        mem_store8(st, 4 * c + 3, _gmul(a0, 3) ^ a1 ^ a2 ^ _gmul(a3, 2))
+        c = c + 1
+    }
+    return 0
+}
+
+fn _inv_mix_columns(st: int) -> int {
+    let mut c = 0
+    while c < 4 {
+        let a0 = mem_load8(st, 4 * c)
+        let a1 = mem_load8(st, 4 * c + 1)
+        let a2 = mem_load8(st, 4 * c + 2)
+        let a3 = mem_load8(st, 4 * c + 3)
+        mem_store8(st, 4 * c, _gmul(a0, 14) ^ _gmul(a1, 11) ^ _gmul(a2, 13) ^ _gmul(a3, 9))
+        mem_store8(st, 4 * c + 1, _gmul(a0, 9) ^ _gmul(a1, 14) ^ _gmul(a2, 11) ^ _gmul(a3, 13))
+        mem_store8(st, 4 * c + 2, _gmul(a0, 13) ^ _gmul(a1, 9) ^ _gmul(a2, 14) ^ _gmul(a3, 11))
+        mem_store8(st, 4 * c + 3, _gmul(a0, 11) ^ _gmul(a1, 13) ^ _gmul(a2, 9) ^ _gmul(a3, 14))
+        c = c + 1
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// 分组加解密：in/out 都是 16 字节缓冲，rk 是 176 字节
+// ---------------------------------------------------------------------------
+
+fn aes128_encrypt_block(inp: int, out: int, rk: int) -> int {
+    let st = mem_alloc(16)
+    let mut i = 0
+    while i < 16 {
+        mem_store8(st, i, mem_load8(inp, i))
+        i = i + 1
+    }
+    _add_round_key(st, rk, 0)
+    let mut r = 1
+    while r < 10 {
+        _sub_bytes(st)
+        _shift_rows(st)
+        _mix_columns(st)
+        _add_round_key(st, rk, r)
+        r = r + 1
+    }
+    _sub_bytes(st)
+    _shift_rows(st)
+    _add_round_key(st, rk, 10)
+    i = 0
+    while i < 16 {
+        mem_store8(out, i, mem_load8(st, i))
+        i = i + 1
+    }
+    mem_free(st, 16)
+    return 0
+}
+
+fn aes128_decrypt_block(inp: int, out: int, rk: int) -> int {
+    let st = mem_alloc(16)
+    let mut i = 0
+    while i < 16 {
+        mem_store8(st, i, mem_load8(inp, i))
+        i = i + 1
+    }
+    _add_round_key(st, rk, 10)
+    let mut r = 9
+    while r >= 1 {
+        _inv_shift_rows(st)
+        _inv_sub_bytes(st)
+        _add_round_key(st, rk, r)
+        _inv_mix_columns(st)
+        r = r - 1
+    }
+    _inv_shift_rows(st)
+    _inv_sub_bytes(st)
+    _add_round_key(st, rk, 0)
+    i = 0
+    while i < 16 {
+        mem_store8(out, i, mem_load8(st, i))
+        i = i + 1
+    }
+    mem_free(st, 16)
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// GCM：GHASH（GF(2^128)，两个 64 位字）+ CTR + tag
+// ---------------------------------------------------------------------------
+
+// 大端 64 位读写（GCM 的 128 位值按大端解释，不能直接用 mem_load64）
+fn _be64(p: int, w: int) -> int {
+    let mut v = 0
+    let mut i = 0
+    while i < 8 {
+        v = (v << 8) | mem_load8(p, w * 8 + i)
+        i = i + 1
+    }
+    return v
+}
+
+fn _put_be64(p: int, w: int, v: int) -> int {
+    let mut i = 0
+    while i < 8 {
+        mem_store8(p, w * 8 + i, (v >> (56 - i * 8)) & 0xFF)
+        i = i + 1
+    }
+    return 0
+}
+
+// GHASH 的 128 位乘法：Z = X * H（X、H 都是 16 字节大端缓冲）
+// 逐位算法：Z 累加 V，V 每轮右移并在最低位为 1 时异或 R=0xE1<<120。
+fn _gf_mul(x: int, h: int, out: int) -> int {
+    // 规范算法：V = X，按 H 的位（MSB 优先）决定是否累加；V 每轮右移并归约。
+    let hh = _be64(h, 0)
+    let hl = _be64(h, 1)
+    let mut vh = _be64(x, 0)
+    let mut vl = _be64(x, 1)
+    let mut zh = 0
+    let mut zl = 0
+    let mut i = 0
+    while i < 128 {
+        let mut bit = 0
+        if i < 64 {
+            bit = (hh >> (63 - i)) & 1
+        } else {
+            bit = (hl >> (127 - i)) & 1
+        }
+        if bit != 0 {
+            zh = zh ^ vh
+            zl = zl ^ vl
+        }
+        let lsb = vl & 1
+        // 128 位值的高位可能为 1，必须用逻辑右移（>>>），否则符号位会灌进来
+        let nh = vh >>> 1
+        let nl = (vl >>> 1) | ((vh & 1) << 63)
+        vh = nh
+        vl = nl
+        if lsb != 0 {
+            vh = vh ^ 0xE100000000000000
+        }
+        i = i + 1
+    }
+    _put_be64(out, 0, zh)
+    _put_be64(out, 1, zl)
+    return 0
+}
+
+// GHASH(Y, H, data)：data 是 16 字节块序列，len 必须是 16 的倍数
+fn ghash(h: int, data: int, n: int, out: int) -> int {
+    let y = mem_alloc(16)
+    mem_zero(y, 16)
+    let tmp = mem_alloc(16)
+    let mut p = 0
+    while p < n {
+        let mut i = 0
+        while i < 16 {
+            mem_store8(tmp, i, mem_load8(y, i) ^ mem_load8(data, p + i))
+            i = i + 1
+        }
+        _gf_mul(tmp, h, y)
+        p = p + 16
+    }
+    let mut k = 0
+    while k < 16 {
+        mem_store8(out, k, mem_load8(y, k))
+        k = k + 1
+    }
+    mem_free(y, 16)
+    mem_free(tmp, 16)
+    return 0
+}
+
+// 大端 32 位自增（GCM 计数器）
+fn _inc32(ctr: int) -> int {
+    let mut i = 15
+    let mut carry = 1
+    while i >= 12 && carry == 1 {
+        let v = mem_load8(ctr, i) + 1
+        if v > 255 {
+            mem_store8(ctr, i, 0)
+        } else {
+            mem_store8(ctr, i, v)
+            carry = 0
+        }
+        i = i - 1
+    }
+    return 0
+}
+
+// CTR 加解密（对称）：in/out 可同缓冲；n 不要求 16 对齐（尾部按流截断）
+fn _ctr_xor(inp: int, n: int, out: int, ctr: int, rk: int) -> int {
+    let blk = mem_alloc(16)
+    let mut p = 0
+    while p < n {
+        aes128_encrypt_block(ctr, blk, rk)
+        let mut i = 0
+        while i < 16 && p + i < n {
+            mem_store8(out, p + i, mem_load8(inp, p + i) ^ mem_load8(blk, i))
+            i = i + 1
+        }
+        _inc32(ctr)
+        p = p + 16
+    }
+    mem_free(blk, 16)
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// 对外：AES-128-GCM
+// ---------------------------------------------------------------------------
+
+// gcm_encrypt(key, iv12, aad, plain) -> str
+//   返回密文 || 16 字节 tag（TLS 1.3 的 AEAD 布局）
+fn gcm_encrypt(key: str, iv: str, aad: str, plain: str) -> str {
+    let rk = mem_alloc(176)
+    aes128_expand(key, rk)
+
+    let h = mem_alloc(16)
+    let zero = mem_alloc(16)
+    mem_zero(zero, 16)
+    aes128_encrypt_block(zero, h, rk)
+
+    // J0 = IV || 0^31 || 1（96 位 IV）
+    let j0 = mem_alloc(16)
+    let mut i = 0
+    while i < 12 {
+        mem_store8(j0, i, iv[i])
+        i = i + 1
+    }
+    mem_store8(j0, 12, 0)
+    mem_store8(j0, 13, 0)
+    mem_store8(j0, 14, 0)
+    mem_store8(j0, 15, 1)
+
+    // 密文
+    let n = len(plain)
+    let ctr = mem_alloc(16)
+    let mut k = 0
+    while k < 16 {
+        mem_store8(ctr, k, mem_load8(j0, k))
+        k = k + 1
+    }
+    _inc32(ctr)
+    let pin = mem_alloc(n + 16)
+    mem_zero(pin, n + 16)
+    k = 0
+    while k < n {
+        mem_store8(pin, k, plain[k])
+        k = k + 1
+    }
+    let pout = mem_alloc(n + 16)
+    _ctr_xor(pin, n, pout, ctr, rk)
+
+    // GHASH 输入：AAD 补齐 + 密文补齐 + [len(AAD)*8]64 || [len(C)*8]64
+    let an = len(aad)
+    let aad_pad = ((an + 15) / 16) * 16
+    let c_pad = ((n + 15) / 16) * 16
+    let total = aad_pad + c_pad + 16
+    let g = mem_alloc(total)
+    mem_zero(g, total)
+    k = 0
+    while k < an {
+        mem_store8(g, k, aad[k])
+        k = k + 1
+    }
+    k = 0
+    while k < n {
+        mem_store8(g, aad_pad + k, mem_load8(pout, k))
+        k = k + 1
+    }
+    let bits_a = an * 8
+    let bits_c = n * 8
+    let mut b = 0
+    while b < 8 {
+        mem_store8(g, total - 16 + b, (bits_a >> (56 - b * 8)) & 0xFF)
+        mem_store8(g, total - 8 + b, (bits_c >> (56 - b * 8)) & 0xFF)
+        b = b + 1
+    }
+    let s = mem_alloc(16)
+    ghash(h, g, total, s)
+
+    // tag = E(K, J0) ^ S
+    let ej0 = mem_alloc(16)
+    aes128_encrypt_block(j0, ej0, rk)
+    let res = vec[int].new(n + 20)
+    k = 0
+    while k < n {
+        res.push(mem_load8(pout, k))
+        k = k + 1
+    }
+    k = 0
+    while k < 16 {
+        res.push(mem_load8(ej0, k) ^ mem_load8(s, k))
+        k = k + 1
+    }
+
+    mem_free(rk, 176)
+    mem_free(h, 16)
+    mem_free(zero, 16)
+    mem_free(j0, 16)
+    mem_free(ctr, 16)
+    mem_free(pin, n + 16)
+    mem_free(pout, n + 16)
+    mem_free(g, total)
+    mem_free(s, 16)
+    mem_free(ej0, 16)
+    return str_from_bytes(res)
+}
+
+// gcm_decrypt(key, iv, aad, sealed) -> str
+//   sealed = 密文 || tag；tag 不匹配返回 ""（调用方必须当作失败处理）
+fn gcm_decrypt(key: str, iv: str, aad: str, sealed: str) -> str {
+    let sn = len(sealed)
+    if sn < 16 {
+        return ""
+    }
+    let n = sn - 16
+    let rk = mem_alloc(176)
+    aes128_expand(key, rk)
+
+    let h = mem_alloc(16)
+    let zero = mem_alloc(16)
+    mem_zero(zero, 16)
+    aes128_encrypt_block(zero, h, rk)
+
+    let j0 = mem_alloc(16)
+    let mut i = 0
+    while i < 12 {
+        mem_store8(j0, i, iv[i])
+        i = i + 1
+    }
+    mem_store8(j0, 12, 0)
+    mem_store8(j0, 13, 0)
+    mem_store8(j0, 14, 0)
+    mem_store8(j0, 15, 1)
+
+    let cin = mem_alloc(n + 16)
+    mem_zero(cin, n + 16)
+    let mut k = 0
+    while k < n {
+        mem_store8(cin, k, sealed[k])
+        k = k + 1
+    }
+
+    // 先验 tag
+    let an = len(aad)
+    let aad_pad = ((an + 15) / 16) * 16
+    let c_pad = ((n + 15) / 16) * 16
+    let total = aad_pad + c_pad + 16
+    let g = mem_alloc(total)
+    mem_zero(g, total)
+    k = 0
+    while k < an {
+        mem_store8(g, k, aad[k])
+        k = k + 1
+    }
+    k = 0
+    while k < n {
+        mem_store8(g, aad_pad + k, mem_load8(cin, k))
+        k = k + 1
+    }
+    let bits_a = an * 8
+    let bits_c = n * 8
+    let mut b = 0
+    while b < 8 {
+        mem_store8(g, total - 16 + b, (bits_a >> (56 - b * 8)) & 0xFF)
+        mem_store8(g, total - 8 + b, (bits_c >> (56 - b * 8)) & 0xFF)
+        b = b + 1
+    }
+    let s = mem_alloc(16)
+    ghash(h, g, total, s)
+    let ej0 = mem_alloc(16)
+    aes128_encrypt_block(j0, ej0, rk)
+    let mut diff = 0
+    k = 0
+    while k < 16 {
+        diff = diff | ((mem_load8(ej0, k) ^ mem_load8(s, k)) ^ sealed[n + k])
+        k = k + 1
+    }
+    if diff != 0 {
+        mem_free(rk, 176)
+        mem_free(h, 16)
+        mem_free(zero, 16)
+        mem_free(j0, 16)
+        mem_free(cin, n + 16)
+        mem_free(g, total)
+        mem_free(s, 16)
+        mem_free(ej0, 16)
+        return ""
+    }
+
+    let ctr = mem_alloc(16)
+    k = 0
+    while k < 16 {
+        mem_store8(ctr, k, mem_load8(j0, k))
+        k = k + 1
+    }
+    _inc32(ctr)
+    let pout = mem_alloc(n + 16)
+    _ctr_xor(cin, n, pout, ctr, rk)
+    let res = vec[int].new(n + 1)
+    k = 0
+    while k < n {
+        res.push(mem_load8(pout, k))
+        k = k + 1
+    }
+
+    mem_free(rk, 176)
+    mem_free(h, 16)
+    mem_free(zero, 16)
+    mem_free(j0, 16)
+    mem_free(cin, n + 16)
+    mem_free(g, total)
+    mem_free(s, 16)
+    mem_free(ej0, 16)
+    mem_free(ctr, 16)
+    mem_free(pout, n + 16)
+    return str_from_bytes(res)
+}

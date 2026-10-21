@@ -21,7 +21,6 @@ sys.path.insert(0, STAGE0)
 
 # 唯一允许保留旧名的文件
 ALLOW = {
-    "docs/MIGRATION_rosoto_to_quelmara.md",
     "tools/dev/migrate_names.py",
     "tools/dev/check_names.py",
 }

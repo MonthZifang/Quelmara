@@ -1,0 +1,8 @@
+// 负向夹具：同一个句柄 drop 两次，必须编译失败
+module own_double_drop
+struct P { x: int }
+fn main() {
+    let a = rc_new(P { x: 1 })
+    rc_drop(a)
+    rc_drop(a)
+}

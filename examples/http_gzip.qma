@@ -1,0 +1,34 @@
+// examples/http_gzip.qma —— HTTP/1.1 + Content-Encoding: gzip（v1.6）
+//
+// 演示：同一个路由按 Accept-Encoding 自动压缩大响应；小响应不压。
+//   GET /            -> 1 KB 文本（客户端支持 gzip 时压缩）
+//   GET /small       -> 10 字节（永远不压）
+//   GET /quit        -> 退出（方便脚本化测试）
+//
+// 跑：python tools/stage0/qlm_cli.py run examples/http_gzip.qma --target win
+module http_gzip
+
+import std.http
+import std.str
+
+fn page() -> str {
+    return str_repeat("<p>quelmara gzip demo: the quick brown fox jumps over the lazy dog</p>\n", 20)
+}
+
+fn route(fd: int) -> int {
+    let p = http_path(fd)
+    if p == "/quit" {
+        http_text(fd, 200, "bye\n")
+        exit(0)
+    }
+    if p == "/small" {
+        http_text(fd, 200, "tiny")
+        return 1
+    }
+    http_html_auto(fd, 200, page())
+    return 1
+}
+
+fn main() {
+    http_serve(18080, 128, route)
+}

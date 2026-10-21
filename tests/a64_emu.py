@@ -142,6 +142,11 @@ class A64:
             rn = (w >> 5) & 31
             self.pc = self.get(rn) & ~3
             return
+        # CSEL Xd, Xn, Xm, cond（条件选择：flags 满足 cond 取 Xn，否则 Xm）
+        if (w & 0xFFE00C00) == 0x1A800000:
+            rd, rn, rm, cond = w & 31, (w >> 5) & 31, (w >> 16) & 31, (w >> 12) & 15
+            self.put(rd, self.get(rn) if self.cond_holds(cond) else self.get(rm))
+            return
         # B / BL
         if (w & 0xFC000000) == 0x14000000 or (w & 0xFC000000) == 0x94000000:
             off = self.sext(w & 0x3FFFFFF, 26) * 4
@@ -231,6 +236,22 @@ class A64:
             rn, imm = (w >> 5) & 31, (w >> 10) & 0xFFF
             a = self.get(rn)
             self.set_flags_sub(a, imm, (a - imm) & (2**64 - 1))
+            return
+        # SUBS reg（cssub：出差并置标志）——CMP 是 Rd=31 的特例
+        if (w & 0xFFE0001F) == 0xEB000000:
+            rd, rn, rm = w & 31, (w >> 5) & 31, (w >> 16) & 31
+            a, b = self.get(rn), self.get(rm)
+            r = (a - b) & (2**64 - 1)
+            self.put(rd, r)
+            self.set_flags_sub(a, b, r)
+            return
+        # SUBS imm
+        if (w & 0x7F800000) == 0x71000000:
+            rd, rn, imm = w & 31, (w >> 5) & 31, (w >> 10) & 0xFFF
+            a = self.get(rn)
+            r = (a - imm) & (2**64 - 1)
+            self.put(rd, r)
+            self.set_flags_sub(a, imm, r)
             return
         # UBFM / SBFM（用于 lsl/lsr/asr 立即数）
         if (w & 0xFFC00000) in (0xD3400000, 0x93400000):

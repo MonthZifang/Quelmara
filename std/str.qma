@@ -1,0 +1,518 @@
+// std/str.qma —— 字符串工具（ASCII 视角，按字节操作），Quelmara 自实现
+//
+// 为什么需要它：语言内建只有 substr/chr/len/s[i]/to_int/to_str，写业务代码
+// 连 split/trim 都要手写循环。这一层是"HTTP 服务能对外交付"的第二件套。
+//
+// 命名纪律：全部带 str_ 前缀。原因有两个——
+//   1) import 是扁平合并（无命名空间），`join` 已被任务句柄占用；
+//   2) 库与用户代码同处一个命名空间，前缀是唯一可靠的隔离手段（见 docs/GAPS.md §2）。
+//
+// 语义边界（写进文档，不做惊喜）：
+//   * 全部按**字节**处理，不做 UTF-8 解码；大小写只对 ASCII A-Z/a-z 生效；
+//   * 找不到返回 -1，空 needle 返回 0（与 std/mem.buf_find 一致）；
+//   * split 的分隔符为空时返回"整体一项"，不拆成单字符（避免歧义）。
+
+// ---------------------------------------------------------------------------
+// 构造：vec[int] 字节缓冲 -> str（一次分配，避免 str + 的 O(n²)）
+// ---------------------------------------------------------------------------
+
+fn _sb_new(cap: int) -> vec[int] {
+    return vec[int].new(cap)
+}
+
+fn _sb_str(b: vec[int]) -> str {
+    return str_from_bytes(b)
+}
+
+// ---------------------------------------------------------------------------
+// 查找与判定
+// ---------------------------------------------------------------------------
+
+// str_find(s, needle) -> int：首个出现位置，找不到 -1
+fn str_find(s: str, needle: str) -> int {
+    return str_find_from(s, 0, needle)
+}
+
+fn str_find_from(s: str, from: int, needle: str) -> int {
+    let n = len(s)
+    let m = len(needle)
+    if m == 0 {
+        return 0
+    }
+    if from < 0 {
+        return -1
+    }
+    let mut i = from
+    while i + m <= n {
+        let mut k = 0
+        let mut ok = 1
+        while k < m {
+            if s[i + k] != needle[k] {
+                ok = 0
+                k = m
+            } else {
+                k = k + 1
+            }
+        }
+        if ok == 1 {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// 反向查找：从 need 的位置往前找最后一次出现
+fn str_rfind(s: str, needle: str) -> int {
+    let n = len(s)
+    let m = len(needle)
+    if m == 0 {
+        return 0
+    }
+    let mut i = n - m
+    while i >= 0 {
+        let mut k = 0
+        let mut ok = 1
+        while k < m {
+            if s[i + k] != needle[k] {
+                ok = 0
+                k = m
+            } else {
+                k = k + 1
+            }
+        }
+        if ok == 1 {
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+fn str_contains(s: str, needle: str) -> bool {
+    return str_find(s, needle) >= 0
+}
+
+fn str_starts_with(s: str, p: str) -> bool {
+    let n = len(s)
+    let m = len(p)
+    if m > n {
+        return false
+    }
+    let mut i = 0
+    while i < m {
+        if s[i] != p[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn str_ends_with(s: str, p: str) -> bool {
+    let n = len(s)
+    let m = len(p)
+    if m > n {
+        return false
+    }
+    let off = n - m
+    let mut i = 0
+    while i < m {
+        if s[off + i] != p[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn str_count(s: str, needle: str) -> int {
+    let m = len(needle)
+    if m == 0 {
+        return 0
+    }
+    let mut n = 0
+    let mut i = 0
+    while true {
+        let p = str_find_from(s, i, needle)
+        if p < 0 {
+            return n
+        }
+        n = n + 1
+        i = p + m
+    }
+    return n
+}
+
+// ---------------------------------------------------------------------------
+// 裁剪：ASCII 空白（空格 / \t / \r / \n / \v / \f）
+// ---------------------------------------------------------------------------
+
+fn _is_space(b: int) -> bool {
+    if b == 32 { return true }
+    if b == 9 { return true }
+    if b == 10 { return true }
+    if b == 13 { return true }
+    if b == 11 { return true }
+    if b == 12 { return true }
+    return false
+}
+
+fn str_trim_left(s: str) -> str {
+    let n = len(s)
+    let mut i = 0
+    while i < n {
+        if _is_space(s[i]) {
+            i = i + 1
+        } else {
+            return substr(s, i, n - i)
+        }
+    }
+    return ""
+}
+
+fn str_trim_right(s: str) -> str {
+    let n = len(s)
+    let mut e = n
+    while e > 0 {
+        if _is_space(s[e - 1]) {
+            e = e - 1
+        } else {
+            return substr(s, 0, e)
+        }
+    }
+    return ""
+}
+
+fn str_trim(s: str) -> str {
+    let t = str_trim_left(s)
+    return str_trim_right(t)
+}
+
+// ---------------------------------------------------------------------------
+// 大小写（仅 ASCII；非 A-Z/a-z 原样保留）
+// ---------------------------------------------------------------------------
+
+fn str_upper(s: str) -> str {
+    let n = len(s)
+    let b = _sb_new(n + 1)
+    let mut i = 0
+    while i < n {
+        let c = s[i]
+        if c >= 97 && c <= 122 {
+            b.push(c - 32)
+        } else {
+            b.push(c)
+        }
+        i = i + 1
+    }
+    return _sb_str(b)
+}
+
+fn str_lower(s: str) -> str {
+    let n = len(s)
+    let b = _sb_new(n + 1)
+    let mut i = 0
+    while i < n {
+        let c = s[i]
+        if c >= 65 && c <= 90 {
+            b.push(c + 32)
+        } else {
+            b.push(c)
+        }
+        i = i + 1
+    }
+    return _sb_str(b)
+}
+
+// ASCII 忽略大小写比较（HTTP 头名 / 方法名常用；RFC 7230 规定 token 是 ASCII）
+fn str_eq_ci(a: str, b: str) -> bool {
+    if len(a) != len(b) {
+        return false
+    }
+    let mut i = 0
+    while i < len(a) {
+        let x = a[i]
+        let y = b[i]
+        let mut cx = x
+        let mut cy = y
+        if x >= 65 && x <= 90 { cx = x + 32 }
+        if y >= 65 && y <= 90 { cy = y + 32 }
+        if cx != cy {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ---------------------------------------------------------------------------
+// 重复 / 拼接
+// ---------------------------------------------------------------------------
+
+fn str_repeat(s: str, n: int) -> str {
+    if n <= 0 {
+        return ""
+    }
+    let m = len(s)
+    let b = _sb_new(m * n + 1)
+    let mut r = 0
+    while r < n {
+        let mut i = 0
+        while i < m {
+            b.push(s[i])
+            i = i + 1
+        }
+        r = r + 1
+    }
+    return _sb_str(b)
+}
+
+// 用分隔符拼 vec[str]（对应 Python 的 sep.join(list)）
+fn str_join(parts: vec[str], sep: str) -> str {
+    let n = len(parts)
+    if n == 0 {
+        return ""
+    }
+    let sl = len(sep)
+    let mut total = 0
+    let mut i = 0
+    while i < n {
+        total = total + len(parts.get(i))
+        i = i + 1
+    }
+    total = total + sl * (n - 1)
+    let b = _sb_new(total + 1)
+    let mut j = 0
+    while j < n {
+        let p = parts.get(j)
+        let mut k = 0
+        while k < len(p) {
+            b.push(p[k])
+            k = k + 1
+        }
+        if j + 1 < n {
+            let mut q = 0
+            while q < sl {
+                b.push(sep[q])
+                q = q + 1
+            }
+        }
+        j = j + 1
+    }
+    return _sb_str(b)
+}
+
+// ---------------------------------------------------------------------------
+// 拆分
+// ---------------------------------------------------------------------------
+
+// 判断 s 的 i 位置是否以 p 开头（split 的匹配原语，避免循环内 substr）
+fn _match_at(s: str, i: int, p: str) -> bool {
+    let m = len(p)
+    if i + m > len(s) {
+        return false
+    }
+    let mut k = 0
+    while k < m {
+        if s[i + k] != p[k] {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+// str_split(s, sep) -> vec[str]：单遍扫描拆分。sep 为空 -> 整体一项。
+// 实现纪律：循环内不调用 substr（v1.5 实测"循环内 substr + 调用结果做下标"
+// 会被优化器误编译），改为累积字节缓冲、到分隔符处一次性成串。
+fn str_split(s: str, sep: str) -> vec[str] {
+    let out = vec[str].new(4)
+    let m = len(sep)
+    if m == 0 {
+        out.push(s)
+        return out
+    }
+    let n = len(s)
+    let cur = vec[int].new(16)
+    let mut i = 0
+    while i < n {
+        if _match_at(s, i, sep) {
+            out.push(str_from_bytes(cur))
+            cur.clear()
+            i = i + m
+        } else {
+            cur.push(s[i])
+            i = i + 1
+        }
+    }
+    out.push(str_from_bytes(cur))
+    return out
+}
+
+// 只拆前 max_parts-1 次，剩余整段作为最后一项（HTTP 请求行等场景）
+fn str_split_n(s: str, sep: str, max_parts: int) -> vec[str] {
+    let out = vec[str].new(4)
+    let m = len(sep)
+    if m == 0 || max_parts <= 1 {
+        out.push(s)
+        return out
+    }
+    let n = len(s)
+    let cur = vec[int].new(16)
+    let mut i = 0
+    let mut parts = 1
+    while i < n {
+        if parts < max_parts && _match_at(s, i, sep) {
+            out.push(str_from_bytes(cur))
+            cur.clear()
+            i = i + m
+            parts = parts + 1
+        } else {
+            cur.push(s[i])
+            i = i + 1
+        }
+    }
+    out.push(str_from_bytes(cur))
+    return out
+}
+
+// 按行拆（\n，自动去掉行尾 \r），日志/配置/HTTP 头常用
+fn str_lines(s: str) -> vec[str] {
+    let out = vec[str].new(8)
+    let n = len(s)
+    let cur = vec[int].new(64)
+    let mut i = 0
+    while i < n {
+        let c = s[i]
+        if c == 10 {
+            out.push(str_from_bytes(cur))
+            cur.clear()
+        } else if c == 13 && i + 1 < n && s[i + 1] == 10 {
+            // CRLF：\r 交给下一轮的 \n 处理，不进入行内容
+        } else {
+            cur.push(c)
+        }
+        i = i + 1
+    }
+    if len(cur) > 0 {
+        out.push(str_from_bytes(cur))
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// 替换
+// ---------------------------------------------------------------------------
+
+fn str_replace(s: str, from: str, to: str) -> str {
+    let m = len(from)
+    if m == 0 {
+        return s
+    }
+    let c = str_count(s, from)
+    if c == 0 {
+        return s
+    }
+    let tl = len(to)
+    let total = len(s) + c * (tl - m)
+    if total <= 0 {
+        return ""
+    }
+    let b = _sb_new(total + 1)
+    let n = len(s)
+    let mut i = 0
+    while true {
+        let p = str_find_from(s, i, from)
+        if p < 0 {
+            while i < n {
+                b.push(s[i])
+                i = i + 1
+            }
+            return _sb_str(b)
+        }
+        while i < p {
+            b.push(s[i])
+            i = i + 1
+        }
+        let mut k = 0
+        while k < tl {
+            b.push(to[k])
+            k = k + 1
+        }
+        i = p + m
+    }
+    return _sb_str(b)
+}
+
+fn str_replace_first(s: str, from: str, to: str) -> str {
+    let p = str_find(s, from)
+    if p < 0 {
+        return s
+    }
+    return substr(s, 0, p) + to + substr(s, p + len(from), len(s) - p - len(from))
+}
+
+// ---------------------------------------------------------------------------
+// 前缀/后缀/切片包装
+// ---------------------------------------------------------------------------
+
+fn str_slice(s: str, lo: int, hi: int) -> str {
+    let n = len(s)
+    let mut a = lo
+    let mut b = hi
+    if a < 0 { a = 0 }
+    if b > n { b = n }
+    if a >= b {
+        return ""
+    }
+    return substr(s, a, b - a)
+}
+
+fn str_left(s: str, n: int) -> str {
+    return str_slice(s, 0, n)
+}
+
+fn str_right(s: str, n: int) -> str {
+    return str_slice(s, len(s) - n, len(s))
+}
+
+// 去掉前缀/后缀（不存在则原样返回）
+fn str_strip_prefix(s: str, p: str) -> str {
+    if str_starts_with(s, p) {
+        return substr(s, len(p), len(s) - len(p))
+    }
+    return s
+}
+
+fn str_strip_suffix(s: str, p: str) -> str {
+    if str_ends_with(s, p) {
+        return substr(s, 0, len(s) - len(p))
+    }
+    return s
+}
+
+// ---------------------------------------------------------------------------
+// 数字格式化辅助（业务日志/JSON 组装常用）
+// ---------------------------------------------------------------------------
+
+// 左补字符到宽度（str_pad_left("7", 3, "0") = "007"）
+fn str_pad_left(s: str, width: int, pad: str) -> str {
+    let n = len(s)
+    if n >= width || len(pad) == 0 {
+        return s
+    }
+    let need = width - n
+    let b = _sb_new(width + 1)
+    let mut i = 0
+    while i < need {
+        b.push(pad[0])
+        i = i + 1
+    }
+    let mut j = 0
+    while j < n {
+        b.push(s[j])
+        j = j + 1
+    }
+    return _sb_str(b)
+}

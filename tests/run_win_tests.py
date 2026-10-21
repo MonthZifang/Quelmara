@@ -547,6 +547,44 @@ def main():
     print("== [3i] 函数名作值 + callr 间接调用（v1.4 地基） ==")
     case_selfcheck("callr", "tests/t38_callr.qma")
 
+    print("== [3k] 标准库 P0 四件套：sha256 / str / url / json（v1.6） ==")
+    case_selfcheck("t43_sha256", "tests/t43_sha256.qma")
+    case_selfcheck("t44_str", "tests/t44_str.qma")
+    case_selfcheck("t45_url", "tests/t45_url.qma")
+    case_selfcheck("t46_json", "tests/t46_json.qma")
+    case_selfcheck("t47_gzip", "tests/t47_gzip.qma")
+    case_selfcheck("t48_aes", "tests/t48_aes.qma")
+
+    print("== [3j] 语言特性 v1.8（宽度 / @simd / rc[T] / 所有权） ==")
+    case_selfcheck("t49_width", "tests/t49_width.qma")
+    case_selfcheck("t50_simd", "tests/t50_simd.qma")
+    case_selfcheck("t51_rc", "tests/t51_rc.qma")
+    case_selfcheck("t52_iface", "tests/t52_iface.qma")
+    case_selfcheck("t53_regress", "tests/t53_regress.qma")
+    # 所有权负向：这三个必须被借用检查拦下（编译失败）
+    for nm, why, needle in (
+            ("own_use_after_drop", "use-after-drop", "所有权检查"),
+            ("own_double_drop", "double-free", "所有权检查"),
+            ("own_move_use", "move-then-use", "所有权检查"),
+            ("iface_missing", "impl 缺方法", "缺少方法"),
+            ("iface_rettype", "impl 返回类型不符", "返回类型与接口声明不一致")):
+        try:
+            build(os.path.join(ROOT, f"tests/bad/{nm}.qma"),
+                  os.path.join(ROOT, "build", f"bad_{nm}.exe"))
+        except SyntaxError as ex:
+            ok(f"编译期拦下 {why}") if needle in str(ex) \
+                else bad(f"{nm} 报错但信息不符（期望含 {needle!r}）：{ex}")
+        else:
+            bad(f"{nm} 应当编译失败却通过了")
+    # gzip 的唯一权威证明：Python zlib 逐字节解压
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "tests/gzip_interop.py")],
+                       cwd=ROOT, capture_output=True, text=True, errors="replace")
+    if r.returncode == 0:
+        ok("gzip：zlib 解压逐字节一致（%d 个样本）"
+           % sum(1 for ln in r.stdout.splitlines() if "[PASS]" in ln))
+    else:
+        bad(f"gzip zlib 互操作失败：{r.stdout[-300:]}{r.stderr[-200:]}")
+
     print("== [3j] 高并发网络：IOCP reactor + 回调（v1.4） ==")
     test_net_reactor()
 

@@ -1,0 +1,21 @@
+// std/core.qma —— 标准库雏形：整数与通用工具
+// 扁平合并语义：import std.core 后这些函数直接可见（无命名空间前缀）。
+
+fn abs(x: int) -> int {
+    if x < 0 { return -x }
+    return x
+}
+
+fn max2(a: int, b: int) -> int {
+    if a > b { return a }
+    return b
+}
+
+fn min2(a: int, b: int) -> int {
+    if a < b { return a }
+    return b
+}
+
+fn pow2k(x: int, k: int) -> int {
+    return x << k
+}

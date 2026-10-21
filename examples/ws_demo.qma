@@ -1,0 +1,23 @@
+// ws_demo.qma — WebSocket echo 服务示例（std.ws）
+// 测试：Python 客户端完成 RFC 6455 握手 + 帧编解码后与本服务互发消息。
+import std.ws
+
+fn on_open(fd: int) -> int {
+    ws_send(fd, "hello from quelmara")
+    return 1
+}
+
+fn on_msg(fd: int, data: str) -> int {
+    // echo：文本原样回；binary 加前缀回
+    ws_send(fd, data)
+    return 1
+}
+
+fn on_close(fd: int) -> int {
+    return 0
+}
+
+fn main() {
+    print("ws echo listening on 8092")
+    ws_serve(8092, 512, on_open, on_msg, on_close)
+}

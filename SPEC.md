@@ -102,14 +102,31 @@ let m = a[1..3]       // [20, 30]  —— 切片/数组切片是【零拷贝视�
 | `args()` | `-> []str` | 命令行参数，**不含程序名** |
 | `arg(i)` | `int -> str` | 同上取第 i 个，越界 fail-fast |
 | `read_text(p)` | `str -> str` | 整文件读入（NUL 结尾），失败 fail-fast |
+| `write_text(p, s)` | `(str,str) -> int` | 覆盖写整文件，返回写入字节数；失败 fail-fast（v1.3） |
+| `tcp_listen(port)` | `int -> int` | 监听 0.0.0.0:port，返回 fd；失败 fail-fast（v1.3） |
+| `tcp_accept(fd)` | `int -> int` | 阻塞接受连接，返回 conn fd（v1.3） |
+| `tcp_send(fd, s)` | `(int,str) -> int` | 发送，返回字节数（v1.3） |
+| `tcp_recv(fd, cap)` | `(int,int) -> str` | 接收一包（对端关闭返回空串）（v1.3） |
+| `tcp_close(fd)` | `int -> int` | 关闭 socket/连接（v1.3） |
 | `substr(s, lo, n)` | `(str,int,int) -> str` | 子串，越界 fail-fast |
 | `chr(b)` | `int -> str` | 单字节串（0..255），可拼出任意字节序列 |
-| `len(x)` | `-> int` | 数组/切片/map/str 的长度（str 是 O(n)） |
+| `len(x)` | `-> int` | 数组/切片/map/str 的长度（str 为 O(1)：长度前缀 ABI，v1.5.1） |
 | `eprint(x)` | `-> int` | 与 `print` 同格式，写 **stderr** |
 | `exit(code)` | `int -> int` | 立即结束进程 |
 | `to_int/to_str/to_float` | `-> T` | 标量转换 |
 | `slice_of(a)` | `[N]T -> []T` | 数组零拷贝视图 |
 | `cores()` | `-> int` | 逻辑核数 |
+| `now_ns()` | `-> int` | 单调时钟纳秒（v1.5） |
+| `str_from_bytes(v)` | `vec[int] -> str` | 字节缓冲成串，避免 `str +` 的 O(n²)（v1.3） |
+| `mem_alloc(n)` / `mem_free(p)` | `int -> int` | 堆分配/释放（v1.5） |
+| `mem_load8(p,i)` / `mem_store8(p,i,v)` | `-> int` / `-> 0` | 字节读写（v1.5） |
+| `mem_load64(p,w)` / `mem_store64(p,w,v)` | `-> int` / `-> 0` | 8 字节字读写，`w` 是**槽索引**不是字节偏移（v1.5） |
+| `mem_copy(dst,src,n)` / `mem_zero(p,n)` / `mem_cmp(a,b,n)` | `-> 0` / `-> 0` / `-> int` | 块操作（v1.5） |
+| `mem_str(p,n)` | `-> str` | 拷 n 字节补 NUL 成串（v1.5） |
+| `mem_xchg(addr,val)` | `-> int` | 原子交换（仅 x86_64 后端，v1.5） |
+| `tcp_send_n(fd,ptr,n)` / `tcp_recv_n(fd,ptr,cap)` | `-> int` | 零拷贝收发，不构造 str（v1.5） |
+| `net_serve(port,backlog,on_connect,on_data,on_close)` | `-> int` | IOCP reactor（仅 Windows PE，v1.4） |
+| `static_word(i)` | `int -> int` | 第 i 个进程级 8 字节静态字地址（32 个），协议库放回调/连接表用（v1.5） |
 
 ### 1.4 字符串比较是字典序
 
@@ -129,17 +146,20 @@ let m = a[1..3]       // [20, 30]  —— 切片/数组切片是【零拷贝视�
 
 ```
 int     默认 64 位有符号        i8 i16 i32 i64  u8 u16 u32 u64
+        （v1.8 起宽度有真实语义：let 标注 / 形参 / 返回值 / 赋值四处截断，
+          表达式内部按 C 提升到 64 位；细节见 docs/LANG.md §1）
 float   默认 64 位浮点          f32 f64
 bool    true | false
-str     UTF-8 字节串（零结尾；`len` 由扫描求得，O(n)）
+str     UTF-8 字节串（长度前缀 ABI：值指向 `[len][字节][NUL]`，`len`/`s[i]` O(1)，v1.5.1）
 []T     切片（指针+长度，零拷贝传递）
 [N]T    定长数组（栈上；v0.6 已实现：数值元素、索引、len、值语义拷贝、越界 fail-fast）
-map[K]V 开放寻址哈希表（可指定 arena 分配）
+map[K]V 开放寻址哈希表（写作 `map[int]int` / `map[str]int`，K ∈ int/bool/str，V ∈ int/str；值不能是 struct）
+vec[T]  堆上变长数组（v1.2；句柄语义，2 倍扩容；元素 = 标量 / struct / enum，`vec[vec[T]]` 暂不支持）
 option[T]   可空（无 null 指针）
 result[T, E] 显式错误（配合 `?` 传播）
 ```
 
-定长数组（v0.6 子集）：
+### 2.1 定长数组 `[N]T`（v0.6 子集）
 
 ```quelmara
 let mut a = [1, 2, 3, 4]
@@ -149,12 +169,13 @@ assert(len(a) == 4, "len")
 let b = a              // 值语义拷贝，b[0] 与 a[0] 独立
 ```
 
-- 元素只支持数值类型（int/bool 家族）；`[N]T` 目前只能作函数内局部变量，
-  作函数参数/返回值会明确报错。
+- 元素只支持数值类型（int/bool 家族）。
 - 下标支持动态表达式；越界默认 fail-fast，可用
   `Quelmara.toml [build] bounds_check = false` 关闭（越界即 UB）。
+- 作函数参数/返回值自 **v1.2** 起支持：参数按值拷贝，返回值走隐藏出参
+  （见 §3.2，仅自研后端；C 后端明确拒绝）。此前版本 `slice_of(a)` 是替代。
 
-字符串（v0.12 子集）：
+### 2.2 字符串（v0.12 子集）
 
 ```quelmara
 let s = "hello"
@@ -168,10 +189,10 @@ s + " world"           // 拼接（arena/静态缓冲，见后端说明）
 (-7).to_str()          // "-7"
 ```
 
-- `str` 是**零结尾字节串**，没有长度前缀，因此 `len(s)` 是 O(n) 扫描，
-  `s[i]` 是先求 `strlen` 再比对的动态越界检查。
-- `s[i]` 返回**字节**值而不是单字符 `str`：`str` 是不可变字节串，
-  取子串需要分配，当前没有切片语法（后续版本引入 `s[lo..hi]`）。
+- `str` 是**不可变字节串**，v1.5.1 起为长度前缀 ABI（值指向 `[len][字节][NUL]`）：
+  `len(s)` 与 `s[i]` 都是 O(1)；`s[i]` 是带越界检查的字节读取。
+- `s[i]` 返回**字节**值而不是单字符 `str`：`str` 是不可变字节串。
+- 取子串用子切片 `s[lo..hi]`（拷贝语义，见 §1.2）或 `substr(s, lo, n)`。
 - 非法十进制（空串、非数字字符、前后空格、超出 int64）一律 fail-fast，
   不静默返回 0、不静默回绕。
 - UTF-8 多字节字符按字节下标访问时，得到的是该字节而不是码点。
@@ -201,9 +222,7 @@ interface Renderable {
 - `@rc[T]` 显式引用计数（付出成本是你自己选的）
 - 析构确定性：离开作用域立即释放，无停顿
 
----
-
-### 2.9 `vec[T]` 变长数组（v1.2）
+### 2.3 `vec[T]` 变长数组（v1.2）
 
 ```quelmara
 let v = vec[int].new(4)      // 初始容量 4（小于 4 按 4 算）
@@ -277,7 +296,7 @@ fn load_config(path: str) -> result[Config, IoError] {
 
 ---
 
-### 3.5 遍历 `for x in <map|vec>`（v1.2）
+### 3.1 遍历 `for x in <map|vec>`（v1.2）
 
 ```quelmara
 for k in m {            // map：产出【键】，需要值时用 m.get(k)
@@ -295,7 +314,7 @@ for x in v {            // vec：按下标序，稳定
 - 遍历期间**不要**修改集合（push/del 会导致扩容或墓碑变化，行为未定义）。
 - `break` / `continue` 与区间循环一致。
 
-### 3.6 定长数组作参数/返回值（v1.2，自研后端）
+### 3.2 定长数组作参数/返回值（v1.2，自研后端）
 
 ```quelmara
 fn sum4(a: [4]int) -> int { return a[0] + a[1] + a[2] + a[3] }
@@ -433,12 +452,19 @@ fn main() {
 }
 ```
 
+> **⚠️ 规范 vs 现状（2026-10-21）**：上面这段 `net.TcpServer` 结构体 + `[]byte` + `net.Action` 是**目标模型**，尚未实现。  
+> 当前可用的是两条过程式/回调式 API：
+> - `tcp_listen/accept/send/recv/close`（阻塞，IPv4 字面量，**不支持域名**）——`std/net.qma`
+> - `net_serve(port, backlog, on_connect, on_data, on_close)`（Windows IOCP reactor，回调是函数名）——v1.4
+>
+> UDP / Unix socket / TLS / HTTP/2 **均未提供**（`docs/GAPS.md §4`）。语言里也没有 `byte` 类型，字节一律用 `int` + `mem_*` 处理。
+
 要点：
 - 后端按平台自动选择：Linux `io_uring` → `epoll`，macOS/BSD `kqueue`，Windows `IOCP`，移动端 `epoll/kqueue`
 - 每连接内存 ≈ 数百字节；100 万连接常驻内存 < 1 GB（可配上限 `max_conns`）
-- 背压：`c.write` 返回 `result[void, Backpressured]`，超限时策略可配（丢弃/断开/阻塞任务）
+- 背压（目标）：`c.write` 返回 `result[void, Backpressured]`，超限时策略可配（丢弃/断开/阻塞任务）；现状是 `[net].backpressure` 只作用于 C 后端 demo，自研后端用"溢出缓冲 + 上限 1MB"兜底
 - 资源上限全部在 `Quelmara.toml` 声明（见 §7），超限行为确定（fail-fast，不静默膨胀）
-- UDP / Unix socket / TLS / HTTP/2 / WebSocket 作为 `std.net` 子模块同级提供
+- **（目标）** UDP / Unix socket / TLS / HTTP/2 作为 `std.net` 子模块同级提供；WebSocket 已以 `std/ws.qma` 落地（服务端，v1.5）
 
 ---
 
@@ -539,20 +565,23 @@ quelmara build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 E
 
 ---
 
-## 9. 当前实现状态（v0.3）
+## 9. 实现状态（截至 v1.5）
+
+> 各版本的精确特性清单与回归项数以 `CHANGELOG.md` 为唯一权威记录；
+> 未完成项与排期见 `HANDOVER.md`。
 
 本仓库包含**四个后端**（详见 `BACKEND.md` / `PLATFORM.md`）：
 
 | 后端 | 路径 | 状态 |
 |---|---|---|
 | **自研 x86_64 Linux** | Quelmara → QuIR → 自研 x86_64 编码器 → 裸 ELF64（无 libc） | ✅ v0.1，执行级 |
-| **自研 x86_64 Windows** | 同一 QuIR/编码器 → PE32+/COFF（无 CRT，kernel32 导入） | ✅ v0.3，本机 55 项 |
+| **自研 x86_64 Windows** | 同一 QuIR/编码器 → PE32+/COFF（无 CRT，kernel32 + ws2_32 导入） | ✅ v0.3，本机 96 项回归全绿 |
 | **自研 AArch64 Linux** | 同一条 QuIR，只换发射层 → ELF64 | 🟡 模拟器执行级，待真机 |
 | C 后端 | Quelmara → C99 → 任意 C 编译器（移植/bootstrapping/网络 demo） | ✅ v0.1 |
 
 各后端对同一 `.qma` 源码交叉验证输出，互为 oracle。
 
-已实现（v0.2 / v0.3 / v0.4 / v0.5 / v0.6 / v0.7）：
+已实现（v0.1 – v1.5）：
 
 | 特性 | 状态 |
 |---|---|
@@ -567,7 +596,7 @@ quelmara build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 E
 | **结构体/枚举返回值（隐藏出参指针 ABI）** | ✅ 全部后端 |
 | `parfor`（Linux：raw clone；Windows：CreateThread；C：pthread）| ✅ 受 `[core] multicore` 控制 |
 | `Quelmara.toml` 解析（core/net/memory/build）| ✅ 全部后端 |
-| `net.TcpServer()`（epoll 非阻塞并发服务器 / io_uring 后端）| ✅ C 后端 intrinsic；Windows 待 IOCP |
+| `net.TcpServer()`（epoll 非阻塞并发服务器 / io_uring 后端）| 🟡 仅 C 后端 intrinsic（非产品链路）；自研后端用 `net_serve`（IOCP）与 `tcp_*` |
 | 魔数除法/强度削减/DCE/复制传播/线性扫描寄存器分配 | ✅ 自研后端 |
 | **内联 / CSE-GVN / LICM / 循环展开 / 指令调度** | ✅ 自研后端（QuIR 级，全部发射层共享） |
 | **Windows PE32+/COFF 写出 / kernel32 导入 / DIR64 重定位** | ✅ v0.3 |
@@ -578,14 +607,32 @@ quelmara build <src> --target native|win|arm64|c   # 默认 native（Linux 裸 E
 | **`chan[T]` 有界 MPMC（send/recv 阻塞、FIFO）** | ✅ v0.5，x86_64 自研 + C；载荷 8 字节 |
 | **`[N]T` 定长数组（字面量/索引/复合赋值/`len`/值语义拷贝/越界 fail-fast）** | ✅ v0.6，数值元素；局部数组；三链一致 |
 | 用户定义 `Result { Ok(value) Err(error) }` + `?` | ✅ x86_64 native/PE/C；标量载荷 |
-| 泛型 `option[T]` / `result[T,E]`、`map`/`[]T` 运算 | 🚧 下一轮 |
-| `h.join()` 方法式语法、`chan.close()` / `select` | 🚧 |
-| 泛型 / interface / 所有权借用检查 / `@extern("C")` | 🚧 规范已定 |
-| Windows IOCP/AFD 网络、Mach-O/kqueue、wasm、SIMD 向量化 | 🚧 路线图（PLATFORM.md / BACKEND.md）|
+| 泛型 `option[T]`（v0.8）/ `result[T,E]`（v0.9）受控单态化 | ✅ 前端合成枚举 + match 解构，后端零改动 |
+| `[]T` 切片（{ptr, len} 零拷贝视图，可作参数/返回值） | ✅ v0.9，动态越界 fail-fast |
+| `map[K]V` 开放寻址哈希表 + 浮点实际运算（f64/f32） | ✅ v0.10 |
+| `h.join()` 方法式语法、`chan.close()`、`select` | ✅ v0.11 |
+| `args()` / `arg(i)` / `read_text` / `substr` / `chr` | ✅ v1.0，自研 + PE 三链 |
+| 位运算 `& \| ^ ~ << >> >>>` + 进制字面量 + 顶层 `const` + `eprint`/`exit` | ✅ v1.1，全部后端 |
+| 子切片 `a[lo..hi]`（str 拷贝 / 切片数组零拷贝视图）+ 字符串字典序 | ✅ v1.1 |
+| `vec[T]` 变长数组 + `for x in <map|vec>` 集合遍历 | ✅ v1.2；v1.3 起元素支持标量 / struct / enum（`vec[vec[T]]` 仍 ❌） |
+| `[N]T` 作函数参数/返回值（值语义拷贝 + 隐藏出参，见 §3.2） | ✅ v1.2，自研后端；C 后端明确拒绝 |
+| `import` 扁平合并（递归加载 `std/` 与同目录 `.qma`，v1.3） | ✅ 全部后端；**无命名空间/可见性**，靠前缀约定 |
+| `write_text` / 原生 `tcp_*` / `net_serve`（IOCP）/ `now_ns` / `mem_*` | ✅ v1.3–v1.5，自研后端（`net_serve` 仅 Windows PE） |
+| `std/http.qma`（HTTP/1.1 keep-alive + 流水线）、`std/ws.qma`（RFC 6455）、`std/sse.qma` | ✅ v1.5 服务端；**无客户端**，无 TLS |
+| str 长度前缀 ABI（`len`/`s[i]` O(1)） | ✅ v1.5.1，自研后端 + PE |
+| 真实整数宽度（u8/u32 截断回绕） | ❌ 目前只有类型名（`i8..u64` 均为 64 位别名），见 `docs/GAPS.md §2` |
+| `@extern("C")` | 🟡 C 后端发射原型；自研后端明确拒绝（无动态链接器） |
+| `interface` + `impl`（静态分发） | ✅ v1.8：契约 + 一致性检查 + 方法调用；**动态分发未实现** |
+| `rc[T]` + 所有权检查（仅 rc 句柄） | ✅ v1.8：use-after-drop / double-free / move-then-use 编译错误 |
+| `@simd` / `@no_preempt` | ✅ v1.8：SSE2 归约（单一形状）/ 抑制让出点 |
+| 用户自定义泛型 / 完整借用检查 | 🚧 规范已定，未实现（`option/result/vec/map/rc` 是受控单态化） |
+| Windows IOCP 网络（`net_serve`） | ✅ v1.4，单 acceptor + N 工作线程；回调签名固定 |
+| Linux epoll（自研后端）、Mach-O/kqueue、wasm、SIMD 向量化 | 🚧 路线图（PLATFORM.md / BACKEND.md）|
 
-回归：`tests/run_native_tests.sh`（自研 Linux 52 项，含 AArch64 模拟器）+
-`tests/run_win_tests.py`（Windows PE 55 项）+ `tests/run_tests.sh`（C 16 项）
-+ `tests/test_corelib.sh`（34 项）+ `tests/test_uring.sh`（26 项）= **183 项全绿**。
+回归：五套测试 + 四个自举对拍脚本（`tests/lexdiff.py` / `parsediff.py` /
+`irdiff.py` / `emitdiff.py`）。各版本回归项数以 `CHANGELOG.md` 为唯一权威记录
+（v1.5 时点：Windows PE 96 项本机全绿；自研 Linux / C / corelib / io_uring
+四套需 Linux 环境执行）。能力缺口全表见 `docs/GAPS.md`。
 
 实现状态、未完成清单、阻塞项与下一步排期见 `HANDOVER.md`。
 

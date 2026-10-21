@@ -1,0 +1,69 @@
+// t50_simd.qma：@simd / @no_preempt（v1.8）
+// @simd 只认 `acc = acc + a[i]` / `acc += a[i]` 的定长 int 数组归约，
+// 走 SSE2 paddq 两路 + 标量尾；语义差异：跳过逐元素越界检查。
+module t50
+
+@simd
+fn sum_all(a: [16]int) -> int {
+    let mut s = 0
+    for i in 0..16 { s = s + a[i] }
+    return s
+}
+
+@no_preempt
+fn spin(n: int) -> int {
+    let mut k = 0
+    while k < n { k = k + 1 }
+    return k
+}
+
+fn sum_scalar(a: [16]int, lo: int, hi: int) -> int {
+    let mut s = 0
+    for i in lo..hi { s = s + a[i] }
+    return s
+}
+
+fn main() {
+    let a = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+    // 整段
+    let mut s = 0
+    @simd for i in 0..16 { s = s + a[i] }
+    assert(s == 136, "simd full range")
+
+    // 非 2 的倍数长度：走标量尾
+    let mut t = 0
+    @simd for i in 0..5 { t += a[i] }
+    assert(t == 15, "simd odd count tail")
+
+    // 非零起点
+    let mut u = 0
+    @simd for i in 1..4 { u = u + a[i] }
+    assert(u == 9, "simd offset range")
+
+    // 空区间
+    let mut v = 0
+    @simd for i in 3..3 { v = v + a[i] }
+    assert(v == 0, "simd empty range")
+
+    // 与标量版本逐区间一致
+    let mut lo = 0
+    while lo <= 16 {
+        let mut hi = lo
+        while hi <= 16 {
+            let mut x = 0
+            @simd for i in lo..hi { x = x + a[i] }
+            assert(x == sum_scalar(a, lo, hi), "simd == scalar")
+            hi = hi + 1
+        }
+        lo = lo + 1
+    }
+
+    // 函数级 @simd 与循环级等价
+    assert(sum_all(a) == 136, "fn-level @simd")
+
+    // @no_preempt：语义是"不给编译器插让出点"，结果必须不变
+    assert(spin(10000) == 10000, "no_preempt spin")
+
+    print("simd ok")
+}

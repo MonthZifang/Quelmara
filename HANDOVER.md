@@ -1,271 +1,283 @@
 # Quelmara 交接文档（HANDOVER）
 
-> 工作区状态（2026-10-20 末）：**v1.0 = 改名 Quelmara + 自举前置能力 + stage-1 词法器**。
-> 提交线：`b42e0a4` v0.9/v0.10 → `ade98a4` v0.11 → `ffadac6`/`ca3cc93` v0.12 → v1.0（见 §7）。
-> **工具链分层**：`tools/stage0/` 是 Python 引导层（待退场），`bootstrap/` 是 Quelmara 自举层，
-> `tests/`、`tools/dev/` 允许长期用 Python/Node。详见 `docs/SELFHOST.md`。
-> v0.9：`opt_modsum` 模和折叠 + 范围分析扩展 + `mul_const` 回退路径错编修复（loop_sum 11–13ms，见 CHANGELOG）。
-> v0.10：`map[K]V` 开放寻址哈希表（t22）+ 浮点实际运算（t23，修复 `__f64_to_str` 科学计数法死循环）。
-> v0.11：`h.join()` 方法式 + `chan.close()` + `select`（t24/t25/t26）。
-> 本机（Windows）验证：PE 链 **91 项全绿**；词法对拍 **71/71 全等**；跨平台基线 win+arm64 输出一致；[7] 交叉验证与 native/C 链需 Linux/WSL 环境
+> 工作区状态（2026-10-21）：**已发布 v1.2；v1.3（自举）+ v1.4/v1.5（reactor + 性能 + 协议库）
+> + v1.6（标准库六件）+ v1.8（语言特性大补）在工作区落地待提交**。  
+> 各版本特性、修复与回归项数的**权威记录**在 `CHANGELOG.md`；本文只保留  
+> 当前快照、差距清单与下一步排期，不再按轮复述。  
+> **完整能力边界（含"文档与代码不符"逐条核对、标准库缺口全表、优先级路线）见 `docs/GAPS.md`。**  
+> **工具链分层**：`tools/stage0/` 是 Python 引导层（待退场），`bootstrap/` 是 Quelmara 自举层，  
+> `tests/`、`tools/dev/` 允许长期用 Python/Node。分层纪律见 `docs/SELFHOST.md`。  
+> 本机（Windows）验证边界：PE 链可执行级验证；[7] 交叉验证与 native/C 链需 Linux/WSL  
 > （本机无 gcc/clang，C 后端只能验证「生成」不能验证「执行」）。
-> 代码总量：`tools/stage0/` 15.1k 行 Python（引导层）+ `bootstrap/` 268 行 Quelmara（自举层）+ `tests/` 1.9k 行
->
-> ### v1.2 一句话
-> 补齐自举 parser 的三块地基：`vec[T]`（可增长容器）、`for x in <map|vec>`（可枚举符号表）、
-> `[N]T` 作参数/返回值（按值拷贝 + 隐藏出参）。至此"写编译器的语言能力"基本齐了，
-> 下一步可以开工 `bootstrap/parser/`。
->
-> ### v1.1 一句话
-> 补齐"写编译器真正需要"的语法：位运算（含 `>>>`）、进制字面量、子切片 `a[lo..hi]`、
-> 顶层 `const`、`eprint`/`exit`、字符串字典序（修正了一个"文档说有、实现是指针比较"的坑）；
-> 跨平台 bench 基线按「平台/架构/后端」分 key 并把输出哈希跨后端对齐；
-> 新增原创性门禁（只许标准库、禁止外部运行时特征）。
->
-> ### v1.0 一句话
-> 语言正式更名 **Quelmara**，源码扩展名 `.qma`、产物 `.qex`/`.qel`；Python 编译器降级为
-> stage-0 引导层。补上自举必需的 `args()` / `read_text` / `substr` / `chr` / 堆对齐，
-> 然后用 Quelmara 写出 **stage-1 流式词法器**，与 Python 词法器在全部 66 个源文件上逐行全等。
-> 自举过程中抓出两个存在已久的核心 bug：`||` 恒为真、`let` 是别名不是拷贝。
->
-> ### v0.12 一句话
-> 补上字符串最基础的三个能力：`len(s)` 字节长度、`s[i]` 字节下标（无符号 0..255，
-> 越界 fail-fast）、`s.to_int()` 十进制解析（非法输入/溢出一律 fail-fast）；
-> 同时把 v0.11 遗留的 `@extern("C")` 在自研后端从 Python traceback 改成明确诊断。
->
-> ### v0.10 一句话
-> `map[K]V`（K/V ∈ int/bool/str，开放寻址 + 线性探测 + 墓碑 + 扩容）与浮点实际运算
-> （f64/f32 四则/比较/转换/格式化，定点 + 科学计数双路径）三链打通；
-> 顺带修复自研后端 `__f64_to_str` 在科学计数路径的非 SSA 死循环（`print(1e-7)` 挂死）。
 
----
+## 0.0 AI 接力包（记忆注入 · 下个会话先读这一节）
 
-## 0. 一句话结论
+> 这一节是给"接手的 AI"看的：把当前状态、已验证的事实、踩过的坑、不能违反的约定一次写清，
+> 避免重新探索、避免重复犯错。**读完这一节再动代码。**
 
-Quelmara 现在可以在三条链上使用用户定义的 Result 枚举和 `?`：
+### 身份与坐标
 
-```quelmara
-enum Result {
-    Ok(value: int)
-    Err(error: str)
-}
+<!-- legacy-ok:begin -->
+- 项目：**Quelmara**（旧名 Rosoto，仓库目录仍是 `Rosoto/rosoto/`，改名脚本见 §6）。
+<!-- legacy-ok:end -->
+- 语言定位：自研系统级语言，**产品后端只允许自研**（x86_64 ELF / PE32+ / AArch64），
+  C99 后端只做交叉验证，**永远不是产品链路**。
+- 宿主环境：Windows，用户 `43551`；本机只能跑 PE 链；`wsl.exe` 被沙箱拉黑（`[7]` 交叉验证永远 SKIP）；
+  本机无 gcc/clang（C 后端只能验证"生成"不能验证"执行"）。
+- 解释器：`C:/Users/43551/.workbuddy/binaries/python/envs/default/Scripts/python.exe`
+  （系统 Python 也能跑，但依赖装在这个 venv 里）。
 
-fn parse(n: int) -> Result {
-    if n < 0 { return Result.Err("negative") }
-    return Result.Ok(n)
-}
+### 当前状态（2026-10-21 实测，不是文档抄的）
 
-fn add_one(n: int) -> Result {
-    let value = parse(n)?
-    return Result.Ok(value + 1)
-}
-```
-
-错误分支复制当前 Result 并直接返回，成功分支提取 `Ok` 载荷。`Ok`/`Err` 可按声明顺序排列，
-不再假定 `Ok` 必须是 tag 0。
-
-同时推进了 native 优化器：严格递增、常量上界循环可进行非负范围传播，安全地消除有符号魔数除法的
-符号修正链；parfor/spawn 独立 worker 保留为寄存器分配边界，避免内联造成 spill 回退。
-
----
-
-## 1. 这一轮做了什么
-
-### 1.1 Result + `?`
-
-| 后端 | 实现 |
-|---|---|
-| Linux 自研 x86_64 | Result 作为已有 enum 聚合值，`?` 检查 tag；Err 整体拷贝到隐藏返回槽后 return；Ok 载荷从槽 1 读取 |
-| Windows PE | 复用同一 QuIR/Lower，PE 发射层无额外分叉 |
-| C 后端 | GNU C statement expression：Err 直接 `return`，Ok 返回 `u.Ok.value` |
-
-当前明确边界：
-
-- Result 必须是**用户定义 enum**，且恰有两个单载荷变体 `Ok(value)` / `Err(error)`；
-- `Ok` 载荷仅支持标量 int/bool/str；
-- 泛型 `result[T,E]` 尚未自动单态化；
-- 结构体/多槽 payload 暂不接受，避免只读取一个槽导致静默错编；
-- `?` 所在函数必须返回相同的 Result enum。
-
-`t17_result.qma` 覆盖：正常传播、错误传播、`Err` 在 `Ok` 前声明的反向 tag 顺序，
-Linux native / Windows PE / C 三链均通过。
-
-### 1.2 自研优化器
-
-#### 非负范围传播
-
-`analyze_nonneg()` 现在只接受有明确证明的值：
-
-- 单次常量定义；
-- 严格递增的 `i < hi` 循环；
-- `lo`、`hi` 是可追溯常量；
-- 步长为正且末次步进不会溢出；
-- 循环体不重定义归纳变量。
-
-之后才传播 `add/mul/shl/sar/umulhi` 的上界，用于安全消除有符号魔数除法的符号修正。
-证明不满足时保守保留原代码。
-
-#### worker 内联边界
-
-parfor/spawn worker 的独立栈和寄存器压力敏感，继续保留 `Fn.no_inline` 边界；
-避免把 helper 塞进 worker 后扩大活跃区间、触发 spill，导致热循环反而变慢。
-
-> 本轮没有把未验证的周期归约重写保留在最终管线；当前性能提交只包含已通过全量回归的范围证明与 worker 边界。
-
-### 1.3 产品后端策略
-
-- `qlm_cli.py` 默认目标：Windows 使用 `win`，其他平台使用 `native`；
-- C 后端必须显式 `--target c`，只用于交叉验证、自举、移植和测试；
-- 文档已同步：README / SPEC / BACKEND 都标明 C 后端不是产品默认运行路径。
-
-### 1.4 回归
-
-新增：
-
-- `tests/t17_result.qma`；
-- `tests/t19_option.qma`（v0.8）；
-- native 回归 [12]：Result native + C 传播；[13]：option native + C；
-- Windows 回归：Result / option PE 自校验 + PE×ELF 交叉验证。
-
-当前总量（v0.12）：
-
-```
-Windows PE 74 ✅（本机实测，[1]–[6]；[7] 需 WSL）
-自研 Linux / C / corelib / io_uring：需 Linux 环境执行，本机无法运行
-```
-
-> v0.7 的 183 → v0.8 option(+4) → v0.9/v0.10(+t20/t21/t22/t23) → v0.11(+t24/t25/t26)
-> → v0.12 字符串(+15 条 PE 断言，t27/t28)。各段具体项数在 Linux 侧 `run_native_tests.sh` 里累计。
-
----
-
-## 2. 还没有做什么
-
-### 2.1 语言特性
-
-| 特性 | 状态 | 优先级 |
+| 项 | 数字 | 命令 |
 |---|---|---|
-| `option[T]` 单态化 | ✅ v0.8 合成枚举 + match 解构（int/bool/str） | — |
-| 泛型 `result[T,E]` | ✅ v0.9 受控单态化（t20） | — |
-| `[]T` 切片（指针+长度） | ✅ v0.9 `slice_of(a)` 零拷贝 + 参数/返回值/别名写入（t21） | — |
-| `map[K]V` | ✅ v0.10 开放寻址 + 墓碑 + 扩容（t22） | — |
-| `chan.close()` / `select` | ✅ v0.11（t25/t26）；无界通道仍 ❌ | — |
-| `h.join()` 方法式语法 | ✅ v0.11 解析期脱糖（t24） | — |
-| `len(str)` / `s[i]` 字节下标 / `s.to_int()` | ✅ v0.12 三链；越界与非法输入 fail-fast（t27/t28） | — |
-| **`a[lo..hi]` 子切片** | ✅ v1.1 str 拷贝 / 切片视图 / 数组视图（三链） | — |
-| **`argv` / 命令行参数** | ✅ v1.0 `args()` / `arg(i)`（Windows 走 GetCommandLineA 拆分） | — |
-| 数组作函数参数/返回值 | ❌ `[N]T` v0.6 边界明确报错（`slice_of` 是当前替代） | 中 |
-| 位运算 `& \| ^ ~ << >> >>>` | ✅ v1.1 含复合赋值与自定义优先级 | — |
-| 顶层 `const` | ✅ v1.1 字面量内联（无运行时存储） | — |
-| 进制字面量 `0x/0b/0o` | ✅ v1.1 三链 | — |
-| 字符串字典序 `< <= > >=` | ✅ v1.1 修正（此前是指针比较） | — |
-| `eprint` / `exit` | ✅ v1.1 | — |
-| `vec[T]` 变长数组 | ✅ v1.2 push/get/set/pop/len/clear + 2 倍扩容 | — |
-| `for k in m` 遍历 map / `for x in v` | ✅ v1.2（顺序实现定义，SPEC 写明不要依赖） | — |
-| `[N]T` 作参数/返回值 | ✅ v1.2 值语义拷贝 + 隐藏出参（仅自研后端） | — |
-| 泛型 / interface | ❌ | 中 |
-| 所有权 + 借用检查 | ❌ arena/spawn/array 依赖约定 | 中 |
-| `@simd` / `@no_preempt` / `@rc[T]` | ❌ | 中 |
-| `@extern("C")` | 🟡 C 后端发射原型；自研后端明确拒绝（无动态链接器） | 中 |
-| 浮点实际运算 | ✅ v0.10 运算/比较/转换/格式化三链打通（t23，f64+f32） | — |
-| `qlm_fmt` 新语法覆盖 | ❌ | 低 |
+| PE 回归 | **113 项全绿**（FAIL=0，SKIP=1 WSL） | `python tests/run_win_tests.py` |
+| 自举 | **2/9**，1770 / 18909 行 = 8.6% | `python tools/dev/selfhost_status.py` |
+| 函数体对拍 | dump 一致 94 / 分叉 636 / SKIP 不同步 25 | `python tests/bodydiff.py` |
+| 词法 / 声明 / IR / 发射 | 99/99、90/90（1 跳过）、50/50（19 skip）、10/10 | `tests/lexdiff.py` 等 |
+| 三件门禁 | check_names / check_origin / check_docs 全 PASS | `tools/dev/check_*.py` |
 
-### 2.2 平台 / 性能
+### 本轮（v1.8 工作区）新增：语言特性补全
 
-| 项 | 状态 |
-|---|---|
-| Windows IOCP/AFD | ❌ `net.TcpServer` 尚未进入 Windows PE 后端 |
-| 自研 Linux epoll 网络 | ❌ native 后端尚无网络 intrinsic |
-| macOS/iOS Mach-O + kqueue | ❌ 需 Mac 真机/CI |
-| Android / wasm64 | ❌ |
-| AArch64 spawn/chan | ❌ 需要 `ldaxr/stxr` 原子发射层 |
-| SIMD 自动向量化 | ❌ loop_sum 与 gcc -O2 的主要差距 |
-| 尾调用消除 / LTO / 热重载 | ❌ |
-| Windows PE 调试信息 / SEH unwind | ❌ |
-
-### 2.3 工程化
-
-| 项 | 状态 |
-|---|---|
-| `quelmara test --target all` | ❌ 需分别指定 |
-| 跨平台 bench 基线 | ✅ v1.1 按「平台/架构/后端」分 key，输出哈希跨后端校验 |
-| Linux/Windows CI | ❌ 未接 |
-| Windows C 后端执行验证 | ❌ 本机无 gcc/clang |
-
----
-
-## 3. 差什么
-
-1. **`argv` / 命令行参数**：目前没有入口参数通道（PE 走 `GetCommandLineA` + 拆分，
-   Linux 走 `_start` 栈上的 argc/argv），写不出真正的 CLI 工具——这是当前最大的可用性缺口。
-2. **`s[lo..hi]` 子切片**：`str` 是不可变字节串，取子串现在只能手写逐字节拷贝。
-   需要解析 `a..b` 下标 + 后端生成 `{ptr+lo, hi-lo}` 视图（数组与切片同语法）。
-3. **Mac/ARM64 机器或 CI**：macOS Mach-O/kqueue 与 AArch64 真机验证缺硬件。
-4. **Windows C 工具链**：本机无 gcc/clang，C 后端只能验证「生成」不能验证「执行」
-   （已验证 `gcc`/`clang`/`tcc`/MSVC 均不可用于 GNU C + POSIX 头）。
-5. **IOCP 压测环境**：需要 Windows 句柄上限、防火墙配置和压测客户端。
-6. **SIMD 基线环境**：需要固定 CPU、固定构建参数和 baseline 文件，避免把机器负载误判成优化收益。
-
----
-
-## 4. 写了多少
-
-| 类别 | 文件 | 行数 | 说明 |
+| 特性 | 语义 | 夹具 | 边界 |
 |---|---|---|---|
-| 前端 + C 后端 | `tools/stage0/qlm.py` | ~4.7k | 解析/推断/C 发射；v0.12 加 str 长度、字节下标、十进制解析 |
-| 自研 x86_64 + QuIR | `tools/stage0/qlm_native.py` | ~4.5k | v0.12 加 `str_len` / str 下标 / `__str_to_int` 运行时 |
-| QuIR 优化器 | `tools/stage0/qlm_opt.py` | 1021 | 范围传播、worker 内联边界、保守溢出条件 |
-| Windows PE | `tools/stage0/qlm_pe.py` | 353 | 未改（复用 QuIR） |
-| 命令行 | `tools/stage0/qlm_cli.py` | 336 | 主机架构默认 target |
-| 测试 | `tests/run_win_tests.py` | ~430 | v0.12 加 `[3c] 字符串` 段（15 条断言） |
-| 测试夹具 | `tests/t27_str.qma` / `t28_toint.qma` | 110 | 长度/下标/解析/边界/往返 |
-| 文档 | `README.md` / `SPEC.md` / `BACKEND.md` / `CHANGELOG.md` / `HANDOVER.md` | — | v0.12 同步 |
+| 整数宽度 `u8..u32/i8..i32` | 边界截断（let/形参/返回值/赋值），表达式内按 C 提升 | `tests/t49_width.qma` | struct 字段存值不截断 |
+| `let x: T` | 只有宽度类型参与语义 | 同上 | 不是完整 typeck |
+| `@simd` | SSE2 `paddq` 两路归约 + 标量尾 | `tests/t50_simd.qma` | 只认 `acc += a[i]` 的 `[N]int` |
+| `@no_preempt` | 抑制编译器插入的 `sched_yield` | 同上 | 不是内核抢占 |
+| `rc[T]` | `[refcount][payload]`，`rc_new/clone/get/drop/count` | `tests/t51_rc.qma` | 载荷仅具名 struct |
+| 所有权检查 | use-after-drop / double-free / move-then-use | `tests/bad/own_*.qma` | 只查 `rc` 句柄 |
+| `interface`/`impl` | 契约 + 校验 + **静态分发** | `tests/t52_iface.qma` | **无动态分发** |
 
-**测试规模**：Windows PE 74 项（本机实测全绿）；native / C / corelib / io_uring 需 Linux。
+新增 IR 指令：`('trunc', dst, a, bits, signed)`、`('vsum', dst, base, count)`。
+**加新 IR 指令的纪律**：必须同时登记到 `qlm_opt.vreg_mentions`、`qlm_native._map_ins`、
+`qlm_opt._EFF`（访存类）。漏一处就是"开优化才错"的静默误编译——
+本轮 `vsum` 就是这样被调度器挪到数组初始化之前、归约少一个元素的。
+
+### 上一轮（v1.6 工作区）新增
+
+- **P0 标准库六件**：`std/sha256.qma`（SHA-256+HMAC）、`std/str.qma`、`std/url.qma`、
+  `std/json.qma`、`std/gzip.qma`（DEFLATE 编码 + gzip）、`std/aes.qma`（AES-128-GCM）；
+  回归 `t43`–`t48` + gzip 的 zlib 互操作；HTTP 端已接 `Content-Encoding` 协商。
+  说明与实测见 `docs/P0_LIBS.md`。
+- **文档门禁** `tools/dev/check_docs.py`（已进 CI 双 job）：拦"过期断言"，强制 README/HANDOVER/SPEC 链接 `docs/GAPS.md`。
+- **自举计划** `docs/SELFHOST_PLAN.md`：分 7 阶段、每阶段有门禁与工作量估计。
+- 编译器新增调试开关：`QLM_NO_INLINE=1`（关内联）、`QLM_SKIP_PASSES=a,b`（按 pass 跳过）、`QLM_ENABLE_LICM=1`（开 LICM）。
+
+### 三个误编译已在 v1.8 全部修掉（不是"还有洞"）
+
+| # | 症状 | 根因 | 回归 |
+|---|---|---|---|
+| 1 | 循环内 `substr` 长度来自调用结果 → 越界/错串（`--no-opt` 正常） | 内联路径把栈偏移 `8` 当 `R8` 寄存器号比较，跳过 fetch | `tests/t53_regress.qma` |
+| 2 | `"\xNN"`（≥0x80）被当 Unicode 码点再 UTF-8 编码 | 词法器 `chr(b)` + `encode("utf-8")` 二次编码 | 同上 |
+| 3 | 一个表达式里两次调用 + 下标 → 结果整体偏移 | 同 #1 | 同上 |
+
+> 曾被怀疑的 `len(f(x))` 段错误**已排除**：真实原因是我把 `mem_load64` 的字节偏移
+> 当槽索引，写穿了堆。教训：**随机位置段错误先怀疑自己越界写**，
+> 最小化到 30 行内仍复现才算编译器 bug。
+
+含义：**#1/#3 的根因是"栈偏移与寄存器号类型混淆"**，修完之后 b1/b3 两个形状
+（循环内调用 + 下标）都不再需要规避写法。LICM 仍默认关闭（`QLM_ENABLE_LICM=1` 可开），
+原因是分配器布局敏感的另一条段错误还没根修——那是**下一件事**，不阻塞写业务代码。
+### 语言层的"写库须知"（用血换的，写标准库前必读）
+
+- `mem_load64/store64` 的偏移是**槽索引（×8）**，不是字节偏移 —— 按字节偏移写会
+  静默写穿堆，崩溃点随机漂移（曾误判成编译器 bug）。
+- `vec` 句柄经 `int` 形参/返回值传递会**丢类型标签**（`v.push` 报"不支持方法"）；
+  要写成 `vec[int]` 形参/返回类型。
+- 方法调用**不能链在函数调用结果上**（`f(x).push(y)` 不支持），先落局部变量。
+- 64 位值可能为负，右移要用 `>>>`（`>>` 是算术右移，会灌符号位）—— GHASH 踩过。
+- `len()` 只对**带类型标签的本地 vec 变量**可靠；句柄跨函数后要自己记账或用
+  `vec[int]` 返回类型。
+- `"\xNN"`（≥0x80）现在是**原始字节**（v1.8），可以直接写二进制字面量。
+
+### 文档权威分工（别再写串）
+
+| 文档 | 管什么 |
+|---|---|
+| `CHANGELOG.md` | 版本特性、修复、回归项数的**历史记录** |
+| `docs/STATUS.md` | **当前状态总表**：语言 / 工程化 / 性能 / 平台（唯一"现在到哪了"口径） |
+| `docs/GAPS.md` | 能力边界与缺口全表、优先级路线、误编译根因 |
+| `docs/LANG.md` | v1.8 新特性的精确语义与边界（宽度 / @simd / rc / 所有权 / interface） |
+| `docs/SELFHOST.md` / `SELFHOST_PLAN.md` | 自举进度与阶段门禁 |
+| `HANDOVER.md`（本文） | 快照、接力记忆、下一步排期 |
+
+> 规则：任何"支持/不支持"的翻转，**同一次提交**里改 `STATUS.md` + `GAPS.md`，
+> 再跑 `tools/dev/check_docs.py`。文档漂移按缺陷算。
+
+### 下一步三件事（按顺序，不要跳）
+
+1. **接口动态分发**：接口值 = `{data, tid}` 两字结构；每个 (interface, method) 生成
+   一个派发函数 `if tid == k { call Type__m }`。做完 `let s: Shape = Circle{..}` 才成立。
+2. **重开 LICM 并压测**：默认关闭是因为 x64 分配器布局敏感的段错误未根修；
+   先补最小复现的回归网，再开 `QLM_ENABLE_LICM=1` 跑全量 + bench。
+3. **用户泛型**（`fn f[T]` 单态化）：`vec/option/result/rc` 之外的通用容器与算法。
+
+并行可做（不阻塞上面三条）：`std/gzip` 解码、X25519 + TLS 记录层、
+文件系统/时间/随机/排序最小集（`docs/GAPS.md §3.3`）。
+
+### 交接纪律
+
+- 不要 `git reset --hard` / 不要删 `build/` 以外的任何目录；`archive/` 是旧快照。
+- 跑完任何改动，至少复跑：`run_win_tests.py` + `parsediff.py` + 三道门禁。
+- **新增 IR 指令的检查表**（`docs/STATUS.md §5.2`）：`vreg_mentions`、`_map_ins`、
+  `_EFF`（访存类）三处必须同时登记，否则就是"开优化才错"的静默误编译。
+- 大改动前先 `git status`：工作区常有大量未提交内容（v1.3–v1.8），别误判。
+- 提交粒度：按 `CHANGELOG.md` 的版本节各打一个 commit（v1.3 → v1.5 → v1.6 → v1.8），
+  不要攒成一坨。
 
 ---
 
-## 5. 需要写什么
+## 0. 当前快照
 
-1. **`argv` / 命令行参数**（最高优先）：`args() -> []str` 或 `arg(i) -> str`；
-   PE 走 `GetCommandLineA`（kernel32 已在导入表里）+ 空格/引号拆分运行时；
-   Linux 走 `_start` 栈 `[argc][argv...]` 直接取。
-2. **`s[lo..hi]` 子切片**：解析区间下标，后端生成 `{ptr+lo, hi-lo}` 零拷贝视图；
-   越界按 `lo <= hi <= N` 检查。数组与切片用同一语法。
-3. **`[N]T` 作函数参数/返回值**：值语义拷贝路径（隐藏出参 ABI），
-   当前用 `slice_of(a)` 规避。
-4. **native epoll / Windows IOCP 网络**：需要间接回调调用。
-5. **SIMD 自动向量化**：先做 canonical reduction loop，再加 `@simd`。
-6. **macOS Mach-O + kqueue**：有 Mac runner 后落地。
+- **协议库（v1.5 本轮）**：`std/http.qma`（HTTP/1.1）+ `std/ws.qma`（RFC 6455
+  WebSocket）+ `std/sse.qma`（SSE）+ `std/net/core.qma`（十万连接槽位层，
+  640 B/连接）——全部 Quelmara 自实现，Python 客户端互操作实测全绿。
+  TLS（https/wss）路线定稿 `docs/TLS.md`，协议层回调签名已预留 TLS 缝。
+- **性能（v1.5）**：性能报告（2026-10-21）七项优化全部落地——str 长度前缀
+  ABI（16KB 扫描 85.9ms → 22µs）、2 的幂除法特化、掩码值域 + 越界检查合并、
+  8 字节块 memcpy（拼接 3.2×）、内联白名单、展开阈值 1024→8、
+  `__realloc` 原地延展。
+- **P0 标准库六件（v1.6 本轮）**：sha256（+HMAC）、str（26 函数）、url（14 函数）、
+  json（DOM 解析 + builder）、gzip（LZ77 + 固定 Huffman + CRC32，zlib 互操作 7/7）、
+  aes（AES-128-GCM，FIPS/NIST 向量全过）。说明与实测见 `docs/P0_LIBS.md`；
+  回归 **113 项全绿**。
+- **语言能力**：写编译器所需的语法基本齐了 —— `vec[T]`（可增长容器）、  
+  `for x in <map|vec>`（可枚举符号表）、`[N]T` 作参数/返回值（按值拷贝 + 隐藏出参，v1.2）；  
+  此前 v1.0–v1.1 已补齐 `args()`/`read_text`/`substr`/`chr`、位运算（含 `>>>`）、  
+  进制字面量、子切片 `a[lo..hi]`、顶层 `const`、`eprint`/`exit`、字符串字典序。
+- **自举进度：2/9 组件**。stage-1 词法器（v1.0）与声明级 parser（v1.3 进行中）均已通过对拍：  
+  词法 **92/92** 逐 token 全等、声明级 AST **87/87** 全等、函数体 Phase 1 **dump 一致 94 / 分叉 636**（`tests/bodydiff.py` 实测）、QuIR 架构无关 **50/50**（19 skip：a64 无 chan/map/spawn）、  
+  发射层确定性 **10/10**（详见 `docs/SELFHOST.md`）。
+- **代码规模**：`tools/stage0/` 18.9k 行 Python（引导层）+ `bootstrap/` **1770 行** Quelmara（自举层，  
+  自举占比 **8.6%**，`selfhost_status.py` 实测）+ `tests/` 2.0k 行脚本与 53 个 `.qma` 夹具（`examples/` 16 个）。
+- **验证**：Windows PE 回归 **113 项全绿**（本机实测，SKIP=1 因 WSL 被沙箱拦截）；  
+  跨平台基线 win + arm64 输出哈希一致（v1.1 起）。
+
+### 版本一句话索引（详情见 `CHANGELOG.md`）
+
+| 版本            | 一句话                                                                   |                                         |
+| ------------- | --------------------------------------------------------------------- | --------------------------------------- |
+| v0.7          | 用户 Result + `?` 三链打通 + 严格范围证明 + 产品默认自研后端                              |                                         |
+| v0.8          | `option[T]` 受控单态化（合成枚举，后端零改动）                                         |                                         |
+| v0.9          | `[]T` 切片 + 泛型 `result[T,E]` + modsum 闭环（loop_sum 518ms → 11–13ms）     |                                         |
+| v0.10         | `map[K]V` 开放寻址哈希表 + 浮点实际运算（f64/f32）                                   |                                         |
+| v0.11         | `h.join()` 方法式 + `chan.close()` + `select`                            |                                         |
+| v0.12         | 字符串 `len`/字节下标/`to_int` + `@extern` 收口 + AArch64 CLI 修复               |                                         |
+| v1.0          | 改名 Quelmara + 自举前置能力 + **stage-1 词法器**（抓出 `\|\|` 恒真、`let` 别名两个核心 bug） |                                         |
+| v1.1          | 位运算/进制字面量/子切片/`const`/字典序 + 跨平台 bench 基线 + 原创性门禁                      |                                         |
+| v1.2          | `vec[T]` + \`for x in <map                                            | vec>`+`[N]T\` 作参数/返回值 —— 自举 parser 地基补齐 |
+| **v1.3（进行中）** | parser 声明级自举（87/87）→ 下一步：函数体解析、类型推断                                   |                                         |
 
 ---
 
-## 6. 怎么接着干
+## 1. 语言特性状态（截至 v1.8）
+
+| 特性                                      | 状态                                                       |
+| --------------------------------------- | -------------------------------------------------------- |
+| `option[T]` 单态化                         | ✅ v0.8 合成枚举 + match 解构（int/bool/str）                     |
+| 泛型 `result[T,E]`                        | ✅ v0.9 受控单态化（t20）                                        |
+| `[]T` 切片（指针+长度）                         | ✅ v0.9 `slice_of(a)` 零拷贝 + 参数/返回值/别名写入（t21）              |
+| `map[K]V`                               | ✅ v0.10 开放寻址 + 墓碑 + 扩容（t22）                              |
+| `chan.close()` / `select`               | ✅ v0.11（t25/t26）；无界通道仍 ❌                                 |
+| `h.join()` 方法式语法                        | ✅ v0.11 解析期脱糖（t24）                                       |
+| `len(str)` / `s[i]` 字节下标 / `s.to_int()` | ✅ v0.12 三链；越界与非法输入 fail-fast（t27/t28）                    |
+| `argv` / 命令行参数                          | ✅ v1.0 `args()` / `arg(i)`（Windows 走 GetCommandLineA 拆分） |
+| 位运算 `& \| ^ ~ << >> >>>`                | ✅ v1.1 含复合赋值与自定义优先级                                      |
+| 顶层 `const`                              | ✅ v1.1 字面量内联（无运行时存储）                                     |
+| 进制字面量 `0x/0b/0o`                        | ✅ v1.1 三链                                                |
+| 子切片 `a[lo..hi]`                         | ✅ v1.1 str 拷贝 / 切片视图 / 数组视图（三链）                          |
+| 字符串字典序 `< <= > >=`                      | ✅ v1.1 修正（此前是指针比较）                                       |
+| `eprint` / `exit`                       | ✅ v1.1                                                   |
+| `vec[T]` 变长数组                           | ✅ v1.2 push/get/set/pop/len/clear + 2 倍扩容                |
+| `for k in m` 遍历 map / `for x in v`      | ✅ v1.2（顺序实现定义，SPEC 写明不要依赖）                               |
+| `[N]T` 作参数/返回值                          | ✅ v1.2 值语义拷贝 + 隐藏出参（仅自研后端；C 后端明确拒绝）                      |
+| 浮点实际运算                                  | ✅ v0.10 运算/比较/转换/格式化三链打通（t23，f64+f32）                    |
+| `vec[Struct]` 聚合元素                      | ✅ v1.3 元素支持标量/struct/enum，按值拷贝进出（t37 实测 `vecagg ok`）；`vec[vec[T]]` 仍 ❌ |
+| `import` 模块加载                         | ✅ v1.3 扁平合并（递归 `std/` + 同目录），无命名空间/可见性              |
+| str 长度前缀 ABI                         | ✅ v1.5.1 `len`/`s[i]` O(1)（值指向 `[len][bytes][NUL]`）     |
+| 真实整数宽度（u8/u32 回绕）                   | ✅ **v1.8** 边界截断（let/形参/返回值/赋值），表达式内按 C 提升（t49）        |
+| `let x: T` 类型标注                         | ✅ v1.8（只有宽度类型参与语义，不是完整 typeck）                          |
+| `@simd` 归约                              | ✅ **v1.8** SSE2 `paddq` 两路 + 标量尾，仅 `[N]int` 加法归约（t50）    |
+| `@no_preempt`                           | ✅ v1.8 抑制编译器插入的 `sched_yield`（t50）                       |
+| `rc[T]` 引用计数                          | ✅ **v1.8** `rc_new/clone/get/drop/count`，载荷仅具名 struct（t51）  |
+| 所有权 / 借用检查                             | 🟡 **v1.8 只查 `rc[T]`**：use-after-drop / double-free / move-then-use（`tests/bad/own_*`） |
+| `interface` / `impl`                    | 🟡 **v1.8 静态分发**：契约 + 校验 + 方法调用；**无 vtable/动态分发**（t52） |
+| `std/http` / `std/ws` / `std/sse`      | ✅ v1.5 服务端（keep-alive/流水线、RFC 6455、W3C SSE）；无客户端、无 TLS |
+| `@extern("C")`                          | 🟡 C 后端发射原型；自研后端明确拒绝（无动态链接器）                             |
+| `qlm_fmt` 新语法覆盖                         | ✅ v1.3 全量冒烟 62/62（token 级重排，新语法零崩溃）        |
+
+## 2. 平台 / 性能 / 工程化缺口
+
+| 项                            | 状态                                      |
+| ---------------------------- | --------------------------------------- |
+| Windows IOCP/AFD             | ✅ v1.4 `net_serve` + 回调派发（单 acceptor + N 工作线程；未设 SO_REUSEADDR/SO_REUSEPORT）<br>❌ `net.TcpServer` 结构体模型未进 Windows PE |
+| 自研 Linux epoll 网络            | ❌ native 后端尚无网络 intrinsic；`net_serve` 仅 Windows（Linux 侧仍只有 C 后端 epoll/io_uring demo） |
+| macOS/iOS Mach-O + kqueue    | ❌ 需 Mac 真机/CI                           |
+| Android / wasm64             | ❌                                       |
+| AArch64 spawn/chan           | ❌ 需要 `ldaxr/stxr` 原子发射层                 |
+| SIMD 自动向量化                   | ❌ 与 gcc -O2 的主要差距（v0.9 后 modsum 类负载已反超） |
+| 尾调用消除 / LTO / 热重载            | ❌                                       |
+| Windows PE 调试信息 / SEH unwind | ❌                                       |
+| `quelmara test --target all` | ✅ v1.3 `--targets all` 多后端矩阵（arm64 模拟器执行级 + 输出比对） |
+| Linux/Windows CI             | ✅ v1.3 `.github/workflows/ci.yml` 双平台矩阵               |
+| Windows C 后端执行验证             | ❌ 本机无 gcc/clang                         |
+
+## 3. 还差什么
+
+1. **Mac/ARM64 机器或 CI**：macOS Mach-O/kqueue 与 AArch64 真机验证缺硬件。
+2. **Windows C 工具链**：本机无 gcc/clang，C 后端只能验证「生成」不能验证「执行」  
+   （已验证 `gcc`/`clang`/`tcc`/MSVC 均不可用于 GNU C + POSIX 头）。
+3. **IOCP 压测环境**：需要 Windows 句柄上限、防火墙配置和压测客户端。
+4. **SIMD 基线环境**：需要固定 CPU、固定构建参数和 baseline 文件，避免把机器负载误判成优化收益。
+
+## 4. 下一步要写什么
+
+0. **接口动态分发（最高优先）**：接口值 = `{data, tid}`，每个 (interface, method)
+   生成派发函数。做完 `let s: Shape = Circle{..}` / `vec[Shape]` 才成立。
+   细节见 `docs/GAPS.md §2`、`docs/LANG.md §7.3`。
+0.1 **重开 LICM 并压测**：先补最小复现回归网，再开 `QLM_ENABLE_LICM=1` 跑全量 + bench。
+0.2 **TLS Phase A 收尾**：X25519 需要 255 位域算术——先做 `std/u128.qma`
+   （limb 加减乘/比较），再做 GF(2^255-19)；之后才是记录层/握手/X.509（Phase B）。
+   同时补 gzip 解码（inflate）与文件系统/时间最小集（需编译器内建）。
+1. **TLS Phase A 已完成 2/3**：`std/sha256.qma`（SHA-256+HMAC，FIPS/RFC 全过）、
+   `std/aes.qma`（AES-128-GCM，FIPS-197 / NIST case 2-3 全过）。
+   剩 `std/ecdh.qma`（X25519）——需要先有 255 位域算术（`std/u128` limb 层）。
+   详见 `docs/TLS.md`。
+2. **协议库回归入 CI**：http/ws/sse 的 Python 客户端互操作脚本
+   （本会话已验证的用例）固化为 `tests/netlibs_test.py`。
+3. **parser 函数体自举**（v1.3 主线）：在 `bootstrap/parser/qlm_parse.qma` 上扩展，  
+   对拍口径 = AST 节点逐层比对（`tests/parsediff.py` 扩展）。
+4. **类型推断自举**（`bootstrap/typeck/`）：负向夹具体检 —— 两阶段必须报错且类别一致。
+5. **动态长度检查消除**（`opt_bounds_elim` 下半场）：切片/str/vec 窗口接入
+   （跨块 CSE 合并 len load）。注意 v1.5.1 长度前缀 ABI 后 `len(s)` 已是
+   O(1) load，此条收益重估后再排。
+6. **SIMD 自动向量化**：`@simd` 已有单形状手写路径（v1.8），下一步推广到切片/`vec`/浮点，再谈自动识别。
+7. **macOS Mach-O + kqueue**：有 Mac runner 后落地。
+8. **`__map_grow` 旧表回收**：map rehash 仍走 bump（vec 已用 realloc），
+   大 map 场景的内存峰值待测。
+
+## 5. 怎么接着干
 
 ```bash
 # Windows（本机可跑）
-python tests/run_win_tests.py       # 74 项，[1]-[6] 全绿；[7] 需 WSL
+python tests/run_win_tests.py           # PE 回归（v1.2 时点 91 项）
+python tests/lexdiff.py                 # 词法对拍 92/92
+python tests/parsediff.py               # 声明级对拍 87/87
+python tests/irdiff.py                  # QuIR 架构无关 50/50
+python tests/emitdiff.py                # 发射层确定性 10/10
+python tools/dev/check_docs.py          # 文档漂移门禁（过期断言 / GAPS 链接）
+python tools/dev/selfhost_status.py     # 自举进度（2/9）
 
 # Linux（需 gcc / 自研 ELF 环境）
-bash tests/run_native_tests.sh      # 含 [21] str / [22] @extern
-bash tests/run_tests.sh             # 16
-bash tests/test_corelib.sh          # 34
-bash tests/test_uring.sh            # 26
+bash tests/run_native_tests.sh
+bash tests/run_tests.sh
+bash tests/test_corelib.sh
+bash tests/test_uring.sh
 
-# 字符串（v0.12）
-python tools/stage0/qlm_pe.py run tests/t27_str.qma
-python tools/stage0/qlm_pe.py run tests/t28_toint.qma
-python3 tools/stage0/qlm_native.py run tests/t27_str.qma     # 需 Linux
-python3 tools/stage0/qlm.py run tests/t28_toint.qma          # 需 gcc
-
-# Result 三链
-python tools/stage0/qlm_pe.py run tests/t17_result.qma
-python3 tools/stage0/qlm_native.py run tests/t17_result.qma
-python3 tools/stage0/qlm.py run tests/t17_result.qma
-
-# 性能审计
+# 单版本验证示例
+python tools/stage0/qlm_cli.py run tests/t34_vec.qma --target win
 python tools/stage0/qlm_cli.py bench examples/loop_sum.qma --target win --runs 5
-python tools/stage0/qlm_native.py build examples/loop_sum.qma -o build/loop
 
 # 调试/IR
 python tools/stage0/qlm_pe.py build tests/t17_result.qma -o build/x.exe --dump-ir --no-opt
@@ -291,32 +303,52 @@ python tools/stage0/qlm_pe.py build tests/t17_result.qma -o build/x.exe --dump-i
 - worker 是独立栈/寄存器压力边界，不能盲目内联。
 - 内联标签必须带 caller 名字，否则跨函数同名会把跳转导入错误函数。
 - C helper 只能引用 helper 形参，不能引用调用点局部变量名。
-- **`bin` 指令不能用 `sub dst, imm, dst` 模拟取反**：dst 与 rhs 同 vreg 时，
+- **`bin` 指令不能用 `sub dst, imm, dst` 模拟取反**：dst 与 rhs 同 vreg 时，  
   分配器先写 dst 再读 rhs，结果恒为 0。取反一律走专用 `neg` 指令。
-- **无函数体的声明必须带 `@extern`**：`body=None` 直接漏进 lowering 会变成
+- **无函数体的声明必须带 `@extern`**：`body=None` 直接漏进 lowering 会变成  
   Python traceback（用户看到的是解释器堆栈而不是编译错误）。后端入口要显式拦截。
-- **`str` 没有长度前缀**：`len(s)`、`s[i]` 都是 O(n)（先 strlen 再比对），
-  别按 O(1) 去设计热路径；真要 O(1) 得把 `str` 改成 `{len, ptr}` 并同步所有后端。
+- **str 曾是无长度前缀的零结尾串**（v1.5.1 已改为长度前缀 ABI）：`len(s)`、`s[i]` 现为 O(1)
+  （str 值指向 `[len][字节][NUL]`）。但所有直接拿 str 当裸指针传给
+  `mem_load8/mem_store8` 的代码要知道数据在 ptr+8 起——`tcp_send_n(fd, s, n)`
+  这类"str 当 ptr"的调用点必须走库层封装（`conn_send_str` 内部已换算）。
+- **`||` 与 `&&` 的短路落空值必须分开处理**（v1.0 自举词法器抓出）：  
+  两者共用「落空即 true」的尾巴会让 `0 || 0 == true`。
+- **`let` 必须拷贝而不是别名**（v1.0）：`let mut j = i` 若直接共享 vreg，
+  改 `j` 会连带改 `i`，值语义被破坏；标量一律拷贝到新 vreg 并传播全部类型标签。
+- **范围分析的循环识别必须覆盖两种 guard 条件码**：for 形态 `jcc ge i, hi, End`
+  （真则退出）与 while 形态 `jcc l i, hi, Body`（真则进体）语义同为
+  "body 在 `i < hi` 下执行"——只认一种会让另一形态的全部循环丢失证明
+  （for 循环的魔数除法收缩曾因此从未生效）。
+- **循环级归纳变量证明是局部的**：init 紧邻可追溯 >= 0、step 唯一 > 0、
+  body 无重定义、窗口在 body 区间内——不需要 ivar 全函数唯一定义；
+  用全局 def 唯一性当门槛会把"多个循环共享 i"的常见形态全部挡掉。
+- **实验配置会污染实验**：`find_config` 从源文件目录向上查找，实验目录里
+  放一份 `bounds_check=false` 的配置会让同目录的负向用例窗口根本不生成——
+  差点误判成"优化过度消除"。做对照实验先确认每个源文件命中哪份配置。
+- **Win64 API 的 int 返回值高位不可靠**：SOCKET_ERROR 落在 rax 是
+  0x00000000FFFFFFFF（0 扩展）而非 64 位 -1，与 -1 直接比较会漏检——
+  用 shl32+sar32 符号扩展后再比（tcp_listen 的 bind/listen 曾因此被放过）。
+- **winapi 函数的 DLL 归属必须跟着内建走**：WSAGetLastError 被漏归
+  kernel32 → 0xC0000139 ENTRYPOINT_NOT_FOUND，进程起不来；WSA* 前缀
+  一律 ws2_32。
+- **sockaddr_in 的 w0 = family | (htons(port)<<16)**：曾写成
+  hp3 | (2<<16)——family 落到字节 2-3，bind 报 10047 EAFNOSUPPORT。
+  反汇编（capstone）一锤定音；纸面推演 IR 语义永远有盲区。
+- **store/load 的 off 是槽索引（×8）不是字节偏移**：slice 头
+  `store s, imm 0/1` 是字节 0-7/8-15；写 imm 8 会落到 [base+64] 越界全局区。
 
 ---
 
-## 7. 版本控制 / 远端
+## 6. 版本控制 / 远端
 
 <!-- legacy-ok:begin -->
-- **git remote**：`origin = https://github.com/MonthZifang/Rosoto`（待改名为 `Quelmara`）。
-- 提交线：
-  - `026be71` v1.0：自举词法器 + `||`/`let` 修复
-  - `52714d0` C2+C3：read_text / substr / chr
-  - `cd05d39` C0+C1：堆对齐 + args()
-  - `d76f686` 扩展名 `.qma` 硬切
-  - `25fe994` 文档 + 门禁
-  - `6493b2d` 改名 Quelmara + 模块下沉 stage0
-  - `ffadac6` / `ca3cc93` v0.12；`ade98a4` v0.11；`b42e0a4` v0.9+v0.10
-- 工作区已整理为单一文件夹：`Rosoto/rosoto/`（git 仓库）。
+- **git remote**：`origin = https://github.com/MonthZifang/Rosoto`（待改名为 `Quelmara`，
+  **截至 2026-10-20 尚未执行**，remote 实测仍为旧地址）。
+- 工作区为单一文件夹：`Rosoto/rosoto/`（git 仓库）。
 
 ### 目录改名（需要用户手动执行）
 
-当前会话把仓库目录作为工作目录，操作系统会拒绝改名（`Permission denied`）。
+当前会话把仓库目录作为工作目录，操作系统会拒绝改名（`Permission denied`）。  
 **关闭当前会话后**在 `C://Users//43551//Desktop` 执行：
 
 ```bash
@@ -324,7 +356,7 @@ mv Rosoto/rosoto Rosoto/quelmara     # 内层仓库目录
 mv Rosoto Quelmara                   # 外层目录
 ```
 
-然后在 `C://Users//43551//Desktop//Quelmara//quelmara` 重新打开项目；
+然后在 `C://Users//43551//Desktop//Quelmara//quelmara` 重新打开项目；  
 `.workbuddy/memory` 会随外层目录一起搬走。
 
 ### GitHub 仓库改名（需要用户手动执行）
@@ -345,44 +377,18 @@ mv Rosoto Quelmara                   # 外层目录
 
 ---
 
-## 8. 文件清单
+## 7. 提交线（最近）
 
 ```
-修改：
-  tools/stage0/qlm.py          C Result ? 生成、Result 类型检查
-  tools/stage0/qlm_native.py   native Result ?、tag 顺序与标量边界
-  tools/stage0/qlm_opt.py      非负范围传播、worker 内联边界
-  tools/stage0/qlm_cli.py      产品默认 target、版本 0.7.0
-  tests/run_native_tests.sh / tests/run_win_tests.py
-  README.md / SPEC.md / BACKEND.md / HANDOVER.md
-
-新增：
-  tests/t17_result.qma     Result Ok/Err、错误传播、反向 tag 顺序
-
-v0.8 本轮改动（option[T]）：
-修改：
-  tools/stage0/qlm.py          KEYWORDS+option、ensure_option_enum 单态化、parse_type/parse_primary 构造、
-                           resolve_option_patterns、C gen_match 求值式先行 + Option 改写
-  tools/stage0/qlm_native.py   lower_match 求值式先行 + Option 模式改写（PE/AArch64 零改动）
-  tests/run_native_tests.sh / tests/run_win_tests.py   登记 t19（native [13] + PE + 交叉验证）
-新增：
-  tests/t19_option.qma     option[int]/option[str] 构造、函数返回、Option.Some/None 解构
-
-v0.12 本轮改动（字符串 + @extern 收口）：
-修改：
-  tools/stage0/qlm.py          len(str)->strlen、s[i] 字节下标 + qlm_str_bounds、
-                           qlm_str_to_int、to_int()/to_int(s) 的 str 分支、推断层类型
-  tools/stage0/qlm_native.py   len(str)->__str_len、s[i] load8 + 动态越界、
-                           __str_to_int / __str_to_int_fail 运行时、run() 拦截 @extern
-  tests/run_win_tests.py   新增 [3c] 字符串段 + test_str_failfast()；交叉验证登记 t27/t28
-  tests/run_native_tests.sh  新增 [21] str / [22] @extern 段
-  SPEC.md / CHANGELOG.md / HANDOVER.md
-新增：
-  tests/t27_str.qma        len / 字节下标 / 动态下标 / 拼接后下标 / 手写 atoi
-  tests/t28_toint.qma      正负号 / 前导零 / int64 边界 / to_str 往返 / CSV 扫描
-  tests/str_bounds.qma     str 下标越界 fail-fast（负向）
-  tests/extern_decl.qma    @extern("C") 声明（自研后端必须拒绝）
-
-测试：
-  Windows PE 74 ✅（本机实测）；native Linux / C / corelib / io_uring 需 Linux 环境
+6ef52ae  docs: SELFHOST 状态表更新（parser 前置能力已齐，仍缺 vec[Struct]）
+28f7df9  fix(v1.2): C 后端 vec 的类型串与局部声明
+335d23f  feat(v1.2): vec[T] / for-in 集合遍历 / [N]T 作参数与返回值
+1a3122d  feat(v1.1): 位运算/进制字面量/子切片/const/字典序/eprint/exit + 基线 + 门禁
+ebfe9f9  fix: C 后端 qlm_args 废弃符号；文档历史叙述加 legacy-ok 标注
+026be71  feat(v1.0/D): 自举词法器 + || / let 两个核心语义 bug 修复
+…（更早见 git log / CHANGELOG）
 ```
+
+> 工作区当前有 v1.3 未提交内容：`bootstrap/parser/`、`tests/parsediff.py` /  
+> `irdiff.py` / `emitdiff.py`、`tools/dev/astdecl.py`、`tests/t37_vecagg.qma` 等。  
+> 各轮次的逐文件变更明细不再在本文维护，用 `git show --stat <hash>` 查。

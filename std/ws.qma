@@ -1,0 +1,499 @@
+// std/ws.qma —— WebSocket 服务端（RFC 6455，Quelmara 自实现）
+//
+// 分层：std/net/core.qma 槽位层 + net_serve reactor。
+// 握手 = HTTP Upgrade（Sec-WebSocket-Accept = base64(sha1(key+GUID))，
+// 密码学来自 std/sha1 + std/b64，语言内闭环，零外部依赖）。
+// 帧层 = 完整实现：FIN/opcode/mask、7/16/64 位长度、客户端帧强制掩码
+// （RFC 要求）、分片消息重组、ping/pong、close 握手。
+//
+// 用法：
+//
+//   import std.ws
+//
+//   fn on_open(fd: int) -> int {
+//       ws_send(fd, "welcome")
+//       return 1
+//   }
+//   fn on_msg(fd: int, data: str) -> int {
+//       ws_send(fd, data)              // echo
+//       return 1                       // 0 = 关闭连接
+//   }
+//   fn on_close(fd: int) -> int {
+//       return 0
+//   }
+//   fn main() {
+//       ws_serve(8092, 512, on_open, on_msg, on_close)   // 阻塞运行
+//   }
+//
+// ws:// 明文即本库；wss:// 需要 TLS 层（见 docs/TLS.md 路线图），
+// 本库的帧/消息层与 TLS 解耦，TLS 就位后握手换成 wss 传输即可。
+//
+// 槽位协议私有字：
+//   w6 状态（0=等握手 1=open）  w7 分片 opcode（0=无分片进行中）
+//   w8 分片累积长度             w9 握手扫描位置
+
+import std.mem
+import std.net.core
+import std.core
+import std.sha1
+import std.b64
+
+const WS_STATE = 6
+const WS_FOP = 7
+const WS_MLEN = 8
+const WS_SCAN = 9
+
+const WS_OP_CONT = 0
+const WS_OP_TEXT = 1
+const WS_OP_BIN = 2
+const WS_OP_CLOSE = 8
+const WS_OP_PING = 9
+const WS_OP_PONG = 10
+
+const WS_DEFAULT_CONNS = 100000
+const WS_DEFAULT_MAX_MSG = 1048576    // 单条消息上限 1MB
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+// ---------------------------------------------------------------------------
+// 服务入口
+// ---------------------------------------------------------------------------
+
+fn ws_serve(port: int, backlog: int, on_open: int, on_message: int,
+            on_close: int) -> int {
+    return ws_serve_max(port, backlog, on_open, on_message, on_close,
+                        WS_DEFAULT_CONNS)
+}
+
+fn ws_serve_max(port: int, backlog: int, on_open: int, on_message: int,
+                on_close: int, max_conns: int) -> int {
+    let st = conn_state_new(max_conns, 80)
+    mem_store64(st, ST_H0, on_open)
+    mem_store64(st, ST_H1, on_message)
+    mem_store64(st, ST_H2, on_close)
+    mem_store64(st, ST_AUX, WS_DEFAULT_MAX_MSG)
+    mem_store64(static_word(0), 0, st)
+    return net_serve(port, backlog, ws_on_connect, ws_on_data, ws_on_close)
+}
+
+fn ws_accepted() -> int {
+    return conn_accepted(_wst())
+}
+
+fn ws_closed() -> int {
+    return conn_closed(_wst())
+}
+
+fn ws_msgs() -> int {
+    return conn_msgs(_wst())
+}
+
+fn ws_bytes_in() -> int {
+    return conn_bytes_in(_wst())
+}
+
+fn ws_bytes_out() -> int {
+    return conn_bytes_out(_wst())
+}
+
+fn _wst() -> int {
+    return mem_load64(static_word(0), 0)
+}
+
+// ---------------------------------------------------------------------------
+// reactor 回调
+// ---------------------------------------------------------------------------
+
+fn ws_on_connect(fd: int) -> int {
+    let r = conn_open(_wst(), fd)
+    if r < 0 {
+        return 0
+    }
+    return 1
+}
+
+fn ws_on_close(fd: int) -> int {
+    let st = _wst()
+    let h = mem_load64(st, ST_H2)
+    h(fd)                                   // 先通知用户再回收槽位
+    conn_close(st, fd)
+    return 0
+}
+
+fn ws_on_data(fd: int, data: str) -> int {
+    let st = _wst()
+    let p = conn_slot(st, fd)
+    if p == 0 {
+        return 0
+    }
+    if len(data) > 0 {
+        let r = conn_append(st, p, data)
+        if r < 0 {
+            return 0                        // 缓冲超限：直接关闭
+        }
+    }
+    let state = mem_load64(p, WS_STATE) & 255
+    if state == 0 {
+        return _handshake(st, p, fd)
+    }
+    return _frames(st, p, fd)
+}
+
+// ---------------------------------------------------------------------------
+// 握手（HTTP Upgrade）
+// ---------------------------------------------------------------------------
+
+fn _handshake(st: int, p: int, fd: int) -> int {
+    let buf = conn_buf_ptr(p)
+    let n = mem_load64(p, SLOT_RECVLEN)
+    let scan = mem_load64(p, WS_SCAN)
+    let k = _find_head_end(buf, scan, n)
+    if k < 0 {
+        let keep = n - 3
+        if keep < 0 {
+            mem_store64(p, WS_SCAN, 0)
+        } else {
+            mem_store64(p, WS_SCAN, keep)
+        }
+        return 1                            // 握手头未收全
+    }
+    // 找 Sec-WebSocket-Key（大小写无关；值基 64 原样参与 sha1，不改大小写）
+    let key = _ws_header(buf, 0, k, "sec-websocket-key")
+    if key == "" {
+        _reject(fd, "missing Sec-WebSocket-Key")
+        return 0
+    }
+    let dig = sha1_str(key + WS_GUID)
+    let accept = b64_encode(dig, 20)
+    mem_free(dig, 20)                       // 摘要即用即还（握手高频路径）
+    let resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+               + "Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept
+               + "\r\n\r\n"
+    conn_send_str(st, fd, resp)
+    mem_store64(p, WS_STATE, 1)
+    mem_store64(p, WS_FOP, 0)
+    mem_store64(p, WS_MLEN, 0)
+    // 丢弃握手字节；客户端可能在同一 TCP 段里已经发了帧
+    conn_shift(p, k + 4)
+    mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
+    let h = mem_load64(st, ST_H0)
+    let rc = h(fd)
+    if rc == 0 {
+        return 0
+    }
+    if mem_load64(p, SLOT_RECVLEN) > 0 {
+        return _frames(st, p, fd)
+    }
+    return 1
+}
+
+// 101 之外的握手失败响应（HTTP 语义）
+fn _reject(fd: int, why: str) -> int {
+    let head = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\n"
+               + "Content-Length: " + len(why).to_str()
+               + "\r\nConnection: close\r\n\r\n" + why
+    conn_send_str(_wst(), fd, head)
+    return 0
+}
+
+// 在头块 [hoff, hend) 里按名找头值（name 小写，大小写无关比较）
+fn _ws_header(buf: int, hoff: int, hend: int, name: str) -> str {
+    let mut i = hoff
+    while i < hend {
+        let mut e = i
+        while e < hend && mem_load8(buf, e) != 13 {
+            e += 1
+        }
+        let mut c = i
+        while c < e && mem_load8(buf, c) != 58 {    // ':'
+            c += 1
+        }
+        if c < e && _ws_ci(buf, i, c - i, name) == 1 {
+            // 值：跳过前导空格，原样（Base64 区分大小写）
+            let mut a = c + 1
+            while a < e && (mem_load8(buf, a) == 32 || mem_load8(buf, a) == 9) {
+                a += 1
+            }
+            let mut b = e
+            while b > a && (mem_load8(buf, b - 1) == 32
+                            || mem_load8(buf, b - 1) == 9) {
+                b -= 1
+            }
+            return mem_str(buf + a, b - a)
+        }
+        i = e + 2
+    }
+    return ""
+}
+
+fn _ws_ci(buf: int, from: int, n: int, name: str) -> int {
+    if len(name) != n {
+        return 0
+    }
+    let mut i = 0
+    while i < n {
+        let mut b = mem_load8(buf, from + i)
+        if b >= 65 && b <= 90 {
+            b += 32
+        }
+        if b != name[i] {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+fn _find_head_end(buf: int, from: int, n: int) -> int {
+    if n < 4 {
+        return -1
+    }
+    let mut i = from
+    let lim = n - 4
+    while i <= lim {
+        if mem_load8(buf, i) == 13 && mem_load8(buf, i + 1) == 10
+                && mem_load8(buf, i + 2) == 13 && mem_load8(buf, i + 3) == 10 {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// ---------------------------------------------------------------------------
+// 帧层
+// ---------------------------------------------------------------------------
+
+// 缓冲区管理不变量：
+//   * 分片进行中（WS_FOP != 0）时，[0, WS_MLEN) 是已累积的消息本体，
+//     下一个待解析帧从 WS_MLEN 处开始（紧跟消息尾部）；
+//   * 分片续帧的载荷解析后向左贴齐（mem_copy 到 MLEN 处），消息连续生长；
+//   * 控制帧/完整帧消费 = 删除区间 [from, end)，保留两端；
+//   * 帧未收全直接 return 1 —— 已有数据各就各位，无需搬移。
+fn _frames(st: int, p: int, fd: int) -> int {
+    let maxmsg = mem_load64(st, ST_AUX)
+    let h_msg = mem_load64(st, ST_H1)
+    while true {
+        let buf = conn_buf_ptr(p)
+        let n = mem_load64(p, SLOT_RECVLEN)
+        let fop = mem_load64(p, WS_FOP)
+        let mut off = 0
+        if fop != 0 {
+            off = mem_load64(p, WS_MLEN)    // 部分消息从 0 开始
+        }
+        // ---- 帧头 ----
+        if n - off < 2 {
+            break
+        }
+        let b0 = mem_load8(buf, off)
+        let b1 = mem_load8(buf, off + 1)
+        let fin = b0 >> 7
+        let op = b0 & 15
+        let masked = b1 >> 7
+        let len7 = b1 & 127
+        let mut hl = 2
+        let mut plen = len7
+        if len7 == 126 {
+            if n - off < 4 {
+                break
+            }
+            plen = (mem_load8(buf, off + 2) << 8) | mem_load8(buf, off + 3)
+            hl = 4
+        } else {
+            if len7 == 127 {
+                if n - off < 10 {
+                    break
+                }
+                // 64 位长度：只接受 < 2^31（防伪造巨型长度）
+                let mut v = 0
+                let mut bi = 0
+                while bi < 8 {
+                    v = v * 256 + mem_load8(buf, off + 2 + bi)
+                    bi += 1
+                }
+                if v >= 2147483648 {
+                    _ws_close_code(fd, 1009)
+                    return 0
+                }
+                plen = v
+                hl = 10
+            }
+        }
+        let mk = off + hl
+        if masked == 1 {
+            hl += 4
+        }
+        if plen > maxmsg || (fop != 0
+                             && mem_load64(p, WS_MLEN) + plen > maxmsg) {
+            _ws_close_code(fd, 1009)        // message too big
+            return 0
+        }
+        if n - off < hl + plen {
+            break                           // 帧未收全
+        }
+        // RFC 6455 5.1：客户端帧必须掩码；不掩码 = 协议错误
+        if masked != 1 {
+            _ws_close_code(fd, 1002)
+            return 0
+        }
+        let pay = off + hl
+        // 原地解掩码（XOR 4 字节循环 key）
+        let mut i = 0
+        while i < plen {
+            let kb = mem_load8(buf, mk + (i & 3))
+            mem_store8(buf, pay + i, mem_load8(buf, pay + i) ^ kb)
+            i += 1
+        }
+        // ---- 分派 ----
+        // 布局恒定：[0..off)=消息本体或空 | [off..pay)=帧头 | [pay..)=载荷
+        // | 载荷后 = 后续数据。所有分支只做「载荷/尾段左移贴齐」。
+        if op == WS_OP_CLOSE {
+            // close 握手：回显关闭帧（code 载荷 ≤ 125 字节）后关闭
+            _ws_frame_raw(fd, WS_OP_CLOSE, buf + pay, plen)
+            return 0
+        }
+        if op == WS_OP_PING {
+            _ws_frame_raw(fd, WS_OP_PONG, buf + pay, plen)
+            _drop_frame(p, off, pay, plen)
+            continue
+        }
+        if op == WS_OP_PONG {
+            _drop_frame(p, off, pay, plen)
+            continue
+        }
+        if op == WS_OP_TEXT || op == WS_OP_BIN {
+            if fop != 0 {
+                _ws_close_code(fd, 1002)    // 分片进行中又来新数据帧
+                return 0
+            }
+            if fin == 1 {
+                let msg = mem_str(buf + pay, plen)
+                _drop_frame(p, off, pay, plen)
+                mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
+                let rc = h_msg(fd, msg)
+                if rc == 0 {
+                    return 0
+                }
+                continue
+            }
+            // 分片开始：[载荷+后续数据] 左移贴到 0，成为消息本体
+            mem_copy(buf, buf + pay, n - pay)
+            mem_store64(p, SLOT_RECVLEN, n - pay)
+            mem_store64(p, WS_FOP, op)
+            mem_store64(p, WS_MLEN, plen)
+            continue
+        }
+        if op == WS_OP_CONT {
+            if fop == 0 {
+                _ws_close_code(fd, 1002)    // 没有进行中的分片
+                return 0
+            }
+            let mlen = mem_load64(p, WS_MLEN)
+            if fin == 1 {
+                // 载荷贴到消息尾 -> 完整消息 [0, mlen+plen)
+                mem_copy(buf + mlen, buf + pay, plen)
+                let total = mlen + plen
+                let msg = mem_str(buf, total)
+                _drop_frame(p, total, pay, plen)
+                mem_store64(p, WS_FOP, 0)
+                mem_store64(p, WS_MLEN, 0)
+                mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
+                let rc = h_msg(fd, msg)
+                if rc == 0 {
+                    return 0
+                }
+                continue
+            }
+            // 续帧：载荷贴到消息尾，后续数据跟着贴，消息连续生长
+            mem_copy(buf + mlen, buf + pay, n - pay)
+            mem_store64(p, SLOT_RECVLEN, mlen + (n - pay))
+            mem_store64(p, WS_MLEN, mlen + plen)
+            continue
+        }
+        _ws_close_code(fd, 1002)            // 未知 opcode
+        return 0
+    }
+    // 帧未收全：消息本体与半截帧都在原位，等下一段数据
+    return 1
+}
+
+// 丢弃一帧：保留 [0, keep_to)（消息本体），跳过 [poff..pend) 的帧，
+// 把帧后的数据贴到 keep_to。poff = 帧头起点，pend_from = 载荷起点。
+fn _drop_frame(p: int, keep_to: int, pend_from: int, plen: int) -> int {
+    let n = mem_load64(p, SLOT_RECVLEN)
+    let buf = conn_buf_ptr(p)
+    let tail = n - (pend_from + plen)
+    if tail > 0 {
+        mem_copy(buf + keep_to, buf + pend_from + plen, tail)
+    }
+    mem_store64(p, SLOT_RECVLEN, keep_to + tail)
+    return keep_to + tail
+}
+
+// ---------------------------------------------------------------------------
+// 发送
+// ---------------------------------------------------------------------------
+
+// 服务端帧不掩码（RFC 6455 5.1）。头 2/4/10 字节 + 载荷一次组包一次 send。
+fn _ws_frame_raw(fd: int, op: int, payload: int, n: int) -> int {
+    if n < 0 {
+        n = 0
+    }
+    let mut hl = 2
+    if n >= 65536 {
+        hl = 10
+    } else {
+        if n >= 126 {
+            hl = 4
+        }
+    }
+    let buf = mem_alloc(hl + n)
+    mem_store8(buf, 0, 128 | op)            // FIN=1
+    if hl == 2 {
+        mem_store8(buf, 1, n)
+    } else {
+        if hl == 4 {
+            mem_store8(buf, 1, 126)
+            mem_store8(buf, 2, (n >> 8) & 255)
+            mem_store8(buf, 3, n & 255)
+        } else {
+            mem_store8(buf, 1, 127)
+            let mut bi = 0
+            while bi < 8 {
+                mem_store8(buf, 2 + bi, (n >> (56 - bi * 8)) & 255)
+                bi += 1
+            }
+        }
+    }
+    if n > 0 {
+        mem_copy(buf + hl, payload, n)
+    }
+    let w = tcp_send_n(fd, buf, hl + n)
+    mem_free(buf, hl + n)
+    return w
+}
+
+fn ws_send(fd: int, data: str) -> int {
+    return _ws_frame_raw(fd, WS_OP_TEXT, data, len(data))
+}
+
+fn ws_send_bin(fd: int, data: str) -> int {
+    return _ws_frame_raw(fd, WS_OP_BIN, data, len(data))
+}
+
+fn ws_ping(fd: int, data: str) -> int {
+    return _ws_frame_raw(fd, WS_OP_PING, data, len(data))
+}
+
+// 主动关闭：发 close 帧（对端回 close 后 reactor 收尾调 on_close）
+fn ws_close(fd: int, code: int) -> int {
+    let buf = mem_alloc(2)
+    mem_store8(buf, 0, (code >> 8) & 255)
+    mem_store8(buf, 1, code & 255)
+    let w = _ws_frame_raw(fd, WS_OP_CLOSE, buf, 2)
+    mem_free(buf, 2)
+    return w
+}
+
+fn _ws_close_code(fd: int, code: int) -> int {
+    return ws_close(fd, code)
+}

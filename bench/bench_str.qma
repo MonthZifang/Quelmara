@@ -1,0 +1,83 @@
+// bench/bench_str.qma —— 字符串扫描/拼接基准（进程内 now_ns，扣掉启动开销）
+// 对应性能报告 §3.3：16 KB 逐字节扫描 85.9 ms（O(n^2)），拼接 437.5 ms。
+module bench_str
+
+import std.core
+
+fn scan(s: str) -> int {
+    let n = len(s)
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        acc += s[i]
+        i = i + 1
+    }
+    return acc
+}
+
+fn main() {
+    let s = read_text("bench/scan16k.txt")
+    let n = len(s)
+
+    // 预热（首次调用把 __str_len 等热路径带进缓存）
+    let mut warm = scan(s)
+    warm = warm + scan(s)
+
+    let t0 = now_ns()
+    let mut acc = 0
+    let mut r = 0
+    while r < 10 {
+        acc += scan(s)
+        r = r + 1
+    }
+    let t1 = now_ns()
+    print("scan16k x10  bytes=" + n.to_str() +
+          "  ns=" + (t1 - t0).to_str() +
+          "  per_scan_us=" + ((t1 - t0) / 10000).to_str() +
+          "  acc=" + acc.to_str() + " warm=" + warm.to_str())
+
+    // 拼接：2 万次 s = s + "x"（v1.3 链融合只对字面量链生效，这里是累积）
+    let t2 = now_ns()
+    let mut cat = "x"
+    let mut j = 0
+    while j < 20000 {
+        cat = cat + "x"
+        j = j + 1
+    }
+    let t3 = now_ns()
+    print("concat20k  ns=" + (t3 - t2).to_str() +
+          "  len=" + len(cat).to_str())
+
+    let t4 = now_ns()
+    let mut k = 0
+    let mut sum = 0
+    while k < 50000000 {
+        sum += (k * 7) % 13
+        k = k + 1
+    }
+    let t5 = now_ns()
+    print("loopsum50m  ns=" + (t5 - t4).to_str() + "  sum=" + sum.to_str())
+
+    let t6 = now_ns()
+    let mut c = 0
+    let mut best = 0
+    let mut x = 1
+    while c < 300000 {
+        x = c + 1
+        let mut ln = 0
+        while x != 1 {
+            if x % 2 == 0 {
+                x = x / 2
+            } else {
+                x = 3 * x + 1
+            }
+            ln = ln + 1
+        }
+        if ln > best {
+            best = ln
+        }
+        c = c + 1
+    }
+    let t7 = now_ns()
+    print("collatz300k  ns=" + (t7 - t6).to_str() + "  best=" + best.to_str())
+}

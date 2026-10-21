@@ -1,0 +1,366 @@
+// std/mem.qma —— 库层内存原语（全部用 Quelmara 自身实现）
+//
+// 设计目标：十万连接的常驻内存可算、可回收、无卡顿。
+//   * slab：一次大块分配 + 自由链，槽位固定大小 -> 每连接内存 = slot_bytes
+//   * fdtab：开放寻址 (fd -> 槽位) 表，2 字/项，负载因子 50%
+//   * buf：定长字节缓冲区的读写（配合 mem_load8/mem_store8 零拷贝）
+//
+// 全部 O(1) 操作，无扫描、无 GC、无 STW —— 释放立刻可复用。
+// 底层依赖内建 mem_alloc / mem_free / mem_load8 / mem_store8 / mem_copy /
+// mem_zero / mem_cmp，这些在自研后端里是内联指令或 8 字节字块循环。
+
+// ---------------------------------------------------------------------------
+// slab：固定槽位分配器
+//   句柄 4 字：{data, cap, slot_words, free_head}
+//   槽位首字存 next（空闲时），因此业务数据从第 1 字起用。
+// ---------------------------------------------------------------------------
+
+fn slab_new(cap: int, slot_words: int) -> int {
+    let h = mem_alloc(32)
+    let words = cap * slot_words
+    let data = mem_alloc(words * 8)
+    mem_store64(h, 0, data)
+    mem_store64(h, 1, cap)
+    mem_store64(h, 2, slot_words)
+    mem_store64(h, 3, 0)
+    // 全部槽位串成空闲链（倒序串，分配时从 0 开始）
+    let mut i = cap - 1
+    while i >= 0 {
+        let p = data + i * slot_words * 8
+        mem_store64(p, 0, i + 2)          // next = 下一个槽位下标+1
+        i = i - 1
+    }
+    // 尾槽 next = 0（空）
+    let tail = data + (cap - 1) * slot_words * 8
+    mem_store64(tail, 0, 0)
+    mem_store64(h, 3, 1)                  // head = 槽位 0（编码为 1）
+    return h
+}
+
+fn slab_alloc(h: int) -> int {
+    let head = mem_load64(h, 3)
+    if head == 0 {
+        return -1
+    }
+    let idx = head - 1
+    let data = mem_load64(h, 0)
+    let sw = mem_load64(h, 2)
+    let p = data + idx * sw * 8
+    mem_store64(h, 3, mem_load64(p, 0))
+    mem_zero(p, sw * 8)
+    return idx
+}
+
+fn slab_free(h: int, idx: int) -> int {
+    if idx < 0 {
+        return -1
+    }
+    let data = mem_load64(h, 0)
+    let sw = mem_load64(h, 2)
+    let p = data + idx * sw * 8
+    mem_store64(p, 0, mem_load64(h, 3))
+    mem_store64(h, 3, idx + 1)
+    return 0
+}
+
+fn slab_ptr(h: int, idx: int) -> int {
+    let data = mem_load64(h, 0)
+    let sw = mem_load64(h, 2)
+    return data + idx * sw * 8
+}
+
+fn slab_cap(h: int) -> int {
+    return mem_load64(h, 1)
+}
+
+fn slab_slot_words(h: int) -> int {
+    return mem_load64(h, 2)
+}
+
+// ---------------------------------------------------------------------------
+// fdtab：(fd -> 槽位) 开放寻址表
+//   句柄 4 字：{keys, vals, cap, count}
+//   keys 存 fd+1（0 = 空槽），vals 存槽位下标。
+//   cap 必须是 2 的幂；hash 用 splitmix 风格的 64 位混合，避免顺序 fd 聚簇。
+// ---------------------------------------------------------------------------
+
+fn fdtab_new(cap: int) -> int {
+    let h = mem_alloc(32)
+    let n = cap
+    let keys = mem_alloc(n * 8)
+    let vals = mem_alloc(n * 8)
+    mem_zero(keys, n * 8)
+    mem_store64(h, 0, keys)
+    mem_store64(h, 1, vals)
+    mem_store64(h, 2, n)
+    mem_store64(h, 3, 0)
+    return h
+}
+
+fn fdtab_hash(k: int) -> int {
+    let mut x = k
+    x = x ^ (x >> 33)
+    x = x * 0xFF51AFD7ED558CCD
+    x = x ^ (x >> 33)
+    x = x * 0xC4CEB9FE1A85EC53
+    x = x ^ (x >> 33)
+    return x
+}
+
+fn fdtab_put(h: int, fd: int, slot: int) -> int {
+    let keys = mem_load64(h, 0)
+    let vals = mem_load64(h, 1)
+    let mask = mem_load64(h, 2) - 1
+    let key = fd + 1
+    let mut i = fdtab_hash(fd) & mask
+    let mut probes = 0
+    while probes <= mask {
+        let k = mem_load64(keys, i)
+        if k == 0 {
+            mem_store64(keys, i, key)
+            mem_store64(vals, i, slot)
+            mem_store64(h, 3, mem_load64(h, 3) + 1)
+            return 0
+        }
+        if k == key {
+            mem_store64(vals, i, slot)
+            return 0
+        }
+        i = (i + 1) & mask
+        probes = probes + 1
+    }
+    return -1                              // 表满（调用方应扩容）
+}
+
+fn fdtab_get(h: int, fd: int) -> int {
+    let keys = mem_load64(h, 0)
+    let vals = mem_load64(h, 1)
+    let mask = mem_load64(h, 2) - 1
+    let key = fd + 1
+    let mut i = fdtab_hash(fd) & mask
+    let mut probes = 0
+    while probes <= mask {
+        let k = mem_load64(keys, i)
+        if k == 0 {
+            return -1
+        }
+        if k == key {
+            return mem_load64(vals, i)
+        }
+        i = (i + 1) & mask
+        probes = probes + 1
+    }
+    return -1
+}
+
+// 删除用「后移填洞」：命中后把后续探测链上仍可前移的项前移，
+// 避免墓碑堆积（开放寻址 + 无墓碑 = 查找链不断裂）。
+fn fdtab_del(h: int, fd: int) -> int {
+    let keys = mem_load64(h, 0)
+    let vals = mem_load64(h, 1)
+    let mask = mem_load64(h, 2) - 1
+    let key = fd + 1
+    let mut i = fdtab_hash(fd) & mask
+    let mut probes = 0
+    let mut found = -1
+    while probes <= mask {
+        let k = mem_load64(keys, i)
+        if k == 0 {
+            return -1
+        }
+        if k == key {
+            found = i
+            probes = mask + 1
+        } else {
+            i = (i + 1) & mask
+            probes = probes + 1
+        }
+    }
+    if found < 0 {
+        return -1
+    }
+    let mut j = found
+    let mut n = (found + 1) & mask
+    while mem_load64(keys, n) != 0 {
+        let home = fdtab_hash(mem_load64(keys, n) - 1) & mask
+        // home 落在 (j, n] 环区间内才前移（否则查找链会断）
+        let mut in_win = 0
+        if j < n {
+            if home <= j || home > n {
+                in_win = 1
+            }
+        } else {
+            if home <= j && home > n {
+                in_win = 1
+            }
+        }
+        if in_win == 1 {
+            mem_store64(keys, j, mem_load64(keys, n))
+            mem_store64(vals, j, mem_load64(vals, n))
+            j = n
+        }
+        n = (n + 1) & mask
+    }
+    mem_store64(keys, j, 0)
+    mem_store64(h, 3, mem_load64(h, 3) - 1)
+    return 0
+}
+
+fn fdtab_len(h: int) -> int {
+    return mem_load64(h, 3)
+}
+
+fn fdtab_cap(h: int) -> int {
+    return mem_load64(h, 2)
+}
+
+// ---------------------------------------------------------------------------
+// 字节缓冲区（定长，零拷贝写入）
+//   句柄 3 字：{ptr, cap, len}
+// ---------------------------------------------------------------------------
+
+fn buf_new(cap: int) -> int {
+    let h = mem_alloc(24)
+    let p = mem_alloc(cap)
+    mem_store64(h, 0, p)
+    mem_store64(h, 1, cap)
+    mem_store64(h, 2, 0)
+    return h
+}
+
+fn buf_ptr(h: int) -> int {
+    return mem_load64(h, 0)
+}
+
+fn buf_len(h: int) -> int {
+    return mem_load64(h, 2)
+}
+
+fn buf_cap(h: int) -> int {
+    return mem_load64(h, 1)
+}
+
+fn buf_reset(h: int) -> int {
+    mem_store64(h, 2, 0)
+    return 0
+}
+
+fn buf_put8(h: int, b: int) -> int {
+    let n = mem_load64(h, 2)
+    if n >= mem_load64(h, 1) {
+        return -1
+    }
+    mem_store8(mem_load64(h, 0), n, b)
+    mem_store64(h, 2, n + 1)
+    return 0
+}
+
+fn buf_put(h: int, src: int, n: int) -> int {
+    let len = mem_load64(h, 2)
+    if len + n > mem_load64(h, 1) {
+        return -1
+    }
+    mem_copy(mem_load64(h, 0) + len, src, n)
+    mem_store64(h, 2, len + n)
+    return 0
+}
+
+fn buf_put_str(h: int, s: str) -> int {
+    let n = len(s)
+    let len = mem_load64(h, 2)
+    if len + n > mem_load64(h, 1) {
+        return -1
+    }
+    let p = mem_load64(h, 0)
+    let mut i = 0
+    while i < n {
+        mem_store8(p, len + i, s[i])
+        i = i + 1
+    }
+    mem_store64(h, 2, len + n)
+    return 0
+}
+
+fn buf_str(h: int) -> str {
+    return mem_str(mem_load64(h, 0), mem_load64(h, 2))
+}
+
+// 在 [from, len) 里找 needle 的首个出现位置；找不到返回 -1
+fn buf_find(h: int, from: int, needle: str) -> int {
+    let p = mem_load64(h, 0)
+    let len = mem_load64(h, 2)
+    let nl = len(needle)
+    if nl == 0 {
+        return from
+    }
+    if from < 0 {
+        return -1
+    }
+    let mut i = from
+    while i + nl <= len {
+        if mem_load8(p, i) == needle[0] {
+            let mut j = 0
+            let mut hit = 1
+            while j < nl {
+                if mem_load8(p, i + j) != needle[j] {
+                    hit = 0
+                    j = nl
+                } else {
+                    j = j + 1
+                }
+            }
+            if hit == 1 {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// 找 "\r\n\r\n"（HTTP 头结束）—— 按 4 字节滑窗，避免逐字节 substr 分配
+fn buf_find_head_end(h: int) -> int {
+    let p = mem_load64(h, 0)
+    let len = mem_load64(h, 2)
+    let mut i = 0
+    while i + 3 < len {
+        if mem_load8(p, i) == 13 && mem_load8(p, i + 1) == 10 &&
+           mem_load8(p, i + 2) == 13 && mem_load8(p, i + 3) == 10 {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// 大小写不敏感的前缀/子串查找（HTTP 头名、WebSocket 头）
+fn buf_lower8(b: int) -> int {
+    if b >= 65 && b <= 90 {
+        return b + 32
+    }
+    return b
+}
+
+fn buf_find_ci(h: int, from: int, needle: str) -> int {
+    let p = mem_load64(h, 0)
+    let len = mem_load64(h, 2)
+    let nl = len(needle)
+    let mut i = from
+    while i + nl <= len {
+        let mut j = 0
+        let mut hit = 1
+        while j < nl {
+            if buf_lower8(mem_load8(p, i + j)) != buf_lower8(needle[j]) {
+                hit = 0
+                j = nl
+            } else {
+                j = j + 1
+            }
+        }
+        if hit == 1 {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}

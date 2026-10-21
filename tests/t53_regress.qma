@@ -1,0 +1,93 @@
+// t53_regress.qma：v1.8 修掉的三个误编译的回归夹具
+// （原 tests/known_bugs/b1 / b2 / b3，修好后转正）
+//   1) 循环内 substr 的长度来自调用结果 + 结果 push 进 vec[str]
+//      —— 根因：内联路径把 [rbp-8] 的**栈偏移**当成 R8 寄存器号比较
+//   2) "\xNN"(>=0x80) 被当 Unicode 码点再 UTF-8 编码
+//      —— 根因：词法器 chr(b) + encode("utf-8")；改用 surrogateescape
+//   3) 循环内一个表达式里两次调用 + 下标
+//      —— 同 #1 的根因
+module t53
+
+import std.str
+
+fn hv(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return -1
+}
+
+// #1：循环内用调用结果算 substr 长度，且 push 进 vec[str]
+fn split_naive(s: str, sep: str) -> vec[str] {
+    let out = vec[str].new(4)
+    let n = len(s)
+    let m = len(sep)
+    let mut start = 0
+    let mut i = 0
+    let mut done = 0
+    while done == 0 {
+        let p = str_find_from(s, i, sep)
+        if p < 0 {
+            let tail = substr(s, start, n - start)
+            out.push(tail)
+            done = 1
+        } else {
+            let piece = substr(s, start, p - start)
+            out.push(piece)
+            start = p + m
+            i = start
+        }
+    }
+    return out
+}
+
+// #3：一个表达式里两次调用 + 下标
+fn hb(h: str) -> str {
+    let n = len(h) / 2
+    let out = vec[int].new(n + 1)
+    let mut i = 0
+    while i < n {
+        let hi = hv(h[i * 2])
+        let lo = hv(h[i * 2 + 1])
+        out.push(hi * 16 + lo)
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+fn hb_one_expr(h: str) -> str {
+    let n = len(h) / 2
+    let out = vec[int].new(n + 1)
+    let mut i = 0
+    while i < n {
+        out.push(hv(h[i * 2]) * 16 + hv(h[i * 2 + 1]))
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+fn main() {
+    // #1
+    let parts = split_naive("a,b", ",")
+    assert(len(parts) == 2, "split count")
+    assert(parts.get(0) == "a", "split head")
+    assert(parts.get(1) == "b", "split tail")
+
+    // #2：\xNN 是原始字节，不是 Unicode 码点
+    let raw = "\xe4\xb8\xad"
+    assert(len(raw) == 3, "hex escape is bytes")
+    assert(raw[0] == 228, "hex byte 0")
+    assert(raw[1] == 184, "hex byte 1")
+    assert(raw[2] == 173, "hex byte 2")
+
+    // #3
+    let hex = "000102030405060708090a0b0c0d0e0f"
+    let k1 = hb(hex)
+    let k2 = hb_one_expr(hex)
+    assert(len(k1) == 16, "hex len")
+    assert(k1 == k2, "two-call expr == split lets")
+    assert(k1[0] == 0, "hex 0")
+    assert(k1[1] == 1, "hex 1")
+    assert(k1[15] == 15, "hex 15")
+
+    print("regress ok")
+}

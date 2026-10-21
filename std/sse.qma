@@ -1,0 +1,244 @@
+// std/sse.qma —— Server-Sent Events 服务端（Quelmara 自实现）
+//
+// SSE = 单向服务器推送：客户端 EventSource 发一个 GET，服务器保持
+// text/event-stream 长连接持续推事件。比 WebSocket 轻（无帧层、无握手
+// 升级、自动重连内建于浏览器），适合行情推送/日志流/AI 流式输出。
+//
+// 用法：
+//
+//   import std.sse
+//
+//   fn on_sub(fd: int) -> int {
+//       sse_retry(fd, 3000)                 // 告诉浏览器断线 3s 重连
+//       sse_event(fd, "hello", "world")     // 立即推一条
+//       return 1                            // 0 = 拒绝订阅（关闭）
+//   }
+//   fn main() {
+//       sse_serve(8093, 512, on_sub)        // 阻塞运行
+//       // 其他线程/回调里：sse_broadcast("price", "100.5")
+//   }
+//
+// 事件编码（W3C 规范）：event:/data:/id:/retry: 字段 + 空行分帧；
+// data 多行拆成多个 data: 行；心跳用注释行 ": ping"（代理不超时）。
+//
+// 槽位协议私有字：
+//   w6 状态（0=等请求 1=流已建立）  w7 扫描位置
+
+import std.mem
+import std.net.core
+import std.core
+
+const SSE_STATE = 6
+const SSE_SCAN = 7
+
+const SSE_DEFAULT_CONNS = 100000
+
+fn sse_serve(port: int, backlog: int, on_sub: int) -> int {
+    return sse_serve_max(port, backlog, on_sub, SSE_DEFAULT_CONNS)
+}
+
+fn sse_serve_max(port: int, backlog: int, on_sub: int,
+                 max_conns: int) -> int {
+    let st = conn_state_new(max_conns, 80)
+    mem_store64(st, ST_H0, on_sub)
+    mem_store64(static_word(0), 0, st)
+    return net_serve(port, backlog, sse_on_connect, sse_on_data, sse_on_close)
+}
+
+fn _sse_st() -> int {
+    return mem_load64(static_word(0), 0)
+}
+
+fn sse_accepted() -> int {
+    return conn_accepted(_sse_st())
+}
+
+fn sse_closed() -> int {
+    return conn_closed(_sse_st())
+}
+
+fn sse_subs() -> int {
+    return conn_msgs(_sse_st())
+}
+
+fn sse_events_out() -> int {
+    return conn_bytes_out(_sse_st())
+}
+
+// ---------------------------------------------------------------------------
+// reactor 回调
+// ---------------------------------------------------------------------------
+
+fn sse_on_connect(fd: int) -> int {
+    let r = conn_open(_sse_st(), fd)
+    if r < 0 {
+        return 0
+    }
+    return 1
+}
+
+fn sse_on_close(fd: int) -> int {
+    conn_close(_sse_st(), fd)
+    return 0
+}
+
+// 客户端发来 GET 请求：校验是 GET、回 200 流头、交给 on_sub。
+// 建流之后这条连接只推不收——再来数据直接丢弃（半关闭语义）。
+fn sse_on_data(fd: int, data: str) -> int {
+    let st = _sse_st()
+    let p = conn_slot(st, fd)
+    if p == 0 {
+        return 0
+    }
+    let state = mem_load64(p, SSE_STATE) & 255
+    if state == 1 {
+        return 1                            // 流已建立：忽略客户端后续数据
+    }
+    if len(data) > 0 {
+        let r = conn_append(st, p, data)
+        if r < 0 {
+            return 0
+        }
+    }
+    let buf = conn_buf_ptr(p)
+    let n = mem_load64(p, SLOT_RECVLEN)
+    let scan = mem_load64(p, SSE_SCAN)
+    let k = _sse_find_head(buf, scan, n)
+    if k < 0 {
+        if n > 16384 {
+            return 0                        // 请求头超限
+        }
+        let keep = n - 3
+        if keep < 0 {
+            mem_store64(p, SSE_SCAN, 0)
+        } else {
+            mem_store64(p, SSE_SCAN, keep)
+        }
+        return 1
+    }
+    // 请求行必须是 GET
+    if n < 4 || mem_load8(buf, 0) != 71 || mem_load8(buf, 1) != 69
+            || mem_load8(buf, 2) != 84 || mem_load8(buf, 3) != 32 {
+        _sse_reject(st, fd)
+        return 0
+    }
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+               + "Cache-Control: no-cache\r\nConnection: keep-alive\r\n"
+               + "\r\n"
+    conn_send_str(st, fd, head)
+    mem_store64(p, SSE_STATE, 1)
+    mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
+    let h = mem_load64(st, ST_H0)
+    let rc = h(fd)
+    if rc == 0 {
+        return 0
+    }
+    return 1
+}
+
+fn _sse_reject(st: int, fd: int) -> int {
+    let body = "SSE endpoint: GET only\n"
+    let head = "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain\r\n"
+               + "Content-Length: " + len(body).to_str()
+               + "\r\nConnection: close\r\n\r\n" + body
+    conn_send_str(st, fd, head)
+    return 0
+}
+
+fn _sse_find_head(buf: int, from: int, n: int) -> int {
+    if n < 4 {
+        return -1
+    }
+    let mut i = from
+    let lim = n - 4
+    while i <= lim {
+        if mem_load8(buf, i) == 13 && mem_load8(buf, i + 1) == 10
+                && mem_load8(buf, i + 2) == 13 && mem_load8(buf, i + 3) == 10 {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// ---------------------------------------------------------------------------
+// 事件发送（可在 on_sub / 任意 reactor 回调里调用）
+// ---------------------------------------------------------------------------
+
+// 完整事件：event 字段 + data（多行拆分）+ 可选 id，空行收尾。
+fn sse_event_ext(fd: int, event: str, data: str, id: str) -> int {
+    let st = _sse_st()
+    let mut out = ""
+    if len(event) > 0 {
+        out = "event: " + event + "\n"
+    }
+    // data 按行拆分（W3C：多行 data = 多个 data: 行）
+    let n = len(data)
+    let mut start = 0
+    let mut i = 0
+    while i < n {
+        if data[i] == 10 {                  // '\n'
+            out = out + "data: " + data[start..i] + "\n"
+            start = i + 1
+        }
+        i += 1
+    }
+    out = out + "data: " + data[start..n] + "\n"
+    if len(id) > 0 {
+        out = out + "id: " + id + "\n"
+    }
+    out = out + "\n"
+    conn_send_str(st, fd, out)
+    return 0
+}
+
+fn sse_event(fd: int, event: str, data: str) -> int {
+    return sse_event_ext(fd, event, data, "")
+}
+
+// 纯 data 事件（浏览器 e.data）
+fn sse_data(fd: int, data: str) -> int {
+    return sse_event_ext(fd, "", data, "")
+}
+
+// 带事件 id（浏览器断线重连会带 Last-Event-ID）
+fn sse_event_id(fd: int, event: str, data: str, id: str) -> int {
+    return sse_event_ext(fd, event, data, id)
+}
+
+// 重连间隔（毫秒）。建流后先发一次，浏览器据此重连。
+fn sse_retry(fd: int, ms: int) -> int {
+    let out = "retry: " + ms.to_str() + "\n\n"
+    conn_send_str(_sse_st(), fd, out)
+    return 0
+}
+
+// 心跳注释行：不产生事件，但让中间代理不掐空闲连接
+fn sse_comment(fd: int, text: str) -> int {
+    conn_send_str(_sse_st(), fd, ": " + text + "\n\n")
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// 广播：遍历槽位层活跃连接，逐个推送（O(活跃连接数) 次 mem_load64 + send）
+// ---------------------------------------------------------------------------
+
+fn sse_broadcast_ext(event: str, data: str, id: str) -> int {
+    let st = _sse_st()
+    let slab = mem_load64(st, ST_SLAB)
+    let cap = slab_cap(slab)
+    let mut i = 0
+    while i < cap {
+        let sp = slab_ptr(slab, i)
+        if mem_load64(sp, SLOT_STATE) == 1 {
+            let fd = mem_load64(sp, SLOT_FD)
+            sse_event_ext(fd, event, data, id)
+        }
+        i += 1
+    }
+    return 0
+}
+
+fn sse_broadcast(event: str, data: str) -> int {
+    return sse_broadcast_ext(event, data, "")
+}

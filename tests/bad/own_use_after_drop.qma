@@ -1,0 +1,8 @@
+// 负向夹具：rc_drop 之后再用句柄，必须编译失败（所有权检查）
+module own_use_after_drop
+struct P { x: int }
+fn main() {
+    let a = rc_new(P { x: 1 })
+    rc_drop(a)
+    print(rc_count(a))
+}

@@ -1,0 +1,169 @@
+// std/sha1.qma —— SHA-1（FIPS 180-4），Quelmara 自实现
+//
+// 为什么需要它：WebSocket 握手的 Sec-WebSocket-Accept = base64(sha1(key+GUID))。
+// 语言侧不引入外部库、不调用 Python/Node —— 协议栈全在 Quelmara 内闭环。
+//
+// 实现要点：
+//   * 全部 32 位运算后用 & 0xFFFFFFFF 截断（int 是 64 位，不截断会串位）；
+//   * 循环左移 = (x<<n | x>>(32-n)) & 0xFFFFFFFF，右移用无符号语义；
+//   * 消息调度表 80 字一次性分配在堆上（320 字节），随调用复用不泄漏。
+
+fn sha1_rotl(x: int, n: int) -> int {
+    let hi = (x << n) & 0xFFFFFFFF
+    let lo = (x >> (32 - n)) & 0xFFFFFFFF
+    return (hi | lo) & 0xFFFFFFFF
+}
+
+// 读 16 个 big-endian 字进 w[0..16)
+fn sha1_load_block(block: int, w: int) -> int {
+    let mut i = 0
+    while i < 16 {
+        let b0 = mem_load8(block, i * 4)
+        let b1 = mem_load8(block, i * 4 + 1)
+        let b2 = mem_load8(block, i * 4 + 2)
+        let b3 = mem_load8(block, i * 4 + 3)
+        mem_store64(w, i, ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 0xFFFFFFFF)
+        i = i + 1
+    }
+    // 扩展到 80 字
+    let mut j = 16
+    while j < 80 {
+        let x = mem_load64(w, j - 3) ^ mem_load64(w, j - 8) ^
+                mem_load64(w, j - 14) ^ mem_load64(w, j - 16)
+        mem_store64(w, j, sha1_rotl(x, 1))
+        j = j + 1
+    }
+    return 0
+}
+
+// 处理一个 64 字节块，原地更新 state[0..5)
+fn sha1_block(state: int, block: int, w: int) -> int {
+    sha1_load_block(block, w)
+    let mut a = mem_load64(state, 0)
+    let mut b = mem_load64(state, 1)
+    let mut c = mem_load64(state, 2)
+    let mut d = mem_load64(state, 3)
+    let mut e = mem_load64(state, 4)
+    let mut i = 0
+    while i < 80 {
+        let wi = mem_load64(w, i)
+        let mut f = 0
+        let mut k = 0
+        if i < 20 {
+            f = (b & c) | ((b ^ 0xFFFFFFFF) & d)
+            k = 0x5A827999
+        } else {
+            if i < 40 {
+                f = b ^ c ^ d
+                k = 0x6ED9EBA1
+            } else {
+                if i < 60 {
+                    f = (b & c) | (b & d) | (c & d)
+                    k = 0x8F1BBCDC
+                } else {
+                    f = b ^ c ^ d
+                    k = 0xCA62C1D6
+                }
+            }
+        }
+        let t = (sha1_rotl(a, 5) + (f & 0xFFFFFFFF) + e + k + wi) & 0xFFFFFFFF
+        e = d
+        d = c
+        c = sha1_rotl(b, 30)
+        b = a
+        a = t
+        i = i + 1
+    }
+    mem_store64(state, 0, (mem_load64(state, 0) + a) & 0xFFFFFFFF)
+    mem_store64(state, 1, (mem_load64(state, 1) + b) & 0xFFFFFFFF)
+    mem_store64(state, 2, (mem_load64(state, 2) + c) & 0xFFFFFFFF)
+    mem_store64(state, 3, (mem_load64(state, 3) + d) & 0xFFFFFFFF)
+    mem_store64(state, 4, (mem_load64(state, 4) + e) & 0xFFFFFFFF)
+    return 0
+}
+
+// sha1_str(s) -> int：返回 20 字节摘要缓冲区指针（大端序，含 0 字节，
+// 不能当 str 用；要字符串请走 sha1_hex / b64_encode）
+fn sha1_str(s: str) -> int {
+    let n = len(s)
+    // 填充后长度：n + 1 + pad + 8，向上取 64 的倍数
+    let total = ((n + 9 + 63) / 64) * 64
+    let buf = mem_alloc(total)
+    let mut i = 0
+    while i < n {
+        mem_store8(buf, i, s[i])
+        i = i + 1
+    }
+    mem_store8(buf, n, 0x80)
+    let mut z = n + 1
+    while z < total {
+        mem_store8(buf, z, 0)
+        z = z + 1
+    }
+    // 长度（bit 数）大端写入最后 8 字节
+    let bits = n * 8
+    let mut b = 0
+    while b < 8 {
+        mem_store8(buf, total - 8 + b, (bits >> (56 - b * 8)) & 0xFF)
+        b = b + 1
+    }
+
+    let state = mem_alloc(40)
+    mem_store64(state, 0, 0x67452301)
+    mem_store64(state, 1, 0xEFCDAB89)
+    mem_store64(state, 2, 0x98BADCFE)
+    mem_store64(state, 3, 0x10325476)
+    mem_store64(state, 4, 0xC3D2E1F0)
+    let w = mem_alloc(80 * 8)
+
+    let mut off = 0
+    while off < total {
+        sha1_block(state, buf + off, w)
+        off = off + 64
+    }
+
+    let out = mem_alloc(20)
+    let mut k = 0
+    while k < 5 {
+        let v = mem_load64(state, k)
+        mem_store8(out, k * 4, (v >> 24) & 0xFF)
+        mem_store8(out, k * 4 + 1, (v >> 16) & 0xFF)
+        mem_store8(out, k * 4 + 2, (v >> 8) & 0xFF)
+        mem_store8(out, k * 4 + 3, v & 0xFF)
+        k = k + 1
+    }
+    // 工作区全部归还（20 字节摘要除外——调用方用完后 mem_free(dig, 20)）。
+    // 握手是高频路径，这里不回收就是确定性泄漏。
+    mem_free(buf, total)
+    mem_free(w, 80 * 8)
+    mem_free(state, 40)
+    return out
+}
+
+// sha1_hex(s) -> str：40 位小写十六进制（调试/ETag/签名用）
+fn sha1_hex(s: str) -> str {
+    let dig = sha1_str(s)
+    let out = mem_alloc(41)
+    let mut i = 0
+    while i < 20 {
+        let v = mem_load8(dig, i)
+        let hi = v >> 4
+        let lo = v & 15
+        if hi < 10 {
+            mem_store8(out, i * 2, 48 + hi)
+        } else {
+            mem_store8(out, i * 2, 87 + hi)
+        }
+        if lo < 10 {
+            mem_store8(out, i * 2 + 1, 48 + lo)
+        } else {
+            mem_store8(out, i * 2 + 1, 87 + lo)
+        }
+        i = i + 1
+    }
+    mem_store8(out, 40, 0)
+    let hex = mem_str(out, 40)
+    mem_free(out, 41)
+    mem_free(dig, 20)
+    return hex
+}

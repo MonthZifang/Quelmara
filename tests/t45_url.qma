@@ -1,0 +1,73 @@
+// tests/t45_url.qma —— URL 解析 / 百分号编解码自校验
+module t45_url
+
+import std.str
+import std.url
+
+fn main() {
+    let u = "https://user:pw@example.com:8443/a/b?q=hello%20world&x=1#frag"
+
+    assert(url_scheme(u) == "https", "scheme")
+    assert(url_host(u) == "example.com", "host")
+    assert(url_port(u) == 8443, "port")
+    assert(url_path(u) == "/a/b", "path")
+    assert(url_query(u) == "q=hello%20world&x=1", "query")
+    assert(url_fragment(u) == "frag", "fragment")
+
+    // 缺省端口 / 无 path / 无 query
+    let v = "http://example.com"
+    assert(url_scheme(v) == "http", "scheme 2")
+    assert(url_host(v) == "example.com", "host 2")
+    assert(url_port(v) == -1, "port absent")
+    assert(url_path(v) == "", "path absent")
+    assert(url_query(v) == "", "query absent")
+    assert(url_fragment(v) == "", "frag absent")
+
+    // 相对路径：没有 scheme
+    assert(url_scheme("/a/b?x=1") == "", "relative scheme")
+    assert(url_path("/a/b?x=1") == "/a/b", "relative path")
+
+    // IPv6 字面量
+    let w = "http://[::1]:8080/x"
+    assert(url_host(w) == "[::1]", "ipv6 host")
+    assert(url_port(w) == 8080, "ipv6 port")
+    assert(url_path(w) == "/x", "ipv6 path")
+
+    // 非法端口按未指定处理（不 fail-fast）
+    assert(url_port("http://h:abc/x") == -1, "bad port")
+
+    // --- 解码 ---
+    assert(url_decode("a%20b") == "a b", "decode space")
+    assert(url_decode("a+b") == "a b", "decode plus")
+    // 注意：\xNN(>=0x80) 目前会被当成 Unicode 码点再 UTF-8 编码（已知编译器 bug），
+    // 这里用 chr() 构造原始字节，避免测试被该 bug 干扰。
+    let zhong = chr(228) + chr(184) + chr(173)
+    assert(url_decode("%E4%B8%AD") == zhong, "decode utf8 bytes")
+    assert(url_decode_path("a+b") == "a+b", "decode path plus")
+    assert(url_decode("%zz") == "%zz", "decode bad pct")
+    assert(url_decode("%4") == "%4", "decode short pct")
+
+    // --- 编码 ---
+    assert(url_encode("a b") == "a%20b", "encode space")
+    assert(url_encode("a+b") == "a%2Bb", "encode plus")
+    assert(url_encode("AZaz09-._~") == "AZaz09-._~", "encode unreserved")
+    assert(url_encode_query("a b") == "a+b", "encode query space")
+    assert(url_encode("/a?b=c") == "%2Fa%3Fb%3Dc", "encode reserved")
+
+    // --- query 取值 ---
+    assert(url_query_get(u, "q") == "hello world", "query get decode")
+    assert(url_query_get(u, "x") == "1", "query get x")
+    assert(url_query_get(u, "missing") == "", "query get miss")
+    assert(url_query_get("http://h/?a=%E4%B8%AD&a=2", "a") == zhong, "query first")
+    assert(url_query_get("http://h/?flag", "flag") == "", "query bare key")
+
+    // --- 拼接 ---
+    assert(url_join_query("http://h/p", "a", "b c") == "http://h/p?a=b%20c", "join first")
+    assert(url_join_query("http://h/p?x=1", "a", "b") == "http://h/p?x=1&a=b", "join more")
+
+    // --- 往返 ---
+    let raw = "a b+c/d?e&f=中"
+    assert(url_decode(url_encode(raw)) == raw, "roundtrip")
+
+    print("ok t45_url")
+}

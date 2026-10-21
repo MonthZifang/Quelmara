@@ -183,6 +183,20 @@ class EncA64:
         # 返回地址丢失、callr 一返回就跳飞。
         self.emit(0xD63F0000 | ((reg & 31) << 5))
 
+    def csel(self, rd, rn, rm, cond):
+        # CSEL Xd, Xn, Xm, cond：sf=1, 0011010100, Rm, cond, 00, Rn, Rd
+        self.emit(0x1A800000 | ((rm & 31) << 16) | ((cond & 15) << 12)
+                  | ((rn & 31) << 5) | (rd & 31))
+
+    def subs_rr(self, rd, rn, rm):
+        # SUBS Xd, Xn, Xm（置标志的减法；cssub 的差与比较一步完成）
+        self.emit(0xEB000000 | ((rm & 31) << 16) | ((rn & 31) << 5) | (rd & 31))
+
+    def subs_imm(self, rd, rn, imm12):
+        # SUBS Xd, Xn, #imm12
+        self.emit(0xF1000000 | ((imm12 & 0xFFF) << 10) | ((rn & 31) << 5)
+                  | (rd & 31))
+
     def bcond(self, cond, label):
         self.fixups.append((self.pos(), label, "b19"))
         self.emit(0x54000000 | cond)
@@ -388,6 +402,22 @@ class CodegenA64:
             enc.blr(SCRATCH2)
             if ins[1] is not None:
                 self.commit(ins[1], ACC)
+        elif op == "cssub":
+            # dst = (a >= b) ? a - b : a。SUBS 一步出差并置标志，
+            # CSEL(GE) 选差或原值——与 x86 的 sub+CMOVns 同构。
+            a, b = ins[2], ins[3]
+            rb = self.fetch(SCRATCH2, b)
+            if rb != SCRATCH2:
+                self.enc.mov_rr(SCRATCH2, rb)
+            ra = self.fetch(SCRATCH, a)
+            if ra != SCRATCH:
+                self.enc.mov_rr(SCRATCH, ra)
+            if isinstance(b, tuple) and b[0] == "imm" and 0 <= b[1] < 4096:
+                self.enc.subs_imm(ACC, SCRATCH, b[1])   # ACC = a - imm，置标志
+            else:
+                self.enc.subs_rr(ACC, SCRATCH, SCRATCH2)
+            self.enc.csel(ACC, ACC, SCRATCH, 10)        # GE 取差，否则取 a
+            self.commit(ins[1], ACC)
         elif op == "ret":
             if ins[1] is not None:
                 r = self.fetch(SCRATCH, ins[1])

@@ -1,0 +1,46 @@
+// t49_width.qma：真实整数宽度（v1.8）
+// 语义：值统一 64 位承载；在 let 标注 / 形参 / 返回值 / 赋值 处按声明宽度截断。
+//       uN 零扩展、iN 符号扩展；表达式内部按 C 语义提升，不在中途回绕。
+module t49
+
+fn take_u8(x: u8) -> int { return x }
+fn give_i8(x: int) -> i8 { return x }
+fn take_u32(x: u32) -> int { return x }
+
+fn main() {
+    // 存储回绕
+    let a: u8 = 300
+    assert(a == 44, "u8 store wraps")
+    let b: u16 = 65536 + 7
+    assert(b == 7, "u16 store wraps")
+    let c: u32 = 0 - 1
+    assert(c == 4294967295, "u32 store zero-extends")
+    let d: i8 = 200
+    assert(d == -56, "i8 store sign-extends")
+    let e: i32 = 2147483648
+    assert(e == -2147483648, "i32 store wraps")
+
+    // 赋值回绕
+    let mut f: u8 = 255
+    f = f + 1
+    assert(f == 0, "u8 assign wraps")
+    let mut g: u8 = 0
+    g = g - 1
+    assert(g == 255, "u8 underflow wraps")
+
+    // 形参在入口截断（调用方可以传任意 64 位值）
+    assert(take_u8(300) == 44, "u8 param truncates")
+    assert(take_u32(0 - 1) == 4294967295, "u32 param zero-extends")
+
+    // 返回值在出口截断
+    assert(give_i8(127 + 1) == -128, "i8 return wraps")
+    assert(give_i8(255) == -1, "i8 return sign-extends")
+
+    // 表达式内部按 64 位算，不中途回绕
+    let h: u8 = 200
+    assert(h + 100 == 300, "expression promotes to 64-bit")
+    let i: u8 = h + 100
+    assert(i == 44, "assignment truncates the promoted result")
+
+    print("width ok")
+}

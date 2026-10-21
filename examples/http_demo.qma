@@ -1,0 +1,29 @@
+// http_demo.qma — HTTP/1.1 服务端示例（std.http）
+// 运行后用浏览器或 curl 验证：
+//   curl http://127.0.0.1:8091/
+//   curl http://127.0.0.1:8091/api/stats
+//   curl http://127.0.0.1:8091/nope          -> 404
+import std.http
+
+fn route(fd: int) -> int {
+    let p = http_path(fd)
+    if p == "/" {
+        http_html(fd, 200, "<h1>Quelmara HTTP</h1><p>keep-alive ok</p>")
+        return 1
+    }
+    if p == "/api/stats" {
+        let body = "{\"accepted\":" + http_accepted().to_str()
+                   + ",\"reqs\":" + http_reqs().to_str()
+                   + ",\"bytes_in\":" + http_bytes_in().to_str()
+                   + ",\"bytes_out\":" + http_bytes_out().to_str() + "}"
+        http_json(fd, 200, body)
+        return 1
+    }
+    http_not_found(fd)
+    return 1
+}
+
+fn main() {
+    print("http demo listening on 8091")
+    http_serve(8091, 512, route)
+}

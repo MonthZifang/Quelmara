@@ -1,0 +1,1447 @@
+// bootstrap/parser/qlm_parse.qma
+// Quelmara 自举 parser（stage-1）第一段：**声明级**解析。
+//
+// 用法：qlm_parse <file.qma>
+// 输出：与 tools/dev/astdecl.py 完全一致的协议行（module/import/struct/enum/fn）
+//
+// 为什么先做声明层：函数体 AST 在 stage-0 里是 Python 元组，逐节点对拍等于把
+// 实现细节当契约；而声明层（模块名、导入、类型、签名、枚举载荷个数）是稳定接口，
+// 正好作为 parser 的第一段可验证里程碑。函数体用括号配平跳过（含字符串/注释感知）。
+//
+// 语言限制带来的写法：Quelmara 没有全局变量，递归下降需要共享游标，
+// 这里用一个 map[str]int 当"游标盒"（句柄语义，改动对调用方可见）。
+module qlm_parse
+
+fn is_digit(c: int) -> bool {
+    return c >= 48 && c <= 57
+}
+
+fn is_alpha(c: int) -> bool {
+    if c == 95 { return true }
+    if c >= 65 && c <= 90 { return true }
+    if c >= 97 && c <= 122 { return true }
+    return false
+}
+
+fn is_alnum(c: int) -> bool {
+    return is_alpha(c) || is_digit(c)
+}
+
+// ---- 游标 ----
+fn cur_get(k: map[str]int) -> int {
+    return k.get("i")
+}
+
+fn cur_set(k: map[str]int, v: int) {
+    k.set("i", v)
+}
+
+fn peek_at(src: str, n: int, k: map[str]int, off: int) -> int {
+    let i = cur_get(k) + off
+    if i >= n { return 0 }
+    return src[i]
+}
+
+// 跳过空白与注释（含块注释里的换行）
+fn skip_ws(src: str, n: int, k: map[str]int) {
+    let mut go = 1
+    while go == 1 {
+        let i = cur_get(k)
+        if i >= n { return }
+        let c = src[i]
+        if c == 32 || c == 9 || c == 13 || c == 10 {
+            cur_set(k, i + 1)
+        } else if c == 47 && peek_at(src, n, k, 1) == 47 {
+            let mut j = i
+            while j < n && src[j] != 10 {
+                j += 1
+            }
+            cur_set(k, j)
+        } else if c == 47 && peek_at(src, n, k, 1) == 42 {
+            let mut j = i + 2
+            let mut done = 0
+            while j < n && done == 0 {
+                if src[j] == 42 && j + 1 < n && src[j + 1] == 47 {
+                    j += 2
+                    done = 1
+                } else {
+                    j += 1
+                }
+            }
+            cur_set(k, j)
+        } else {
+            go = 0
+        }
+    }
+}
+
+fn read_name(src: str, n: int, k: map[str]int) -> str {
+    skip_ws(src, n, k)
+    let start = cur_get(k)
+    let mut j = start
+    while j < n && is_alnum(src[j]) {
+        j += 1
+    }
+    cur_set(k, j)
+    if j <= start { return "" }
+    return substr(src, start, j - start)
+}
+
+fn expect(src: str, n: int, k: map[str]int, ch: int) -> int {
+    skip_ws(src, n, k)
+    let i = cur_get(k)
+    if i < n && src[i] == ch {
+        cur_set(k, i + 1)
+        return 1
+    }
+    return 0
+}
+
+fn read_int(src: str, n: int, k: map[str]int) -> str {
+    skip_ws(src, n, k)
+    let start = cur_get(k)
+    let mut j = start
+    while j < n && (is_digit(src[j]) || src[j] == 95) {
+        j += 1
+    }
+    cur_set(k, j)
+    return substr(src, start, j - start)
+}
+
+// 跳过一段可能带引号/注释的括号块（src[i] 必须是 '{'）
+fn skip_block(src: str, n: int, k: map[str]int) {
+    skip_ws(src, n, k)
+    let i = cur_get(k)
+    if i >= n || src[i] != 123 { return }
+    let mut j = i + 1
+    let mut depth = 1
+    while j < n && depth > 0 {
+        let c = src[j]
+        if c == 34 {
+            j += 1
+            let mut closed = 0
+            while j < n && closed == 0 {
+                if src[j] == 92 && j + 1 < n {
+                    j += 2
+                } else if src[j] == 34 {
+                    closed = 1
+                    j += 1
+                } else {
+                    j += 1
+                }
+            }
+        } else if c == 47 && j + 1 < n && src[j + 1] == 47 {
+            while j < n && src[j] != 10 {
+                j += 1
+            }
+        } else if c == 47 && j + 1 < n && src[j + 1] == 42 {
+            j += 2
+            while j < n && !(src[j] == 42 && j + 1 < n && src[j + 1] == 47) {
+                j += 1
+            }
+            j += 2
+        } else if c == 123 {
+            depth += 1
+            j += 1
+        } else if c == 125 {
+            depth -= 1
+            j += 1
+        } else {
+            j += 1
+        }
+    }
+    cur_set(k, j)
+}
+
+// 类型 -> 规范文本（与 tools/dev/astdecl.py 的 render_type 逐字符一致）
+fn parse_type(src: str, n: int, k: map[str]int) -> str {
+    skip_ws(src, n, k)
+    let i = cur_get(k)
+    if i < n && src[i] == 91 {
+        cur_set(k, i + 1)
+        skip_ws(src, n, k)
+        let j = cur_get(k)
+        if j < n && src[j] == 93 {
+            cur_set(k, j + 1)
+            return "[]" + parse_type(src, n, k)
+        }
+        let num = read_int(src, n, k)
+        expect(src, n, k, 93)
+        return "[" + num + "]" + parse_type(src, n, k)
+    }
+    let mut w = read_name(src, n, k)
+    // 点路径类型：net.Conn / net.Action
+    let mut cont_dot = 1
+    while cont_dot == 1 {
+        skip_ws(src, n, k)
+        let jj = cur_get(k)
+        if jj < n && src[jj] == 46 {
+            cur_set(k, jj + 1)
+            w = w + "." + read_name(src, n, k)
+        } else {
+            cont_dot = 0
+        }
+    }
+    if w == "map" {
+        expect(src, n, k, 91)
+        let kt = parse_type(src, n, k)
+        expect(src, n, k, 93)
+        let vt = parse_type(src, n, k)
+        return "map[" + kt + "]" + vt
+    }
+    if w == "vec" {
+        expect(src, n, k, 91)
+        let t = parse_type(src, n, k)
+        expect(src, n, k, 93)
+        return "vec[" + t + "]"
+    }
+    if w == "chan" {
+        expect(src, n, k, 91)
+        let t = parse_type(src, n, k)
+        expect(src, n, k, 93)
+        return "chan[" + t + "]"
+    }
+    if w == "rc" {
+        // rc[T]（v1.8）：引用计数句柄，声明级渲染与 stage-0 对齐
+        expect(src, n, k, 91)
+        let t = parse_type(src, n, k)
+        expect(src, n, k, 93)
+        return "rc[" + t + "]"
+    }
+    if w == "option" {
+        expect(src, n, k, 91)
+        let t = parse_type(src, n, k)
+        expect(src, n, k, 93)
+        return "option[" + t + "]"
+    }
+    if w == "result" {
+        expect(src, n, k, 91)
+        let a = parse_type(src, n, k)
+        expect(src, n, k, 44)
+        let b = parse_type(src, n, k)
+        expect(src, n, k, 93)
+        return "result[" + a + "," + b + "]"
+    }
+    return w
+}
+
+fn emit(line: str) {
+    print(line)
+}
+
+// ---- 顶层结构 ----
+fn parse_struct(src: str, n: int, k: map[str]int) {
+    let name = read_name(src, n, k)
+    expect(src, n, k, 123)
+    let mut body = ""
+    let mut first = 1
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        if i >= n { return }
+        if src[i] == 125 {
+            cur_set(k, i + 1)
+            go = 0
+        } else {
+            let fname = read_name(src, n, k)
+            expect(src, n, k, 58)
+            let ft = parse_type(src, n, k)
+            if first == 1 {
+                body = fname + ":" + ft
+                first = 0
+            } else {
+                body = body + "," + fname + ":" + ft
+            }
+            expect(src, n, k, 44)
+        }
+    }
+    emit("struct|" + name + "|" + body)
+}
+
+fn parse_enum(src: str, n: int, k: map[str]int) {
+    let name = read_name(src, n, k)
+    expect(src, n, k, 123)
+    let mut body = ""
+    let mut first = 1
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        if i >= n { return }
+        if src[i] == 125 {
+            cur_set(k, i + 1)
+            go = 0
+        } else {
+            let vname = read_name(src, n, k)
+            let mut cnt = 0
+            skip_ws(src, n, k)
+            if cur_get(k) < n && src[cur_get(k)] == 40 {
+                // 载荷：数一下 (a: t, b: t) 里的冒号
+                cur_set(k, cur_get(k) + 1)
+                let mut depth = 1
+                let mut done = 0
+                while done == 0 {
+                    skip_ws(src, n, k)
+                    let j = cur_get(k)
+                    if j >= n { done = 1 } else {
+                        let c = src[j]
+                        if c == 40 {
+                            depth += 1
+                            cur_set(k, j + 1)
+                        } else if c == 41 {
+                            depth -= 1
+                            cur_set(k, j + 1)
+                            if depth == 0 { done = 1 }
+                        } else if c == 58 && depth == 1 {
+                            cnt += 1
+                            cur_set(k, j + 1)
+                        } else {
+                            cur_set(k, j + 1)
+                        }
+                    }
+                }
+            }
+            if first == 1 {
+                body = vname + ":" + cnt.to_str()
+                first = 0
+            } else {
+                body = body + "," + vname + ":" + cnt.to_str()
+            }
+            expect(src, n, k, 44)
+        }
+    }
+    emit("enum|" + name + "|" + body)
+}
+
+// ===========================================================================
+// 函数体解析（Phase 1 核心子集）—— 输出与 tools/dev/astbody.py 逐字节一致的
+// S 表达式协议行。约定：
+//   游标盒 k 附加键：skip(0/1，解析失败信号，逐层短路)、lk(最后主表达式形态
+//   1=name 2=path 3=other)、ln(点链名)、lb/li(assigni 的 base/idx 串)、
+//   noslit(1=条件上下文禁 structlit)、fstart(当前函数体起点，SKIP 回跳用)、
+//   fnname/fidx(当前函数与语句序号)、"e:<Name>"(已声明的枚举名)。
+//   解析器失败约定：k.set("skip",1) 并返回 ""；上层逐步短路传播。
+// ===========================================================================
+
+fn skip_on(k: map[str]int) -> bool {
+    return k.get("skip") == 1
+}
+
+fn hex_of(s: str) -> str {
+    // 字节串 -> 小写 hex（str 字面量协议编码；s 即 UTF-8 字节）
+    let digits = "0123456789abcdef"
+    let buf = vec[int].new(len(s) * 2 + 1)
+    let mut i = 0
+    while i < len(s) {
+        let c = s[i]
+        buf.push(digits[c / 16])
+        buf.push(digits[c % 16])
+        i += 1
+    }
+    return str_from_bytes(buf)
+}
+
+fn str_lit(src: str, n: int, k: map[str]int) -> str {
+    // 进入时 src[cur] == '"'；解码 \n \t \r \\ \" \0 后返回 hex 编码
+    cur_set(k, cur_get(k) + 1)
+    let raw = vec[int].new(64)
+    let mut closed = 0
+    while cur_get(k) < n && closed == 0 {
+        let c = src[cur_get(k)]
+        if c == 34 {
+            closed = 1
+            cur_set(k, cur_get(k) + 1)
+        } else if c == 92 {
+            cur_set(k, cur_get(k) + 1)
+            let e = src[cur_get(k)]
+            if e == 110 { raw.push(10) }
+            else if e == 116 { raw.push(9) }
+            else if e == 114 { raw.push(13) }
+            else if e == 48 { raw.push(0) }
+            else { raw.push(e) }        // \\ 与 \" 落到这里，原样还原
+            cur_set(k, cur_get(k) + 1)
+        } else {
+            raw.push(c)
+            cur_set(k, cur_get(k) + 1)
+        }
+    }
+    if closed == 0 {
+        k.set("skip", 1)
+        return ""
+    }
+    return hex_of(str_from_bytes(raw))
+}
+
+fn read_int_tok(src: str, n: int, k: map[str]int) -> str {
+    // 数字 token：支持 0x/0X 0b/0B 0o/0O 前缀与十进制下划线；含 . 或 e/E -> 浮点
+    skip_ws(src, n, k)
+    let start = cur_get(k)
+    let mut j = start
+    let mut isf = 0
+    if j + 1 < n && src[j] == 48 && (src[j + 1] == 120 || src[j + 1] == 88
+            || src[j + 1] == 98 || src[j + 1] == 66
+            || src[j + 1] == 111 || src[j + 1] == 79) {
+        j += 2
+        while j < n && (is_alnum(src[j]) || src[j] == 95) {
+            j += 1
+        }
+    } else {
+        while j < n && (is_digit(src[j]) || src[j] == 95
+                || src[j] == 46 || src[j] == 101 || src[j] == 69
+                || ((src[j] == 43 || src[j] == 45) && j > start
+                    && (src[j - 1] == 101 || src[j - 1] == 69))) {
+            if src[j] == 46 || src[j] == 101 || src[j] == 69 { isf = 1 }
+            j += 1
+        }
+    }
+    cur_set(k, j)
+    if j <= start { return "" }
+    if isf == 1 { k.set("isf", 1) }
+    return substr(src, start, j - start)
+}
+
+fn strip_us(t: str) -> str {
+    let buf = vec[int].new(len(t) + 1)
+    let mut i = 0
+    while i < len(t) {
+        if t[i] != 95 { buf.push(t[i]) }
+        i += 1
+    }
+    return str_from_bytes(buf)
+}
+
+fn dec_val(t: str) -> int {
+    let mut v = 0
+    let mut i = 0
+    while i < len(t) {
+        v = v * 10 + (t[i] - 48)
+        i += 1
+    }
+    return v
+}
+
+fn radix_val(t: str, base: int) -> int {
+    let mut v = 0
+    let mut i = 0
+    while i < len(t) {
+        let c = t[i]
+        let mut d = 0
+        if is_digit(c) { d = c - 48 }
+        else if c >= 97 { d = c - 87 }        // a-f
+        else { d = c - 55 }                   // A-F
+        v = v * base + d
+        i += 1
+    }
+    return v
+}
+
+fn num_tok(src: str, n: int, k: map[str]int) -> str {
+    let t = read_int_tok(src, n, k)
+    if t == "" {
+        k.set("skip", 1)
+        return ""
+    }
+    if k.get("isf") == 1 {
+        k.set("skip", 1)                                  // 浮点 Phase 2
+        return ""
+    }
+    if len(t) > 1 && t[0] == 48 && (t[1] == 120 || t[1] == 88) {
+        return "(num " + dec_val(radix_val(strip_us(substr(t, 2, len(t) - 2)), 16)).to_str() + ")"
+    }
+    if len(t) > 1 && t[0] == 48 && (t[1] == 98 || t[1] == 66) {
+        return "(num " + dec_val(radix_val(strip_us(substr(t, 2, len(t) - 2)), 2)).to_str() + ")"
+    }
+    if len(t) > 1 && t[0] == 48 && (t[1] == 111 || t[1] == 79) {
+        return "(num " + dec_val(radix_val(strip_us(substr(t, 2, len(t) - 2)), 8)).to_str() + ")"
+    }
+    let u = strip_us(t)
+    let dv = dec_val(u)
+    let sv = dv.to_str()
+    let r2 = "(num " + sv + ")"
+    return r2
+}
+
+fn is_enum(k: map[str]int, name: str) -> bool {
+    return k.has("e:" + name) && k.get("e:" + name) == 1
+}
+
+fn parse_primary(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    skip_ws(src, n, k)
+    let i = cur_get(k)
+    if i >= n { k.set("skip", 1) return "" }
+    let c = src[i]
+    if c == 40 {                                       // ( expr )
+        cur_set(k, i + 1)
+        let e = parse_expr(src, n, k, ks)
+        if skip_on(k) { return "" }
+        expect(src, n, k, 41)
+        return e
+    }
+    if c == 91 {                                       // 数组字面量
+        cur_set(k, i + 1)
+        let mut out = "(arr"
+        let mut first = 1
+        let mut go = 1
+        while go == 1 {
+            skip_ws(src, n, k)
+            if cur_get(k) < n && src[cur_get(k)] == 93 {
+                cur_set(k, cur_get(k) + 1)
+                go = 0
+            } else {
+                let e = parse_expr(src, n, k, ks)
+                if skip_on(k) { return "" }
+                out = out + " " + e
+                skip_ws(src, n, k)
+                if cur_get(k) < n && src[cur_get(k)] == 44 {
+                    cur_set(k, cur_get(k) + 1)
+                } else {
+                    go = 0
+                }
+                first = 0
+            }
+        }
+        return out + ")"
+    }
+    if c == 34 {                                       // 字符串
+        return "(str " + str_lit(src, n, k) + ")"
+    }
+    if is_digit(c) {                                   // 数字
+        let r = num_tok(src, n, k)
+        return r
+    }
+    if c == 45 {                                       // 一元负号交 unop（防御）
+        return ""
+    }
+    if is_alpha(c) {                                   // name / bool / vec[ / map[
+        let w = read_name(src, n, k)
+        ks.set("nm", w)
+        if w == "true" { return "(bool 1)" }
+        if w == "false" { return "(bool 0)" }
+        if w == "vec" && cur_get(k) < n && src[cur_get(k)] == 91 {
+            cur_set(k, cur_get(k) + 1)
+            let tname = read_name(src, n, k)
+            expect(src, n, k, 93)
+            expect(src, n, k, 46)
+            let mn = read_name(src, n, k)
+            if mn != "new" {
+            k.set("skip", 1)
+            return ""
+        }
+            expect(src, n, k, 40)
+            let mut args = ""
+            let mut go = 1
+            while go == 1 {
+                skip_ws(src, n, k)
+                if cur_get(k) < n && src[cur_get(k)] == 41 {
+                    cur_set(k, cur_get(k) + 1)
+                    go = 0
+                } else {
+                    let e = parse_expr(src, n, k, ks)
+                    if skip_on(k) { return "" }
+                    args = args + " " + e
+                    skip_ws(src, n, k)
+                    if cur_get(k) < n && src[cur_get(k)] == 44 {
+                        cur_set(k, cur_get(k) + 1)
+                    } else {
+                        go = 0
+                    }
+                }
+            }
+            let mut out = "(vec " + tname
+            if args != "" { out = out + args }
+            return out + ")"
+        }
+        if w == "map" && cur_get(k) < n && src[cur_get(k)] == 91 {
+            k.set("skip", 1)                           // map 字面量 Phase 2
+            return ""
+        }
+        // name 后跟 { 且未禁用 -> structlit
+        skip_ws(src, n, k)
+        if k.get("noslit") == 0 && cur_get(k) < n && src[cur_get(k)] == 123 {
+            cur_set(k, cur_get(k) + 1)
+            let mut out = "(slit " + w
+            let mut go = 1
+            while go == 1 {
+                skip_ws(src, n, k)
+                if cur_get(k) < n && src[cur_get(k)] == 125 {
+                    cur_set(k, cur_get(k) + 1)
+                    go = 0
+                } else {
+                    let fname = read_name(src, n, k)
+                    expect(src, n, k, 58)
+                    let e = parse_expr(src, n, k, ks)
+                    if skip_on(k) { return "" }
+                    out = out + " " + fname + " " + e
+                    skip_ws(src, n, k)
+                    if cur_get(k) < n && src[cur_get(k)] == 44 {
+                        cur_set(k, cur_get(k) + 1)
+                    } else {
+                        go = 0
+                    }
+                }
+            }
+            return out + ")"
+        }
+        return "(name " + w + ")"
+    }
+    k.set("skip", 1)
+    return ""
+}
+
+fn parse_postfix(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    let base = parse_primary(src, n, k, ks)
+    if skip_on(k) { return "" }
+    let mut out = base
+    let mut dotted = ""
+    let mut pure = 0                                   // 1=纯 name 点链
+    if len(base) > 5 && substr(base, 0, 5) == "(name" {
+        pure = 1
+        dotted = substr(base, 6, len(base) - 7)
+    }
+    k.set("lk", 3)
+    ks.set("ln", "")
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        if cur_get(k) >= n { go = 0 }
+        else {
+            let c = src[cur_get(k)]
+            if c == 40 && pure == 1 {                  // 直接调用 print(1)
+                cur_set(k, cur_get(k) + 1)
+                let mut args = ""
+                let mut go2 = 1
+                while go2 == 1 {
+                    skip_ws(src, n, k)
+                    if cur_get(k) < n && src[cur_get(k)] == 41 {
+                        cur_set(k, cur_get(k) + 1)
+                        go2 = 0
+                    } else {
+                        let e = parse_expr(src, n, k, ks)
+                        if skip_on(k) { return "" }
+                        args = args + " " + e
+                        skip_ws(src, n, k)
+                        if cur_get(k) < n && src[cur_get(k)] == 44 {
+                            cur_set(k, cur_get(k) + 1)
+                        } else {
+                            go2 = 0
+                        }
+                    }
+                }
+                out = "(call " + dotted + args + ")"
+                dotted = ""
+                pure = 0
+                k.set("lk", 3)
+                ks.set("ln", "")
+            } else if c == 46 {                        // .name 后缀
+                cur_set(k, cur_get(k) + 1)
+                let nm = read_name(src, n, k)
+                if nm == "" { go = 0 }                 // `..` 区间：停止
+                else {
+                    skip_ws(src, n, k)
+                    if cur_get(k) < n && src[cur_get(k)] == 40 {
+                        // 方法调用（非纯链）/ 调用或带参枚举（纯链，dump 同形）
+                        cur_set(k, cur_get(k) + 1)
+                        let mut args = ""
+                        let mut go2 = 1
+                        while go2 == 1 {
+                            skip_ws(src, n, k)
+                            if cur_get(k) < n && src[cur_get(k)] == 41 {
+                                cur_set(k, cur_get(k) + 1)
+                                go2 = 0
+                            } else {
+                                let e = parse_expr(src, n, k, ks)
+                                if skip_on(k) { return "" }
+                                args = args + " " + e
+                                skip_ws(src, n, k)
+                                if cur_get(k) < n && src[cur_get(k)] == 44 {
+                                    cur_set(k, cur_get(k) + 1)
+                                } else {
+                                    go2 = 0
+                                }
+                            }
+                        }
+                        if pure == 1 {
+                            out = "(call " + dotted + "." + nm + args + ")"
+                            dotted = ""
+                            pure = 0
+                            k.set("lk", 3)
+                            ks.set("ln", "")
+                        } else {
+                            out = "(method " + out + " " + nm + args + ")"
+                        }
+                    } else if pure == 1 {
+                        dotted = dotted + "." + nm
+                        out = "(path " + dotted + ")"
+                    } else {
+                        out = "(field " + out + " ." + nm + ")"
+                    }
+                }
+            } else if c == 63 {                        // ? 错误传播
+                cur_set(k, cur_get(k) + 1)
+                out = "(try " + out + ")"
+                dotted = ""
+                pure = 0
+                k.set("lk", 3)
+                ks.set("ln", "")
+            } else if c == 91 {                        // 下标
+                cur_set(k, cur_get(k) + 1)
+                let e = parse_expr(src, n, k, ks)
+                if skip_on(k) { return "" }
+                expect(src, n, k, 93)
+                out = "(index " + out + " " + e + ")"
+                dotted = ""
+                pure = 0
+                ks.set("lb", out)
+                ks.set("li", e)
+            } else {
+                go = 0
+            }
+        }
+    }
+    if pure == 1 && dotted != "" {
+        if dotted == ks.get("nm") {
+            k.set("lk", 1)                             // 单名
+        } else {
+            k.set("lk", 2)                             // 点链
+        }
+        ks.set("ln", dotted)
+    }
+    return out
+}
+
+fn parse_fn(src: str, n: int, k: map[str]int) {
+    let name = read_name(src, n, k)
+    expect(src, n, k, 40)
+    let mut params = ""
+    let mut first = 1
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        if i >= n { return }
+        if src[i] == 41 {
+            cur_set(k, i + 1)
+            go = 0
+        } else {
+            let pname = read_name(src, n, k)
+            expect(src, n, k, 58)
+            let pt = parse_type(src, n, k)
+            if first == 1 {
+                params = pt
+                first = 0
+            } else {
+                params = params + "," + pt
+            }
+            skip_ws(src, n, k)
+            if cur_get(k) < n && src[cur_get(k)] == 44 {
+                cur_set(k, cur_get(k) + 1)
+            }
+        }
+    }
+    let mut ret = "void"
+    skip_ws(src, n, k)
+    let i2 = cur_get(k)
+    if i2 + 1 < n && src[i2] == 45 && src[i2 + 1] == 62 {
+        cur_set(k, i2 + 2)
+        ret = parse_type(src, n, k)
+    }
+    emit("fn|" + name + "|(" + params + ")|" + ret)
+    skip_block(src, n, k)
+}
+
+fn main() {
+    let a = args()
+    let bodymode = len(a) == 2 && a[0] == "--body"
+    if len(a) != 1 && !bodymode {
+        emit("ERR|usage: qlm_parse [--body] <file.qma>")
+        return
+    }
+    let src = read_text(a[len(a) - 1])
+    let n = len(src)
+    let k = map[str]int.new(4)
+    let ks = map[str]str.new(8)
+    cur_set(k, 0)
+    k.set("skip", 0)
+    k.set("lk", 0)
+    ks.set("ln", "")
+    ks.set("lb", "")
+    ks.set("li", "")
+    ks.set("nm", "")
+    k.set("noslit", 0)
+    k.set("isf", 0)
+    if bodymode {
+        run_body_mode(src, n, k, ks)
+        return
+    }
+
+    while 1 == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        if i >= n { return }
+        let c = src[i]
+        if c == 64 {
+            // 属性 @extern("C")：跳到本行的 '(' 块结束
+            let mut j = i + 1
+            while j < n && (is_alnum(src[j]) || src[j] == 95) {
+                j += 1
+            }
+            cur_set(k, j)
+            skip_ws(src, n, k)
+            if cur_get(k) < n && src[cur_get(k)] == 40 {
+                let mut depth = 1
+                cur_set(k, cur_get(k) + 1)
+                while cur_get(k) < n && depth > 0 {
+                    let cc = src[cur_get(k)]
+                    if cc == 40 { depth += 1 }
+                    if cc == 41 { depth -= 1 }
+                    cur_set(k, cur_get(k) + 1)
+                }
+            }
+        } else if c == 109 || c == 105 || c == 99 || c == 115 || c == 101 ||
+                   c == 102 || c == 116 {
+            let w = read_name(src, n, k)
+            if w == "module" {
+                emit("module|" + read_name(src, n, k))
+            } else if w == "import" {
+                let mut path = read_name(src, n, k)
+                let mut cont = 1
+                while cont == 1 {
+                    skip_ws(src, n, k)
+                    if cur_get(k) < n && src[cur_get(k)] == 46 {
+                        cur_set(k, cur_get(k) + 1)
+                        path = path + "." + read_name(src, n, k)
+                    } else {
+                        cont = 0
+                    }
+                }
+                emit("import|" + path)
+            } else if w == "const" {
+                // 常量在 stage-0 里是解析期内联的，不进 AST；这里只跳过它的值
+                read_name(src, n, k)
+                expect(src, n, k, 61)
+                let mut j = cur_get(k)
+                while j < n && src[j] != 10 {
+                    j += 1
+                }
+                cur_set(k, j)
+            } else if w == "struct" {
+                parse_struct(src, n, k)
+            } else if w == "enum" {
+                parse_enum(src, n, k)
+            } else if w == "fn" {
+                parse_fn(src, n, k)
+            } else if w == "test" {
+                // test "name" { ... }：跳过字符串与块
+                skip_ws(src, n, k)
+                if cur_get(k) < n && src[cur_get(k)] == 34 {
+                    cur_set(k, cur_get(k) + 1)
+                    while cur_get(k) < n && src[cur_get(k)] != 34 {
+                        cur_set(k, cur_get(k) + 1)
+                    }
+                    cur_set(k, cur_get(k) + 1)
+                }
+                skip_block(src, n, k)
+            } else {
+                // 未知顶层词：跳到行尾，避免死循环
+                let mut j = cur_get(k)
+                while j < n && src[j] != 10 {
+                    j += 1
+                }
+                cur_set(k, j)
+            }
+        } else {
+            let mut j = i
+            while j < n && src[j] != 10 {
+                j += 1
+            }
+            cur_set(k, j)
+        }
+    }
+}
+
+
+// ===========================================================================
+// 函数体协议输出（Phase 1 核心子集）—— 与 tools/dev/astbody.py 逐字节对拍
+// ===========================================================================
+
+fn parse_stmt(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    skip_ws(src, n, k)
+    let i = cur_get(k)
+    if i >= n {
+        k.set("skip", 1)
+        return ""
+    }
+    let c = src[i]
+    if is_alpha(c) {
+        let w = read_name(src, n, k)
+        if w == "let" {
+            skip_ws(src, n, k)
+            let mut kw = read_name(src, n, k)
+            let mut mk = "imm"
+            if kw == "mut" {
+                mk = "mut"
+                kw = read_name(src, n, k)
+            }
+            expect(src, n, k, 61)
+            k.set("noslit", 0)
+            let e = parse_expr(src, n, k, ks)
+            if skip_on(k) { return "" }
+            return "(let " + mk + " " + kw + " " + e + ")"
+        }
+        if w == "return" {
+            skip_ws(src, n, k)
+            if cur_get(k) < n && src[cur_get(k)] != 125 && src[cur_get(k)] != 10 {
+                k.set("noslit", 0)
+                let e = parse_expr(src, n, k, ks)
+                if skip_on(k) { return "" }
+                return "(ret " + e + ")"
+            }
+            return "(ret)"
+        }
+        if w == "continue" { return "(continue)" }
+        if w == "break" { return "(break)" }
+        if w == "if" { return parse_if(src, n, k, ks) }
+        if w == "while" {
+            k.set("noslit", 1)
+            let cond = parse_expr(src, n, k, ks)
+            if skip_on(k) { return "" }
+            let body = parse_brace(src, n, k)
+            if skip_on(k) { return "" }
+            return "(while " + cond + " " + body + ")"
+        }
+        if w == "for" {
+            skip_ws(src, n, k)
+            let v = read_name(src, n, k)
+            let inw = read_name(src, n, k)
+            if inw != "in" {
+                k.set("skip", 1)
+                return ""
+            }
+            k.set("noslit", 1)
+            let lo = parse_expr(src, n, k, ks)
+            if skip_on(k) { return "" }
+            skip_ws(src, n, k)
+            if cur_get(k) + 1 < n && src[cur_get(k)] == 46 && src[cur_get(k) + 1] == 46 {
+                cur_set(k, cur_get(k) + 2)
+                let hi = parse_expr(src, n, k, ks)
+                if skip_on(k) { return "" }
+                let body = parse_brace(src, n, k)
+                if skip_on(k) { return "" }
+                return "(for " + v + " " + lo + " " + hi + " " + body + ")"
+            }
+            let body = parse_brace(src, n, k)
+            if skip_on(k) { return "" }
+            return "(foreach " + v + " " + lo + " " + body + ")"
+        }
+        if w == "arena" || w == "parfor" || w == "match" || w == "spawn" {
+            k.set("skip", 1)                       // Phase 2 形态
+            return ""
+        }
+        cur_set(k, i)                              // 普通语句：回退统一处理
+    }
+    // 表达式语句 / 赋值：先试 expr，peek 赋值 op 再分派
+    let saved = cur_get(k)
+    k.set("noslit", 0)
+    let e = parse_expr(src, n, k, ks)
+    if skip_on(k) { return "" }
+    skip_ws(src, n, k)
+    let i2 = cur_get(k)
+    let mut op = ""
+    if i2 < n {
+        let c2 = src[i2]
+        if c2 == 61 {
+            if i2 + 1 < n && src[i2 + 1] == 61 { op = "" }   // == 是比较
+            else { op = "=" }
+        } else if c2 == 43 || c2 == 45 || c2 == 42 || c2 == 47 || c2 == 37
+                || c2 == 38 || c2 == 124 || c2 == 94 {
+            if i2 + 1 < n && src[i2 + 1] == 61 { op = substr(src, i2, 2) }
+        } else if c2 == 60 || c2 == 62 {
+            if i2 + 2 < n && src[i2 + 1] == c2 && src[i2 + 2] == 61 {
+                op = substr(src, i2, 3)            // <<= >>=
+            } else if i2 + 1 < n && src[i2 + 1] == 61 {
+                op = substr(src, i2, 2)            // <= >= 不会作为赋值 op 出现——
+                                                   // 但 <= 实为比较，此处 op 会误收；
+                                                   // 由调用序保证：表达式已吞掉比较
+            }
+        }
+    }
+    if op == "<=" || op == ">=" { op = "" }        // 比较符不是赋值
+    if op != "" && k.get("lk") != 3 {
+        cur_set(k, i2 + len(op))
+        let rhs = parse_expr(src, n, k, ks)
+        if skip_on(k) { return "" }
+        let lk = k.get("lk")
+        let ln = ks.get("ln")
+        if lk == 1 {
+            return "(assign " + ln + " " + op + " " + rhs + ")"
+        }
+        if lk == 2 && len(ln) > 0 {
+            let mut hasdot = 0
+            let mut q = 0
+            while q < len(ln) {
+                if ln[q] == 46 { hasdot = 1 }
+                q += 1
+            }
+            if hasdot == 1 {
+                return "(assignf " + ln + " " + op + " " + rhs + ")"
+            }
+            return "(assign " + ln + " " + op + " " + rhs + ")"
+        }
+    }
+    if op != "" && k.get("lk") == 3 {
+        cur_set(k, i2 + len(op))
+        k.set("noslit", 0)
+        let rhs = parse_expr(src, n, k, ks)
+        if skip_on(k) { return "" }
+        return "(assigni " + ks.get("lb") + " " + ks.get("li") + " " + op + " " + rhs + ")"
+    }
+    cur_set(k, saved)
+    k.set("noslit", 0)
+    let e2 = parse_expr(src, n, k, ks)
+    if skip_on(k) { return "" }
+    return "(do " + e2 + ")"
+}
+
+fn parse_if(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    k.set("noslit", 1)
+    let cond = parse_expr(src, n, k, ks)
+    if skip_on(k) { return "" }
+    let then = parse_brace(src, n, k)
+    if skip_on(k) { return "" }
+    skip_ws(src, n, k)
+    let saved2 = cur_get(k)
+    let ew = read_name(src, n, k)
+    if ew == "else" {
+        skip_ws(src, n, k)
+        if cur_get(k) < n && src[cur_get(k)] == 105 {
+            let ei = parse_if(src, n, k, ks)           // else if 链
+            if skip_on(k) { return "" }
+            return "(if " + cond + " " + then + " | " + ei + ")"
+        }
+        let els = parse_brace(src, n, k)
+        if skip_on(k) { return "" }
+        return "(if " + cond + " " + then + " | " + els + ")"
+    }
+    cur_set(k, saved2)                                 // 非 else：回退（否则吃掉 return 等关键字）
+    return "(if " + cond + " " + then + ")"
+}
+
+fn parse_brace(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    skip_ws(src, n, k)
+    if cur_get(k) >= n || src[cur_get(k)] != 123 {
+        k.set("skip", 1)
+        return ""
+    }
+    cur_set(k, cur_get(k) + 1)
+    let mut out = ""
+    let mut first = 1
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        if cur_get(k) >= n {
+            k.set("skip", 1)
+            return ""
+        }
+        if src[cur_get(k)] == 125 {
+            cur_set(k, cur_get(k) + 1)
+            go = 0
+        } else {
+            let s = parse_stmt(src, n, k, ks)
+            if skip_on(k) { return "" }
+            if first == 1 {
+                out = s
+                first = 0
+            } else {
+                out = out + " " + s
+            }
+        }
+    }
+    return out
+}
+
+// ---- 优先级链（SPEC §1.1，从松到紧） ----
+
+fn parse_or(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    let lhs = parse_and(src, n, k, ks)
+    if skip_on(k) { return "" }
+    let mut out = lhs
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        if cur_get(k) + 1 < n && src[cur_get(k)] == 124 && src[cur_get(k) + 1] == 124 {
+            cur_set(k, cur_get(k) + 2)
+            let r = parse_and(src, n, k, ks)
+            if skip_on(k) { return "" }
+            out = "(binop || " + out + " " + r + ")"
+        } else {
+            go = 0
+        }
+    }
+    return out
+}
+
+fn parse_and(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    let lhs = parse_bitor(src, n, k, ks)
+    if skip_on(k) { return "" }
+    let mut out = lhs
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        if cur_get(k) + 1 < n && src[cur_get(k)] == 38 && src[cur_get(k) + 1] == 38 {
+            cur_set(k, cur_get(k) + 2)
+            let r = parse_bitor(src, n, k, ks)
+            if skip_on(k) { return "" }
+            out = "(binop && " + out + " " + r + ")"
+        } else {
+            go = 0
+        }
+    }
+    return out
+}
+
+fn parse_bitor(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    let lhs = parse_bitxor(src, n, k, ks)
+    if skip_on(k) { return "" }
+    let mut out = lhs
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        if i < n && src[i] == 124 && (i + 1 >= n || src[i + 1] != 124) {
+            cur_set(k, i + 1)
+            let r = parse_bitxor(src, n, k, ks)
+            if skip_on(k) { return "" }
+            out = "(binop | " + out + " " + r + ")"
+        } else {
+            go = 0
+        }
+    }
+    return out
+}
+
+fn parse_bitxor(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    let lhs = parse_bitand(src, n, k, ks)
+    if skip_on(k) { return "" }
+    let mut out = lhs
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        if i < n && src[i] == 94 {
+            cur_set(k, i + 1)
+            let r = parse_bitand(src, n, k, ks)
+            if skip_on(k) { return "" }
+            out = "(binop ^ " + out + " " + r + ")"
+        } else {
+            go = 0
+        }
+    }
+    return out
+}
+
+fn parse_bitand(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    let lhs = parse_eq(src, n, k, ks)
+    if skip_on(k) { return "" }
+    let mut out = lhs
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        if i < n && src[i] == 38 && (i + 1 >= n || src[i + 1] != 38) {
+            cur_set(k, i + 1)
+            let r = parse_eq(src, n, k, ks)
+            if skip_on(k) { return "" }
+            out = "(binop & " + out + " " + r + ")"
+        } else {
+            go = 0
+        }
+    }
+    return out
+}
+
+fn parse_eq(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    let lhs = parse_rel(src, n, k, ks)
+    if skip_on(k) { return "" }
+    let mut out = lhs
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        if i + 1 < n && (src[i] == 61 || src[i] == 33) && src[i + 1] == 61 {
+            let mut op = "!="
+            if src[i] == 61 { op = "==" }
+            cur_set(k, i + 2)
+            let r = parse_rel(src, n, k, ks)
+            if skip_on(k) { return "" }
+            out = "(binop " + op + " " + out + " " + r + ")"
+        } else {
+            go = 0
+        }
+    }
+    return out
+}
+
+fn parse_rel(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    let lhs = parse_shift(src, n, k, ks)
+    if skip_on(k) { return "" }
+    let mut out = lhs
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        let mut op = ""
+        if i < n && (src[i] == 60 || src[i] == 62) {
+            let n1 = i + 1 < n && src[i + 1] == 61
+            let shift2 = i + 1 < n && src[i + 1] == src[i]
+            if n1 && !shift2 { op = substr(src, i, 2) }
+            else if !n1 && !shift2 { op = substr(src, i, 1) }
+        }
+        if op != "" {
+            cur_set(k, i + len(op))
+            let r = parse_shift(src, n, k, ks)
+            if skip_on(k) { return "" }
+            out = "(binop " + op + " " + out + " " + r + ")"
+        } else {
+            go = 0
+        }
+    }
+    return out
+}
+
+fn parse_shift(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    let lhs = parse_add(src, n, k, ks)
+    if skip_on(k) { return "" }
+    let mut out = lhs
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        let mut op = ""
+        if i + 2 < n && src[i] == 60 && src[i + 1] == 60 { op = "<<" }
+        else if i + 2 < n && src[i] == 62 && src[i + 1] == 62 && src[i + 2] == 62 { op = ">>>" }
+        else if i + 1 < n && src[i] == 62 && src[i + 1] == 62 && (i + 2 >= n || src[i + 2] != 62) {
+            op = ">>"
+        }
+        if op != "" {
+            cur_set(k, i + len(op))
+            let r = parse_add(src, n, k, ks)
+            if skip_on(k) { return "" }
+            out = "(binop " + op + " " + out + " " + r + ")"
+        } else {
+            go = 0
+        }
+    }
+    return out
+}
+
+fn parse_add(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    let lhs = parse_mul(src, n, k, ks)
+    if skip_on(k) { return "" }
+    let mut out = lhs
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        if i < n && (src[i] == 43 || src[i] == 45) {
+            let mut op = "+"
+            if src[i] == 45 { op = "-" }
+            cur_set(k, i + 1)
+            let r = parse_mul(src, n, k, ks)
+            if skip_on(k) { return "" }
+            out = "(binop " + op + " " + out + " " + r + ")"
+        } else {
+            go = 0
+        }
+    }
+    return out
+}
+
+fn parse_mul(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    let lhs = parse_unary(src, n, k)
+    if skip_on(k) { return "" }
+    let mut out = lhs
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        if i < n && (src[i] == 42 || src[i] == 47 || src[i] == 37) {
+            let mut op = "*"
+            if src[i] == 47 { op = "/" }
+            if src[i] == 37 { op = "%" }
+            cur_set(k, i + 1)
+            let r = parse_unary(src, n, k, ks)
+            if skip_on(k) { return "" }
+            out = "(binop " + op + " " + out + " " + r + ")"
+        } else {
+            go = 0
+        }
+    }
+    return out
+}
+
+fn parse_unary(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    if skip_on(k) { return "" }
+    skip_ws(src, n, k)
+    let i = cur_get(k)
+    if i < n && (src[i] == 45 || src[i] == 33) {
+        let mut op = "-"
+        if src[i] == 33 { op = "!" }
+        cur_set(k, i + 1)
+        let x = parse_unary(src, n, k, ks)
+        if skip_on(k) { return "" }
+        return "(unop " + op + " " + x + ")"
+    }
+    return parse_postfix(src, n, k, ks)
+}
+
+fn parse_expr(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
+    return parse_or(src, n, k, ks)
+}
+
+// ---- body 模式入口：fn 签名 + 函数体协议行 ----
+
+fn body_mode_fn(src: str, n: int, k: map[str]int, ks: map[str]str, fname: str) {
+    // 已消费 'fn'；跳参数括号与返回类型，进 { 协议输出
+    skip_ws(src, n, k)
+    if cur_get(k) < n && src[cur_get(k)] == 40 {
+        cur_set(k, cur_get(k) + 1)
+        let mut depth = 1
+        while cur_get(k) < n && depth > 0 {
+            let c = src[cur_get(k)]
+            if c == 40 { depth += 1 }
+            if c == 41 { depth -= 1 }
+            cur_set(k, cur_get(k) + 1)
+        }
+    }
+    skip_ws(src, n, k)
+    if cur_get(k) + 1 < n && src[cur_get(k)] == 45 && src[cur_get(k) + 1] == 62 {
+        cur_set(k, cur_get(k) + 2)
+        parse_type(src, n, k)
+    }
+    skip_ws(src, n, k)
+    if cur_get(k) >= n || src[cur_get(k)] != 123 {
+        emit("fn " + fname + " SKIP")          // extern 等无函数体声明
+        return
+    }
+    let fstart = cur_get(k)                        // '{' 位置（SKIP 回跳用）
+    cur_set(k, cur_get(k) + 1)
+    k.set("skip", 0)
+    let mut idx = 0
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        if cur_get(k) >= n { go = 0 }
+        else if src[cur_get(k)] == 125 {
+            cur_set(k, cur_get(k) + 1)
+            go = 0
+        } else {
+            let s = parse_stmt(src, n, k, ks)
+            if skip_on(k) {
+                cur_set(k, fstart)
+                skip_block(src, n, k)
+                emit("fn " + fname + " SKIP")
+                return
+            }
+            emit("fn " + fname + "#" + idx.to_str() + " " + s)
+            idx += 1
+        }
+    }
+}
+
+fn run_body_mode(src: str, n: int, k: map[str]int, ks: map[str]str) {
+    while 1 == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        if i >= n { return }
+        let c = src[i]
+        if c == 64 {
+            let mut j = i + 1
+            while j < n && (is_alnum(src[j]) || src[j] == 95) {
+                j += 1
+            }
+            cur_set(k, j)
+            skip_ws(src, n, k)
+            if cur_get(k) < n && src[cur_get(k)] == 40 {
+                cur_set(k, cur_get(k) + 1)
+                let mut depth = 1
+                while cur_get(k) < n && depth > 0 {
+                    let cc = src[cur_get(k)]
+                    if cc == 40 { depth += 1 }
+                    if cc == 41 { depth -= 1 }
+                    cur_set(k, cur_get(k) + 1)
+                }
+            }
+        } else if is_alpha(c) {
+            let w = read_name(src, n, k)
+            if w == "module" {
+                read_name(src, n, k)
+            } else if w == "import" {
+                let mut cont = 1
+                while cont == 1 {
+                    skip_ws(src, n, k)
+                    if cur_get(k) < n && src[cur_get(k)] == 46 {
+                        cur_set(k, cur_get(k) + 1)
+                        read_name(src, n, k)
+                    } else {
+                        cont = 0
+                    }
+                }
+            } else if w == "const" {
+                read_name(src, n, k)
+                expect(src, n, k, 61)
+                let mut j = cur_get(k)
+                while j < n && src[j] != 10 {
+                    j += 1
+                }
+                cur_set(k, j)
+            } else if w == "struct" {
+                parse_struct(src, n, k)
+            } else if w == "enum" {
+                skip_ws(src, n, k)
+                let ename = read_name(src, n, k)
+                k.set("e:" + ename, 1)             // 枚举名收集
+                parse_enum(src, n, k)
+            } else if w == "fn" {
+                skip_ws(src, n, k)
+                let fname = read_name(src, n, k)
+                body_mode_fn(src, n, k, ks, fname)
+            } else if w == "test" {
+                skip_ws(src, n, k)
+                if cur_get(k) < n && src[cur_get(k)] == 34 {
+                    cur_set(k, cur_get(k) + 1)
+                    while cur_get(k) < n && src[cur_get(k)] != 34 {
+                        cur_set(k, cur_get(k) + 1)
+                    }
+                    cur_set(k, cur_get(k) + 1)
+                }
+                skip_block(src, n, k)
+            } else {
+                let mut j = cur_get(k)
+                while j < n && src[j] != 10 {
+                    j += 1
+                }
+                cur_set(k, j)
+            }
+        } else {
+            let mut j = i
+            while j < n && src[j] != 10 {
+                j += 1
+            }
+            cur_set(k, j)
+        }
+    }
+}

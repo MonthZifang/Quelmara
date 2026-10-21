@@ -1,0 +1,109 @@
+// std/b64.qma —— Base64（RFC 4648，标准字母表 + 填充）
+// 全部用 Quelmara 自身实现：直接读写字节缓冲区，输出一次性分配。
+// 用途：WebSocket 握手的 Sec-WebSocket-Accept、HTTP Basic、SSE data 编码。
+
+fn b64_char(v: int) -> int {
+    if v < 26 {
+        return 65 + v              // A-Z
+    }
+    if v < 52 {
+        return 97 + v - 26         // a-z
+    }
+    if v < 62 {
+        return 48 + v - 52         // 0-9
+    }
+    if v == 62 {
+        return 43                  // '+'
+    }
+    return 47                      // '/'
+}
+
+fn b64_val(b: int) -> int {
+    if b >= 65 && b <= 90 {
+        return b - 65
+    }
+    if b >= 97 && b <= 122 {
+        return b - 97 + 26
+    }
+    if b >= 48 && b <= 57 {
+        return b - 48 + 52
+    }
+    if b == 43 {
+        return 62
+    }
+    if b == 47 {
+        return 63
+    }
+    return -1
+}
+
+// b64_encode(ptr, n) -> str：编码 n 个字节，返回 NUL 结尾的字符串
+fn b64_encode(p: int, n: int) -> str {
+    let outn = ((n + 2) / 3) * 4
+    let out = mem_alloc(outn + 1)
+    let mut i = 0
+    let mut o = 0
+    while i + 3 <= n {
+        let a = mem_load8(p, i)
+        let b = mem_load8(p, i + 1)
+        let c = mem_load8(p, i + 2)
+        let v = (a << 16) | (b << 8) | c
+        mem_store8(out, o, b64_char((v >> 18) & 63))
+        mem_store8(out, o + 1, b64_char((v >> 12) & 63))
+        mem_store8(out, o + 2, b64_char((v >> 6) & 63))
+        mem_store8(out, o + 3, b64_char(v & 63))
+        i = i + 3
+        o = o + 4
+    }
+    let rem = n - i
+    if rem == 1 {
+        let a = mem_load8(p, i)
+        let v = a << 16
+        mem_store8(out, o, b64_char((v >> 18) & 63))
+        mem_store8(out, o + 1, b64_char((v >> 12) & 63))
+        mem_store8(out, o + 2, 61)         // '='
+        mem_store8(out, o + 3, 61)
+    } else {
+        if rem == 2 {
+            let a = mem_load8(p, i)
+            let b = mem_load8(p, i + 1)
+            let v = (a << 16) | (b << 8)
+            mem_store8(out, o, b64_char((v >> 18) & 63))
+            mem_store8(out, o + 1, b64_char((v >> 12) & 63))
+            mem_store8(out, o + 2, b64_char((v >> 6) & 63))
+            mem_store8(out, o + 3, 61)
+        }
+    }
+    mem_store8(out, outn, 0)
+    return mem_str(out, outn)
+}
+
+// b64_dec_max(s) -> 解码后所需的最大字节数（调用方先 mem_alloc 这个大小）
+fn b64_dec_max(s: str) -> int {
+    let n = len(s)
+    return ((n + 3) / 4) * 3 + 1
+}
+
+// b64_decode_into(s, out) -> int：解码写入 out，返回实际字节数
+// 无填充/非法字符一律跳过（容错解析，握手与 Basic 认证场景足够）。
+fn b64_decode_into(s: str, out: int) -> int {
+    let n = len(s)
+    let mut i = 0
+    let mut o = 0
+    let mut acc = 0
+    let mut bits = 0
+    while i < n {
+        let v = b64_val(s[i])
+        if v >= 0 {
+            acc = (acc << 6) | v
+            bits = bits + 6
+            if bits >= 8 {
+                bits = bits - 8
+                mem_store8(out, o, (acc >> bits) & 0xFF)
+                o = o + 1
+            }
+        }
+        i = i + 1
+    }
+    return o
+}

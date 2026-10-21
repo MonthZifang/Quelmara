@@ -1,0 +1,158 @@
+// tests/t46_json.qma —— JSON 解析 / 序列化自校验（含错误路径与嵌套）
+module t46_json
+
+import std.json
+
+fn main() {
+    // ---------- 解析 ----------
+    let d = json_parse("{\"name\":\"quelmara\",\"ver\":1,\"ok\":true,\"tags\":[\"a\",\"b\"],\"n\":null,\"f\":-2.75e2}")
+    assert(json_ok(d), "parse ok")
+    let root = json_root(d)
+    assert(json_is_obj(d, root), "root obj")
+    assert(json_obj_len(d, root) == 6, "obj len")
+
+    assert(json_str(d, json_obj_get(d, root, "name")) == "quelmara", "name")
+    assert(json_int(d, json_obj_get(d, root, "ver")) == 1, "ver")
+    assert(json_bool(d, json_obj_get(d, root, "ok")), "ok true")
+    assert(json_is_null(d, json_obj_get(d, root, "n")), "null")
+
+    let tags = json_obj_get(d, root, "tags")
+    assert(json_is_arr(d, tags), "tags arr")
+    assert(json_arr_len(d, tags) == 2, "tags len")
+    assert(json_str(d, json_arr_at(d, tags, 0)) == "a", "tag0")
+    assert(json_str(d, json_arr_at(d, tags, 1)) == "b", "tag1")
+
+    let f = json_obj_get(d, root, "f")
+    assert(json_int(d, f) == -2, "num int part")
+    assert(json_num_raw(d, f) == "-2.75e2", "num raw")
+
+    // 键不存在 / 越界
+    assert(json_obj_get(d, root, "missing") == -1, "missing key")
+    assert(json_arr_at(d, tags, 9) == -1, "arr oob")
+
+    // 键顺序遍历
+    assert(json_obj_key(d, root, 0) == "name", "key order 0")
+    assert(json_obj_key(d, root, 5) == "f", "key order 5")
+
+    // ---------- 转义 ----------
+    let e = json_parse("{\"s\":\"a\\\"b\\\\c\\/d\\n\\t\\u0041\"}")
+    assert(json_ok(e), "escape ok")
+    let es = json_str(e, json_obj_get(e, json_root(e), "s"))
+    assert(len(es) == 10, "escape len")
+    assert(es[0] == 97, "esc a")
+    assert(es[1] == 34, "esc quote")
+    assert(es[3] == 92, "esc backslash")
+    assert(es[5] == 47, "esc slash")
+    assert(es[7] == 10, "esc newline")
+    assert(es[8] == 9, "esc tab")
+    assert(es[9] == 65, "esc u0041")
+
+    // \u4e2d = E4 B8 AD
+    let u = json_parse("{\"z\":\"\\u4e2d\"}")
+    let uz = json_str(u, json_obj_get(u, json_root(u), "z"))
+    assert(len(uz) == 3, "utf8 len")
+    assert(uz[0] == 228, "utf8 b0")
+    assert(uz[2] == 173, "utf8 b2")
+
+    // ---------- 空容器 / 空白 ----------
+    let w = json_parse(" \r\n\t { } ")
+    assert(json_ok(w), "ws ok")
+    assert(json_obj_len(w, json_root(w)) == 0, "empty obj")
+    let w2 = json_parse("[ ]")
+    assert(json_arr_len(w2, json_root(w2)) == 0, "empty arr")
+    let w3 = json_parse("[]")
+    assert(json_ok(w3), "minimal")
+
+    // ---------- 错误路径（不崩、给位置）----------
+    let bad1 = json_parse("{\"a\":}")
+    assert(json_ok(bad1) == false, "bad value")
+    assert(json_error_pos(bad1) > 0, "bad pos")
+
+    let bad2 = json_parse("[1,2")
+    assert(json_ok(bad2) == false, "unclosed arr")
+
+    let bad3 = json_parse("{\"a\":1} extra")
+    assert(json_ok(bad3) == false, "trailing garbage")
+
+    let bad4 = json_parse("")
+    assert(json_ok(bad4) == false, "empty input")
+
+    // ---------- 序列化 ----------
+    let h = json_new(256)
+    json_begin_obj(h)
+    json_key_str(h, "name", "quelmara")
+    json_key_int(h, "ver", 1)
+    json_key(h, "ok")
+    json_val_bool(h, true)
+    json_key(h, "tags")
+    json_begin_arr(h)
+    json_val_str(h, "a")
+    json_val_str(h, "b")
+    json_end_arr(h)
+    json_key(h, "n")
+    json_val_null(h)
+    json_end_obj(h)
+    let out = json_done(h)
+    assert(out == "{\"name\":\"quelmara\",\"ver\":1,\"ok\":true,\"tags\":[\"a\",\"b\"],\"n\":null}", "emit")
+
+    // 序列化转义
+    let h2 = json_new(128)
+    json_begin_obj(h2)
+    json_key_str(h2, "q", "a\"b\\c\nd\te")
+    json_end_obj(h2)
+    let o2 = json_done(h2)
+    assert(o2 == "{\"q\":\"a\\\"b\\\\c\\nd\\te\"}", "emit escape")
+
+    // 空对象 / 空数组
+    let h3 = json_new(32)
+    json_begin_obj(h3)
+    json_end_obj(h3)
+    assert(json_done(h3) == "{}", "emit empty obj")
+    let h4 = json_new(32)
+    json_begin_arr(h4)
+    json_end_arr(h4)
+    assert(json_done(h4) == "[]", "emit empty arr")
+
+    // 嵌套：{"a":[{"b":1}]}
+    let h5 = json_new(64)
+    json_begin_obj(h5)
+    json_key(h5, "a")
+    json_begin_arr(h5)
+    json_begin_obj(h5)
+    json_key_int(h5, "b", 1)
+    json_end_obj(h5)
+    json_end_arr(h5)
+    json_end_obj(h5)
+    assert(json_done(h5) == "{\"a\":[{\"b\":1}]}", "emit nested")
+
+    // ---------- 解析 -> 取值 -> 再序列化（往返）----------
+    let src = "{\"users\":[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}],\"total\":2}"
+    let dd = json_parse(src)
+    assert(json_ok(dd), "rt parse")
+    let r = json_root(dd)
+    let users = json_obj_get(dd, r, "users")
+    assert(json_arr_len(dd, users) == 2, "rt users")
+    let u1 = json_arr_at(dd, users, 1)
+    assert(json_int(dd, json_obj_get(dd, u1, "id")) == 2, "rt id")
+    assert(json_str(dd, json_obj_get(dd, u1, "name")) == "b", "rt name")
+
+    let hh = json_new(256)
+    json_begin_obj(hh)
+    json_key_int(hh, "total", json_int(dd, json_obj_get(dd, r, "total")))
+    json_key(hh, "users")
+    json_begin_arr(hh)
+    let mut i = 0
+    while i < json_arr_len(dd, users) {
+        let one = json_arr_at(dd, users, i)
+        json_begin_obj(hh)
+        json_key_int(hh, "id", json_int(dd, json_obj_get(dd, one, "id")))
+        json_key_str(hh, "name", json_str(dd, json_obj_get(dd, one, "name")))
+        json_end_obj(hh)
+        i = i + 1
+    }
+    json_end_arr(hh)
+    json_end_obj(hh)
+    assert(json_done(hh) == "{\"total\":2,\"users\":[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}]}", "rt emit")
+
+    print("ok t46_json")
+}

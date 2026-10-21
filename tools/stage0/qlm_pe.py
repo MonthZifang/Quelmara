@@ -141,42 +141,70 @@ class WinCodegen(Codegen):
 
 
 # ---------------------------------------------------------------------------
-# 导入表（kernel32.dll）
+# 导入表（多 DLL：kernel32 + ws2_32——v1.3 起支持原生 socket）
 # ---------------------------------------------------------------------------
+
+# ws2_32.dll 白名单：命中走 ws2_32，其余一律 kernel32
+WS2_32_FUNCS = {"WSAStartup", "WSACleanup", "socket", "bind", "listen",
+                "accept", "recv", "send", "closesocket", "inet_addr",
+                "htons", "ntohs", "setsockopt", "ioctlsocket"}
+
+
+def _dll_groups(imports):
+    """{dll 名: [函数名]}——保持 imports 首次出现顺序内的稳定分组。
+    WSA* 前缀一律 ws2_32（WSAGetLastError 曾被漏归 kernel32 导致
+    0xC0000139 ENTRYPOINT_NOT_FOUND，进程起不来）。"""
+    groups = {}
+    for name in imports:
+        dll = ("ws2_32.dll" if name.startswith("WSA") or name in WS2_32_FUNCS
+               else "kernel32.dll")
+        groups.setdefault(dll, []).append(name)
+    return groups
 
 
 def build_idata(imports, rdata_rva):
-    """返回 (rdata 内容, import dir 偏移, import dir 大小, IAT RVA, {name: IAT 槽 RVA})"""
-    n = len(imports)
-    desc_size = 20 * 2                 # 1 个 DLL + 结束哨兵
-    ilt_off = align(desc_size, 8)
-    iat_off = ilt_off + 8 * (n + 1)
-    cur = iat_off + 8 * (n + 1)
-    hn_off = []
-    for name in imports:
-        cur = align(cur, 2)
-        hn_off.append(cur)
-        cur += 2 + len(name) + 1
+    """多 DLL 导入表。每个 DLL 一个 {ILT, IAT} 对 + 结束哨兵描述符。
+    返回 (rdata 内容, 0, dir_size, {函数名: IAT 槽 RVA})"""
+    groups = _dll_groups(imports)
+    dlls = list(groups)
+    desc_size = 20 * (len(dlls) + 1)
+    cur = align(desc_size, 8)
+    ilt_offs, iat_offs, hn_offs = {}, {}, {}
+    for dll in dlls:
+        k = len(groups[dll])
+        ilt_offs[dll] = cur
+        cur += 8 * (k + 1)
+        iat_offs[dll] = cur
+        cur += 8 * (k + 1)
+    for dll in dlls:
+        for name in groups[dll]:
+            cur = align(cur, 2)
+            hn_offs[(dll, name)] = cur
+            cur += 2 + len(name) + 1
     cur = align(cur, 2)
-    dll_off = cur
-    dll = b"kernel32.dll\x00"
-    cur += len(dll)
+    dll_offs = {}
+    for dll in dlls:
+        dll_offs[dll] = cur
+        cur += len(dll) + 1
 
     buf = bytearray(cur)
-    struct.pack_into("<IIIII", buf, 0,
-                     rdata_rva + ilt_off, 0, 0,
-                     rdata_rva + dll_off, rdata_rva + iat_off)
-    for i, name in enumerate(imports):
-        rva = rdata_rva + hn_off[i]
-        struct.pack_into("<Q", buf, ilt_off + 8 * i, rva)
-        struct.pack_into("<Q", buf, iat_off + 8 * i, rva)
-        struct.pack_into("<H", buf, hn_off[i], 0)
-        raw = name.encode("ascii")
-        buf[hn_off[i] + 2:hn_off[i] + 2 + len(raw)] = raw
-    buf[dll_off:dll_off + len(dll)] = dll
-    iat_rva = rdata_rva + iat_off
-    return (bytes(buf), 0, desc_size, iat_rva,
-            {name: iat_rva + 8 * i for i, name in enumerate(imports)})
+    iat_map = {}
+    for i, dll in enumerate(dlls):
+        base = i * 20
+        struct.pack_into("<IIIII", buf, base,
+                         rdata_rva + ilt_offs[dll], 0, 0,
+                         rdata_rva + dll_offs[dll], rdata_rva + iat_offs[dll])
+        for j, name in enumerate(groups[dll]):
+            hn = hn_offs[(dll, name)]
+            struct.pack_into("<Q", buf, ilt_offs[dll] + 8 * j, rdata_rva + hn)
+            struct.pack_into("<Q", buf, iat_offs[dll] + 8 * j, rdata_rva + hn)
+            iat_map[name] = rdata_rva + iat_offs[dll] + 8 * j
+            struct.pack_into("<H", buf, hn, 0)
+            raw = name.encode("ascii")
+            buf[hn + 2:hn + 2 + len(raw)] = raw
+        raw_dll = dll.encode("ascii")
+        buf[dll_offs[dll]:dll_offs[dll] + len(raw_dll)] = raw_dll
+    return (bytes(buf), 0, desc_size, iat_map)
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +242,7 @@ def build_pe(code, data, reloc_offsets, imports, api_fixups):
     data_rva = TEXT_RVA + align(text_size, SECT_ALIGN)
     rdata_rva = data_rva + align(len(data), SECT_ALIGN)
 
-    rdata, imp_off, imp_size, iat_rva, iat = build_idata(imports, rdata_rva)
+    rdata, imp_off, imp_size, iat = build_idata(imports, rdata_rva)
     reloc_rva = rdata_rva + align(len(rdata), SECT_ALIGN)
 
     # 回填 call [rip+disp32]：disp 相对下一条指令

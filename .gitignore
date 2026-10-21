@@ -10,3 +10,6 @@ __pycache__/
 
 # 基准基线（需要时再用 --update-baseline 生成并单独提交）
 bench_baseline.json
+
+# AI 会话缓存（本地记忆，不入库）
+.workbuddy-ai/

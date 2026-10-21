@@ -1,0 +1,67 @@
+// t37_vecagg.qma：vec[聚合] —— AST 节点表的容器（v1.3）
+// 元素是 struct，按值拷贝进出；遍历得到的是副本。
+module t37
+
+struct Node {
+    kind: int,
+    line: int,
+    name: str,
+}
+
+fn main() {
+    let ns = vec[Node].new(2)
+    assert(len(ns) == 0, "empty")
+
+    ns.push(Node { kind: 1, line: 3, name: "module" })
+    ns.push(Node { kind: 2, line: 4, name: "main" })
+    assert(len(ns) == 2, "len 2")
+
+    // 取出来是副本
+    let a = ns.get(0)
+    assert(a.kind == 1, "kind")
+    assert(a.line == 3, "line")
+    assert(a.name == "module", "name")
+    assert(len(a.name) == 6, "name len")
+
+    // 改副本不影响表内元素
+    let mut b = ns.get(1)
+    b.kind = 99
+    assert(ns.get(1).kind == 2, "value copy")
+    assert(b.kind == 99, "copy mutated")
+
+    // set 整体替换
+    ns.set(0, Node { kind: 7, line: 9, name: "zz" })
+    assert(ns.get(0).kind == 7, "set kind")
+    assert(ns.get(0).name == "zz", "set name")
+    assert(len(ns.get(0).name) == 2, "set name len")
+
+    // 遍历：聚合元素
+    let mut kinds = 0
+    let mut lines = 0
+    let mut chars = 0
+    for e in ns {
+        kinds += e.kind
+        lines += e.line
+        chars += len(e.name)
+    }
+    assert(kinds == 9, "sum kinds 7+2")
+    assert(lines == 13, "sum lines 9+4")
+    assert(chars == 6, "sum chars 2+4")
+
+    // 扩容：从 2 涨到 40 个，检验 memcpy 搬旧数据
+    let mut i = 0
+    while i < 40 {
+        ns.push(Node { kind: i, line: i, name: "n" })
+        i += 1
+    }
+    assert(len(ns) == 42, "grown")
+    assert(ns.get(0).kind == 7, "old element kept")
+    assert(ns.get(41).kind == 39, "new element")
+
+    // pop 返回副本
+    let p = ns.pop()
+    assert(p.kind == 39, "pop kind")
+    assert(len(ns) == 41, "after pop")
+
+    print("vecagg ok")
+}

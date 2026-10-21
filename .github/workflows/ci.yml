@@ -1,0 +1,76 @@
+# Quelmara CI —— 每次推送 / PR 自动跑双平台矩阵
+#
+# Linux：门禁（改名/原创性）+ 自举对拍四件套 + 五套回归（gcc / 自研 ELF / io_uring）
+# Windows：门禁 + Windows PE 回归 + 词法/声明级对拍
+#
+# [7] 交叉验证（PE×ELF 逐字节）在 ubuntu runner 上有真实 WSL，可执行；
+#     本机沙箱被拦截时 run_win_tests.py 会自动 SKIP，不会假红。
+
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 门禁（改名残留 / 原创性 / 文档漂移）
+        run: |
+          python tools/dev/check_names.py
+          python tools/dev/check_origin.py
+          python tools/dev/check_docs.py
+
+      - name: 自举对拍（词法 / 声明级 AST / QuIR 架构无关 / 发射层确定性）
+        run: |
+          python tests/lexdiff.py
+          python tests/parsediff.py
+          python tests/irdiff.py
+          python tests/emitdiff.py
+
+      - name: C 后端回归（gcc -O2，仅交叉验证链路）
+        run: bash tests/run_tests.sh
+
+      - name: 自研后端回归（含 AArch64 模拟器执行级）
+        run: bash tests/run_native_tests.sh
+
+      - name: 运行时回归（mem/mt/store + io_uring 网络）
+        run: |
+          bash tests/test_corelib.sh
+          bash tests/test_uring.sh
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 门禁（改名残留 / 原创性 / 文档漂移）
+        run: |
+          python tools/dev/check_names.py
+          python tools/dev/check_origin.py
+          python tools/dev/check_docs.py
+
+      - name: Windows PE 回归（无 CRT / 多核 / chan / vec / fail-fast）
+        run: python tests/run_win_tests.py
+
+      - name: 自举对拍（词法 / 声明级 AST）
+        run: |
+          python tests/lexdiff.py
+          python tests/parsediff.py
+
+      - name: 多后端测试矩阵（test --targets all：win 执行级 + arm64 模拟器 + 输出比对）
+        run: python tools/stage0/qlm_cli.py test tests/selftest.qma --targets all

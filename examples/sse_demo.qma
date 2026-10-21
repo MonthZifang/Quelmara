@@ -1,0 +1,29 @@
+// sse_demo.qma — Server-Sent Events 推流示例（std.sse）
+// 测试：curl -N http://127.0.0.1:8093/stream（Ctrl-C 结束）
+// 预期输出：retry 行、greet 事件、每 300ms 一条 tick 广播。
+import std.sse
+
+fn on_sub(fd: int) -> int {
+    sse_retry(fd, 2000)                     // 断线 2s 自动重连
+    sse_event(fd, "greet", "hello sse")
+    return 1
+}
+
+// 广播线程：无 sleep 内建，用 now_ns 自旋节拍（演示用途；生产里
+// 事件由 reactor 回调自然驱动，不需要节拍线程）。
+fn pusher() {
+    let mut i = 0
+    while i < 10 {
+        let t0 = now_ns()
+        while now_ns() - t0 < 300000000 {
+        }
+        sse_broadcast("tick", "n=" + i.to_str())
+        i += 1
+    }
+}
+
+fn main() {
+    print("sse demo listening on 8093")
+    spawn pusher()
+    sse_serve(8093, 512, on_sub)
+}

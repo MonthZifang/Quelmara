@@ -1,0 +1,9 @@
+// 负向夹具：move 之后使用旧名字，必须编译失败
+module own_move_use
+struct P { x: int }
+fn main() {
+    let a = rc_new(P { x: 1 })
+    let b = a
+    rc_drop(a)
+    print(b.x)
+}

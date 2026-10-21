@@ -72,6 +72,11 @@ fn is_keyword(w: str) -> bool {
     if w == "select" { return true }
     if w == "const" { return true }
     if w == "vec" { return true }
+    // v1.8：rc[T] / interface / impl —— 关键字表两侧必须一致
+    // 注意 u8/i32 等宽度类型在两侧都是 NAME（类型名），不要加成关键字。
+    if w == "rc" { return true }
+    if w == "interface" { return true }
+    if w == "impl" { return true }
     return false
 }
 

@@ -1,0 +1,402 @@
+// std/gzip.qma —— DEFLATE（RFC 1951）+ gzip 封装（RFC 1952），Quelmara 自实现
+//
+// 为什么需要它：HTTP 的 Content-Encoding: gzip 是事实标准。没有它，静态资源
+// 体积翻 3–5 倍，移动端直接不可用。这是 docs/GAPS.md §3.2 五件套的第四件。
+//
+// 实现范围（明确写死）：
+//   * 编码：LZ77（3 字节哈希链，窗口 32KB，链长 8）+ **固定 Huffman**（BTYPE=01）；
+//   * 解码：**未实现**（HTTP 服务端只需要编码；客户端解码等 TLS/HTTP 客户端一起做）；
+//   * 不追求压缩率：固定 Huffman 对文本通常 2–3×，对已压缩数据会略微膨胀；
+//   * 大文件分块：一次输出一个 block（不限制大小，但调用方注意内存）。
+//
+// deflate 位序：Huffman 码 MSB-first，但字节流 LSB-first —— 所以每个码先逆序再写。
+
+// ---------------------------------------------------------------------------
+// CRC-32（gzip 校验和，多项式 0xEDB88320）
+// ---------------------------------------------------------------------------
+
+fn crc32(s: str) -> int {
+    let n = len(s)
+    let mut c = 0xFFFFFFFF
+    let mut i = 0
+    while i < n {
+        c = c ^ s[i]
+        let mut k = 0
+        while k < 8 {
+            if (c & 1) == 1 {
+                c = (c >> 1) ^ 0xEDB88320
+            } else {
+                c = c >> 1
+            }
+            k = k + 1
+        }
+        c = c & 0xFFFFFFFF
+        i = i + 1
+    }
+    return (c ^ 0xFFFFFFFF) & 0xFFFFFFFF
+}
+
+// ---------------------------------------------------------------------------
+// 位写入器：st 句柄 16 字节（槽 0 = bitbuf，槽 1 = bitcnt）
+// ---------------------------------------------------------------------------
+
+fn _bw_new() -> int {
+    let st = mem_alloc(16)
+    mem_store64(st, 0, 0)
+    mem_store64(st, 1, 0)
+    return st
+}
+
+fn _pb(out: vec[int], st: int, val: int, n: int) -> int {
+    if n == 0 {
+        return 0
+    }
+    let mut buf = mem_load64(st, 0)
+    let mut cnt = mem_load64(st, 1)
+    let mask = (1 << n) - 1
+    buf = buf | ((val & mask) << cnt)
+    cnt = cnt + n
+    while cnt >= 8 {
+        out.push(buf & 0xFF)
+        buf = buf >> 8
+        cnt = cnt - 8
+    }
+    mem_store64(st, 0, buf)
+    mem_store64(st, 1, cnt)
+    return 0
+}
+
+// 逆序 n 位（Huffman 码 MSB-first -> 位流 LSB-first）
+fn _rev(v: int, n: int) -> int {
+    let mut r = 0
+    let mut i = 0
+    while i < n {
+        r = (r << 1) | ((v >> i) & 1)
+        i = i + 1
+    }
+    return r
+}
+
+// 固定 Huffman：literal/length 码表（RFC 1951 §3.2.6）
+fn _lit_code(sym: int) -> int {
+    if sym <= 143 {
+        return 0x30 + sym
+    }
+    if sym <= 255 {
+        return 0x190 + sym - 144
+    }
+    if sym <= 279 {
+        return sym - 256
+    }
+    return 0xC0 + sym - 280
+}
+
+fn _lit_bits(sym: int) -> int {
+    if sym <= 143 {
+        return 8
+    }
+    if sym <= 255 {
+        return 9
+    }
+    if sym <= 279 {
+        return 7
+    }
+    return 8
+}
+
+fn _put_sym(out: vec[int], st: int, sym: int) -> int {
+    return _pb(out, st, _rev(_lit_code(sym), _lit_bits(sym)), _lit_bits(sym))
+}
+
+// 长度码表：257..285 -> base / extra
+fn _len_base(k: int) -> int {
+    if k == 0 { return 3 }
+    if k == 1 { return 4 }
+    if k == 2 { return 5 }
+    if k == 3 { return 6 }
+    if k == 4 { return 7 }
+    if k == 5 { return 8 }
+    if k == 6 { return 9 }
+    if k == 7 { return 10 }
+    if k == 8 { return 11 }
+    if k == 9 { return 13 }
+    if k == 10 { return 15 }
+    if k == 11 { return 17 }
+    if k == 12 { return 19 }
+    if k == 13 { return 23 }
+    if k == 14 { return 27 }
+    if k == 15 { return 31 }
+    if k == 16 { return 35 }
+    if k == 17 { return 43 }
+    if k == 18 { return 51 }
+    if k == 19 { return 59 }
+    if k == 20 { return 67 }
+    if k == 21 { return 83 }
+    if k == 22 { return 99 }
+    if k == 23 { return 115 }
+    if k == 24 { return 131 }
+    if k == 25 { return 163 }
+    if k == 26 { return 195 }
+    if k == 27 { return 227 }
+    return 258
+}
+
+fn _len_extra(k: int) -> int {
+    if k <= 7 {
+        return 0
+    }
+    if k <= 11 {
+        return 1
+    }
+    if k <= 15 {
+        return 2
+    }
+    if k <= 19 {
+        return 3
+    }
+    if k <= 23 {
+        return 4
+    }
+    if k <= 27 {
+        return 5
+    }
+    return 0
+}
+
+// 距离码表：0..29 -> base / extra
+fn _dist_base(k: int) -> int {
+    if k == 0 { return 1 }
+    if k == 1 { return 2 }
+    if k == 2 { return 3 }
+    if k == 3 { return 4 }
+    if k == 4 { return 5 }
+    if k == 5 { return 7 }
+    if k == 6 { return 9 }
+    if k == 7 { return 13 }
+    if k == 8 { return 17 }
+    if k == 9 { return 25 }
+    if k == 10 { return 33 }
+    if k == 11 { return 49 }
+    if k == 12 { return 65 }
+    if k == 13 { return 97 }
+    if k == 14 { return 129 }
+    if k == 15 { return 193 }
+    if k == 16 { return 257 }
+    if k == 17 { return 385 }
+    if k == 18 { return 513 }
+    if k == 19 { return 769 }
+    if k == 20 { return 1025 }
+    if k == 21 { return 1537 }
+    if k == 22 { return 2049 }
+    if k == 23 { return 3073 }
+    if k == 24 { return 4097 }
+    if k == 25 { return 6145 }
+    if k == 26 { return 8193 }
+    if k == 27 { return 12289 }
+    if k == 28 { return 16385 }
+    return 24577
+}
+
+fn _dist_extra(k: int) -> int {
+    if k < 4 {
+        return 0
+    }
+    return (k - 2) / 2
+}
+
+fn _emit_len(out: vec[int], st: int, l: int) -> int {
+    let mut k = 0
+    while k < 28 {
+        if l < _len_base(k + 1) {
+            // k 就是目标
+            _put_sym(out, st, 257 + k)
+            let ex = _len_extra(k)
+            if ex > 0 {
+                _pb(out, st, l - _len_base(k), ex)
+            }
+            return 0
+        }
+        k = k + 1
+    }
+    _put_sym(out, st, 285)
+    return 0
+}
+
+fn _emit_dist(out: vec[int], st: int, d: int) -> int {
+    let mut k = 0
+    while k < 29 {
+        if d < _dist_base(k + 1) {
+            _pb(out, st, _rev(k, 5), 5)
+            let ex = _dist_extra(k)
+            if ex > 0 {
+                _pb(out, st, d - _dist_base(k), ex)
+            }
+            return 0
+        }
+        k = k + 1
+    }
+    _pb(out, st, _rev(29, 5), 5)
+    let ex = _dist_extra(29)
+    if ex > 0 {
+        _pb(out, st, d - _dist_base(29), ex)
+    }
+    return 0
+}
+
+fn _hash3(s: str, i: int) -> int {
+    let a = s[i]
+    let b = s[i + 1]
+    let c = s[i + 2]
+    return ((a * 251 + b * 31 + c) & 4095)
+}
+
+// ---------------------------------------------------------------------------
+// deflate 编码（固定 Huffman）
+// ---------------------------------------------------------------------------
+
+// deflate_raw(s) -> str：裸 DEFLATE 流（无 gzip/zlib 头）
+fn deflate_raw(s: str) -> str {
+    let n = len(s)
+    let out = vec[int].new(n / 2 + 64)
+    let st = _bw_new()
+
+    // block 头：BFINAL=1, BTYPE=01（固定 Huffman）→ 3 位，LSB 顺序
+    _pb(out, st, 1, 1)
+    _pb(out, st, 1, 2)
+
+    // LZ77 哈希链：head[4096]、prev[n]（都用堆，1-based 位置）
+    let head = mem_alloc(4096 * 8)
+    mem_zero(head, 4096 * 8)
+    let prev = mem_alloc((n + 1) * 8)
+    mem_zero(prev, (n + 1) * 8)
+
+    let mut pos = 0
+    while pos < n {
+        let mut best_len = 0
+        let mut best_dist = 0
+        if pos + 3 <= n {
+            let h = _hash3(s, pos)
+            let mut cand = mem_load64(head, h)      // 1-based
+            let mut chain = 0
+            while cand > 0 && chain < 8 {
+                let cp = cand - 1
+                let dist = pos - cp
+                if dist > 32768 {
+                    cand = 0
+                } else {
+                    let mut l = 0
+                    let maxl = n - pos
+                    let mut limit = 258
+                    if maxl < limit {
+                        limit = maxl
+                    }
+                    let mut stop = 0
+                    while l < limit && stop == 0 {
+                        if s[cp + l] != s[pos + l] {
+                            stop = 1
+                        } else {
+                            l = l + 1
+                        }
+                    }
+                    if l > best_len {
+                        best_len = l
+                        best_dist = dist
+                    }
+                    cand = mem_load64(prev, cp)
+                }
+                chain = chain + 1
+            }
+        }
+
+        if best_len >= 3 {
+            _emit_len(out, st, best_len)
+            _emit_dist(out, st, best_dist)
+            // 把本次匹配覆盖的位置都插进哈希链（提高后续命中率）
+            let mut k = 0
+            while k < best_len {
+                let p = pos + k
+                if p + 3 <= n {
+                    let h2 = _hash3(s, p)
+                    mem_store64(prev, p, mem_load64(head, h2))
+                    mem_store64(head, h2, p + 1)
+                }
+                k = k + 1
+            }
+            pos = pos + best_len
+        } else {
+            _put_sym(out, st, s[pos])
+            if pos + 3 <= n {
+                let h3 = _hash3(s, pos)
+                mem_store64(prev, pos, mem_load64(head, h3))
+                mem_store64(head, h3, pos + 1)
+            }
+            pos = pos + 1
+        }
+    }
+
+    // 结束码 256
+    _put_sym(out, st, 256)
+    // 补齐最后一个字节
+    let left = mem_load64(st, 1)
+    if left > 0 {
+        out.push(mem_load64(st, 0) & 0xFF)
+    }
+    mem_free(head, 4096 * 8)
+    mem_free(prev, (n + 1) * 8)
+    mem_free(st, 16)
+    return str_from_bytes(out)
+}
+
+// ---------------------------------------------------------------------------
+// gzip 封装（RFC 1952）
+//   头：1F 8B 08 00 00 00 00 00 00 FF（无 mtime / 无文件名）
+//   尾：CRC32 (LE) + ISIZE (LE)
+// ---------------------------------------------------------------------------
+
+fn gzip_encode(s: str) -> str {
+    let body = deflate_raw(s)
+    let n = len(body)
+    let out = vec[int].new(n + 24)
+    out.push(0x1F)
+    out.push(0x8B)
+    out.push(8)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(255)
+    let mut i = 0
+    while i < n {
+        out.push(body[i])
+        i = i + 1
+    }
+    let c = crc32(s)
+    out.push(c & 0xFF)
+    out.push((c >> 8) & 0xFF)
+    out.push((c >> 16) & 0xFF)
+    out.push((c >> 24) & 0xFF)
+    let sz = len(s) & 0xFFFFFFFF
+    out.push(sz & 0xFF)
+    out.push((sz >> 8) & 0xFF)
+    out.push((sz >> 16) & 0xFF)
+    out.push((sz >> 24) & 0xFF)
+    return str_from_bytes(out)
+}
+
+// 便捷：gzip 后的十六进制（调试/ETag 指纹用，长度是原串两倍）
+fn gzip_hex(s: str) -> str {
+    let HEX = "0123456789abcdef"
+    let g = gzip_encode(s)
+    let n = len(g)
+    let out = vec[int].new(n * 2 + 1)
+    let mut i = 0
+    while i < n {
+        let v = g[i]
+        out.push(HEX[v >> 4])
+        out.push(HEX[v & 15])
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}

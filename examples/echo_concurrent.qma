@@ -1,0 +1,22 @@
+// echo_concurrent.qma — 高并发 echo：每连接一线程（spawn），主线程只 accept，
+// 连接内循环回显（长连接语义，对端关闭 recv 返回空串即退出）
+module echo_concurrent
+
+import std.net
+
+fn handle(conn: int) {
+    while true {
+        let data = recv(conn, 4096)
+        if len(data) == 0 { break }
+        send(conn, data)
+    }
+    close_conn(conn)
+}
+
+fn main() {
+    let srv = listen(19528)
+    while true {
+        let conn = accept(srv)
+        spawn handle(conn)
+    }
+}

@@ -1,0 +1,35 @@
+// bench_mod.qma — 模归纳削减基准（两个形态，循环体时间排除冷启动）
+// 用法：bench_mod.qma <n> <kind>
+//   kind=0  形态 A：acc += (i*7) % 13      （归纳乘子模）
+//   kind=1  形态 B：x = (x + 3) % 7        （依赖累加器模，串行链）
+module bench_mod
+
+fn work_a(n: int) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + (i * 7) % 13
+        i = i + 1
+    }
+    return acc
+}
+
+fn work_b(n: int) -> int {
+    let mut x = 0
+    let mut i = 0
+    while i < n {
+        x = (x + 3) % 7
+        i = i + 1
+    }
+    return x
+}
+
+fn main() {
+    let n = args()[0].to_int()
+    let kind = args()[1].to_int()
+    if kind == 0 {
+        print(work_a(n))
+    } else {
+        print(work_b(n))
+    }
+}

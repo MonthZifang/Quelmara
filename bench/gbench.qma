@@ -1,0 +1,335 @@
+// bench/gbench.qma —— 通用性能基准：8 个【从未参与优化器调优】的代码形状
+//
+// 方法论声明（回答"基准是不是专门调过的"）：
+//   本文件里的每段代码都是全新的、写法刻意多样化（解析器形状、状态机
+//   形状、哈希表形状、字符串组装、缓冲搜索、嵌套数组），与 bench_str /
+//   bench_mod / examples/loop_sum 这些调优期用例零重叠。如果优化收益
+//   是通用机制，这些形状应该同样受益；如果是单文件特化，这里会原形
+//   毕露。运行不依赖任何命令行参数。
+//
+// 计时：now_ns() 进程内单调时钟（v1.5 内建），无进程启动开销污染。
+module gbench
+
+import std.core
+
+// ---------------------------------------------------------------------------
+// 1. tokenizer：手写词法器形状（分支密集 + 字节扫描 + 多状态）
+//    输入重复 "int x12 = 345; float f1 = 2.5; " 模式文本。
+// ---------------------------------------------------------------------------
+
+fn tokenize(src: str) -> int {
+    let n = len(src)
+    let mut i = 0
+    let mut tokens = 0
+    let mut num_acc = 0
+    let mut num_count = 0
+    while i < n {
+        let c = src[i]
+        if c == 32 || c == 9 || c == 10 {
+            i += 1
+        } else {
+            if c >= 48 && c <= 57 {
+                // 数字字面量：连续读
+                let mut v = 0
+                while i < n {
+                    let d = src[i]
+                    if d < 48 || d > 57 {
+                        break
+                    }
+                    v = v * 10 + (d - 48)
+                    i += 1
+                }
+                num_acc += v & 1
+                num_count += 1
+                tokens += 1
+            } else {
+                // 标识符/关键字：扫到非字母数字
+                let mut l = 0
+                while i < n {
+                    let d = src[i]
+                    if (d >= 97 && d <= 122) || (d >= 48 && d <= 57) || d == 95 {
+                        l += 1
+                        i += 1
+                    } else {
+                        break
+                    }
+                }
+                if l == 0 {
+                    i += 1                 // 标点：单字符 token，必须消费
+                }
+                num_acc += l & 3
+                tokens += 1
+            }
+        }
+    }
+    return tokens + num_count + (num_acc & 1)
+}
+
+// ---------------------------------------------------------------------------
+// 2. mix_arith：整数混合运算依赖链（乘加移位异或，模拟哈希/校验和内核）
+// ---------------------------------------------------------------------------
+
+fn mix_arith(n: int) -> int {
+    let mut x = 12345
+    let mut i = 0
+    while i < n {
+        x = x * 6364136223846793005 + 1442695040888963407
+        x = (x >> 13) ^ x
+        x = x * 0x2545F4914F6CDD1D
+        x = (x >> 7) ^ x
+        i += 1
+    }
+    return x
+}
+
+// ---------------------------------------------------------------------------
+// 3. map_str：map[str]int 一万键插入 + 全量查找（字符串哈希表路径）
+// ---------------------------------------------------------------------------
+
+fn map_str(n: int) -> int {
+    let mut m = map[str]int.new(n * 2)
+    let mut i = 0
+    while i < n {
+        let k = "key_" + i.to_str()
+        m.set(k, i)
+        i += 1
+    }
+    let mut hits = 0
+    i = 0
+    while i < n {
+        let k = "key_" + i.to_str()
+        let v = m.get(k)
+        if v == i {
+            hits += 1
+        }
+        i += 1
+    }
+    return hits
+}
+
+// ---------------------------------------------------------------------------
+// 4. branchy：数据依赖分支（小状态机，模拟协议处理热路径）
+// ---------------------------------------------------------------------------
+
+fn branchy(n: int) -> int {
+    let mut state = 0
+    let mut x = 7
+    let mut i = 0
+    while i < n {
+        let c = i & 7
+        if state == 0 {
+            x += c
+            if x % 5 == 0 {
+                state = 1
+            }
+        } else {
+            if state == 1 {
+                x ^= c
+                if x % 3 == 0 {
+                    state = 2
+                } else {
+                    state = 0
+                }
+            } else {
+                x = (x + c) % 1000003
+                state = 0
+            }
+        }
+        i += 1
+    }
+    return x + state
+}
+
+// ---------------------------------------------------------------------------
+// 5. str_build：日志行组装（拼接 + 整数转字符串，1 千行 x 5 字段）
+// ---------------------------------------------------------------------------
+
+fn str_build(rows: int) -> int {
+    let mut total = 0
+    let mut r = 0
+    while r < rows {
+        let line = "level=info ts=" + (1700000000 + r).to_str()
+                   + " id=" + (r % 9973).to_str()
+                   + " dur_ms=" + (r % 89).to_str()
+                   + " status=" + (200 + (r & 3)).to_str()
+                   + " user=\"u" + (r % 331).to_str() + "\""
+        total += len(line)
+        r += 1
+    }
+    return total
+}
+
+// ---------------------------------------------------------------------------
+// 6. buf_scan：缓冲区模式搜索（mem_load8 循环，找 "needle" 出现次数）
+// ---------------------------------------------------------------------------
+
+const PAT = "pattern!"
+
+fn buf_scan(n: int) -> int {
+    // 构造缓冲：每 64 字节埋一个 8 字节模式
+    let buf = mem_alloc(n)
+    mem_zero(buf, n)
+    let mut off = 0
+    while off + 8 <= n {
+        let mut j = 0
+        while j < 8 {
+            mem_store8(buf, off + j, PAT[j])
+            j += 1
+        }
+        off += 64
+    }
+    // 搜索：朴素逐字节匹配（真实解析器常见内层形状）
+    let mut hits = 0
+    let mut i = 0
+    while i + 8 <= n {
+        if mem_load8(buf, i) == 112 && mem_load8(buf, i + 1) == 97
+                && mem_load8(buf, i + 2) == 116 && mem_load8(buf, i + 3) == 116 {
+            hits += 1
+            i += 8
+        } else {
+            i += 1
+        }
+    }
+    mem_free(buf, n)
+    return hits
+}
+
+// ---------------------------------------------------------------------------
+// 7. nested：双层循环 + 二维索引数组访问（矩阵风格，行主序展开）
+// ---------------------------------------------------------------------------
+
+fn nested(dim: int) -> int {
+    let cells = dim * dim
+    let a = mem_alloc(cells * 8)
+    // 初始化 a[i][j] = i*dim+j
+    let mut i = 0
+    while i < dim {
+        let row = i * dim
+        let mut j = 0
+        while j < dim {
+            mem_store64(a, row + j, row + j)
+            j += 1
+        }
+        i += 1
+    }
+    // 行求和
+    let mut sum = 0
+    i = 0
+    while i < dim {
+        let row = i * dim
+        let mut j = 0
+        while j < dim {
+            sum += mem_load64(a, row + j)
+            j += 1
+        }
+        i += 1
+    }
+    mem_free(a, cells * 8)
+    return sum
+}
+
+// ---------------------------------------------------------------------------
+// 8. hashmix：splitmix64 位散列链（纯位运算依赖链，无乘法捷径）
+// ---------------------------------------------------------------------------
+
+fn hashmix(n: int) -> int {
+    let mut z = 0x9E3779B97F4A7C15
+    let mut i = 0
+    while i < n {
+        z = z + 0x9E3779B97F4A7C15
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+        z = z ^ (z >> 31)
+        i += 1
+    }
+    return z
+}
+
+// ---------------------------------------------------------------------------
+// 计时跑批
+// ---------------------------------------------------------------------------
+
+fn bench(name: str, iters: int, f: int) -> int {
+    f(iters)                                    // 预热
+    let t0 = now_ns()
+    let r = f(iters)
+    let t1 = now_ns()
+    print(name + "  iters=" + iters.to_str()
+          + "  ns=" + (t1 - t0).to_str()
+          + "  ns_per_iter=" + ((t1 - t0) / iters).to_str())
+    return r
+}
+
+const UNIT = "int x12 = 345; float f1 = 2.5; while (a1 != b2) { s3 = s3 + 42; } "
+
+fn main() {
+    // tokenizer 用真实文本量：512KB 模式文本
+    // 模式文本：缓冲区一次组装（512KB；str+ 循环累积是 O(n^2) 反模式，
+    // 基准里用它反而是给拼接优化记双份功，这里必须绕开）
+    let ulen = len(UNIT)
+    let reps = 8192
+    let bp = mem_alloc(ulen * reps)
+    let mut rep = 0
+    while rep < reps {
+        mem_copy(bp + rep * ulen, UNIT, ulen)
+        rep += 1
+    }
+    let src = mem_str(bp, ulen * reps)
+
+    print("== gbench：通用形状基准（全部为未调优代码）==")
+    eprint("P1")
+    print("tokens=" + tokenize(src).to_str())
+    eprint("P2")
+    print("mix=" + mix_arith(10000000).to_str())
+    eprint("P3")
+    print("map_hits=" + map_str(10000).to_str())
+    eprint("P4")
+    print("branchy=" + branchy(10000000).to_str())
+    eprint("P5")
+    print("logbytes=" + str_build(1000).to_str())
+    eprint("P6")
+    print("scan_hits=" + buf_scan(1048576).to_str())
+    eprint("P7")
+    print("matsum=" + nested(300).to_str())
+    print("hash=" + hashmix(10000000).to_str())
+
+    let t0 = now_ns()
+    tokenize(src)
+    let t1 = now_ns()
+    print("bench tokenizer 512KB  ns=" + (t1 - t0).to_str())
+
+    let t2 = now_ns()
+    mix_arith(10000000)
+    let t3 = now_ns()
+    print("bench mix_arith 10M     ns=" + (t3 - t2).to_str())
+
+    let t4 = now_ns()
+    map_str(10000)
+    let t5 = now_ns()
+    print("bench map_str 10k       ns=" + (t5 - t4).to_str())
+
+    let t6 = now_ns()
+    branchy(10000000)
+    let t7 = now_ns()
+    print("bench branchy 10M       ns=" + (t7 - t6).to_str())
+
+    let t8 = now_ns()
+    str_build(1000)
+    let t9 = now_ns()
+    print("bench str_build 1k      ns=" + (t9 - t8).to_str())
+
+    let t10 = now_ns()
+    buf_scan(1048576)
+    let t11 = now_ns()
+    print("bench buf_scan 1MB      ns=" + (t11 - t10).to_str())
+
+    let t12 = now_ns()
+    nested(300)
+    let t13 = now_ns()
+    print("bench nested 300x300    ns=" + (t13 - t12).to_str())
+
+    let t14 = now_ns()
+    hashmix(10000000)
+    let t15 = now_ns()
+    print("bench hashmix 10M       ns=" + (t15 - t14).to_str())
+}

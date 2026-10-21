@@ -181,9 +181,10 @@ fn main() {
 
 ---
 
-## 7. 定长数组 [N]T 与切片 []T
+## 7. 数组、切片与集合
 
 ```quelmara
+// 定长数组：值语义
 let mut a = [1, 2, 3, 4]
 a[1] = 20
 a[2] += 5
@@ -198,7 +199,45 @@ print(a[i])          // 越界 → fail-fast，退出码 1，stderr 报错
 ```
 
 切片 `[]T` = {ptr, len} 两字零拷贝视图（聚合 ABI），可作参数/返回值，
-动态长度越界同样 fail-fast。
+动态长度越界同样 fail-fast。`[N]T` 作函数参数/返回值自 v1.2 起支持
+（值语义拷贝 + 隐藏出参，自研后端；C 后端明确拒绝）。
+
+子切片 `a[lo..hi]`（v1.1，左闭右开）——`str` 是拷贝，切片/数组是零拷贝视图：
+
+```quelmara
+let s = "hello world"
+print(s[0..5])            // hello
+print(s[6..11] == "world")  // true
+
+let a = [10, 20, 30, 40, 50]
+let mid = a[1..4]         // 零拷贝视图：写 mid 会写穿原数组
+print(len(mid))           // 3
+print(mid[1..3][0])       // 30 —— 切片还能再切
+```
+
+集合容器（v0.10 / v1.2）：
+
+```quelmara
+// map[K]V：开放寻址哈希表（写作 map[int]int，无逗号）
+let m = map[str]int.new(16)
+m.set("apple", 3)
+m.set("pear", 5)
+if m.has("apple") { print(m.get("apple")) }    // 3
+m.del("pear")
+
+for k in m { print(k) }    // 遍历产出【键】，顺序实现定义，不要依赖
+
+// vec[T]：堆上变长数组，2 倍扩容，当栈用也行
+let st = vec[int].new(2)
+st.push(1)
+st.push(2)
+st.push(3)
+while len(st) > 0 { print(st.pop()) }    // 3 2 1
+
+let v = vec[str].new(2)
+v.push("alpha")
+for w in v { print(w) }    // vec 按下标序，稳定
+```
 
 ---
 
@@ -218,7 +257,63 @@ fn frame() {
 
 ---
 
-## 9. 性能与产物一览
+## 9. 位运算与真正的命令行工具（v1.0 / v1.1）
+
+位运算 `& | ^ ~ << >> >>>` 配合进制字面量，掩码操作直接写：
+
+```quelmara
+const MASK_LOW = 0xFF
+
+let mut flags = 0
+flags |= 1 << 2                       // 置位第 2 位
+flags |= 1 << 5
+print(flags & MASK_LOW)               // 36（0b100100）
+
+if (flags & (1 << 2)) != 0 { print("bit2 on") }
+print(-8 >> 1)                        // -4：算术右移保符号
+print(-8 >>> 1)                       // 9223372036854775804：逻辑右移填 0
+```
+
+`args()` / `read_text` / 子切片凑齐后，终于能写真正的 CLI 工具
+（`args()` 不含程序名；所有非法输入 fail-fast）：
+
+```quelmara
+// wc.qma —— 极简字数统计
+module wc
+
+fn main() {
+    let a = args()
+    if len(a) < 1 {
+        eprint("usage: wc <textfile>")
+        exit(1)
+    }
+    let text = read_text(a[0])       // 整文件读入，失败 fail-fast
+    let mut words = 0
+    let mut in_word = false
+    let mut i = 0
+    while i < len(text) {
+        let c = text[i]              // 字节值 0..255，可直接比较
+        let sep = (c == 32) | (c == 9) | (c == 10)   // 空格 / Tab / 换行
+        if sep {
+            in_word = false
+        } else {
+            if !in_word { words += 1 }
+            in_word = true
+        }
+        i += 1
+    }
+    print(words)
+}
+```
+
+```bash
+python tools/stage0/qlm_cli.py build wc.qma --target win -o build/wc.qex
+build/wc.qex README.md
+```
+
+---
+
+## 10. 性能与产物一览
 
 **基准**（Xeon E5-2666 v3 / WSL2 / gcc 15.2，`tests/bench.sh` best-of-3，2026-10-20）：
 
@@ -236,8 +331,8 @@ fn frame() {
 | parfor_sum（20 线程） | 14,848 B |
 | chan / arrays / spawn | 9–14 KB |
 
-**质量**：五套回归 **198 项全绿**（Windows PE 61 / 自研 Linux 61 / C 16 /
-corelib 34 / io_uring 26）+ 优化器差分模糊 180 例。
+**质量**：回归规模随版本增长，各版本项数以 `CHANGELOG.md` 为权威记录
+（v0.9 时点：五套 198 项全绿 + 优化器差分模糊 180 例；v1.2 时点：Windows PE 91 项本机全绿）。
 
 ---
 

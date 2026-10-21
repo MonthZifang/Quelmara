@@ -1,0 +1,47 @@
+// t52_iface.qma：interface / impl（v1.8）
+// 现状：契约 + 实现一致性检查 + **静态分发**（接收者类型在编译期已知）。
+// 动态分发（trait object / vtable）尚未实现，见 docs/GAPS.md §2。
+module t52
+
+interface Shape {
+    fn area(self) -> int
+    fn name(self) -> str
+    fn scaled(self, k: int) -> int
+}
+
+struct Circle { r: int }
+struct Rect { w: int, h: int }
+
+impl Circle : Shape {
+    fn area(c: Circle) -> int { return c.r * c.r * 3 }
+    fn name(c: Circle) -> str { return "circle" }
+    fn scaled(c: Circle, k: int) -> int { return c.area() * k }
+}
+
+impl Rect : Shape {
+    fn area(r: Rect) -> int { return r.w * r.h }
+    fn name(r: Rect) -> str { return "rect" }
+    fn scaled(r: Rect, k: int) -> int { return r.area() * k }
+}
+
+// 方法可以当普通函数调用（mangling 是 Type__method，属于实现细节）
+fn total(a: Circle, b: Rect) -> int {
+    return a.area() + b.area()
+}
+
+fn main() {
+    let c = Circle { r: 3 }
+    let r = Rect { w: 4, h: 5 }
+    assert(c.area() == 27, "circle area")
+    assert(r.area() == 20, "rect area")
+    assert(c.scaled(2) == 54, "method with arg")
+    assert(r.scaled(3) == 60, "method with arg 2")
+    assert(total(c, r) == 47, "methods inside function")
+
+    // 方法名在不同类型上互不干扰（各自 impl）
+    let c2 = Circle { r: 10 }
+    assert(c2.area() == 300, "second circle")
+    assert(r.area() == 20, "rect unchanged")
+
+    print("iface ok")
+}

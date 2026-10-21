@@ -1,0 +1,15 @@
+// 负向夹具：impl 少实现一个接口方法，必须编译失败
+module iface_missing
+
+interface S {
+    fn a(self) -> int
+    fn b(self) -> int
+}
+
+struct T { x: int }
+
+impl T : S {
+    fn a(t: T) -> int { return t.x }
+}
+
+fn main() { }

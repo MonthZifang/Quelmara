@@ -1,0 +1,34 @@
+// t51_rc.qma：rc[T] 引用计数句柄 + 所有权检查（v1.8）
+module t51
+
+struct Point { x: int, y: int }
+
+fn make(a: int, b: int) -> rc[Point] {
+    let p = Point { x: a, y: b }
+    return rc_new(p)
+}
+
+fn take(h: rc[Point]) -> int {
+    // 借用：不 drop，不转移
+    let q = rc_get(h)
+    return q.x + q.y
+}
+
+fn main() {
+    let r = make(3, 4)
+    assert(rc_count(r) == 1, "new -> 1")
+
+    let c = rc_clone(r)
+    assert(rc_count(r) == 2, "clone -> 2")
+
+    let p = rc_get(r)
+    assert(p.x == 3, "payload x")
+    assert(p.y == 4, "payload y")
+    assert(take(r) == 7, "pass to fn")
+
+    rc_drop(c)
+    assert(rc_count(r) == 1, "drop clone -> 1")
+
+    rc_drop(r)
+    print("rc ok")
+}

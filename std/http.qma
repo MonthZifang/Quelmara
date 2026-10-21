@@ -1,0 +1,642 @@
+// std/http.qma —— HTTP/1.1 服务端库（Quelmara 自实现，零 Python/Node）
+//
+// 架构：std/net/core.qma 的槽位层 + net_serve 的 IOCP reactor。
+// 每个连接一个定长槽位（默认 640 B），请求数据累积在槽位内联缓冲，
+// 解析是单遍字节扫描（mem_load8 内联，无 strlen、无 str 拼接热路径）。
+// 响应一次性组包，单个 conn_send 发出。
+//
+// 用法（handler 传函数名，经 callr 间接调用）：
+//
+//   import std.http
+//
+//   fn route(fd: int) -> int {
+//       let p = http_path(fd)
+//       if p == "/" {
+//           http_text(fd, 200, "hello")
+//           return 1                       // 1 = 按 keep-alive 语义继续
+//       }
+//       http_not_found(fd)
+//       return 1
+//   }
+//
+//   fn main() {
+//       http_serve(8080, 512, route)       // 阻塞运行
+//   }
+//
+// 支持：keep-alive、流水线（一个缓冲里多个请求依次派发）、
+// Content-Length 请求体、Connection: close、头部增量解析。
+// 明确 fail-fast：Transfer-Encoding: chunked -> 501；头部超限 -> 431；
+// 请求行非法 -> 400 并关闭。WebSocket 升级请用 std.ws。
+//
+// 槽位协议私有字（core.qma 的 w6..w15，SLOT_PROTO 起）：
+//   w6  状态（低 8 位：0=等头 1=等体；bit8=连接要关；bit9=HTTP/1.0）
+//   w7/w8   方法偏移/长度       w9/w10 路径偏移/长度
+//   w11/w12 头块偏移/长度       w13/w14 体偏移/长度（=Content-Length）
+//   w15 头部扫描位置（\r\n\r\n 增量搜索）
+
+import std.mem
+import std.net.core
+import std.str
+import std.gzip
+
+const HP_STATE = 6
+const HP_MOFF = 7
+const HP_MLEN = 8
+const HP_POFF = 9
+const HP_PLEN = 10
+const HP_HOFF = 11
+const HP_HLEN = 12
+const HP_BOFF = 13
+const HP_BLEN = 14
+const HP_SCAN = 15
+
+const HP_ST_HDR = 0
+const HP_ST_BODY = 1
+const HP_F_CLOSE = 256
+const HP_F_HTTP10 = 512
+
+const HTTP_VER_PREFIX = "HTTP/1."
+const HTTP_HDR_CL = "content-length"
+const HTTP_HDR_TE = "transfer-encoding"
+const HTTP_HDR_CONN = "connection"
+
+const HTTP_MAX_HDR = 16384        // 请求头（含请求行）上限
+const HTTP_DEFAULT_CONNS = 100000 // 十万连接档（可由 http_serve_max 覆盖）
+
+// ---------------------------------------------------------------------------
+// 服务入口
+// ---------------------------------------------------------------------------
+
+fn http_serve(port: int, backlog: int, on_request: int) -> int {
+    return http_serve_max(port, backlog, on_request, HTTP_DEFAULT_CONNS)
+}
+
+// max_conns 可调版：槽位层按 max_conns 预分配定长槽位
+// （640 B/连接 × max_conns，十万连接 = 64 MB 常驻，无 GC、无停顿）。
+fn http_serve_max(port: int, backlog: int, on_request: int,
+                  max_conns: int) -> int {
+    let st = conn_state_new(max_conns, 80)
+    mem_store64(st, ST_H0, on_request)          // 用户 handler
+    mem_store64(static_word(0), 0, st)          // 回调通道：进程级状态指针
+    return net_serve(port, backlog, http_on_connect, http_on_data,
+                     http_on_close)
+}
+
+// 统计直通（core.qma 的计数器，监控用）
+fn http_accepted() -> int {
+    return conn_accepted(_st())
+}
+
+fn http_closed() -> int {
+    return conn_closed(_st())
+}
+
+fn http_reqs() -> int {
+    return conn_msgs(_st())
+}
+
+fn http_bytes_in() -> int {
+    return conn_bytes_in(_st())
+}
+
+fn http_bytes_out() -> int {
+    return conn_bytes_out(_st())
+}
+
+fn _st() -> int {
+    return mem_load64(static_word(0), 0)
+}
+
+// ---------------------------------------------------------------------------
+// reactor 回调（net_serve 派发；on_connect 在 acceptor 线程，
+// on_data/on_close 在 io 线程，槽位层自旋锁保护共享结构）
+// ---------------------------------------------------------------------------
+
+fn http_on_connect(fd: int) -> int {
+    let r = conn_open(_st(), fd)
+    if r < 0 {
+        return 0                                // 超上限：fail-fast，拒绝连接
+    }
+    return 1
+}
+
+fn http_on_close(fd: int) -> int {
+    conn_close(_st(), fd)
+    return 0
+}
+
+fn http_on_data(fd: int, data: str) -> int {
+    let st = _st()
+    let p = conn_slot(st, fd)
+    if p == 0 {
+        return 0
+    }
+    if len(data) > 0 {
+        let r = conn_append(st, p, data)
+        if r < 0 {
+            // 单连接缓冲超 1MB 上限：响应 431 后关闭，绝不静默截断
+            http_respond_raw(fd, 431, "", "headers too large\n")
+            return 0
+        }
+    }
+    // 解析-派发循环：一次 on_data 可能带 0 个、1 个或多个完整请求（流水线）
+    while true {
+        let buf = conn_buf_ptr(p)
+        let n = mem_load64(p, SLOT_RECVLEN)
+        let state = mem_load64(p, HP_STATE) & 255
+        if state == HP_ST_HDR {
+            // 增量搜索 \r\n\r\n（扫描位置跨 on_data 持久，整请求只扫一遍）
+            let scan = mem_load64(p, HP_SCAN)
+            let k = _find_head_end(buf, scan, n)
+            if k < 0 {
+                if n > HTTP_MAX_HDR {
+                    http_respond_raw(fd, 431, "", "headers too large\n")
+                    return 0
+                }
+                let keep = n - 3
+                if keep < 0 {
+                    mem_store64(p, HP_SCAN, 0)
+                } else {
+                    mem_store64(p, HP_SCAN, keep)
+                }
+                return 1                        // 头未收全，等下一段
+            }
+            if _parse_head(p, buf, k) < 0 {
+                http_respond_raw_parse_fail(fd)
+                return 0                        // _parse_head 里已标记失败原因
+            }
+            // 状态切到等体（保留 flags 位）
+            let st2 = mem_load64(p, HP_STATE)
+            mem_store64(p, HP_STATE, st2 - (st2 & 255) + HP_ST_BODY)
+        }
+        // 等请求体收全
+        let need = mem_load64(p, HP_BOFF) + mem_load64(p, HP_BLEN)
+        if n < need {
+            return 1
+        }
+        // 派发：callr 间接调用用户 handler
+        mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
+        let h = mem_load64(st, ST_H0)
+        let rc = h(fd)
+        let flags = mem_load64(p, HP_STATE)
+        if rc == 0 || (flags & HP_F_CLOSE) != 0 {
+            return 0                            // handler 要求关 / Connection: close
+        }
+        // keep-alive：把剩余半包搬到缓冲头，继续解析下一个请求
+        let rest = conn_shift(p, need)
+        mem_store64(p, HP_STATE, HP_ST_HDR)
+        mem_store64(p, HP_SCAN, 0)
+        if rest == 0 {
+            return 1
+        }
+    }
+}
+
+// 解析失败时按 _parse_head 留下的标记发错误响应。
+// 失败码放静态字 1（仅解析失败瞬间使用，多线程下每连接各自瞬间写读）。
+const HTTP_ERR_W = 1
+
+fn http_respond_raw_parse_fail(fd: int) -> int {
+    let code = mem_load64(static_word(HTTP_ERR_W), 0)
+    let mut body = "bad request\n"
+    if code == 501 {
+        body = "chunked not supported\n"
+    }
+    if code == 431 {
+        body = "headers too large\n"
+    }
+    let head = "HTTP/1.1 " + (code).to_str() + " " + http_reason(code)
+               + "\r\nContent-Type: text/plain; charset=utf-8"
+               + "\r\nContent-Length: " + len(body).to_str()
+               + "\r\nConnection: close\r\n\r\n"
+    conn_send_str(_st(), fd, head + body)
+    return 0
+}
+
+// 找头块结束标记 \r\n\r\n：[from, n-4] 内扫描，返回标记首字节下标，无则 -1。
+// 摊还 O(请求数据量)：from 持久化在 HP_SCAN，跨段不重扫。
+fn _find_head_end(buf: int, from: int, n: int) -> int {
+    if n < 4 {
+        return -1
+    }
+    let mut i = from
+    let lim = n - 4
+    while i <= lim {
+        if mem_load8(buf, i) == 13 && mem_load8(buf, i + 1) == 10
+                && mem_load8(buf, i + 2) == 13 && mem_load8(buf, i + 3) == 10 {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// 解析请求行 + 单遍扫描头块。成功填好槽位协议字并返回 0；
+// 失败把错误码写进 HTTP_ERR_W 并返回 -1（调用方发响应后关闭连接）。
+fn _parse_head(p: int, buf: int, k: int) -> int {
+    // 请求行：METHOD SP PATH SP HTTP/1.x
+    let mut rl_end = 0
+    while rl_end < k && mem_load8(buf, rl_end) != 13 {
+        rl_end += 1
+    }
+    if rl_end + 1 >= k || mem_load8(buf, rl_end + 1) != 10 {
+        return _fail(400)
+    }
+    let mut sp1 = 0
+    while sp1 < rl_end && mem_load8(buf, sp1) != 32 {
+        sp1 += 1
+    }
+    let mut sp2 = sp1 + 1
+    while sp2 < rl_end && mem_load8(buf, sp2) != 32 {
+        sp2 += 1
+    }
+    // 版本必须是 "HTTP/1.0" 或 "HTTP/1.1"（8 字节）
+    let mut ok = sp1 >= 1 && sp2 > sp1 + 1 && rl_end - sp2 - 1 == 8
+    let mut vver = 48
+    if ok {
+        let mut vi = 0
+        while vi < 7 && ok {
+            if mem_load8(buf, sp2 + 1 + vi) != HTTP_VER_PREFIX[vi] {
+                ok = false
+            }
+            vi += 1
+        }
+        if ok {
+            vver = mem_load8(buf, sp2 + 8)
+            if vver != 48 && vver != 49 {
+                ok = false
+            }
+        }
+    }
+    if !ok {
+        return _fail(400)
+    }
+    mem_store64(p, HP_MOFF, 0)
+    mem_store64(p, HP_MLEN, sp1)
+    mem_store64(p, HP_POFF, sp1 + 1)
+    mem_store64(p, HP_PLEN, sp2 - sp1 - 1)
+    mem_store64(p, HP_HOFF, rl_end + 2)
+    mem_store64(p, HP_HLEN, k - rl_end - 2)
+    mem_store64(p, HP_BOFF, k + 4)
+    mem_store64(p, HP_BLEN, 0)
+    let mut flags = 0
+    if vver == 48 {
+        flags = HP_F_HTTP10                     // HTTP/1.0 默认关闭
+    }
+    // 单遍扫描头块：content-length / connection / transfer-encoding
+    let hoff = rl_end + 2
+    let hend = k
+    let mut i = hoff
+    let mut ka_seen = 0
+    while i < hend {
+        // 行界
+        let mut e = i
+        while e < hend && mem_load8(buf, e) != 13 {
+            e += 1
+        }
+        let mut c = i
+        while c < e && mem_load8(buf, c) != 58 {    // ':'
+            c += 1
+        }
+        if c < e {
+            let nl = c - i
+            if _ci_bytes(buf, i, nl, HTTP_HDR_CL) == 1 {
+                let v = _hdr_num(buf, c + 1, e)
+                if v >= 0 {
+                    mem_store64(p, HP_BLEN, v)
+                }
+            } else {
+                if _ci_bytes(buf, i, nl, HTTP_HDR_TE) == 1 {
+                    return _fail(501)           // 分块传输明确拒绝
+                }
+                if _ci_bytes(buf, i, nl, HTTP_HDR_CONN) == 1 {
+                    let vs = _hdr_val_str(buf, c + 1, e)
+                    if vs == "close" {
+                        flags |= HP_F_CLOSE
+                    } else {
+                        if vs == "keep-alive" {
+                            ka_seen = 1
+                        }
+                    }
+                }
+            }
+        }
+        i = e + 2                                   // 跳过 \r\n
+    }
+    if (flags & HP_F_HTTP10) != 0 && ka_seen == 0 {
+        flags |= HP_F_CLOSE                     // HTTP/1.0 且无 keep-alive
+    }
+    mem_store64(p, HP_STATE, flags)
+    return 0
+}
+
+fn _fail(code: int) -> int {
+    mem_store64(static_word(HTTP_ERR_W), 0, code)
+    return -1
+}
+
+// 头块 [i, e) 区间的名字与 name（小写）做大小写无关比较：1 = 相等
+fn _ci_bytes(buf: int, from: int, n: int, name: str) -> int {
+    if len(name) != n {
+        return 0
+    }
+    let mut i = 0
+    while i < n {
+        let mut b = mem_load8(buf, from + i)
+        if b >= 65 && b <= 90 {
+            b += 32
+        }
+        if b != name[i] {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// 头块值区解析无符号十进制（容忍前后空格）；非法返回 -1
+fn _hdr_num(buf: int, from: int, to: int) -> int {
+    let mut a = from
+    while a < to && (mem_load8(buf, a) == 32 || mem_load8(buf, a) == 9) {
+        a += 1
+    }
+    let mut b = to
+    while b > a && (mem_load8(buf, b - 1) == 32 || mem_load8(buf, b - 1) == 9) {
+        b -= 1
+    }
+    if a == b {
+        return -1
+    }
+    let mut v = 0
+    let mut i = a
+    while i < b {
+        let d = mem_load8(buf, i) - 48
+        if d < 0 || d > 9 {
+            return -1
+        }
+        v = v * 10 + d
+        i += 1
+    }
+    return v
+}
+
+// 头块值区取小写字符串（connection 值比较用）
+fn _hdr_val_str(buf: int, from: int, to: int) -> str {
+    let mut a = from
+    while a < to && (mem_load8(buf, a) == 32 || mem_load8(buf, a) == 9) {
+        a += 1
+    }
+    let mut b = to
+    while b > a && (mem_load8(buf, b - 1) == 32 || mem_load8(buf, b - 1) == 9) {
+        b -= 1
+    }
+    let tmp = mem_alloc(b - a + 1)
+    let mut i = a
+    while i < b {
+        let mut c = mem_load8(buf, i)
+        if c >= 65 && c <= 90 {
+            c += 32
+        }
+        mem_store8(tmp, i - a, c)
+        i += 1
+    }
+    return mem_str(tmp, b - a)
+}
+
+// ---------------------------------------------------------------------------
+// 请求访问器（handler 内用；数据就在连接槽位里，mem_str 只拷一次）
+// ---------------------------------------------------------------------------
+
+fn http_method(fd: int) -> str {
+    let p = conn_slot(_st(), fd)
+    if p == 0 {
+        return ""
+    }
+    let buf = conn_buf_ptr(p)
+    return mem_str(buf + mem_load64(p, HP_MOFF), mem_load64(p, HP_MLEN))
+}
+
+fn http_path(fd: int) -> str {
+    let p = conn_slot(_st(), fd)
+    if p == 0 {
+        return ""
+    }
+    let buf = conn_buf_ptr(p)
+    return mem_str(buf + mem_load64(p, HP_POFF), mem_load64(p, HP_PLEN))
+}
+
+// 零拷贝体访问（大请求体：拿到指针直接读，不构造 str）
+fn http_body_ptr(fd: int) -> int {
+    let p = conn_slot(_st(), fd)
+    if p == 0 {
+        return 0
+    }
+    return conn_buf_ptr(p) + mem_load64(p, HP_BOFF)
+}
+
+fn http_body_len(fd: int) -> int {
+    let p = conn_slot(_st(), fd)
+    if p == 0 {
+        return 0
+    }
+    return mem_load64(p, HP_BLEN)
+}
+
+fn http_body(fd: int) -> str {
+    let n = http_body_len(fd)
+    if n == 0 {
+        return ""
+    }
+    return mem_str(http_body_ptr(fd), n)
+}
+
+// 按名找请求头（name 传小写；比较大小写无关）。没有返回 ""。
+fn http_header(fd: int, name: str) -> str {
+    let p = conn_slot(_st(), fd)
+    if p == 0 {
+        return ""
+    }
+    let buf = conn_buf_ptr(p)
+    let hoff = mem_load64(p, HP_HOFF)
+    let hend = hoff + mem_load64(p, HP_HLEN)
+    let mut i = hoff
+    while i < hend {
+        let mut e = i
+        while e < hend && mem_load8(buf, e) != 13 {
+            e += 1
+        }
+        let mut c = i
+        while c < e && mem_load8(buf, c) != 58 {
+            c += 1
+        }
+        if c < e && _ci_bytes(buf, i, c - i, name) == 1 {
+            return _hdr_val_str(buf, c + 1, e)
+        }
+        i = e + 2
+    }
+    return ""
+}
+
+// handler 强制本连接响应后关闭（不等对端 Connection 头）
+fn http_set_close(fd: int) -> int {
+    let p = conn_slot(_st(), fd)
+    if p == 0 {
+        return 0
+    }
+    let f = mem_load64(p, HP_STATE)
+    mem_store64(p, HP_STATE, f | HP_F_CLOSE)
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// 响应构造
+// ---------------------------------------------------------------------------
+
+fn http_reason(status: int) -> str {
+    if status == 200 {
+        return "OK"
+    }
+    if status == 201 {
+        return "Created"
+    }
+    if status == 204 {
+        return "No Content"
+    }
+    if status == 301 {
+        return "Moved Permanently"
+    }
+    if status == 302 {
+        return "Found"
+    }
+    if status == 304 {
+        return "Not Modified"
+    }
+    if status == 400 {
+        return "Bad Request"
+    }
+    if status == 403 {
+        return "Forbidden"
+    }
+    if status == 404 {
+        return "Not Found"
+    }
+    if status == 405 {
+        return "Method Not Allowed"
+    }
+    if status == 413 {
+        return "Payload Too Large"
+    }
+    if status == 426 {
+        return "Upgrade Required"
+    }
+    if status == 431 {
+        return "Request Header Fields Too Large"
+    }
+    if status == 500 {
+        return "Internal Server Error"
+    }
+    if status == 501 {
+        return "Not Implemented"
+    }
+    if status == 503 {
+        return "Service Unavailable"
+    }
+    return "Unknown"
+}
+
+// 标准响应：状态行 + Content-Type/Length + Connection + 体，一次组包一次 send。
+// extra_headers 传 "" 表示没有；要附加自定义头时每行自带 \r\n。
+fn http_respond_ext(fd: int, status: int, ctype: str, extra: str,
+                    body: str) -> int {
+    let st = _st()
+    let mut conn = "keep-alive"
+    let p = conn_slot(st, fd)
+    if p != 0 && (mem_load64(p, HP_STATE) & HP_F_CLOSE) != 0 {
+        conn = "close"
+    }
+    let head = "HTTP/1.1 " + (status).to_str() + " " + http_reason(status)
+               + "\r\nContent-Type: " + ctype
+               + "\r\nContent-Length: " + len(body).to_str()
+               + "\r\nConnection: " + conn + "\r\n"
+    let all = head + extra + "\r\n" + body
+    conn_send_str(st, fd, all)
+    return 0
+}
+
+fn http_respond(fd: int, status: int, ctype: str, body: str) -> int {
+    return http_respond_ext(fd, status, ctype, "", body)
+}
+
+// 响应后立即关闭（SSE 场景之外少用；force close 不看对端头）
+fn http_respond_close(fd: int, status: int, ctype: str, body: str) -> int {
+    http_set_close(fd)
+    return http_respond(fd, status, ctype, body)
+}
+
+fn http_text(fd: int, status: int, body: str) -> int {
+    return http_respond(fd, status, "text/plain; charset=utf-8", body)
+}
+
+fn http_html(fd: int, status: int, body: str) -> int {
+    return http_respond(fd, status, "text/html; charset=utf-8", body)
+}
+
+fn http_json(fd: int, status: int, body: str) -> int {
+    return http_respond(fd, status, "application/json", body)
+}
+
+// 供库内解析失败路径用（此时槽位协议字未就绪，直接组包发送）
+fn http_respond_raw(fd: int, status: int, extra: str, body: str) -> int {
+    let head = "HTTP/1.1 " + (status).to_str() + " " + http_reason(status)
+               + "\r\nContent-Type: text/plain; charset=utf-8"
+               + "\r\nContent-Length: " + len(body).to_str()
+               + "\r\nConnection: close\r\n"
+    conn_send_str(_st(), fd, head + extra + "\r\n" + body)
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Content-Encoding: gzip（v1.6）
+//   * 客户端接受才压缩（Accept-Encoding 含 gzip）；
+//   * 小于 256 字节不压——固定 Huffman 头开销会让小响应反而变大；
+//   * Vary: Accept-Encoding 必须带，缓存/CDN 才不会串味。
+// ---------------------------------------------------------------------------
+
+fn http_accepts_gzip(fd: int) -> bool {
+    let v = http_header(fd, "accept-encoding")
+    if len(v) == 0 {
+        return false
+    }
+    return str_contains(str_lower(v), "gzip")
+}
+
+fn http_respond_gzip(fd: int, status: int, ctype: str, body: str) -> int {
+    let gz = gzip_encode(body)
+    return http_respond_ext(fd, status, ctype,
+                            "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n",
+                            gz)
+}
+
+// 自动协商版：客户端支持且体足够大才压，否则原样发。
+fn http_respond_auto(fd: int, status: int, ctype: str, body: str) -> int {
+    if len(body) >= 256 && http_accepts_gzip(fd) {
+        return http_respond_gzip(fd, status, ctype, body)
+    }
+    return http_respond(fd, status, ctype, body)
+}
+
+fn http_json_auto(fd: int, status: int, body: str) -> int {
+    return http_respond_auto(fd, status, "application/json", body)
+}
+
+fn http_html_auto(fd: int, status: int, body: str) -> int {
+    return http_respond_auto(fd, status, "text/html; charset=utf-8", body)
+}
+
+fn http_not_found(fd: int) -> int {
+    return http_text(fd, 404, "not found\n")
+}
+
+fn http_method_not_allowed(fd: int) -> int {
+    return http_text(fd, 405, "method not allowed\n")
+}

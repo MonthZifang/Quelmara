@@ -1,0 +1,86 @@
+// tests/t40_mem.qma —— v1.5 内存/时间内建自校验
+// mem_alloc / mem_free / mem_load8 / mem_store8 / mem_load64 / mem_store64
+// mem_copy / mem_zero / mem_cmp / mem_str / now_ns
+module t40_mem
+
+import std.core
+
+fn main() {
+    // 基本读写
+    let p = mem_alloc(64)
+    mem_store8(p, 0, 65)
+    mem_store8(p, 1, 66)
+    mem_store8(p, 2, 0)
+    assert(mem_load8(p, 0) == 65, "load8 0")
+    assert(mem_load8(p, 1) == 66, "load8 1")
+    assert(mem_load8(p, 2) == 0, "load8 2")
+
+    // 64 位字读写（字下标，不是字节）
+    mem_store64(p, 4, 0x1122334455667788)
+    assert(mem_load64(p, 4) == 0x1122334455667788, "load64")
+
+    // mem_zero
+    mem_zero(p, 64)
+    assert(mem_load64(p, 4) == 0, "zero64")
+
+    // mem_copy（跨缓冲区）
+    let q = mem_alloc(64)
+    mem_store8(p, 0, 72)
+    mem_store8(p, 1, 105)
+    mem_copy(q, p, 2)
+    assert(mem_load8(q, 0) == 72, "copy0")
+    assert(mem_load8(q, 1) == 105, "copy1")
+
+    // mem_cmp
+    assert(mem_cmp(p, q, 2) == 0, "cmp eq")
+    mem_store8(q, 1, 73)
+    assert(mem_cmp(p, q, 2) > 0, "cmp gt")     // p[1]=105 > q[1]=73
+
+    // mem_str：缓冲区 -> 不可变串
+    mem_store8(p, 2, 0)
+    let s = mem_str(p, 2)
+    assert(len(s) == 2, "mem_str len")
+    assert(s[0] == 72, "mem_str byte0")
+
+    // 8 字节字块拷贝必须逐字节等价（含非 8 倍数长度）
+    let src = mem_alloc(37)
+    let dst = mem_alloc(37)
+    let mut i = 0
+    while i < 37 {
+        mem_store8(src, i, i + 1)
+        i = i + 1
+    }
+    mem_copy(dst, src, 37)
+    let mut j = 0
+    let mut bad = 0
+    while j < 37 {
+        if mem_load8(dst, j) != j + 1 {
+            bad = bad + 1
+        }
+        j = j + 1
+    }
+    assert(bad == 0, "mem_copy 37 bytes")
+
+    // mem_free：释放后重新分配应复用同一块（O(1) 回收，尺寸类一致）
+    // 注意：空闲链把 next 指针写在块首字，所以复用块的首字内容不保证保留。
+    let a = mem_alloc(256)
+    mem_free(a, 256)
+    let b = mem_alloc(256)
+    assert(b == a, "free list reuse")
+    mem_store64(b, 1, 777)
+    assert(mem_load64(b, 1) == 777, "reuse 可写")
+
+    // now_ns 单调递增
+    let t0 = now_ns()
+    let mut k = 0
+    let mut acc = 0
+    while k < 100000 {
+        acc += k
+        k = k + 1
+    }
+    let t1 = now_ns()
+    assert(t1 >= t0, "now_ns 单调")
+    assert(acc == 4999950000, "loop acc")
+
+    print("ok t40_mem")
+}

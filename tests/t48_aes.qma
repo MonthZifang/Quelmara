@@ -1,0 +1,97 @@
+// tests/t48_aes.qma —— AES-128 / GCM 标准向量自校验
+// 向量：FIPS-197 附录 C.1；NIST GCM test case 2（全零）与 case 3（带 AAD）
+module t48_aes
+
+import std.aes
+
+fn hv(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return -1
+}
+
+fn hb(h: str) -> str {
+    let n = len(h) / 2
+    let out = vec[int].new(n + 1)
+    let mut i = 0
+    while i < n {
+        let hi = hv(h[i * 2])
+        let lo = hv(h[i * 2 + 1])
+        out.push(hi * 16 + lo)
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+fn s2hex(s: str) -> str {
+    let HEX = "0123456789abcdef"
+    let n = len(s)
+    let out = vec[int].new(n * 2 + 1)
+    let mut i = 0
+    while i < n {
+        let v = s[i]
+        out.push(HEX[v >> 4])
+        out.push(HEX[v & 15])
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+fn zeros(n: int) -> str {
+    let out = vec[int].new(n + 1)
+    let mut i = 0
+    while i < n {
+        out.push(0)
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+fn main() {
+    // ---------- FIPS-197 C.1：单块 ----------
+    let key = hb("000102030405060708090a0b0c0d0e0f")
+    let pt = hb("00112233445566778899aabbccddeeff")
+    let rk = mem_alloc(176)
+    aes128_expand(key, rk)
+    let ct = mem_alloc(16)
+    let back = mem_alloc(16)
+    aes128_encrypt_block(pt, ct, rk)
+    assert(s2hex(mem_str(ct, 16)) == "69c4e0d86a7b0430d8cdb78070b4c55a", "fips197 enc")
+    aes128_decrypt_block(ct, back, rk)
+    assert(s2hex(mem_str(back, 16)) == "00112233445566778899aabbccddeeff", "fips197 dec")
+
+    // ---------- GCM test case 2：K=0, P=0(128bit), IV=0 ----------
+    let k0 = zeros(16)
+    let iv0 = zeros(12)
+    let p0 = zeros(16)
+    let sealed = gcm_encrypt(k0, iv0, "", p0)
+    assert(len(sealed) == 32, "gcm len")
+    assert(s2hex(substr(sealed, 0, 16)) == "0388dace60b6a392f328c2b971b2fe78", "gcm c")
+    assert(s2hex(substr(sealed, 16, 16)) == "ab6e47d42cec13bdf53a67b21257bddf", "gcm tag")
+
+    // 往返 + 篡改检测
+    let open = gcm_decrypt(k0, iv0, "", sealed)
+    assert(len(open) == 16, "gcm dec len")
+    assert(open == p0, "gcm dec bytes")
+    let bad = substr(sealed, 0, 31) + chr(sealed[31] ^ 1)
+    assert(len(gcm_decrypt(k0, iv0, "", bad)) == 0, "gcm tamper")
+
+    // ---------- GCM test case 3：带 AAD ----------
+    let k3 = hb("feffe9928665731c6d6a8f9467308308")
+    let iv3 = hb("cafebabefacedbaddecaf888")
+    let p3 = hb("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72" +
+                "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39")
+    let a3 = hb("feedfacedeadbeeffeedfacedeadbeefabaddad2")
+    let s3 = gcm_encrypt(k3, iv3, a3, p3)
+    assert(len(s3) == 60 + 16, "gcm3 len")
+    assert(s2hex(substr(s3, 0, 60)) ==
+        "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e" +
+        "21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091", "gcm3 c")
+    assert(s2hex(substr(s3, 60, 16)) == "5bc94fbc3221a5db94fae95ae7121a47", "gcm3 tag")
+    assert(gcm_decrypt(k3, iv3, a3, s3) == p3, "gcm3 roundtrip")
+    // AAD 不同必须失败
+    assert(len(gcm_decrypt(k3, iv3, "", s3)) == 0, "gcm3 aad mismatch")
+
+    print("ok t48_aes")
+}

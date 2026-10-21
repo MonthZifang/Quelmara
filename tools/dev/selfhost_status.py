@@ -12,18 +12,22 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 # 组件退场表（与 docs/SELFHOST.md 保持一致）
 COMPONENTS = [
-    # (组件, stage-0 实现, stage-1 目标, 自检命令)
+    # (组件, stage-0 实现, stage-1 目标, 自检命令, 进度说明)
     ("词法", "tools/stage0/qlm.py::tokenize", "bootstrap/lexer/qlm_lex.qma",
-     ["tests/lexdiff.py"]),
-    ("语法", "tools/stage0/qlm.py::Parser", "bootstrap/parser/", None),
-    ("类型推断", "tools/stage0/qlm.py 推断层", "bootstrap/typeck/", None),
-    ("AST->IR", "tools/stage0/qlm_native.py::Lower", "bootstrap/ir/", None),
-    ("优化", "tools/stage0/qlm_opt.py", "bootstrap/opt/", None),
-    ("x86_64 编码", "tools/stage0/qlm_native.py::Codegen", "bootstrap/codegen/x64/", None),
-    ("ELF 写出", "tools/stage0/qlm_native.py", "bootstrap/codegen/elf/", None),
-    ("PE 写出", "tools/stage0/qlm_pe.py", "bootstrap/codegen/pe/", None),
-    ("AArch64", "tools/stage0/qlm_arm64.py", "bootstrap/codegen/a64/", None),
-    ("C99 后端", "tools/stage0/qlm.py::Codegen", "（不移植，仅交叉验证）", None),
+     ["tests/lexdiff.py"], "完整"),
+    ("语法", "tools/stage0/qlm.py::Parser", "bootstrap/parser/qlm_parse.qma",
+     ["tests/parsediff.py"], "声明级"),
+    ("类型推断", "tools/stage0/qlm.py 推断层", "bootstrap/typeck/", None, ""),
+    ("AST->IR", "tools/stage0/qlm_native.py::Lower", "bootstrap/ir/", None, "有对拍骨架"),
+    ("优化", "tools/stage0/qlm_opt.py", "bootstrap/opt/", None, ""),
+    ("x86_64 编码", "tools/stage0/qlm_native.py::Codegen", "bootstrap/codegen/x64/",
+     ["tests/emitdiff.py"], "有对拍骨架"),
+    ("ELF 写出", "tools/stage0/qlm_native.py", "bootstrap/codegen/elf/",
+     ["tests/emitdiff.py"], "有对拍骨架"),
+    ("PE 写出", "tools/stage0/qlm_pe.py", "bootstrap/codegen/pe/",
+     ["tests/emitdiff.py"], "有对拍骨架"),
+    ("AArch64", "tools/stage0/qlm_arm64.py", "bootstrap/codegen/a64/", None, "有 IR 对拍"),
+    ("C99 后端", "tools/stage0/qlm.py::Codegen", "（不移植，仅交叉验证）", None, "不移植"),
 ]
 
 
@@ -60,7 +64,9 @@ def main():
     print(f"{'组件':<10} {'阶段':<6} {'stage-1 目标':<28} 说明")
     print("-" * 78)
     done = 0
-    for name, impl0, impl1, check in COMPONENTS:
+    for comp in COMPONENTS:
+        name, impl0, impl1, check = comp[0], comp[1], comp[2], comp[3]
+        note = comp[4] if len(comp) > 4 else ""
         exists = "-" if impl1.startswith("（") else (
             "就绪" if os.path.exists(os.path.join(ROOT, impl1)) else "缺失")
         status = "stage1" if exists == "就绪" else "stage0"
@@ -71,7 +77,7 @@ def main():
             r = subprocess.run([sys.executable] + [os.path.join(ROOT, c) for c in check],
                                capture_output=True, cwd=ROOT)
             verify = "对拍通过" if r.returncode == 0 else "对拍失败"
-        print(f"{name:<10} {status:<6} {impl1:<28} {exists} {verify}")
+        print(f"{name:<10} {status:<6} {impl1:<34} {exists:<4} {note} {verify}")
     print("-" * 78)
     real = [c for c in COMPONENTS if not c[2].startswith("（")]
     print(f"组件自举：{done}/{len(real)}")

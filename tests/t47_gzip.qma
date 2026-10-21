@@ -1,0 +1,56 @@
+// tests/t47_gzip.qma —— crc32 / deflate / gzip 自校验 + 供 Python zlib 互操作
+//
+// 自校验只能证明"格式形状"（头/长度/crc 向量）；真正的正确性由
+// tests/gzip_interop.py 用 Python zlib 解压这些产物来证明。
+module t47_gzip
+
+import std.gzip
+import std.str
+
+fn dump(name: str, data: str) -> int {
+    let gz = gzip_encode(data)
+    write_text("build/gz_" + name + ".bin", gz)
+    write_text("build/gz_" + name + ".txt", data)
+    return len(gz)
+}
+
+fn main() {
+    // CRC-32 标准向量：CRC32("123456789") = 0xCBF43926
+    assert(crc32("123456789") == 0xCBF43926, "crc32 check")
+    assert(crc32("") == 0, "crc32 empty")
+
+    // gzip 头（1F 8B 08 ...）+ 尾（8 字节 CRC/ISIZE）
+    let g = gzip_encode("hello")
+    assert(len(g) >= 18, "gzip min len")
+    assert(g[0] == 0x1F, "magic1")
+    assert(g[1] == 0x8B, "magic2")
+    assert(g[2] == 8, "method deflate")
+    assert(g[3] == 0, "flags")
+    // ISIZE = 5（小端）
+    let n = len(g)
+    assert(g[n - 4] == 5, "isize lo")
+    assert(g[n - 3] == 0, "isize hi")
+
+    // 压缩率：重复文本必须显著变小
+    let rep = str_repeat("the quick brown fox jumps over the lazy dog\n", 500)
+    let gr = gzip_encode(rep)
+    assert(len(gr) < len(rep) / 4, "compression ratio")
+
+    // 空串 / 单字节 / 全 0 / 随机样式的往返样本（Python 侧重解）
+    dump("empty", "")
+    dump("one", "A")
+    dump("hello", "hello, quelmara")
+    dump("repeat", rep)
+    let mixed = str_repeat("0123456789abcdef", 4096)
+    dump("mixed", mixed)
+    dump("binaryish", str_repeat(chr(0) + chr(255) + chr(1) + chr(254), 1024))
+
+    // 大输入（1MB 级）：只验证不崩、能产出
+    let big = str_repeat("qlm-gzip-0123456789abcdef0123456789abcdef", 16384)
+    let gb = gzip_encode(big)
+    assert(len(gb) < len(big), "big compress")
+    write_text("build/gz_big.bin", gb)
+    write_text("build/gz_big.txt", big)
+
+    print("ok t47_gzip")
+}

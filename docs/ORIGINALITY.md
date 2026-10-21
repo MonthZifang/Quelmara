@@ -44,7 +44,7 @@
 | 并发 | `spawn`/`chan`/`parfor`，`[core] multicore=false` 时**编译期退化为同步调用** | GIL 线程 | goroutine 调度器 |
 | 错误 | `result[T,E]` 枚举 + `?` 传播 + fail-fast（越界直接 exit 1） | 异常 | error 返回值 |
 | 绑定 | `let` / `let mut`，标量**值语义拷贝**（不是别名） | 名字绑定对象 | 值/引用语义混合 |
-| 模块 | 单文件模块，`import` 目前只做语法保留 | 包/模块 | package |
+| 模块 | **扁平合并**（v1.3）：`import` 递归加载 `std/` 与同目录 `.qma`，顶层 fn/struct/enum/test 合并进主 AST，后端零改动；无命名空间/可见性 | 包/模块 | package |
 
 语法层面的自有点（都在 SPEC 里有定义，不是任何语言的子集照搬）：
 

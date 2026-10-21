@@ -1,0 +1,53 @@
+// tests/t42_crypto.qma —— sha1 / base64 标准向量自校验
+module t42_crypto
+
+import std.core
+import std.sha1
+import std.b64
+
+fn main() {
+    // FIPS 180-4 官方向量
+    assert(sha1_hex("") == "da39a3ee5e6b4b0d3255bfef95601890afd80709", "sha1 empty")
+    assert(sha1_hex("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d", "sha1 abc")
+    assert(sha1_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
+           == "84983e441c3bd26ebaae4aa1f95129e5e54670f1", "sha1 448bit")
+    // 跨块边界（56 字节 = 一个块内最大不跨块长度 + 1）
+    assert(len(sha1_hex("0123456789abcdef0123456789abcdef0123456789abcdef01234567")) == 40, "sha1 56B")
+
+    // Base64 RFC 4648 向量
+    let p1 = mem_alloc(8)
+    mem_store8(p1, 0, 102)   // 'f'
+    assert(b64_encode(p1, 1) == "Zg==", "b64 f")
+    let p2 = mem_alloc(8)
+    mem_store8(p2, 0, 102)
+    mem_store8(p2, 1, 111)
+    assert(b64_encode(p2, 2) == "Zm8=", "b64 fo")
+    let p3 = mem_alloc(8)
+    mem_store8(p3, 0, 102)
+    mem_store8(p3, 1, 111)
+    mem_store8(p3, 2, 111)
+    assert(b64_encode(p3, 3) == "Zm9v", "b64 foo")
+    let p4 = mem_alloc(8)
+    mem_store8(p4, 0, 102)
+    mem_store8(p4, 1, 111)
+    mem_store8(p4, 2, 111)
+    mem_store8(p4, 3, 98)
+    assert(b64_encode(p4, 4) == "Zm9vYg==", "b64 foob")
+    let p5 = mem_alloc(8)
+    mem_store8(p5, 0, 102)
+    mem_store8(p5, 1, 111)
+    mem_store8(p5, 2, 111)
+    mem_store8(p5, 3, 98)
+    mem_store8(p5, 4, 97)
+    assert(b64_encode(p5, 5) == "Zm9vYmE=", "b64 fooba")
+
+    // 解码回环
+    let s = "Zm9vYmFy"
+    let out = mem_alloc(b64_dec_max(s))
+    let n = b64_decode_into(s, out)
+    assert(n == 6, "b64 decode len")
+    assert(mem_load8(out, 0) == 102, "b64 dec f")
+    assert(mem_load8(out, 5) == 114, "b64 dec r")
+
+    print("ok t42_crypto")
+}

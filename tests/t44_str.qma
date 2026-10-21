@@ -1,0 +1,86 @@
+// tests/t44_str.qma —— 字符串工具库自校验（边界 + 性能形状）
+module t44_str
+
+import std.str
+
+fn main() {
+    // --- 查找 ---
+    assert(str_find("hello world", "o") == 4, "find o")
+    assert(str_find("hello", "z") == -1, "find miss")
+    assert(str_find("hello", "") == 0, "find empty")
+    assert(str_find_from("aXbXc", 2, "X") == 3, "find from")
+    assert(str_rfind("aXbXc", "X") == 3, "rfind")
+    assert(str_rfind("abc", "abcdef") == -1, "rfind miss")
+    assert(str_contains("abc", "bc"), "contains")
+    assert(str_contains("abc", "d") == false, "contains false")
+
+    // --- 前后缀 ---
+    assert(str_starts_with("Content-Type", "Content-"), "starts")
+    assert(str_starts_with("ab", "abc") == false, "starts long")
+    assert(str_ends_with("a.json", ".json"), "ends")
+    assert(str_ends_with("a.json", "jsonx") == false, "ends long")
+
+    // --- 裁剪 ---
+    assert(str_trim("  \t hi \r\n ") == "hi", "trim")
+    assert(str_trim("   ") == "", "trim blank")
+    assert(str_trim_left("  hi  ") == "hi  ", "trim left")
+    assert(str_trim_right("  hi  ") == "  hi", "trim right")
+
+    // --- 大小写 / 忽略大小写比较 ---
+    assert(str_upper("aBc-1") == "ABC-1", "upper")
+    assert(str_lower("AbC-1") == "abc-1", "lower")
+    assert(str_eq_ci("Content-Length", "content-length"), "eq_ci")
+    assert(str_eq_ci("abc", "abd") == false, "eq_ci false")
+    assert(str_eq_ci("abc", "ab") == false, "eq_ci len")
+
+    // --- 拆分 / 拼接 ---
+    let parts = str_split("a,b,,c", ",")
+    assert(len(parts) == 4, "split len")
+    assert(parts.get(0) == "a", "split 0")
+    assert(parts.get(2) == "", "split empty")
+    assert(str_join(parts, "|") == "a|b||c", "join")
+    assert(len(str_split("", ",")) == 1, "split empty src")
+    assert(str_split("abc", "").get(0) == "abc", "split empty sep")
+
+    let rl = str_split_n("GET /a/b HTTP/1.1", " ", 3)
+    assert(len(rl) == 3, "split_n len")
+    assert(rl.get(0) == "GET", "split_n 0")
+    assert(rl.get(1) == "/a/b", "split_n 1")
+    assert(rl.get(2) == "HTTP/1.1", "split_n 2")
+
+    let ls = str_lines("a\r\nb\n\nc")
+    assert(len(ls) == 4, "lines len")
+    assert(ls.get(0) == "a", "lines crlf")
+    assert(ls.get(2) == "", "lines blank")
+
+    // --- 替换 ---
+    assert(str_replace("a-b-c", "-", "+") == "a+b+c", "replace")
+    assert(str_replace("aaa", "aa", "b") == "ba", "replace overlap")
+    assert(str_replace("abc", "x", "y") == "abc", "replace miss")
+    assert(str_replace("a-b", "-", "") == "ab", "replace del")
+    assert(str_replace_first("a-b-c", "-", "+") == "a+b-c", "replace first")
+    assert(str_count("aaaa", "aa") == 2, "count non-overlap")
+
+    // --- 重复 / 填充 / 切片包装 ---
+    assert(str_repeat("ab", 3) == "ababab", "repeat")
+    assert(str_repeat("ab", 0) == "", "repeat 0")
+    assert(str_pad_left("7", 3, "0") == "007", "pad")
+    assert(str_pad_left("123", 2, "0") == "123", "pad noop")
+    assert(str_slice("abcdef", 1, 3) == "bc", "slice")
+    assert(str_slice("abcdef", -5, 99) == "abcdef", "slice clamp")
+    assert(str_left("abcdef", 2) == "ab", "left")
+    assert(str_right("abcdef", 2) == "ef", "right")
+    assert(str_strip_prefix("std.io", "std.") == "io", "strip prefix")
+    assert(str_strip_suffix("a.json", ".json") == "a", "strip suffix")
+
+    // --- 性能形状：1MB 文本按行拆分再拼接（不许出现 O(n²) 爆炸）---
+    let unit = "0123456789abcdef0123456789abcdef01234567\n"
+    let big = str_repeat(unit, 20000)
+    assert(len(big) == 820000, "big len")
+    let rows = str_split(big, "\n")
+    assert(len(rows) == 20001, "rows len")
+    let back = str_join(rows, "\n")
+    assert(len(back) == 820000, "join len")
+
+    print("ok t44_str")
+}

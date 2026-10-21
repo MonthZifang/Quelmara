@@ -66,7 +66,7 @@ quelmara build examples/hello.qma --target c        # -> build/hello.c
       git mv tests/t27_str.ros tests/t27_str.qma
 ```
 
-理由：两套扩展名长期共存会让"哪些文件还是旧格式"变成永久性的判断负担；项目还没发版，一次切干净成本最低。迁移细节见 `MIGRATION_rosoto_to_quelmara.md`。
+理由：两套扩展名长期共存会让"哪些文件还是旧格式"变成永久性的判断负担；项目还没发版，一次切干净成本最低。改名迁移的完整记录见 `CHANGELOG.md` v1.0 段。
 <!-- legacy-ok:end -->
 
 ## 6. 代码围栏标签

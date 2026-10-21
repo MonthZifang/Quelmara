@@ -121,7 +121,8 @@ def load_config(src_path):
 # 1. 词法分析
 # ---------------------------------------------------------------------------
 
-KEYWORDS = {"fn", "let", "mut", "if", "else", "while", "for", "parfor",
+KEYWORDS = {"fn", "let", "mut", "if", "else", "while", "for", "parfor", "rc",
+            "interface", "impl",
             "return", "module", "import", "true", "false", "test",
             "break", "continue", "struct", "enum", "match",
             "arena", "spawn", "chan", "option", "result", "map", "select",
@@ -241,7 +242,27 @@ def tokenize(src, keep_comments=False):
             while j < n and src[j] != '"':
                 if src[j] == "\\" and j + 1 < n:
                     esc = src[j + 1]
-                    buf.append({"n": "\n", "t": "\t", '"': '"', "\\": "\\"}.get(esc, esc))
+                    # v1.5：补 \r \0 \a \b \f \v 与 \xNN —— 网络协议
+                    # （HTTP/1.1 的 CRLF、SSE、WebSocket 帧）必须能写字面量，
+                    # 否则 \r 会被当成字母 r（此前 "GET / HTTP/1.1\r\n" 静默错位）。
+                    if esc == "x" and j + 3 < n:
+                        try:
+                            b = int(src[j + 2:j + 4], 16)
+                            # ⚠ \xNN 是**原始字节**，不是 Unicode 码点。
+                            # 之前 buf.append(chr(b)) 让 \xe4 变成 U+00E4，
+                            # 再 encode("utf-8") 就成 C3 A4（2 字节）——
+                            # 二进制协议/哈希实现全被拖坏（b2 误编译）。
+                            # 用 surrogateescape 区（U+DC80..U+DCFF）承载
+                            # 原始字节，发射端 encode("utf-8", "surrogateescape")
+                            # 原样还原成单字节。
+                            buf.append(chr(b) if b < 0x80 else chr(0xDC00 + b))
+                            j += 4
+                            continue
+                        except ValueError:
+                            pass
+                    buf.append({"n": "\n", "t": "\t", "r": "\r", "0": "\0",
+                                "a": "\a", "b": "\b", "f": "\f", "v": "\v",
+                                '"': '"', "\\": "\\", "'": "'"}.get(esc, esc))
                     j += 2
                 else:
                     if src[j] == "\n":
@@ -284,13 +305,19 @@ def tokenize(src, keep_comments=False):
 
 
 class Parser:
-    def __init__(self, toks):
+    def __init__(self, toks, consts=None):
         self.toks, self.pos = toks, 0
         self.structs = {}          # name -> [(field, type)]（预扫描先登记名字）
         self.enums = {}            # name -> [(variant, [(field, type)])]（预扫描先登记名字）
         self.decl_order = []       # [("struct"|"enum", name)] 声明顺序（C typedef 输出顺序）
         self.externs = {}          # name -> fdef（@extern("C") 声明，无函数体）
-        self.consts = {}           # name -> 字面量值（顶层 const，编译期内联）
+        self.interfaces = {}       # name -> [(method, [param types], ret)]
+        self.impls = {}            # (iface, type) -> {method: fdef}
+        self.methods = {}          # (type, method) -> fdef（impl 里定义的实例方法）
+        # 顶层 const，编译期内联。consts= 跨文件种子（load_program 两遍解析：
+        # 第一遍收集各文件 const，第二遍带着全集重解析——import 侧的 const
+        # 因此可见，std 库的槽位布局常量得以跨文件共享）。
+        self.consts = dict(consts) if consts else {}
         self._prescan()
 
     def _prescan(self):
@@ -388,9 +415,10 @@ class Parser:
                     raise SyntaxError(
                         f"line {annots[-1][2]}: 注解只能用于 fn 声明")
                 fdef = self.parse_fn()
-                if fdef["body"] is not None:
+                fdef["annots"] = [(a, g) for a, g, _ in annots]
+                if fdef["body"] is not None and any(a == "extern" for a, _, _ in annots):
                     raise SyntaxError(
-                        f"line {annots[-1][2]}: 注解声明不能带函数体")
+                        f"line {annots[-1][2]}: @extern 声明不能带函数体")
                 for aname, aarg, line in annots:
                     if aname == "extern":
                         if aarg != "C":
@@ -398,10 +426,69 @@ class Parser:
                                 f"line {line}: @extern 只支持 \"C\"，得到 {aarg!r}")
                         fdef["extern"] = True
                         self.externs[fdef["name"]] = fdef
+                    elif aname in ("simd", "no_preempt"):
+                        # v1.8：函数级提示/约定，语义见 docs/LANG.md
+                        if aarg is not None:
+                            raise SyntaxError(f"line {line}: @{aname} 不接受参数")
+                    elif aname == "rc":
+                        # @rc 只允许出现在返回 rc[T] 的函数上（借用检查用）
+                        pass
                     else:
                         raise SyntaxError(
-                            f"line {line}: 未知注解 @{aname}（当前仅支持 @extern(\"C\")）")
+                            f"line {line}: 未知注解 @{aname}"
+                            f"（支持 @extern(\"C\") / @simd / @no_preempt）")
                 fns.append(fdef)
+            elif self.at("interface"):
+                self.next()
+                iname = self.eat("NAME").val
+                self.eat("SYM", "{")
+                msigs = []
+                while not self.at("SYM", "}"):
+                    self.eat("fn")
+                    mname = self.eat("NAME").val
+                    self.eat("SYM", "(")
+                    ptypes = []
+                    while not self.at("SYM", ")"):
+                        pn = self.eat("NAME").val
+                        if pn == "self" and not self.at("SYM", ":"):
+                            # 接口签名里的接收者不写类型：self
+                            ptypes.append(("named", "__self__"))
+                        else:
+                            self.eat("SYM", ":")
+                            ptypes.append(self.parse_type())
+                        if self.at("SYM", ","):
+                            self.next()
+                    self.eat("SYM", ")")
+                    rty = ("named", "void")
+                    if self.at("SYM", "->"):
+                        self.next()
+                        rty = self.parse_type()
+                    msigs.append((mname, ptypes, rty))
+                self.eat("SYM", "}")
+                self.interfaces[iname] = msigs
+                self.decl_order.append(("interface", iname))
+            elif self.at("impl"):
+                # impl Type : Interface { fn m(...) { ... } ... }
+                self.next()
+                tname = self.eat("NAME").val
+                self.eat("SYM", ":")
+                iname = self.eat("NAME").val
+                if iname not in self.interfaces:
+                    raise SyntaxError(f"line {self.peek().line}: 未声明的接口 {iname}")
+                self.eat("SYM", "{")
+                bodies = {}
+                while not self.at("SYM", "}"):
+                    fd = self.parse_fn()
+                    bodies[fd["name"]] = fd
+                self.eat("SYM", "}")
+                self.impls[(iname, tname)] = bodies
+                for mname, fd in bodies.items():
+                    # 方法落成普通函数 Circle__area(c, ...)；方法调用语法
+                    # 在后端 eval 的 method 分支里解析成直接调用。
+                    fd["name"] = f"{tname}__{mname}"
+                    fd["self_type"] = tname
+                    self.methods[(tname, mname)] = fd
+                    fns.append(fd)
             elif self.at("struct"):
                 self.next()
                 name = self.eat("NAME").val
@@ -453,6 +540,27 @@ class Parser:
                 t = self.peek()
                 raise SyntaxError(
                     f"line {t.line}: 顶层期望 fn/struct/test/module/import，得到 {t.val!r}")
+        # ---- interface 一致性检查（v1.8）----
+        for (iname, tname), bodies in self.impls.items():
+            if tname not in self.structs:
+                raise SyntaxError(f"impl {tname} : {iname} —— 未声明的结构体 {tname}")
+            for mname, ptypes, rty in self.interfaces[iname]:
+                if mname not in bodies:
+                    raise SyntaxError(f"impl {tname} : {iname} 缺少方法 {mname}")
+                fd = bodies[mname]
+                got = [t for _, t in fd["params"]]
+                if len(got) != len(ptypes):
+                    raise SyntaxError(
+                        f"{tname}.{mname}: 接口要求 {len(ptypes)} 个参数，实现给了 {len(got)}")
+                if got and got[0] != ("named", tname):
+                    raise SyntaxError(
+                        f"{tname}.{mname}: 第一个参数必须是接收者 {tname}")
+                for i, (a, b) in enumerate(zip(got[1:], ptypes[1:]), start=1):
+                    if a != b:
+                        raise SyntaxError(f"{tname}.{mname}: 第 {i} 个参数类型与接口不一致")
+                if fd["ret"] != rty:
+                    raise SyntaxError(f"{tname}.{mname}: 返回类型与接口声明不一致")
+        self._methods = self.methods
         return mod, imports, fns, tests, self.structs, self.enums, self.decl_order
 
     # ---- 类型 ----
@@ -472,13 +580,24 @@ class Parser:
             self.eat("SYM", "]")
             return ("chan", et)
         if self.at("vec"):
-            # vec[T]：堆上变长数组（v1.2）；元素仅标量（int/bool/str）
+            # vec[T]：堆上变长数组（v1.2）；元素为标量或具名聚合 struct/enum（v1.3）
+            # 元素按值拷贝进出；vec[vec[T]] / vec[map] 不支持（见 docs/GAPS.md §2）
             t = self.next()
             self.eat("SYM", "[")
             et = self.parse_type()
             self.eat("SYM", "]")
-            map_kv_tag(et, "vec 元素类型", t.line)
+            vec_elem_tag(et, t.line)
             return ("vec", et)
+        if self.at("rc"):
+            # rc[T]：引用计数句柄（v1.8）。T 只支持具名 struct；句柄按值传递、
+            # 不自动 drop —— 所有权由借用检查器强制（docs/LANG.md §rc）。
+            t = self.next()
+            self.eat("SYM", "[")
+            tt = self.parse_type()
+            self.eat("SYM", "]")
+            if tt[0] != "named":
+                raise SyntaxError(f"line {t.line}: rc[T] 的 T 目前只支持具名结构体")
+            return ("rc", tt)
         if self.at("map"):
             # map[K]V：开放寻址哈希表（K/V 仅 int/bool/str 标量，SPEC 附录 v0.10）
             t = self.next()
@@ -545,6 +664,26 @@ class Parser:
 
     def parse_stmt(self):
         t = self.peek()
+        # 语句注解（v1.8）：@simd for ... / @no_preempt while ...
+        if t.kind == "SYM" and t.val == "@":
+            line = t.line
+            anns = []
+            while self.at("SYM", "@"):
+                self.next()
+                aname = self.eat("NAME").val
+                aarg = None
+                if self.at("SYM", "("):
+                    self.next()
+                    if self.at("INT"):
+                        aarg = self.next().val
+                    elif self.at("STR"):
+                        aarg = self.next().val
+                    self.eat("SYM", ")")
+                anns.append((aname, aarg, line))
+            inner = self.parse_stmt()
+            if inner[0] not in ("for", "while"):
+                raise SyntaxError(f"line {line}: 语句注解只能修饰 for / while")
+            return ("annot", anns, inner)
         if t.kind == "let":
             self.next()
             mut = False
@@ -552,8 +691,17 @@ class Parser:
                 self.next()
                 mut = True
             name = self.eat("NAME").val
+            # v1.8：`let x: u8 = ...` 类型标注。宽度类型在**边界处截断/回绕**
+            # （init/assign/形参/返回值），表达式内部按 C 语义提升到 64 位。
+            anno = None
+            if self.at("SYM", ":"):
+                self.next()
+                anno = self.parse_type()
             self.eat("SYM", "=")
-            return ("let", mut, name, self.parse_expr())
+            node = ("let", mut, name, self.parse_expr())
+            if anno is not None:
+                node = node + (("as", anno),)
+            return node
         if t.kind == "if":
             return self.parse_if()
         if t.kind == "while":
@@ -951,7 +1099,7 @@ class Parser:
             self.eat("SYM", "[")
             et = self.parse_type()
             self.eat("SYM", "]")
-            map_kv_tag(et, "vec 元素类型", t.line)
+            vec_elem_tag(et, t.line)
             self.eat("SYM", ".")
             meth = self.eat("NAME").val
             if meth != "new":
@@ -1114,6 +1262,126 @@ class Parser:
 def parse_source(src):
     """解析源码 -> (module, imports, fns, tests, structs, enums, decl_order)"""
     return Parser(tokenize(src)).parse_program()
+
+
+def _import_candidates(imp, src_dir):
+    """import a.b.c 的候选文件：主文件目录优先，标准库 std/（仓库根）其次。
+    `import std.core` 在标准库根下按 core.qma 解析（首段 std 即根本身）。"""
+    parts = imp.split(".")
+    rel = os.sep.join(parts) + SRC_EXT
+    std_root = os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir, "std"))
+    rel_in_std = (os.sep.join(parts[1:]) + SRC_EXT) if parts[0] == "std" else rel
+    return [os.path.normpath(os.path.join(src_dir, rel)),
+            os.path.join(std_root, rel_in_std)]
+
+
+def load_program(src_path):
+    """带 import 的程序加载：递归解析被导入模块，**扁平合并**进主 AST。
+
+    - 合并范围：顶层 fn / struct / enum / test。const 在各文件解析期内联，
+      天然可用，无需导出；module 声明只作文档。
+    - 查找顺序：`import std.io` -> 主文件目录 `std/io.qma`，其次仓库根 `std/io.qma`
+      （标准库随编译器分发）。
+    - 名字冲突（fn/struct/enum 与主文件或导入彼此重名）报错；
+      被导入文件定义 main 报错（入口只在主文件）；
+      循环 import 报错；找不到模块报错并列出全部查找路径。
+    - 后端零改动：合并后的 AST 按单文件流程照常编译（C / native / a64 通用）。
+    """
+    src_dir = os.path.dirname(os.path.abspath(src_path))
+    seen, order, stack = {}, [], []
+
+    def parse_file(path, consts=None):
+        with open(path, encoding="utf-8") as f:
+            return Parser(tokenize(f.read()), consts=consts).parse_program()
+
+    def resolve_or_raise(imp, from_path):
+        cands = _import_candidates(imp, os.path.dirname(os.path.abspath(from_path)))
+        for cand in cands:
+            if os.path.isfile(cand):
+                return cand
+        raise SyntaxError(f"{from_path}: import {imp!r} 找不到模块"
+                          f"（查找：{'；'.join(cands)}）")
+
+    def load(path, chain):
+        ap = os.path.normpath(os.path.abspath(path))
+        if ap in seen:
+            return
+        if ap in stack:
+            raise SyntaxError(f"import 循环："
+                              f"{' -> '.join(chain + [os.path.basename(path)])}")
+        stack.append(ap)
+        res = parse_file(ap)
+        stack.pop()
+        seen[ap] = res
+        order.append(res)
+        for imp in res[1]:
+            cand = resolve_or_raise(imp, path)
+            load(cand, chain + [os.path.basename(path)])
+
+    main_res = parse_file(src_path)
+    for imp in main_res[1]:
+        load(resolve_or_raise(imp, src_path), [os.path.basename(src_path)])
+
+    # 两遍解析（const 跨 import 可见）：第一遍已把各文件解析过、const 都已
+    # 登记；这里收集全部顶层 const 成全集（同名不同值报错），再带全集把
+    # 主文件与全部被导入模块重新解析一遍。没有这一步，std 库里定义的
+    # 槽位布局常量（如 std/net/core.qma 的 SLOT_*）对使用方不可见——
+    # 解析期内联发生在各自文件，而 import 是扁平合并、解析顺序不保证。
+    def _consts_of(path):
+        with open(path, encoding="utf-8") as f:
+            p = Parser(tokenize(f.read()))
+        p.parse_program()
+        return p.consts
+
+    acc = {}
+    for path in [src_path] + list(seen.keys()):
+        for k, v in _consts_of(path).items():
+            if k in acc and acc[k] != v:
+                raise SyntaxError(
+                    f"const 冲突：{k!r} 在多个模块中取值不同")
+            acc[k] = v
+    if acc:
+        seen2, order2 = {}, []
+
+        def reload(path):
+            ap = os.path.normpath(os.path.abspath(path))
+            if ap in seen2:
+                return
+            res = parse_file(ap, consts=acc)
+            seen2[ap] = res
+            order2.append(res)
+            for imp in res[1]:
+                reload(resolve_or_raise(imp, path))
+
+        main_res = parse_file(src_path, consts=acc)
+        for imp in main_res[1]:
+            reload(resolve_or_raise(imp, src_path))
+        seen, order = seen2, order2
+
+    mod, imports, fns, tests, structs, enums, decl_order = main_res
+    fn_names = {f["name"] for f in fns}
+    for res in order:
+        imp_path = f"(imported)"
+        for f in res[2]:
+            if f["name"] == "main":
+                raise SyntaxError("被导入的模块不能定义 main()（入口只在主文件）")
+            if f["name"] in fn_names:
+                raise SyntaxError(f"import 冲突：函数 {f['name']!r} 重名")
+            fn_names.add(f["name"])
+        fns = fns + res[2]
+        for k in res[4]:
+            if k in structs:
+                raise SyntaxError(f"import 冲突：struct {k!r} 重名")
+        structs.update(res[4])
+        for k in res[5]:
+            if k in enums:
+                raise SyntaxError(f"import 冲突：enum {k!r} 重名")
+        enums.update(res[5])
+        have = set(decl_order)
+        decl_order = decl_order + [d for d in res[6] if d not in have]
+        tests = tests + res[3]
+    return mod, imports, fns, tests, structs, enums, decl_order
 
 
 def resolve_option_patterns(arms, scrut_ename):
@@ -1286,6 +1554,42 @@ def is_map_env(t):
     return isinstance(t, str) and t.startswith("map:")
 
 
+VEC_SCALARS = ("int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8",
+               "bool", "str")
+
+
+def vec_elem_tag(t, line=None):
+    """vec 元素类型标签：标量原样返回，具名聚合返回 ('agg', Name)。
+    只在解析期做语法级校验；是不是真的 struct/enum 由后端查符号表。"""
+    if t[0] == "named" and t[1] in VEC_SCALARS:
+        return t[1]
+    if t[0] == "named":
+        return ("agg", t[1])
+    raise SyntaxError(f"vec 元素类型只支持标量与具名类型，得到 {t!r}")
+
+
+def _vec_tag_str(t):
+    """vec 元素标签串：标量原样，聚合 -> "agg:Name"（env 里用字符串传）"""
+    tag = vec_elem_tag(t)
+    return tag if isinstance(tag, str) else "agg:" + tag[1]
+
+
+def _vec_ewords(cg, t):
+    """vec 元素占几个 8 字节槽（决定分配大小与拷贝宽度）。
+    标量 1；struct = 字段数（字段各占 1 槽，嵌套聚合按 C 结构体布局也会是 1 槽指针式占位，
+    这条限制在 SPEC 里写明）；enum = 1 + 最大变体载荷数。"""
+    tag = vec_elem_tag(t)
+    if isinstance(tag, str):
+        return 1
+    name = tag[1]
+    if name in cg.structs:
+        return max(1, len(cg.structs[name]))
+    if name in cg.enums:
+        variants = cg.enums[name] or []
+        return 1 + max([len(fs) for _v, fs in variants] or [0])
+    raise SyntaxError(f"vec 元素类型 {name} 未声明（需要先声明 struct/enum）")
+
+
 def is_vec_env(t):
     """环境类型串是否是 vec（`vec:<elem>`）"""
     return isinstance(t, str) and t.startswith("vec:")
@@ -1397,7 +1701,7 @@ class Infer:
         if t[0] == "named" and t[1] in self.enums:
             return "enum:" + t[1]
         if t[0] == "vec":
-            return "vec:" + map_kv_tag(t[1], "vec 元素类型")
+            return "vec:" + _vec_tag_str(t[1])
         return CTYPE.get(t[1], "int64_t") if t[0] == "named" else "void *"
 
     def fn_ret(self, name):
@@ -1415,7 +1719,7 @@ class Infer:
             if t[0] == "map":
                 return map_env_of_type(t) or "int64_t"
             if t[0] == "vec":
-                return "vec:" + map_kv_tag(t[1], "vec 元素类型")
+                return "vec:" + _vec_tag_str(t[1])
             return "QlmBuf" if t[1] == ("named", "byte") else "void *"
         return BUILTIN_RETS.get(name, "void")
 
@@ -1494,7 +1798,11 @@ class Infer:
             if is_vec_env(obj_t):
                 elem = vec_env_elem(obj_t)
                 if m in ("get", "pop"):
-                    return "const char *" if elem == "str" else "int64_t"
+                    if elem == "str":
+                        return "const char *"
+                    if elem.startswith("agg:"):
+                        return "struct:" + elem[4:]
+                    return "int64_t"
                 if m == "len":
                     return "int64_t"
                 return "int64_t"          # push/set/clear 视作语句，值不用
@@ -1719,8 +2027,9 @@ static const char *qlm_substr(const char *s, int64_t lo, int64_t n) {
     return buf;
 }
 
-/* vec[T]：堆上变长数组（C 后端用 malloc/realloc；元素一律 int64_t 槽） */
-typedef struct { int64_t *data; int64_t len; int64_t cap; int64_t tag; } QlmVec;
+/* vec[T]：堆上变长数组。头部 {buf, len, cap, esz}，esz = sizeof(元素类型)。
+   C 侧一律用字节偏移 + memcpy，这样 bool（1 字节）/struct（含 padding）都对。 */
+typedef struct { char *buf; int64_t len; int64_t cap; int64_t esz; } QlmVec;
 
 static void qlm_vec_fail(void) {
     fprintf(stderr, "quelmara: vec index out of bounds (fail-fast)\n");
@@ -1728,40 +2037,76 @@ static void qlm_vec_fail(void) {
     exit(1);
 }
 
-static QlmVec *qlm_vec_new(int64_t cap) {
-    QlmVec *v = (QlmVec *)malloc(sizeof(QlmVec));
-    if (!v) qlm_vec_fail();
-    if (cap < 4) cap = 4;
-    v->data = (int64_t *)malloc(sizeof(int64_t) * (size_t)cap);
-    if (!v->data) qlm_vec_fail();
-    v->len = 0;
-    v->cap = cap;
-    v->tag = 0;
-    return v;
-}
-
-static void qlm_vec_push(QlmVec *v, int64_t x) {
-    if (v->len >= v->cap) {
-        int64_t ncap = v->cap * 2;
-        int64_t *nd = (int64_t *)realloc(v->data, sizeof(int64_t) * (size_t)ncap);
-        if (!nd) qlm_vec_fail();
-        v->data = nd;
-        v->cap = ncap;
-    }
-    v->data[v->len++] = x;
-}
-
 static void qlm_vec_bounds(QlmVec *v, int64_t i) {
     if (i < 0 || i >= v->len) qlm_vec_fail();
 }
 
-static int64_t qlm_vec_get(QlmVec *v, int64_t i) { qlm_vec_bounds(v, i); return v->data[i]; }
+static QlmVec *qlm_vec_new(int64_t cap, int64_t esz) {
+    QlmVec *v = (QlmVec *)malloc(sizeof(QlmVec));
+    if (!v) qlm_vec_fail();
+    if (cap < 4) cap = 4;
+    if (esz < 1) esz = 1;
+    v->buf = (char *)malloc((size_t)(cap * esz));
+    if (!v->buf) qlm_vec_fail();
+    v->len = 0;
+    v->cap = cap;
+    v->esz = esz;
+    return v;
+}
 
-static void qlm_vec_set(QlmVec *v, int64_t i, int64_t x) { qlm_vec_bounds(v, i); v->data[i] = x; }
+static void qlm_vec_grow(QlmVec *v) {
+    if (v->len < v->cap) return;
+    int64_t ncap = v->cap * 2;
+    char *nb = (char *)realloc(v->buf, (size_t)(ncap * v->esz));
+    if (!nb) qlm_vec_fail();
+    v->buf = nb;
+    v->cap = ncap;
+}
+
+static void qlm_vec_push(QlmVec *v, int64_t x) {
+    qlm_vec_grow(v);
+    *(int64_t *)(v->buf + v->len * v->esz) = x;
+    v->len++;
+}
+
+static void qlm_vec_push_n(QlmVec *v, const void *src) {
+    qlm_vec_grow(v);
+    memcpy(v->buf + v->len * v->esz, src, (size_t)v->esz);
+    v->len++;
+}
+
+static int64_t qlm_vec_get(QlmVec *v, int64_t i) {
+    qlm_vec_bounds(v, i);
+    return *(int64_t *)(v->buf + i * v->esz);
+}
+
+static void *qlm_vec_get_n(QlmVec *v, int64_t i, void *dst) {
+    qlm_vec_bounds(v, i);
+    memcpy(dst, v->buf + i * v->esz, (size_t)v->esz);
+    return dst;
+}
+
+static void qlm_vec_set(QlmVec *v, int64_t i, int64_t x) {
+    qlm_vec_bounds(v, i);
+    *(int64_t *)(v->buf + i * v->esz) = x;
+}
+
+static void qlm_vec_set_n(QlmVec *v, int64_t i, const void *src) {
+    qlm_vec_bounds(v, i);
+    memcpy(v->buf + i * v->esz, src, (size_t)v->esz);
+}
 
 static int64_t qlm_vec_pop(QlmVec *v) {
     if (v->len <= 0) qlm_vec_fail();
-    return v->data[--v->len];
+    v->len--;
+    return *(int64_t *)(v->buf + v->len * v->esz);
+}
+
+static void *qlm_vec_pop_n(QlmVec *v, void *dst) {
+    if (v->len <= 0) qlm_vec_fail();
+    v->len--;
+    memcpy(dst, v->buf + v->len * v->esz, (size_t)v->esz);
+    return dst;
 }
 
 static int64_t qlm_vec_len(QlmVec *v) { return v->len; }
@@ -1809,6 +2154,28 @@ static const char *qlm_read_text(const char *path) {
     buf[sz] = 0;
     fclose(f);
     return buf;
+}
+
+static const char *qlm_str_from_bytes(const int64_t *data, int64_t n) {
+    char *buf = (char *)malloc((size_t)n + 1);
+    for (int64_t i = 0; i < n; i++) {
+        buf[i] = (char)(data[i] & 0xFF);
+    }
+    buf[n] = 0;
+    return buf;
+}
+
+static int64_t qlm_write_text(const char *path, const char *content) {
+    FILE *f = fopen(path, "wb");
+    size_t n;
+    if (!f) {
+        fprintf(stderr, "quelmara: write_text() failed (fail-fast)\n");
+        fflush(stdout);
+        exit(1);
+    }
+    n = fwrite(content, 1, strlen(content), f);
+    fclose(f);
+    return (int64_t)n;
 }
 
 /* 命令行参数：main 入口把 argc/argv 交给运行时，args() 返回 {argv+1, argc-1}
@@ -2482,6 +2849,17 @@ class Codegen:
                     raise SyntaxError("read_text(path) 需要一个实参")
                 a1, _ = self.gen_expr(e[2][0], env)
                 return f"qlm_read_text({a1})", "const char *"
+            if name == "str_from_bytes" and name not in self.infer.fns:
+                if len(e[2]) != 1:
+                    raise SyntaxError("str_from_bytes(v) 需要一个实参")
+                a1, _ = self.gen_expr(e[2][0], env)
+                return f"qlm_str_from_bytes({a1})", "const char *"
+            if name == "write_text" and name not in self.infer.fns:
+                if len(e[2]) != 2:
+                    raise SyntaxError("write_text(path, content) 需要两个实参")
+                a1, _ = self.gen_expr(e[2][0], env)
+                a2, _ = self.gen_expr(e[2][1], env)
+                return f"qlm_write_text({a1}, {a2})", "int"
             if name == "args" and name not in self.infer.fns:
                 if e[2]:
                     raise SyntaxError("args() 不接受实参")
@@ -2624,7 +3002,11 @@ class Codegen:
                     raise SyntaxError("vec[T].new(cap) 只接受一个容量实参")
                 ccode, _ = self.gen_expr(e[2][0], env)
                 cap = f"(int64_t)({ccode})"
-            return f"qlm_vec_new({cap})", "vec:" + map_kv_tag(e[1], "vec 元素类型")
+            esz = self.ctype(e[1]) if e[1][0] == "named" and e[1][1] in self.structs \
+                else ("int64_t" if e[1] == ("named", "bool") else
+                      ("const char *" if e[1] == ("named", "str") else self.ctype(e[1])))
+            return (f"qlm_vec_new({cap}, (int64_t)sizeof({esz}))",
+                    "vec:" + _vec_tag_str(e[1]))
         if k == "sliceof":
             ocode, otype = self.gen_expr(e[1], env)
             lcode, _ = self.gen_expr(e[2], env)
@@ -2688,11 +3070,20 @@ class Codegen:
                 if m == "push":
                     if len(args) != 1:
                         raise SyntaxError("vec.push(v) 需要一个实参")
-                    acode, _ = self.gen_expr(args[0], env)
+                    acode, atype = self.gen_expr(args[0], env)
+                    if elem.startswith("agg:"):
+                        tn = elem[4:]
+                        return (f"({{ {tn} _vt = {acode}; "
+                                f"qlm_vec_push_n({ocode}, (const void *)&_vt); (int64_t)0; }})",
+                                "int64_t")
                     return f"qlm_vec_push({ocode}, (int64_t)({acode}))", "int64_t"
                 if m == "pop":
                     if args:
                         raise SyntaxError("vec.pop() 不接受实参")
+                    if elem.startswith("agg:"):
+                        tn = elem[4:]
+                        return (f"({{ {tn} _vt; qlm_vec_pop_n({ocode}, (void *)&_vt); _vt; }})",
+                                "struct:" + tn)
                     base = f"qlm_vec_pop({ocode})"
                     return (f"((const char *)(intptr_t){base})", "const char *") \
                         if elem == "str" else (base, "int64_t")
@@ -2700,6 +3091,11 @@ class Codegen:
                     if len(args) != 1:
                         raise SyntaxError("vec.get(i) 需要一个实参")
                     icode, _ = self.gen_expr(args[0], env)
+                    if elem.startswith("agg:"):
+                        tn = elem[4:]
+                        return (f"({{ {tn} _vt; "
+                                f"qlm_vec_get_n({ocode}, (int64_t)({icode}), (void *)&_vt); _vt; }})",
+                                "struct:" + tn)
                     base = f"qlm_vec_get({ocode}, (int64_t)({icode}))"
                     return (f"((const char *)(intptr_t){base})", "const char *") \
                         if elem == "str" else (base, "int64_t")
@@ -2708,6 +3104,11 @@ class Codegen:
                         raise SyntaxError("vec.set(i, v) 需要两个实参")
                     icode, _ = self.gen_expr(args[0], env)
                     vcode, _ = self.gen_expr(args[1], env)
+                    if elem.startswith("agg:"):
+                        tn = elem[4:]
+                        return (f"({{ {tn} _vt = {vcode}; "
+                                f"qlm_vec_set_n({ocode}, (int64_t)({icode}), (const void *)&_vt); "
+                                f"(int64_t)0; }})", "int64_t")
                     return (f"qlm_vec_set({ocode}, (int64_t)({icode}), "
                             f"(int64_t)({vcode}))", "int64_t")
                 raise SyntaxError(f"vec 不支持方法 {m}")
@@ -2935,7 +3336,7 @@ class Codegen:
         if t[0] == "slice":
             return "slice:" + slice_elem_tag(t[1])
         if t[0] == "vec":
-            return "vec:" + map_kv_tag(t[1], "vec 元素类型")
+            return "vec:" + _vec_tag_str(t[1])
         if t[0] == "named" and t[1] in self.structs:
             return "struct:" + t[1]
         if t[0] == "named" and t[1] in self.enums:
@@ -3186,6 +3587,19 @@ class Codegen:
                 elem = vec_env_elem(ctype)
                 if elem == "str":
                     e2[var] = "const char *"
+                if elem.startswith("agg:"):
+                    # 聚合元素：每轮把元素 memcpy 进一个局部变量
+                    tn = elem[4:]
+                    e2[var] = "struct:" + tn
+                    return "\n".join([
+                        f"{pad}{{",
+                        f"{pad}    QlmVec *_v = (QlmVec *)(intptr_t)({ccode});",
+                        f"{pad}    for (int64_t _i = 0; _i < _v->len; _i++) {{",
+                        f"{pad}        {tn} {var};",
+                        f"{pad}        qlm_vec_get_n(_v, _i, (void *)&{var});",
+                        self.gen_block(body, e2, ind + 2, ret_t),
+                        f"{pad}    }}",
+                        f"{pad}}}"])
                 if elem == "str":
                     # 字符串元素：循环变量直接是 const char*
                     out = [f"{pad}{{",
@@ -3678,10 +4092,8 @@ PROGRAM = None
 def transpile(src_path):
     global PROGRAM
     require_source(src_path)
-    with open(src_path, encoding="utf-8") as f:
-        src = f.read()
     cfg = load_config(src_path)
-    mod, imports, fns_ast, tests, structs, enums, decl_order = parse_source(src)
+    mod, imports, fns_ast, tests, structs, enums, decl_order = load_program(src_path)
     PROGRAM = (mod, imports, fns_ast, tests)
     fns_ast = with_test_runner(fns_ast, tests)
     # 用户 main 与 C main 区分：编译为 qlm_main
