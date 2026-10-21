@@ -38,9 +38,12 @@ let dig = sha256_str("payload")   // 32 字节摘要缓冲区（含 0 字节，�
 - 消息拷贝/补零走 `mem_copy` / `mem_zero`（不是逐字节循环）；
 - HMAC 支持任意长度 key（>64 字节先取摘要），RFC 4231 case 1/2/6 全过。
 
-**实测**（`bench/p0_bench.qma`，进程内 `now_ns`）：1 MiB 单遍 **71 ms ≈ 14.7 MB/s**。
-这是"能用"的水平，不是"能打"的水平：每轮 ~68ns，主要成本是 64 轮标量运算 + 每块
-调度表。要到 100 MB/s 级需要 8 字节加载 + 轮展开 + 常量表常驻寄存器（见 §9）。
+**实测**（`bench/p0_bench.qma`，进程内 `now_ns`）：1 MiB 单遍 **67 ms ≈ 15.6 MB/s**
+（2026-10-22，bounds_elim 等值类修复后）。这是"能用"的水平，不是"能打"的水平：
+主要成本是 64 轮标量运算 + 每块调度表 + `msg[i+t]` 派生下标（bounds 数学上
+不可由 `i < n` 窗口消除，须按块 `mem_load64`）。**赢回 20-30 倍的唯一路线是
+SHA-NI 双路径**（cpuid 检测 + sha256rnds2/msg1/msg2/keccak 指令族进编码器，
+运行时降级标量）——已登记 `docs/GAPS.md` 性能专项，P1。
 
 ## 3. 字符串工具（`str_` 前缀）
 
@@ -62,7 +65,8 @@ let dig = sha256_str("payload")   // 32 字节摘要缓冲区（含 0 字节，�
 - `str_split(s, "")` 返回整体一项，不拆成单字符；
 - `str_lines` 自动剥 `\r`（CRLF），末尾换行不产生空尾项。
 
-**实测**：1 MiB 文本 `str_split` + `str_join` 往返 **30 ms**（65537 段）。
+**实测**：1 MiB 文本 `str_split` + `str_join` 往返 **26 ms**（65537 段；
+2026-10-22 bounds_elim 等值类修复后，库代码零改动）。
 
 ## 4. URL
 

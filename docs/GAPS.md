@@ -239,6 +239,30 @@
      atomic 本轮实测踩中）；
   5. `qlm_native.Codegen.gen_instr`（x86 编码）+ `qlm_arm64`（不支持时要显式拦截）。
 
+### 6.5.15 性能专项（v1.14 登记的"赢回来"路线）
+
+**已落地（全部通用优化，无 benchmark 特调，import std 的程序自动受益）**：
+- CRC-32 逐位 → 256 项查表：约 8 倍（gzip 的校验部分）；
+- DEFLATE 匹配器：滚动哈希 + 首字节快速否决；gzip 1MiB 117 → 71ms（1.65 倍）；
+- **bounds_elim 等值类**：s[i] 的 len 重复读取对（obj 单定义）归入等值类，
+  循环窗口证明跨"两次独立 len 读取"生效——`while i < n { s[i] }` 的
+  bounds 检查 4 条 jcc → **0**。全部 str/vec 密集循环普适受益。
+
+**路线（按赢回幅度排序）**：
+1. **SHA-NI 双路径**（P1，预计 20-40 倍）：编码器加 4 条指令
+   （sha256rnds2 F2/0F38/CB、sha256msg1 CC、sha256msg2 CD、sha256k CE，
+   xmm 形态 66/0F38/WIG）+ `cpuid` 内建（RAX=leaf → ECX，需 push/pop RBX
+   ——cpuid 破坏 RBX 而它在分配池）+ 库运行时降级标量路径。
+   通用性：CPUID 检测保证老机器同跑（OpenSSL 同款策略）。
+2. **GHASH 4-bit nibble 查表**（P1，预计 15-20 倍）：H 固定，会话级惰性
+   生成 16×16×16B 表（4KB，_gf_mul 现有正确实现逐级生成），
+   每块乘法 128 轮逐位 → 16 次表查 + 异或。FIPS 向量回归必须仍全过。
+3. **AES-ECB 主体 AES-NI**（P2）：aesenc/aesenclast 指令族（同 SHA-NI
+   一起进编码器），标量 sbox 路径保留降级。
+4. **LICM 根修**（P2，普适最大杠杆）：循环不变量外提默认关闭的根因是
+   x64 分配器布局敏感段错误——根修后 str 下标的 len 读取、常量表地址
+   等自动外提，所有循环受益。
+
 ### 6.5.2 并发边界（v1.10 登记）
 
 - `std/sync` 无锁栈 pop 是**单消费者**设计；多消费者有 ABA（需要 tagged pointer
