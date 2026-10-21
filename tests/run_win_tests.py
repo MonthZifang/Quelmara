@@ -376,6 +376,91 @@ def test_str_failfast():
         bad("@extern 在自研后端竟然编译成功（不链接外部符号不该成功）")
 
 
+def test_net_reactor():
+    """[3j] 高并发网络：IOCP reactor（v1.4）
+
+    examples/echo_reactor.qma：serve() + 回调（on_connect/on_data/on_close）。
+    客户端（本进程 Python 线程）：
+      R1 50 并发连接 × 50 轮往返 —— reactor 对全部连接服务
+      R2 200 次连接 churn（建→echo→关）—— rec freelist 回收/复用
+    """
+    import threading
+    port = 19531
+    src = os.path.join(ROOT, "examples", "echo_reactor.qma")
+    out = os.path.join(ROOT, "build", "win_reactor.exe")
+    build(src, out)
+    if not IS_WIN:
+        skip("IOCP reactor：非 Windows 平台，跳过执行")
+        return
+    proc = subprocess.Popen([out], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        # 等服务就绪（监听端口可连接）
+        import socket
+        import time
+        ready = False
+        for _ in range(50):
+            try:
+                s = socket.create_connection(("127.0.0.1", port), timeout=1)
+                s.close()
+                ready = True
+                break
+            except OSError:
+                time.sleep(0.1)
+        ok("reactor：服务端口就绪") if ready else bad("reactor：服务未就绪")
+
+        results = {"ok": 0, "fail": 0}
+        lock = threading.Lock()
+
+        def client(tid, n):
+            okc = failc = 0
+            try:
+                s = socket.create_connection(("127.0.0.1", port), timeout=10)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                for i in range(n):
+                    msg = f"t{tid}-m{i}".encode()
+                    s.sendall(msg)
+                    if s.recv(100) == msg:
+                        okc += 1
+                    else:
+                        failc += 1
+                s.close()
+            except Exception:
+                failc += 1
+            with lock:
+                results["ok"] += okc
+                results["fail"] += failc
+
+        ths = [threading.Thread(target=client, args=(t, 50)) for t in range(50)]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join()
+        ok("reactor：50 并发连接 × 50 往返全等（2500/2500）"
+           ) if results["ok"] == 2500 and results["fail"] == 0 else \
+            bad(f"reactor 并发回显 ok={results['ok']} fail={results['fail']}")
+
+        churn_ok = True
+        for i in range(200):
+            try:
+                s = socket.create_connection(("127.0.0.1", port), timeout=5)
+                s.sendall(b"churn")
+                if s.recv(50) != b"churn":
+                    churn_ok = False
+                s.close()
+            except Exception:
+                churn_ok = False
+                break
+        ok("reactor：200 次连接 churn（freelist 回收）全等"
+           ) if churn_ok else bad("reactor：连接 churn 出现回声不符/失败")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def main():
     print("== [1] PE/COFF 结构（自研写出器，无 CRT） ==")
     out = os.path.join(ROOT, "build", "win_hello.exe")
@@ -461,6 +546,9 @@ def main():
 
     print("== [3i] 函数名作值 + callr 间接调用（v1.4 地基） ==")
     case_selfcheck("callr", "tests/t38_callr.qma")
+
+    print("== [3j] 高并发网络：IOCP reactor + 回调（v1.4） ==")
+    test_net_reactor()
 
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])

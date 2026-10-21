@@ -473,6 +473,7 @@ class Lower:
         self.uses_args = False
         self.uses_io = False
         self.uses_net = False
+        self.uses_net_serve = False
         self.uses_sfb = False
         self.uses_memcpy = False
         self.uses_substr = False
@@ -1922,6 +1923,32 @@ class Lower:
             if name == "tcp_recv":
                 return self._mark_str(fn, d)
             return d
+        if name == "net_serve" and name not in self.fns_ast:
+            # 高并发 reactor 第一格（v1.4，Windows IOCP）：
+            #   net_serve(port, backlog, on_connect, on_data, on_close)
+            # 回调（IR 层代码地址，运行库里经 callr 派发）：
+            #   on_connect(fd)               新连接（可为 0 = 不回调）
+            #   on_data(fd, str) -> int      1 = 保持连接继续投递 recv；0 = 关闭
+            #   on_close(fd)                 连接关闭（对端关闭或 on_data 决定）
+            # 失败（socket/bind/listen/关联/accept）一律 fail-fast。
+            if self.platform != "windows":
+                raise SyntaxError(
+                    "net_serve() reactor 当前只在 Windows PE 后端实现（IOCP）；"
+                    "Linux epoll 后端在路线图上（PLATFORM.md 候选 A）")
+            if len(e[2]) != 5:
+                raise SyntaxError(
+                    "net_serve(port, backlog, on_connect, on_data, on_close) "
+                    "需要五个实参")
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            for v in vals[2:]:
+                if not (isinstance(v, int) or
+                        (isinstance(v, tuple) and v[0] in ("imm", "fnaddr"))):
+                    raise SyntaxError(
+                        "net_serve 的回调实参必须是函数名（或 0 表示无回调）")
+            self.uses_net_serve = True
+            d = fn.new_v()
+            fn.emit("call", d, "__net_serve", vals)
+            return d
         if name == "substr" and name not in self.fns_ast:
             # substr(s, lo, n) -> str：越界 fail-fast（与下标同策略）
             if len(e[2]) != 3:
@@ -2926,6 +2953,22 @@ class Lower:
         # 否则 a64 上会因非对齐访问而崩、x86 上会静默错位。
         f.emit("bin", "add", n, n, ("imm", 7))
         f.emit("bin", "and", n, n, ("imm", -8))
+        # 多线程程序（spawn / net reactor）bump 指针加 xchg 自旋锁：
+        # io 线程与 acceptor 并发分配时，非原子的 load->add->store 会
+        # 返回重叠内存 / 回退 bump（曾因此 reactor 静默不回声）。
+        # 无线程程序不发射锁——单线程路径零变化（hello/loop_sum 不受影响）。
+        alloc_locked = self.uses_join or self.uses_net_serve
+        if alloc_locked:
+            gid_alloc_lock = self.intern_array(1)
+            l_spin = f.label("aspin")
+            f.emit("label", l_spin)
+            old = f.new_v()
+            f.emit("xchg", old, ("ga", gid_alloc_lock), ("imm", 1))
+            l_locked = f.label("alock")
+            f.emit("jz", old, l_locked)
+            self.emit_yield(f)
+            f.emit("jmp", l_spin)
+            f.emit("label", l_locked)
         h = f.new_v()
         f.emit("load", h, ("ga", self.heap_gid), ("imm", 0))
         l_ready = f.label("aready")
@@ -2975,6 +3018,8 @@ class Lower:
             f.emit("store", ("ga", self.committed_gid), ("imm", 0), ce)
             f.emit("label", l_cok)
         f.emit("store", ("ga", self.bump_gid), ("imm", 0), newoff)
+        if alloc_locked:
+            f.emit("store", ("ga", gid_alloc_lock), ("imm", 0), ("imm", 0))
         r = f.new_v()
         f.emit("bin", "add", r, h, off)
         f.emit("ret", r)
@@ -4389,6 +4434,403 @@ class Lower:
             else:
                 f.emit("syscall", None, self.sc["close"], [fd])
             f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+        if self.uses_net_serve and self.platform == "windows":
+            # ---- 高并发 reactor：IOCP（v1.4，Windows PE）----
+            # 模型（SPEC §5 net.TcpServer 的第一格，先落 Windows；PLATFORM.md 候选 B）：
+            #   主线程 = acceptor：阻塞 accept -> 关联完成端口 -> 投递 WSARecv
+            #   N 个 io 线程 = GetQueuedCompletionStatus 循环 -> callr 派发用户回调
+            # 连接记录 rec（编译期定尺，recv_buffer 内联）：
+            #   +0 fd | +8 OVERLAPPED(32B) | +40 WSABUF.len | +48 WSABUF.buf
+            #   +56 nrecv | +64 flags | +80 recvbuf（recv_buffer 字节）
+            # freelist：xchg 自旋锁（acceptor 分配、io 线程回收——堆是 bump
+            # 分配器，不回收会被连接 churn 耗尽触发堆上限 fail-fast）。
+            # 全局：cbconn/cbdata/cbclose/iocp/active/freehead/lock/wsa
+            ncfg = self.cfg.get("net", {})
+            max_conns = int(ncfg.get("max_conns", 1000000) or 1000000)
+            recv_cap = int(ncfg.get("recv_buffer", 4096) or 4096)
+            io_threads = int(ncfg.get("io_threads", 0) or 0)
+            if io_threads <= 0:
+                io_threads = int(self.cfg["core"].get("threads", 0) or 0)
+            if io_threads <= 0:
+                io_threads = os.cpu_count() or 1
+            nodelay = bool(ncfg.get("tcp_nodelay", True))
+            rec_bytes = (80 + recv_cap + 8 + 7) & ~7      # +8 给 NUL 留位
+            OFF_FD, OFF_OV, OFF_WLEN, OFF_WBUF = 0, 1, 5, 6
+            OFF_NRECV, OFF_FLAGS, OFF_DATA = 7, 8, 10
+
+            # ---- fail-fast：WSAGetLastError + stderr + exit(1) ----
+            msg_ns = "quelmara: net_serve() reactor failed (fail-fast)\n"
+            gid_ns = self.intern_str(msg_ns)
+            f = Fn("__net_serve_fail")
+            f.emit("args", [])
+            err = f.new_v()
+            f.emit("winapi", err, "WSAGetLastError", [])
+            f.emit("call", None, "__print_i64", [err])
+            bp = f.new_v()
+            f.emit("movaddr", bp, gid_ns)
+            self.emit_write(f, 2, bp, ("imm", len(msg_ns.encode("utf-8"))))
+            self.emit_exit(f, 1)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            g_cbconn = self.intern_array(1)
+            g_cbdata = self.intern_array(1)
+            g_cbclose = self.intern_array(1)
+            g_iocp = self.intern_array(1)
+            g_active = self.intern_array(1)
+            g_freehead = self.intern_array(1)
+            g_lock = self.intern_array(1)
+            g_wsa = self.intern_array(8)      # WSADATA 64B；setsockopt 复用低 8B
+
+            # ---- io 线程入口（Win64 ThreadProc：winargs 取 lpParameter）----
+            wrap = Fn("__net_worker_entry")
+            wrap.win_thread = True            # 序言/尾声保存 RDI/RSI（Win64 callee-saved）
+            wp = wrap.new_v()
+            wrap.emit("winargs", [wp])
+            wv = wrap.new_v()
+            wrap.emit("load", wv, wp, ("imm", 0))   # 参数块首字 = IOCP 句柄
+            wrap.emit("call", None, "__net_worker", [wv])
+            wrap.emit("ret", ("imm", 0))
+            self.out.append(wrap)
+
+            # ---- rec 槽分配 / 回收（xchg 自旋锁 freelist）----
+            def emit_spin_lock(f, gid, spin_lbl, locked_lbl):
+                f.emit("label", spin_lbl)
+                old = f.new_v()
+                f.emit("xchg", old, ("ga", gid), ("imm", 1))
+                f.emit("jz", old, locked_lbl)
+                self.emit_yield(f)
+                f.emit("jmp", spin_lbl)
+                f.emit("label", locked_lbl)
+
+            f = Fn("__net_rec_alloc")
+            emit_spin_lock(f, g_lock, f.label("nraspin"), f.label("nralock"))
+            h = f.new_v()
+            f.emit("load", h, ("ga", g_freehead), ("imm", 0))
+            b = f.new_v()
+            f.emit("cmpset", "e", b, h, ("imm", 0))
+            l_heap = f.label("nraheap")
+            f.emit("jnz", b, l_heap)
+            n = f.new_v()
+            f.emit("load", n, h, ("imm", 0))          # next 借用 +0 槽
+            f.emit("store", ("ga", g_freehead), ("imm", 0), n)
+            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
+            f.emit("ret", h)
+            f.emit("label", l_heap)
+            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
+            p = f.new_v()
+            f.emit("call", p, "__alloc", [("imm", rec_bytes)])
+            f.emit("ret", p)
+            self.out.append(f)
+
+            f = Fn("__net_rec_free")
+            rec = f.new_v()
+            f.emit("args", [rec])
+            emit_spin_lock(f, g_lock, f.label("nrfspin"), f.label("nrflock"))
+            h = f.new_v()
+            f.emit("load", h, ("ga", g_freehead), ("imm", 0))
+            f.emit("store", rec, ("imm", 0), h)       # next 借用 +0 槽
+            f.emit("store", ("ga", g_freehead), ("imm", 0), rec)
+            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            # ---- 连接计数：try_inc 上限内接纳 / dec 关闭归还（g_lock 复用）----
+            f = Fn("__net_active_try_inc")
+            maxc = f.new_v()
+            f.emit("args", [maxc])
+            emit_spin_lock(f, g_lock, f.label("naispin"), f.label("nailock"))
+            a = f.new_v()
+            f.emit("load", a, ("ga", g_active), ("imm", 0))
+            b = f.new_v()
+            f.emit("cmpset", "ge", b, a, maxc)
+            l_full = f.label("naifull")
+            f.emit("jnz", b, l_full)               # a >= max：拒绝
+            a1 = f.new_v()
+            f.emit("bin", "add", a1, a, ("imm", 1))
+            f.emit("store", ("ga", g_active), ("imm", 0), a1)
+            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
+            f.emit("ret", ("imm", 1))              # 接纳
+            f.emit("label", l_full)
+            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
+            f.emit("ret", ("imm", 0))              # 达到上限
+            self.out.append(f)
+
+            f = Fn("__net_active_dec")
+            f.emit("args", [])
+            emit_spin_lock(f, g_lock, f.label("nadspin"), f.label("nadlock"))
+            a = f.new_v()
+            f.emit("load", a, ("ga", g_active), ("imm", 0))
+            a1 = f.new_v()
+            f.emit("bin", "sub", a1, a, ("imm", 1))
+            f.emit("store", ("ga", g_active), ("imm", 0), a1)
+            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            # ---- 投递一条 WSARecv（rec 布局见上）----
+            f = Fn("__net_recv_post")
+            rec = f.new_v()
+            f.emit("args", [rec])
+            fd = f.new_v()
+            f.emit("load", fd, rec, ("imm", OFF_FD))
+            f.emit("store", rec, ("imm", OFF_WLEN), ("imm", recv_cap))
+            dp = f.new_v()
+            f.emit("bin", "add", dp, rec, ("imm", OFF_DATA * 8))
+            f.emit("store", rec, ("imm", OFF_WBUF), dp)
+            f.emit("store", rec, ("imm", OFF_NRECV), ("imm", 0))
+            f.emit("store", rec, ("imm", OFF_FLAGS), ("imm", 0))
+            pw = f.new_v()
+            f.emit("bin", "add", pw, rec, ("imm", OFF_WLEN * 8))
+            pn = f.new_v()
+            f.emit("bin", "add", pn, rec, ("imm", OFF_NRECV * 8))
+            pf = f.new_v()
+            f.emit("bin", "add", pf, rec, ("imm", OFF_FLAGS * 8))
+            po = f.new_v()
+            f.emit("bin", "add", po, rec, ("imm", OFF_OV * 8))
+            r = f.new_v()
+            f.emit("winapi", r, "WSARecv",
+                   [fd, pw, ("imm", 1), pn, pf, po, ("imm", 0)])
+            # WSARecv 返回值语义（Winsock 约定）：
+            #   0            = 立即完成（完成包仍会入队，GQCS 照样收到）
+            #   SOCKET_ERROR = 失败 **或** WSA_IO_PENDING(997) 成功入队——必须
+            #   查 WSAGetLastError 区分，否则 997 被误判为失败（曾在这里炸过：
+            #   第一条 WSARecv 就 fail-fast，表现是 accept 成功后即死）。
+            r32 = f.new_v()
+            f.emit("bin", "shl", r32, r, ("imm", 32))
+            r322 = f.new_v()
+            f.emit("bin", "sar", r322, r32, ("imm", 32))
+            b2 = f.new_v()
+            f.emit("cmpset", "e", b2, r322, ("imm", -1))
+            l_ok = f.label("nrpok")
+            f.emit("jz", b2, l_ok)               # 非 SOCKET_ERROR：立即完成
+            e2 = f.new_v()
+            f.emit("winapi", e2, "WSAGetLastError", [])
+            # 极性备忘：cmpset e 后 b=相等为 1；「命中即跳」用 jnz，「不中即跳」用 jz
+            f.emit("cmpset", "e", b2, e2, ("imm", 997))   # WSA_IO_PENDING
+            f.emit("jnz", b2, l_ok)               # 997 = 成功入队 -> OK
+            f.emit("call", None, "__net_serve_fail", [])
+            f.emit("label", l_ok)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            # ---- __net_serve(port, backlog, cbconn, cbdata, cbclose) ----
+            f = Fn("__net_serve")
+            p_port, p_bl = f.new_v(), f.new_v()
+            p_c1, p_c2, p_c3 = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [p_port, p_bl, p_c1, p_c2, p_c3])
+            b = f.new_v()
+            l_fail = f.label("nsfail")
+            f.emit("store", ("ga", g_cbconn), ("imm", 0), p_c1)
+            f.emit("store", ("ga", g_cbdata), ("imm", 0), p_c2)
+            f.emit("store", ("ga", g_cbclose), ("imm", 0), p_c3)
+            f.emit("store", ("ga", g_active), ("imm", 0), ("imm", 0))
+            f.emit("store", ("ga", g_freehead), ("imm", 0), ("imm", 0))
+            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
+            # WSAStartup
+            wsa = f.new_v()
+            f.emit("movaddr", wsa, g_wsa)
+            sw = f.new_v()
+            f.emit("winapi", sw, "WSAStartup", [("imm", 0x202), wsa])
+            # WSAStartup：0 = 成功，非 0 = 错误码。极性：相等跳失败
+            f.emit("cmpset", "e", b, sw, ("imm", 0))
+            f.emit("jz", b, l_fail)
+            # 完成端口（创建态）
+            iocp = f.new_v()
+            f.emit("winapi", iocp, "CreateIoCompletionPort",
+                   [("imm", -1), ("imm", 0), ("imm", 0), ("imm", 0)])
+            f.emit("cmpset", "e", b, iocp, ("imm", 0))
+            f.emit("jnz", b, l_fail)
+            f.emit("store", ("ga", g_iocp), ("imm", 0), iocp)
+            # 监听 socket：显式 WSA_FLAG_OVERLAPPED（Accepted socket 继承可重叠性）
+            s = f.new_v()
+            f.emit("winapi", s, "WSASocketW",
+                   [("imm", 2), ("imm", 1), ("imm", 0), ("imm", 0),
+                    ("imm", 0), ("imm", 1)])
+            s32 = f.new_v()
+            f.emit("bin", "shl", s32, s, ("imm", 32))
+            s322 = f.new_v()
+            f.emit("bin", "sar", s322, s32, ("imm", 32))
+            f.emit("cmpset", "e", b, s322, ("imm", -1))
+            f.emit("jnz", b, l_fail)
+            # sockaddr_in：w0 = family(2) | htons(port)<<16（与 __tcp_listen 同构）
+            sinb = f.new_v()
+            f.emit("call", sinb, "__alloc", [("imm", 16)])
+            hp = f.new_v()
+            f.emit("bin", "and", hp, p_port, ("imm", 0xFF))
+            hp2 = f.new_v()
+            f.emit("bin", "shl", hp2, hp, ("imm", 8))
+            hb = f.new_v()
+            f.emit("bin", "shr", hb, p_port, ("imm", 8))
+            hb2 = f.new_v()
+            f.emit("bin", "and", hb2, hb, ("imm", 0xFF))
+            hp3 = f.new_v()
+            f.emit("bin", "or", hp3, hp2, hb2)
+            sh16 = f.new_v()
+            f.emit("bin", "shl", sh16, hp3, ("imm", 16))
+            w0 = f.new_v()
+            f.emit("bin", "or", w0, sh16, ("imm", 2))
+            f.emit("store", sinb, ("imm", 0), w0)
+            f.emit("store", sinb, ("imm", 1), ("imm", 0))
+            br = f.new_v()
+            f.emit("winapi", br, "bind", [s, sinb, ("imm", 16)])
+            br32 = f.new_v()
+            f.emit("bin", "shl", br32, br, ("imm", 32))
+            br322 = f.new_v()
+            f.emit("bin", "sar", br322, br32, ("imm", 32))
+            f.emit("cmpset", "e", b, br322, ("imm", -1))
+            f.emit("jnz", b, l_fail)
+            lr = f.new_v()
+            f.emit("winapi", lr, "listen", [s, p_bl])
+            lr32 = f.new_v()
+            f.emit("bin", "shl", lr32, lr, ("imm", 32))
+            lr322 = f.new_v()
+            f.emit("bin", "sar", lr322, lr32, ("imm", 32))
+            f.emit("cmpset", "e", b, lr322, ("imm", -1))
+            f.emit("jnz", b, l_fail)
+            # io 线程（N 个 GQCS worker）
+            i = f.new_v()
+            f.emit("mov", i, ("imm", 0))            # 计数必须显式初始化
+            l_sp, l_spd = f.label("nssp"), f.label("nsspd")
+            f.emit("label", l_sp)
+            # 退出条件：i >= io_threads（极性备忘：jcc 是「真则退出」形态）
+            f.emit("jcc", "ge", i, ("imm", io_threads), l_spd)
+            ap = f.new_v()
+            f.emit("movaddr", ap, g_iocp)             # 参数块 = &g_iocp
+            h = f.new_v()
+            f.emit("winapi", h, "CreateThread",
+                   [("imm", 0), ("imm", 0), ("fnaddr", wrap.name), ap,
+                    ("imm", 0), ("imm", 0)])
+            f.emit("bin", "add", i, i, ("imm", 1))
+            f.emit("jmp", l_sp)
+            f.emit("label", l_spd)
+            # acceptor 循环（主线程）
+            l_acc = f.label("nsacc")
+            c = f.new_v()
+            f.emit("label", l_acc)
+            f.emit("winapi", c, "accept", [s, ("imm", 0), ("imm", 0)])
+            c32 = f.new_v()
+            f.emit("bin", "shl", c32, c, ("imm", 32))
+            c322 = f.new_v()
+            f.emit("bin", "sar", c322, c32, ("imm", 32))
+            f.emit("cmpset", "e", b, c322, ("imm", -1))
+            f.emit("jnz", b, l_fail)
+            # max_conns 上限（原子判定）：try_inc 返回 0 = 拒绝新连接
+            ad = f.new_v()
+            f.emit("call", ad, "__net_active_try_inc", [("imm", max_conns)])
+            f.emit("cmpset", "e", b, ad, ("imm", 0))
+            l_over = f.label("nsover")
+            l_aok = f.label("nsaok")
+            f.emit("jnz", b, l_over)               # ad == 0：达到上限
+            f.emit("jmp", l_aok)
+            f.emit("label", l_over)
+            f.emit("winapi", None, "closesocket", [c])
+            f.emit("jmp", l_acc)
+            f.emit("label", l_aok)
+            if nodelay:
+                # TCP_NODELY：level=IPPROTO_TCP(6), optname=TCP_NODELAY(1)
+                f.emit("store", ("ga", g_wsa), ("imm", 0), ("imm", 1))
+                f.emit("winapi", None, "setsockopt",
+                       [c, ("imm", 6), ("imm", 1), ("ga", g_wsa), ("imm", 4)])
+            # rec 槽 + 关联完成端口
+            rec = f.new_v()
+            f.emit("call", rec, "__net_rec_alloc", [])
+            f.emit("store", rec, ("imm", OFF_FD), c)
+            cap = f.new_v()
+            f.emit("winapi", cap, "CreateIoCompletionPort",
+                   [c, iocp, rec, ("imm", 0)])
+            f.emit("cmpset", "e", b, cap, ("imm", 0))
+            f.emit("jnz", b, l_fail)
+            # on_connect(c)（0 = 不回调）
+            fc = f.new_v()
+            f.emit("load", fc, ("ga", g_cbconn), ("imm", 0))
+            f.emit("cmpset", "e", b, fc, ("imm", 0))
+            l_cbc = f.label("nscbc")
+            f.emit("jnz", b, l_cbc)
+            f.emit("callr", None, fc, [c])
+            f.emit("label", l_cbc)
+            # 投递首个 recv 后继续 accept
+            f.emit("call", None, "__net_recv_post", [rec])
+            f.emit("jmp", l_acc)
+            f.emit("label", l_fail)
+            f.emit("call", None, "__net_serve_fail", [])
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            # ---- __net_worker(iocp)：GQCS 循环 + 回调派发 ----
+            f = Fn("__net_worker")
+            iocp = f.new_v()
+            f.emit("args", [iocp])
+            sc = f.new_v()
+            f.emit("call", sc, "__alloc", [("imm", 24)])   # [bytes, key, ov]
+            a_key = f.new_v()
+            f.emit("bin", "add", a_key, sc, ("imm", 8))
+            a_ov = f.new_v()
+            f.emit("bin", "add", a_ov, sc, ("imm", 16))
+            l_loop = f.label("nwl")
+            f.emit("label", l_loop)
+            r = f.new_v()
+            f.emit("winapi", r, "GetQueuedCompletionStatus",
+                   [iocp, sc, a_key, a_ov, ("imm", -1)])
+            kv = f.new_v()
+            f.emit("load", kv, sc, ("imm", 1))
+            b = f.new_v()
+            f.emit("cmpset", "e", b, kv, ("imm", 0))
+            f.emit("jnz", b, l_loop)                  # key==0：无意义完成，继续
+            # dequeue 失败（r==0）且 ov==0 -> 致命；ov!=0 -> 该连接 IO 错误走关闭
+            ov = f.new_v()
+            f.emit("load", ov, sc, ("imm", 2))
+            f.emit("cmpset", "e", b, r, ("imm", 0))
+            l_okq = f.label("nwokq")
+            l_errq = f.label("nwerrq")
+            l_data = f.label("nwdata")
+            l_close = f.label("nwclose")
+            l_keep = f.label("nwkeep")
+            l_nocb = f.label("nwnocb")
+            f.emit("jnz", b, l_okq)          # r != 0：正常出队
+            f.emit("cmpset", "e", b, ov, ("imm", 0))
+            f.emit("jnz", b, l_errq)          # r==0 且 ov==0：端口级致命错误
+            f.emit("label", l_okq)           # r==0 且 ov!=0：该连接 IO 错误，走 bytes 判定
+            byv = f.new_v()
+            f.emit("load", byv, sc, ("imm", 0))
+            # 注意极性：cmpset e + jnz = 「相等时跳走」
+            f.emit("cmpset", "ne", b, byv, ("imm", 0))
+            f.emit("jnz", b, l_data)            # 有数据 -> 数据路径
+            f.emit("jmp", l_close)              # bytes==0：对端关闭
+            f.emit("label", l_errq)             # dequeue 失败且 ov==0：致命
+            f.emit("call", None, "__net_serve_fail", [])
+            f.emit("label", l_data)
+            fd = f.new_v()
+            f.emit("load", fd, kv, ("imm", OFF_FD))
+            dp = f.new_v()
+            f.emit("bin", "add", dp, kv, ("imm", OFF_DATA * 8))
+            f.emit("store8", dp, byv, ("imm", 0))      # NUL 结尾 -> str
+            fc = f.new_v()
+            f.emit("load", fc, ("ga", g_cbdata), ("imm", 0))
+            dr = f.new_v()
+            f.emit("callr", dr, fc, [fd, dp])    # on_data(fd, data) -> int
+            f.emit("cmpset", "e", b, dr, ("imm", 0))
+            f.emit("jnz", b, l_close)           # 返回 0 -> 关闭连接
+            # ---- 保持路径：重新投递 recv ----
+            f.emit("label", l_keep)
+            f.emit("call", None, "__net_recv_post", [kv])
+            f.emit("jmp", l_loop)
+            # ---- 关闭路径：closesocket + on_close + 还槽 ----
+            f.emit("label", l_close)
+            fcw = f.new_v()
+            f.emit("load", fcw, kv, ("imm", OFF_FD))
+            f.emit("winapi", None, "closesocket", [fcw])
+            fx = f.new_v()
+            f.emit("load", fx, ("ga", g_cbclose), ("imm", 0))
+            f.emit("cmpset", "e", b, fx, ("imm", 0))
+            f.emit("jnz", b, l_nocb)            # 0 = 不回调 on_close
+            f.emit("callr", None, fx, [fcw])
+            f.emit("label", l_nocb)
+            f.emit("call", None, "__net_active_dec", [])
+            f.emit("call", None, "__net_rec_free", [kv])
+            f.emit("jmp", l_loop)
             self.out.append(f)
 
         if self.uses_substr:

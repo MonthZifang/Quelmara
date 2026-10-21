@@ -1,0 +1,25 @@
+// echo_reactor.qma — 高并发 echo：IOCP reactor（v1.4，Windows PE）
+// 对比 echo_concurrent.qma（每连接一线程）：这里 N 个 io 线程经完成
+// 端口服务全部连接——创建 1e6 个内核线程之前，连接数先撞 Quelmara.toml
+// [net] max_conns 上限。
+module echo_reactor
+
+import std.net
+
+fn on_connect(fd: int) {
+    print("peer connected")
+}
+
+fn on_data(fd: int, data: str) -> int {
+    send(fd, data)          // echo 回写（零拷贝回显 + 显式背压策略预留）
+    return 1
+}
+
+fn on_close(fd: int) {
+    print("peer closed")
+}
+
+fn main() {
+    print("reactor echo server listening on :19531")
+    serve(19531, 65535, on_connect, on_data, on_close)
+}

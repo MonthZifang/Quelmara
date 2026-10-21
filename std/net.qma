@@ -1,0 +1,36 @@
+// std/net.qma —— 网络第一格：tcp_* 内建的过程式包装（v1.3）
+// SPEC 的 net.TcpServer reactor（回调结构体 + epoll/IOCP）仍是目标模型；
+// 这一层先给阻塞式过程式 API，echo 类服务十行内可写。
+
+fn listen(port: int) -> int {
+    return tcp_listen(port)
+}
+
+fn accept(fd: int) -> int {
+    return tcp_accept(fd)
+}
+
+fn send(conn: int, data: str) -> int {
+    return tcp_send(conn, data)
+}
+
+fn recv(conn: int, cap: int) -> str {
+    return tcp_recv(conn, cap)
+}
+
+fn close_conn(fd: int) {
+    tcp_close(fd)
+}
+
+// 高并发 reactor（v1.4，Windows IOCP）：
+//   serve(port, backlog, on_connect, on_data, on_close) -> 阻塞运行
+// 回调（传函数名即可，IR 层是代码地址，运行库经 callr 派发）：
+//   on_connect(fd: int)              新连接建立（传 0 = 不回调）
+//   on_data(fd: int, data: str) -> int   1 = 保持连接继续收；0 = 关闭
+//   on_close(fd: int)                连接关闭（对端关闭或 on_data 决定关闭）
+// 资源上限（max_conns / recv_buffer / io_threads / tcp_nodelay）在根目录
+// Quelmara.toml [net] 节声明，超限拒绝新连接（不静默膨胀）。
+fn serve(port: int, backlog: int,
+         on_connect: int, on_data: int, on_close: int) -> int {
+    return net_serve(port, backlog, on_connect, on_data, on_close)
+}
