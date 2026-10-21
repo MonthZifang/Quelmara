@@ -5981,9 +5981,9 @@ class Lower:
                 f.emit("label", l_sep2)
                 f.emit("jnz", inq2, l_word2)               # 引号内空白保留
                 f.emit("jz", started, l_sepd)
-                f.emit("store8", buf, w, ("imm", 0))       # 词尾补 NUL
+                finish_tok()                               # 先收 token（w 未含分隔符）
+                f.emit("store8", buf, w, ("imm", 0))       # buf 分隔 NUL（重用缓冲）
                 f.emit("bin", "add", w, w, ("imm", 1))
-                finish_tok()
                 f.emit("mov", started, ("imm", 0))
                 f.emit("label", l_sepd)
                 f.emit("bin", "add", i2, i2, ("imm", 1))
@@ -5995,9 +5995,9 @@ class Lower:
                 f.emit("jmp", ltop2)
                 f.emit("label", lend2)
                 f.emit("jz", started, l_endok)
+                finish_tok()                               # 同上：先收 token
                 f.emit("store8", buf, w, ("imm", 0))
                 f.emit("bin", "add", w, w, ("imm", 1))
-                finish_tok()
                 f.emit("label", l_endok)
                 f.emit("store", ("ga", self.argv_gid), ("imm", 0), arr)
                 f.emit("store", ("ga", self.argc_gid), ("imm", 0), k)
