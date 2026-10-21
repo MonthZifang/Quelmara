@@ -302,7 +302,7 @@ fn deflate_raw(s: str) -> str {
         let mut best_dist = 0
         if pos + 3 <= n {
             if hok == 0 {
-                h = ((s[pos] * 961 + s[pos + 1] * 31 + s[pos + 2]) & 4095)
+                h = ((mem_load8(s, pos) * 961 + mem_load8(s, pos + 1) * 31 + mem_load8(s, pos + 2)) & 4095)
                 hok = 1
             }
             let mut cand = mem_load64(head, h)      // 1-based
@@ -316,7 +316,7 @@ fn deflate_raw(s: str) -> str {
                     // 首字节快速否决：大多数候选拿 2 次下标就出局
                     // （相对逐字节全比 ~4×；全部是通用手法，无形状特调）
                     let mut l = 0
-                    if s[cp] == s[pos] {
+                    if mem_load8(s, cp) == mem_load8(s, pos) {
                         let maxl = n - pos
                         let mut limit = 258
                         if maxl < limit {
@@ -324,7 +324,7 @@ fn deflate_raw(s: str) -> str {
                         }
                         let mut stop = 0
                         while l < limit && stop == 0 {
-                            if s[cp + l] != s[pos + l] {
+                            if mem_load8(s, cp + l) != mem_load8(s, pos + l) {
                                 stop = 1
                             } else {
                                 l = l + 1
@@ -349,7 +349,7 @@ fn deflate_raw(s: str) -> str {
             while k < best_len {
                 let p = pos + k
                 if p + 3 <= n {
-                    let h2 = ((s[p] * 961 + s[p + 1] * 31 + s[p + 2]) & 4095)
+                    let h2 = ((mem_load8(s, p) * 961 + mem_load8(s, p + 1) * 31 + mem_load8(s, p + 2)) & 4095)
                     mem_store64(prev, p, mem_load64(head, h2))
                     mem_store64(head, h2, p + 1)
                 }
@@ -360,7 +360,7 @@ fn deflate_raw(s: str) -> str {
             let mut step = 0
             while step < best_len {
                 if pos + step + 3 < n {
-                    h = (((h - s[pos + step] * 961) * 31 + s[pos + step + 3]) & 4095)
+                    h = (((h - mem_load8(s, pos + step) * 961) * 31 + mem_load8(s, pos + step + 3)) & 4095)
                 } else {
                     hok = 0
                 }
@@ -368,14 +368,14 @@ fn deflate_raw(s: str) -> str {
             }
             pos = pos + best_len
         } else {
-            _put_sym(out, st, s[pos])
+            _put_sym(out, st, mem_load8(s, pos))
             if pos + 3 <= n {
                 mem_store64(prev, pos, mem_load64(head, h))
                 mem_store64(head, h, pos + 1)
                 // 滑窗一步：h' = (h - a*961)*31 + d——读 s[pos+3] 需要
                 // pos+4 <= n，否则下一位置 h 无效（v1.13 越界修复）
                 if pos + 4 <= n {
-                    h = (((h - s[pos] * 961) * 31 + s[pos + 3]) & 4095)
+                    h = (((h - mem_load8(s, pos) * 961) * 31 + mem_load8(s, pos + 3)) & 4095)
                 } else {
                     hok = 0
                 }
