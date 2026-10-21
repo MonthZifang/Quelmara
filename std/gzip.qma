@@ -13,14 +13,22 @@
 
 // ---------------------------------------------------------------------------
 // CRC-32（gzip 校验和，多项式 0xEDB88320）
+// v1.14：逐位 → 256 项查表（约 8-10×）。表在首次调用时惰性生成并缓存到
+// static_word(6)（与 std/aes.qma 的 sbox 同款模式）；多线程同时初始化时
+// 各自生成内容相同的表，最后一次 store 胜出，仅泄漏一份 2KB，功能正确。
 // ---------------------------------------------------------------------------
 
-fn crc32(s: str) -> int {
-    let n = len(s)
-    let mut c = 0xFFFFFFFF
+const CRC32_TAB_W = 6          // static_word(6) = CRC32 查表指针（256 × 8B）
+
+fn _crc32_table() -> int {
+    let p = mem_load64(static_word(CRC32_TAB_W), 0)
+    if p != 0 {
+        return p
+    }
+    let tbl = mem_alloc(256 * 8)
     let mut i = 0
-    while i < n {
-        c = c ^ s[i]
+    while i < 256 {
+        let mut c = i
         let mut k = 0
         while k < 8 {
             if (c & 1) == 1 {
@@ -30,7 +38,20 @@ fn crc32(s: str) -> int {
             }
             k = k + 1
         }
-        c = c & 0xFFFFFFFF
+        mem_store64(tbl, i, c & 0xFFFFFFFF)
+        i = i + 1
+    }
+    mem_store64(static_word(CRC32_TAB_W), 0, tbl)
+    return tbl
+}
+
+fn crc32(s: str) -> int {
+    let tbl = _crc32_table()
+    let n = len(s)
+    let mut c = 0xFFFFFFFF
+    let mut i = 0
+    while i < n {
+        c = (c >> 8) ^ mem_load64(tbl, (c ^ s[i]) & 0xFF)
         i = i + 1
     }
     return (c ^ 0xFFFFFFFF) & 0xFFFFFFFF
@@ -270,12 +291,20 @@ fn deflate_raw(s: str) -> str {
     let prev = mem_alloc((n + 1) * 8)
     mem_zero(prev, (n + 1) * 8)
 
+    // v1.14 滚动哈希：h(pos) = (a*961 + b*31 + c) & 4095（K=31 多项式，
+    // mod 4096 下可 O(1) 滑窗更新），替代每位置 3 次 str 下标的 _hash3。
+    // hok = 滚动值是否有效（pos 推进方式不同，跨语句维护）。
+    let mut h = 0
+    let mut hok = 0
     let mut pos = 0
     while pos < n {
         let mut best_len = 0
         let mut best_dist = 0
         if pos + 3 <= n {
-            let h = _hash3(s, pos)
+            if hok == 0 {
+                h = ((s[pos] * 961 + s[pos + 1] * 31 + s[pos + 2]) & 4095)
+                hok = 1
+            }
             let mut cand = mem_load64(head, h)      // 1-based
             let mut chain = 0
             while cand > 0 && chain < 8 {
@@ -284,23 +313,27 @@ fn deflate_raw(s: str) -> str {
                 if dist > 32768 {
                     cand = 0
                 } else {
+                    // 首字节快速否决：大多数候选拿 2 次下标就出局
+                    // （相对逐字节全比 ~4×；全部是通用手法，无形状特调）
                     let mut l = 0
-                    let maxl = n - pos
-                    let mut limit = 258
-                    if maxl < limit {
-                        limit = maxl
-                    }
-                    let mut stop = 0
-                    while l < limit && stop == 0 {
-                        if s[cp + l] != s[pos + l] {
-                            stop = 1
-                        } else {
-                            l = l + 1
+                    if s[cp] == s[pos] {
+                        let maxl = n - pos
+                        let mut limit = 258
+                        if maxl < limit {
+                            limit = maxl
                         }
-                    }
-                    if l > best_len {
-                        best_len = l
-                        best_dist = dist
+                        let mut stop = 0
+                        while l < limit && stop == 0 {
+                            if s[cp + l] != s[pos + l] {
+                                stop = 1
+                            } else {
+                                l = l + 1
+                            }
+                        }
+                        if l > best_len {
+                            best_len = l
+                            best_dist = dist
+                        }
                     }
                     cand = mem_load64(prev, cp)
                 }
@@ -316,19 +349,38 @@ fn deflate_raw(s: str) -> str {
             while k < best_len {
                 let p = pos + k
                 if p + 3 <= n {
-                    let h2 = _hash3(s, p)
+                    let h2 = ((s[p] * 961 + s[p + 1] * 31 + s[p + 2]) & 4095)
                     mem_store64(prev, p, mem_load64(head, h2))
                     mem_store64(head, h2, p + 1)
                 }
                 k = k + 1
             }
+            // 滚动哈希同步：pos 推进 best_len，逐位置滑窗更新
+            // （h' = (h - s[pos]*961) * 31 + s[pos+3]，mod 4096 补码安全）
+            let mut step = 0
+            while step < best_len {
+                if pos + step + 3 < n {
+                    h = (((h - s[pos + step] * 961) * 31 + s[pos + step + 3]) & 4095)
+                } else {
+                    hok = 0
+                }
+                step = step + 1
+            }
             pos = pos + best_len
         } else {
             _put_sym(out, st, s[pos])
             if pos + 3 <= n {
-                let h3 = _hash3(s, pos)
-                mem_store64(prev, pos, mem_load64(head, h3))
-                mem_store64(head, h3, pos + 1)
+                mem_store64(prev, pos, mem_load64(head, h))
+                mem_store64(head, h, pos + 1)
+                // 滑窗一步：h' = (h - a*961)*31 + d——读 s[pos+3] 需要
+                // pos+4 <= n，否则下一位置 h 无效（v1.13 越界修复）
+                if pos + 4 <= n {
+                    h = (((h - s[pos] * 961) * 31 + s[pos + 3]) & 4095)
+                } else {
+                    hok = 0
+                }
+            } else {
+                hok = 0
             }
             pos = pos + 1
         }

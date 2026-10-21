@@ -1266,6 +1266,46 @@ def opt_bounds_elim(fn):
             guards.append((ivar, hi_spec, hc[1] if hc else None,
                            body_start, body_end))
 
+    # len 等值集合（v1.14）：s[i] 每次降级都会重新读 len——
+    #   ('bin','sub',t,obj,('imm',8)) + ('load',v,t,('imm',0))
+    # guard 里的 hi 与 bounds 里的 n 是**两个不同 vreg 但同一对象的 len**，
+    # 直接比较 vreg 编号会让窗口证明失效（gzip 匹配循环这类 str 密集
+    # 循环全部受害）。识别同对象的 len 读取对：obj 单定义（无重定义）
+    # 且两对读取的 obj 相同 → load 的 vreg 等值。
+    eq_map = {}                            # vreg -> 等值类代表（取最小 vreg 号）
+    if guards:
+        defs_count = {}
+        def_at = {}
+        for pi, p in enumerate(ins):
+            d, _u = vreg_mentions(p)
+            for dd in d:
+                defs_count[dd] = defs_count.get(dd, 0) + 1
+                def_at[dd] = pi
+        # 收集所有 len 读取对：(load_vreg, obj)
+        len_pairs = []
+        for pi, p in enumerate(ins):
+            if p[0] == "load" and isinstance(p[1], int) and isinstance(p[2], int) \
+                    and p[3] == ('imm', 0) and p[2] - 1 >= 0:
+                t = p[2]
+                td = ins[def_at.get(t, -1)] if t in def_at else None
+                if td is not None and td[0] == "bin" and td[1] == "sub" \
+                        and td[2] == t and isinstance(td[3], int) \
+                        and td[4] == ('imm', 8):
+                    obj = td[3]
+                    if defs_count.get(obj, 0) == 1:
+                        len_pairs.append((pi, p[1], obj))
+        # obj 相同的 load vreg 归入同一等值类
+        by_obj = {}
+        for pi, v, obj in len_pairs:
+            by_obj.setdefault(obj, []).append(v)
+        for obj, vs in by_obj.items():
+            rep = min(vs)
+            for v in vs:
+                eq_map[v] = rep
+
+    def _eq_rep(v):
+        return eq_map.get(v, v)
+
     uses = {}
     for p in ins:
         if p[0] in ("jcc", "jnz", "jmp") and isinstance(p[-1], str):
@@ -1314,9 +1354,10 @@ def opt_bounds_elim(fn):
                         provable = True     # 循环内：0 <= ivar < hi <= n 恒真
                         break
         elif isinstance(nval, int):
+            nrep = _eq_rep(nval)
             for (ivar, hv, _hc, s, e) in guards:
-                if ivar == idx and hv == nval and s <= i < e:
-                    provable = True         # 循环内：0 <= ivar < hi == nval 恒真
+                if ivar == idx and _eq_rep(hv) == nrep and s <= i < e:
+                    provable = True         # 循环内：0 <= ivar < hi == n 恒真
                     break
         if not provable:
             i -= 1

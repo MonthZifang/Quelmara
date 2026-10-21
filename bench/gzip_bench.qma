@@ -1,0 +1,23 @@
+// bench/gzip_bench.qma：gzip 压缩 1MiB（对比 P0_LIBS 口径 117ms）
+module gzip_bench
+
+import std.gzip
+import std.str
+
+fn main() {
+    let unit = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    let big = str_repeat(unit, 16384)
+    assert(len(big) == 1048576, "size")
+    // 预热（CRC 表惰性生成 + 缓存热身）
+    let warm = gzip_encode(str_repeat(unit, 1024))
+    let t0 = now_ns()
+    let g = gzip_encode(big)
+    let t1 = now_ns()
+    assert(len(g) > 0, "gz nonempty")
+    print("gzip 1MiB repeat: " + ((t1 - t0) / 1000000).to_str() + " ms, out=" + len(g).to_str())
+    let t2 = now_ns()
+    let c = crc32(big)
+    let t3 = now_ns()
+    print("crc32 1MiB: " + ((t3 - t2) / 1000000).to_str() + " ms")
+    print("gzip_bench ok")
+}
