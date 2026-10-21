@@ -149,7 +149,7 @@
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| **包管理 / 依赖** | ❌ | `Quelmara.toml` 无 `[deps]`；`import` 只查 `std/` 与同目录 ⇒ 第三方库无从获取、无法锁版本、无法离线复现 |
+| **包管理 / 依赖** | 🟡 **v1.14 qpm v0 落地**：`tools/qpm.py`（install/add/remove/list），依赖声明在项目 `Quelmara.toml` 的 `[deps]` 段：`name = "path"` 或 `name = "git-url#rev"`；git 依赖 clone 到 `~/.qpm/cache` 再复制到 `<project>/.qpm/deps`（Windows 无 symlink，复制保证构建离线）；`.qpm/lock.toml` 锁定来源与 git sha；编译器 `_qpm_candidates` 按**主项目根**的 `.qpm/deps` 解析 import（依赖包内部递归 import 也能找到彼此）。约定：**git 仓库根 = 包根**、包名 import-safe（下划线）。端到端测试：路径依赖 + file:// git 依赖两条路都通（fixtures/qpm-demo，`import pkg_demo.hello` 编译运行输出 hello, qpm!）| semver 区间、registry 服务、发布流程、传递依赖冲突合并、包内构建配置继承未做 | 手动 clone | **P1（semver + registry）** |
 | **库归档 `.qla`** | 🚧 规划中 | `docs/EXTENSIONS.md:17` 写明"`quelmara lib`（规划中）"；无目标文件格式 ⇒ 无法增量编译/分发二进制库 |
 | **调试器** | 🟡 很弱 | `tools/stage0/qlm_dbg.py` 是 Windows ctypes 调试小工具（打印加载基址/线程/异常码/RVA），**不是语言级调试器**；无 DWARF/PDB、无源码断点、无变量查看；平时靠 `readelf`/`capstone`/`--dump-ir` |
 | **LSP / 编辑器支持** | ❌ | 无补全、无跳转、无内联诊断（只有 `qlm_fmt` 格式化器） |

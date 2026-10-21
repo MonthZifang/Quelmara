@@ -1429,7 +1429,7 @@ def parse_source(src):
 
 def _import_candidates(imp, src_dir):
     """import a.b.c 的候选文件：主文件目录优先，标准库 std/（仓库根）其次。
-    `import std.core` 在标准库根下按 core.qma 解析（首段 std 即根本身）。"""
+    （qpm 依赖目录由 _qpm_candidates 单独提供——始终按主项目根解析。）"""
     parts = imp.split(".")
     rel = os.sep.join(parts) + SRC_EXT
     std_root = os.path.normpath(os.path.join(
@@ -1437,6 +1437,14 @@ def _import_candidates(imp, src_dir):
     rel_in_std = (os.sep.join(parts[1:]) + SRC_EXT) if parts[0] == "std" else rel
     return [os.path.normpath(os.path.join(src_dir, rel)),
             os.path.join(std_root, rel_in_std)]
+
+
+def _qpm_candidates(imp, main_dir):
+    """qpm 依赖的 import 候选：<main_dir>/.qpm/deps/<a>/<b>.qma（v1.14）。
+    由 qpm.py install 填充（git 依赖从全局缓存复制、路径依赖直接复制）。"""
+    parts = imp.split(".")
+    rel = os.sep.join(parts) + SRC_EXT
+    return [os.path.normpath(os.path.join(main_dir, ".qpm", "deps", rel))]
 
 
 def expand_generics(fns, generic_fns, structs, enums):
@@ -1548,6 +1556,9 @@ def load_program(src_path):
 
     def resolve_or_raise(imp, from_path):
         cands = _import_candidates(imp, os.path.dirname(os.path.abspath(from_path)))
+        # qpm 依赖目录始终按**主文件**的 .qpm/deps 解析（依赖包内部的
+        # 递归 import 也要能在主项目的依赖集合里找到彼此）
+        cands += _qpm_candidates(imp, os.path.dirname(os.path.abspath(src_path)))
         for cand in cands:
             if os.path.isfile(cand):
                 return cand

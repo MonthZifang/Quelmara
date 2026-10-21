@@ -118,7 +118,9 @@ def check_markers(files, verbose):
 def check_third_party():
     found = []
     for dp, dns, fns in os.walk(ROOT):
-        dns[:] = [d for d in dns if d not in {".git", "__pycache__", ".openclaw"}]
+        # .qpm 是 qpm 的依赖副本（Quelmara 源码包，git tag 锁定），
+        # 不属于"C/Python 第三方构建产物"检查的范畴
+        dns[:] = [d for d in dns if d not in {".git", "__pycache__", ".openclaw", ".qpm"}]
         for d in list(dns):
             if d in THIRD_PARTY_DIRS:
                 found.append(os.path.relpath(os.path.join(dp, d), ROOT))
