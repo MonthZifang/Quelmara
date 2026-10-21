@@ -241,6 +241,18 @@
 
 ### 6.5.15 性能专项（v1.14 登记的"赢回来"路线）
 
+**v1.14d 补充实测（min of 3）**：gzip 1MiB 61ms（1.9 倍，DEFLATE 全程
+mem_load8 零 bounds）；split+join 8ms（3.6 倍）；url 72ms；
+sha256 65ms；json parse 4ms。
+**loop_sum 200M 迭代 ≈ 12.6 cycles/iter**（868ms wall 含启动）：IR 已做到
+magic-mul 除法、循环不变外提、乘法增量化（i*7 滚动加）、循环内 6 条 + 2 条
+phi copy。距 GCC ~3.5 cycles/iter 还有 ~3.6 倍，差距在：
+(a) phi copy 残留（寄存器分配缺 coalescing）；
+(b) while 头测试结构多 1 跳/iter（do-while 变换未做）；
+(c) cssub 的 cmp+cmov 展开形态。这三项是"通用性能"最后的编译器硬骨头。
+
+### 6.5.15 性能专项（v1.14 登记的"赢回来"路线）
+
 **已落地（全部通用优化，无 benchmark 特调，import std 的程序自动受益）**：
 - CRC-32 逐位 → 256 项查表：约 8 倍（gzip 的校验部分）；
 - DEFLATE 匹配器：滚动哈希 + 首字节快速否决；gzip 1MiB 117 → 71ms（1.65 倍）；
