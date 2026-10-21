@@ -50,10 +50,12 @@
 | **`rc[T]`** | ✅ **v1.8** | `tests/t51_rc.qma` | 载荷仅具名 struct；不自动 drop |
 | **所有权 / 借用检查** | 🟡 **v1.8** | `tests/bad/own_*.qma`（必须编译失败） | **只查 `rc[T]` 句柄**的 use-after-drop / double-drop / move-then-use；不漏检堆/引用别名 |
 | **`interface` / `impl`** | ✅ **v1.9** | `tests/t52_iface.qma`（静态）、`t54_iface_dyn.qma`（动态） | 契约 + 校验 + 静态分发 + **vtable 动态分发**（接口值 / 接口形参 / 返回值 / `vec[Shape]`） |
-| 用户泛型（`fn f[T]`） | ❌ | `docs/GAPS.md §2` | 只有 `option/result/vec/map/rc` 受控单态化 |
+| **用户泛型（`fn f[T]`）** | 🟡 **v1.11 单态化落地**：单 T + 显式实例化 `f[int](...)`，编译期复制成具名实例（零分发开销）；自递归 / `T{...}` 字面量 / `vec[T]` 形参可用（`tests/t56_generic.qma`） | 类型推导 / 多参 / 约束 / 泛型 struct 未做（`docs/GAPS.md §2`） | 此前只能复制粘贴 + 命名前缀 | **P1（推导）** |
 | 闭包 / 捕获 | ❌ | 同上 | 只能传函数名 |
 | FFI（`@extern("C")`） | ❌ 自研后端 | `CHANGELOG` v0.12 | C 后端有原型；自研后端显式拒绝（无动态链接器） |
-| 宏 / 反射 / 编译期求值 | ❌ | `docs/GAPS.md §2` | `const` 仅字面量内联 |
+| **编译期求值（const）** | 🟡 **v1.11 整型算术**：`const N = 4 * KB`（+ - * / % 括号 + const 引用，C 截断语义，解析期求值）（`tests/t56_generic.qma`） | `const fn`（编译期执行纯函数）未做；float/str/bool 仍仅字面量 | 手算后写字面量 |
+| **宏系统** | ❌ | `docs/GAPS.md §2` | 需要编译期 AST API 基建；路线在 P2 | — |
+| **运行时反射** | ❌ | `docs/GAPS.md §2` | 需要类型元数据段；P2 | — |
 
 ### 1.2 整数宽度的准确语义（v1.8）
 

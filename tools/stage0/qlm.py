@@ -305,7 +305,7 @@ def tokenize(src, keep_comments=False):
 
 
 class Parser:
-    def __init__(self, toks, consts=None):
+    def __init__(self, toks, consts=None, generic_fns=None):
         self.toks, self.pos = toks, 0
         self.structs = {}          # name -> [(field, type)]（预扫描先登记名字）
         self.enums = {}            # name -> [(variant, [(field, type)])]（预扫描先登记名字）
@@ -318,6 +318,9 @@ class Parser:
         # 第一遍收集各文件 const，第二遍带着全集重解析——import 侧的 const
         # 因此可见，std 库的槽位布局常量得以跨文件共享）。
         self.consts = dict(consts) if consts else {}
+        # 泛型模板全集（v1.11）：调用点 f[int](...) 的解析需要知道 f 是不是
+        # 泛型——种子跨文件传递（与 consts 同一批两遍解析）。
+        self.generic_fns = dict(generic_fns) if generic_fns else {}
         self._prescan()
 
     def _prescan(self):
@@ -338,25 +341,101 @@ class Parser:
             elif depth == 0 and t.kind == "enum" and i + 1 < len(toks) \
                     and toks[i + 1].kind == "NAME":
                 self.enums.setdefault(toks[i + 1].val, [])
+            elif depth == 0 and t.kind == "fn" and i + 2 < len(toks) \
+                    and toks[i + 1].kind == "NAME" \
+                    and toks[i + 2].kind == "SYM" and toks[i + 2].val == "[":
+                # 泛型 fn 名占位（v1.11）：体解析时 `fact[n](...)` 的自引用 /
+                # 相互递归需要提前知道"这个名字是泛型"，否则会被解析成
+                # 下标链。占位值在 parse_program 解析到声明时被完整模板覆盖。
+                self.generic_fns.setdefault(toks[i + 1].val, None)
             i += 1
 
     def parse_const_value(self, name):
-        """const 的右值：整数/浮点/字符串/布尔，或它们的负号形式。"""
-        neg = False
-        if self.at("SYM", "-"):
-            self.next()
-            neg = True
+        """const 的右值（v1.11 起支持**编译期整型算术**——编译期求值的最小形态）：
+
+        - int：字面量 / 一元负号 / 括号 / `+ - * / %` / 已声明的 const 引用
+          （按声明序，引用未声明的报错）。求值在解析期完成，除法与模
+          按 C 截断语义（与语言 binop 一致），编译期除零 fail-fast。
+        - float / str / bool：仍仅字面量（含一元负号）。
+        """
         t = self.peek()
-        if t.kind in ("INT", "FLOAT"):
-            self.next()
-            return ("num", -t.val if neg else t.val)
-        if t.kind == "STR" and not neg:
+        if t.kind == "STR":
             self.next()
             return ("str", t.val)
-        if t.kind in ("true", "false") and not neg:
+        if t.kind in ("true", "false"):
             self.next()
             return ("bool", t.kind == "true")
-        raise SyntaxError(f"line {t.line}: const {name} 的右值必须是字面量")
+        if t.kind == "FLOAT" or (t.kind == "SYM" and t.val == "-"
+                                 and self.peek(1).kind == "FLOAT"):
+            neg = False
+            if t.kind == "SYM":
+                self.next()
+                neg = True
+            tf = self.next()
+            return ("num", -tf.val if neg else tf.val)
+        # int 路径：字面量或编译期算术
+        return ("num", self._const_int_expr(name))
+
+    def _const_int_expr(self, name):
+        """编译期整型表达式求值（const 专用，递归下降）。
+
+        只允许 INT / const 名 / 括号 / 算术——没有函数调用、没有类型转换，
+        求值不可能有副作用，这就是"编译期求值"的安全边界。
+        """
+        def factor():
+            t = self.peek()
+            if t.kind == "SYM" and t.val == "-":
+                self.next()
+                return -factor()
+            if t.kind == "SYM" and t.val == "(":
+                self.next()
+                v = expr()
+                self.eat("SYM", ")")
+                return v
+            if t.kind == "INT":
+                self.next()
+                return t.val
+            if t.kind == "NAME":
+                if t.val in self.consts:
+                    cv = self.consts[t.val]
+                    if cv[0] == "num" and isinstance(cv[1], int):
+                        self.next()
+                        return cv[1]
+                    raise SyntaxError(
+                        f"line {t.line}: const {name} 引用了非整型 const {t.val!r}")
+                raise SyntaxError(
+                    f"line {t.line}: const {name} 的算术引用了未声明的 {t.val!r}"
+                    "（const 按声明序求值）")
+            raise SyntaxError(
+                f"line {t.line}: const {name} 的右值不是编译期可求值表达式"
+                "（支持整型字面量/const 引用/括号/+ - * / %）")
+
+        def term():
+            v = factor()
+            while self.at("SYM", "*") or self.at("SYM", "/") or self.at("SYM", "%"):
+                op = self.next().val
+                r = factor()
+                if r == 0 and op in ("/", "%"):
+                    raise SyntaxError(f"const {name}: 编译期除零")
+                if op == "*":
+                    v = v * r
+                elif op == "/":
+                    q = abs(v) // abs(r)
+                    v = q if (v >= 0) == (r >= 0) else -q   # C 截断语义
+                else:
+                    m = abs(v) % abs(r)
+                    v = m if v >= 0 else -m
+            return v
+
+        def expr():
+            v = term()
+            while self.at("SYM", "+") or self.at("SYM", "-"):
+                op = self.next().val
+                r = term()
+                v = v + r if op == "+" else v - r
+            return v
+
+        return expr()
 
     def peek(self, off=0):
         return self.toks[min(self.pos + off, len(self.toks) - 1)]
@@ -390,14 +469,29 @@ class Parser:
                     path.append(self.eat("NAME").val)
                 imports.append(".".join(path))
             elif self.at("const"):
-                # const NAME = <编译期字面量>：只在解析期做内联，不产生运行时存储。
-                # 只接受字面量（含一元负号）——需要算式的常量请直接写字面量。
+                # const NAME [: T] = <编译期可求值>：解析期内联，无运行时存储。
+                # v1.11：右值支持整型算术（+ - * / % 与括号、const 引用），
+                # 编译期求值、C 截断语义；类型标注仅文档性（不做检查）。
                 self.next()
                 cname = self.eat("NAME").val
+                if self.at("SYM", ":"):
+                    self.next()
+                    self.parse_type()
                 self.eat("SYM", "=")
                 self.consts[cname] = self.parse_const_value(cname)
             elif self.at("fn"):
-                fns.append(self.parse_fn())
+                fdef = self.parse_fn()
+                if fdef.get("type_params"):
+                    # 泛型模板（v1.11）：不进发射列表，只作单态化种子。
+                    # 带注解的泛型（@simd/@extern ...）暂不支持——模板复制
+                    # 会丢注解语义，先 fail-fast。
+                    if fdef.get("annots") or fdef.get("extern"):
+                        raise SyntaxError(
+                            f"line ?: 泛型函数 {fdef['name']!r} 暂不支持注解"
+                            "（@simd/@extern 等只用于具体函数）")
+                    self.generic_fns[fdef["name"]] = fdef
+                else:
+                    fns.append(fdef)
             elif self.at("SYM", "@"):
                 # 注解：@extern("C") fn ... （v0.11）
                 annots = []
@@ -652,6 +746,18 @@ class Parser:
     def parse_fn(self):
         self.eat("fn")
         name = self.eat("NAME").val
+        tparams = None
+        if self.at("SYM", "["):
+            # 用户泛型（v1.11）：fn name[T](x: T) -> T { ... }。
+            # 单类型参数；**显式实例化**（调用点写 f[int](...)），
+            # 类型推导 / 多参 / 约束未做（docs/GAPS.md §2）。
+            bracket = self.next()
+            tparams = [self.eat("NAME").val]
+            if self.at("SYM", ","):
+                raise SyntaxError(
+                    f"line {bracket.line}: 用户泛型 v1.11 只支持单类型参数 T"
+                    "（多参在 docs/GAPS.md §2 路线上）")
+            self.eat("SYM", "]")
         self.eat("SYM", "(")
         params = []
         while not self.at("SYM", ")"):
@@ -665,12 +771,19 @@ class Parser:
         if self.at("SYM", "->"):
             self.next()
             ret = self.parse_type()
+        # 类型参数作用域：体解析期间 `T { ... }` 是泛型字面量占位（v1.11）
+        saved_tp = getattr(self, "_cur_tparams", None)
+        self._cur_tparams = tparams or []
         if self.at("SYM", "{"):
             body = self.parse_block()
         else:
             # 无函数体：仅 @extern("C") 声明允许（parse_program 校验注解存在）
             body = None
-        return {"name": name, "params": params, "ret": ret, "body": body}
+        self._cur_tparams = saved_tp
+        fd = {"name": name, "params": params, "ret": ret, "body": body}
+        if tparams:
+            fd["type_params"] = tparams
+        return fd
 
     # ---- 语句 ----
     def parse_block(self):
@@ -1246,6 +1359,21 @@ class Parser:
                         self.next()
                 self.eat("SYM", "}")
                 return ("enumlit", path, fields)
+            if self.at("SYM", "{") and len(path) == 1 \
+                    and path[0] in (self._cur_tparams or []):
+                # 泛型体内的 `T { ... }` 字面量（v1.11）：T 是当前 fn 的
+                # 类型参数，不是具体 struct——生成占位节点，单态化时替换
+                # 为 ("structlit", 实例类型, fields)（Lower 照常校验字段）。
+                self.next()
+                fields = {}
+                while not self.at("SYM", "}"):
+                    fname = self.eat("NAME").val
+                    self.eat("SYM", ":")
+                    fields[fname] = self.parse_expr()
+                    if self.at("SYM", ","):
+                        self.next()
+                self.eat("SYM", "}")
+                return ("tp_lit", path[0], fields)
             if self._is_type_path(path) and self.at("SYM", "{"):
                 # 结构体字面量 net.TcpServer { ... } / Vec3 { ... }
                 self.next()
@@ -1258,6 +1386,22 @@ class Parser:
                         self.next()
                 self.eat("SYM", "}")
                 return ("structlit", path, fields)
+            if self.at("SYM", "[") and len(path) == 1 and path[0] in self.generic_fns:
+                # 泛型显式实例化：f[int](...)（v1.11）。
+                # 之所以不歧义：语言没有"下标后调用"（函数指针数组），
+                # 而 f 在泛型模板集合里——唯一解释就是实例化。
+                g = self.next()
+                ty = self.parse_type()
+                if ty[0] != "named" or "." in ty[1]:
+                    raise SyntaxError(
+                        f"line {g.line}: 泛型实参 v1.11 只支持单个具名类型"
+                        "（标量 / struct / enum；vec/map 嵌套见 GAPS §2）")
+                self.eat("SYM", "]")
+                self.eat("SYM", "(")
+                args = self.parse_args()
+                if any(a[0] == "namedarg" for a in args):
+                    raise SyntaxError(f"line {g.line}: 泛型调用不支持命名实参")
+                return ("gcall", path[0], ty[1], args)
             if self.at("SYM", "("):
                 self.next()
                 args = self.parse_args()
@@ -1295,6 +1439,93 @@ def _import_candidates(imp, src_dir):
             os.path.join(std_root, rel_in_std)]
 
 
+def expand_generics(fns, generic_fns, structs, enums):
+    """用户泛型单态化（v1.11）：收集全部 gcall 节点，按 (fn, T) 复制模板成
+    具名实例 `f__<T>`，体内类型参数 ("named", T) 全替换、体内 gcall 递归
+    实例化后降为普通 call。**Lower 与后端零改动**——pass 之后 AST 里不再有
+    泛型痕迹（模板不进发射列表，只有实例存在）。
+
+    支持范围（诚实边界，docs/GAPS.md §2）：
+      * 单类型参数 T；**显式实例化** f[int](...)（类型推导未做）；
+      * T 可出现在：形参 / 返回值 / let 标注 / 嵌套容器元素（vec[T] 等）；
+      * 泛型体内可调用其他泛型（含自递归 f[int]）；
+      * 不支持：泛型 struct、泛型方法、约束、多类型参数。
+    """
+    import copy
+    SCALARS = {"int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8",
+               "bool", "str", "float", "f64", "f32"}
+    instances = {}   # (fname, tyname) -> instance fn dict（先注册后填体，支持自递归）
+
+    def ensure(fname, tyname, line):
+        key = (fname, tyname)
+        if key in instances:
+            return instances[key]
+        tmpl = generic_fns.get(fname)
+        if tmpl is None:
+            raise SyntaxError(
+                f"line {line}: {fname}[{tyname}] —— {fname!r} 不是泛型函数")
+        legal = tyname in SCALARS or tyname in structs or tyname in enums
+        if not legal:
+            raise SyntaxError(
+                f"line {line}: 泛型实参 {tyname!r} 不是已知类型"
+                "（标量 / struct / enum）")
+        inst = copy.deepcopy(tmpl)
+        inst["name"] = f"{fname}__{tyname}"
+        inst.pop("type_params", None)
+        if inst["name"] in {f["name"] for f in fns}:
+            raise SyntaxError(
+                f"泛型实例 {inst['name']!r} 与已有函数重名（请改名）")
+        instances[key] = inst            # 先注册：体内自递归 f[同T] 直接引用
+        tp = tmpl["type_params"][0]
+        inst["params"] = [(n, subst(t, tp, tyname)) for n, t in inst["params"]]
+        inst["ret"] = subst(inst["ret"], tp, tyname)
+        inst["body"] = subst(inst["body"], tp, tyname)
+        return inst
+
+    def subst(x, tp, tyname):
+        # ("named", T) -> ("named", 实例类型)；gcall -> 普通 call；
+        # ("tp_lit", T, fields) -> ("structlit", 实例类型, fields)。
+        # 变量引用是 ("name", s)、类型是 ("named", s)——天然不撞。
+        if isinstance(x, tuple):
+            if x[0] == "named" and len(x) == 2 and x[1] == tp:
+                return ("named", tyname)
+            if x[0] == "tp_lit" and x[1] == tp:
+                return ("structlit", tyname,
+                        {k: subst(v, tp, tyname) for k, v in x[2].items()})
+            if x[0] == "gcall":
+                # 体内 gcall：类型参数随实例化替换（f[T] -> f__<tyname>），
+                # 显式具体类型（f[int]）按原样实例化。
+                ty2 = tyname if x[2] == tp else x[2]
+                inner = ensure(x[1], ty2, 0)
+                return ("call", [inner["name"]],
+                        [subst(a, tp, tyname) for a in x[3]])
+            return tuple(subst(v, tp, tyname) for v in x)
+        if isinstance(x, list):
+            return [subst(v, tp, tyname) for v in x]
+        return x
+
+    def subst_main(x):
+        # 主（非泛型）函数体：只降级 gcall（无类型参数替换）。
+        if isinstance(x, tuple):
+            if x[0] == "gcall":
+                inner = ensure(x[1], x[2], 0)
+                return ("call", [inner["name"]], [subst_main(a) for a in x[3]])
+            return tuple(subst_main(v) for v in x)
+        if isinstance(x, list):
+            return [subst_main(v) for v in x]
+        return x
+
+    out = []
+    for f in fns:
+        if f.get("type_params"):
+            continue                       # 模板不发射（正常不会出现在 fns）
+        f["body"] = subst_main(f["body"])
+        out.append(f)
+    for inst in instances.values():
+        out.append(inst)
+    return out
+
+
 def load_program(src_path):
     """带 import 的程序加载：递归解析被导入模块，**扁平合并**进主 AST。
 
@@ -1310,9 +1541,10 @@ def load_program(src_path):
     src_dir = os.path.dirname(os.path.abspath(src_path))
     seen, order, stack = {}, [], []
 
-    def parse_file(path, consts=None):
+    def parse_file(path, consts=None, generic_fns=None):
         with open(path, encoding="utf-8") as f:
-            return Parser(tokenize(f.read()), consts=consts).parse_program()
+            return Parser(tokenize(f.read()), consts=consts,
+                          generic_fns=generic_fns).parse_program()
 
     def resolve_or_raise(imp, from_path):
         cands = _import_candidates(imp, os.path.dirname(os.path.abspath(from_path)))
@@ -1351,29 +1583,36 @@ def load_program(src_path):
         with open(path, encoding="utf-8") as f:
             p = Parser(tokenize(f.read()))
         p.parse_program()
-        return p.consts
+        return p.consts, p.generic_fns
 
     acc = {}
+    acc_gf = {}
     for path in [src_path] + list(seen.keys()):
-        for k, v in _consts_of(path).items():
+        cs, gf = _consts_of(path)
+        for k, v in cs.items():
             if k in acc and acc[k] != v:
                 raise SyntaxError(
                     f"const 冲突：{k!r} 在多个模块中取值不同")
             acc[k] = v
-    if acc:
+        for k, v in gf.items():
+            if k in acc_gf and acc_gf[k] != v:
+                raise SyntaxError(
+                    f"泛型函数冲突：{k!r} 在多个模块中定义不同")
+            acc_gf[k] = v
+    if acc or acc_gf:
         seen2, order2 = {}, []
 
         def reload(path):
             ap = os.path.normpath(os.path.abspath(path))
             if ap in seen2:
                 return
-            res = parse_file(ap, consts=acc)
+            res = parse_file(ap, consts=acc, generic_fns=acc_gf)
             seen2[ap] = res
             order2.append(res)
             for imp in res[1]:
                 reload(resolve_or_raise(imp, path))
 
-        main_res = parse_file(src_path, consts=acc)
+        main_res = parse_file(src_path, consts=acc, generic_fns=acc_gf)
         for imp in main_res[1]:
             reload(resolve_or_raise(imp, src_path))
         seen, order = seen2, order2
@@ -1400,6 +1639,10 @@ def load_program(src_path):
         have = set(decl_order)
         decl_order = decl_order + [d for d in res[6] if d not in have]
         tests = tests + res[3]
+    # 用户泛型单态化（v1.11）：gcall 全部降为普通 call，模板换成实例。
+    # 必须在合并完成后做——调用点可能跨文件（std 库的泛型）。
+    if acc_gf:
+        fns = expand_generics(fns, acc_gf, structs, enums)
     return mod, imports, fns, tests, structs, enums, decl_order
 
 

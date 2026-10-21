@@ -1,0 +1,82 @@
+// t56_generic.qma：用户泛型单态化 + const 编译期算术（v1.11）
+// 覆盖：
+//   1) const 编译期求值：算术 / const 引用 / C 截断除法
+//   2) 泛型显式实例化：标量 / str / struct 实参
+//   3) 泛型自递归（fact[T] -> fact__int）
+//   4) 泛型体内的 T { ... } 字面量构造
+//   5) 泛型形参含容器（vec[T]）
+// 边界（GAPS §2）：单类型参数、显式实例化（无推导）、无约束、无泛型 struct
+module t56
+
+const KB: int = 1024
+const BUF: int = 4 * KB          // 编译期算术 + const 引用
+const HALF: int = BUF / 2        // C 截断除法
+const NEG: int = -3 * 8
+
+struct P { x: int, y: int }
+
+// 泛型：单 T，显式实例化
+fn pick_first[T](a: T, b: T) -> T {
+    return a
+}
+
+fn dup[T](v: T) -> T {
+    return v + v
+}
+
+// 自递归泛型：实例体内 fact[T] 降级为 call fact__int
+fn fact[T](n: T) -> T {
+    if n <= 1 {
+        return 1
+    }
+    return n * fact[T](n - 1)
+}
+
+// 泛型 + 结构体实参（T { ... } 占位字面量，单态化后变 structlit）
+fn xscale[T](p: T, k: int) -> T {
+    return T { x: p.x * k, y: p.y * k }
+}
+
+// 泛型形参含容器：vec[T] 随实例化替换
+fn total(v: vec[int]) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < len(v) {
+        s = s + v.get(i)
+        i = i + 1
+    }
+    return s
+}
+
+fn main() {
+    // 1) const 编译期求值
+    assert(BUF == 4096, "const arith")
+    assert(HALF == 2048, "const div")
+    assert(NEG == -24, "const neg mul")
+
+    // 2) 泛型实例化
+    let a = pick_first[int](7, 9)
+    let s = pick_first[str]("hi", "no")
+    assert(a == 7, "generic int")
+    assert(s == "hi", "generic str")
+
+    let d = dup[int](21)
+    assert(d == 42, "generic dup")
+
+    // 3) 自递归
+    assert(fact[int](5) == 120, "generic recursion")
+
+    // 4) T 字面量构造（struct 按值语义）
+    let p = P { x: 3, y: 4 }
+    let q = xscale[P](p, 10)
+    assert(q.x == 30 and q.y == 40, "generic struct lit")
+
+    // 5) vec 容器实参
+    let v = vec[int].new(4)
+    v.push(10)
+    v.push(20)
+    v.push(12)
+    assert(total(v) == 42, "generic vec param")
+
+    print("generic ok")
+}

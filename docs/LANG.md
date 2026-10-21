@@ -352,3 +352,53 @@ wg_add(w, 3) ... wg_done(w) ... wg_wait(w)
 - AArch64 发射层未接 atomic/rdtsc（编译期明确报错，与 trunc/vsum/vtable 同条边界）；
 - 栈 pop 多消费者有 ABA（需 tagged pointer，GAPS 登记）；本库 pop 按单消费者设计；
 - `now_cycle` 是墙钟近似（TSC 周期，非纳秒）；标定由调用方做。
+
+---
+
+## 10. 用户泛型（v1.11）：`fn f[T]` 单态化
+
+```quelmara
+fn pick_first[T](a: T, b: T) -> T { return a }
+
+let a = pick_first[int](7, 9)       // 显式实例化：生成 pick_first__int
+let s = pick_first[str]("hi", "no") // 各实例独立存在（静态分发，零开销）
+
+fn fact[T](n: T) -> T {             // 自递归：体内 fact[T] 降级为 call fact__int
+    if n <= 1 { return 1 }
+    return n * fact[T](n - 1)
+}
+
+fn xscale[T](p: T, k: int) -> T {   // T { ... } 占位字面量 -> structlit
+    return T { x: p.x * k, y: p.y * k }
+}
+
+fn total(v: vec[T]) -> int { ... }  // 容器形参随实例化替换
+```
+
+- **实现**：解析期收集模板（不发射）→ 后置 pass 收集全部 `f[Type](...)` 调用点
+  → 按 (fn, T) 深拷贝模板成具名实例 `f__<T>`、类型元组 `("named", T)` 全替换、
+  体内泛型调用递归实例化后**降为普通 call**。Lower 与后端零改动。
+- **实例化是编译期复制**：每个用到的 (fn, T) 恰好一份机器码，无虚表无装箱——
+  与 C++ 模板同级的分发开销（零）。
+- **支持**：单类型参数 T；显式实例化；标量 / str / 具名 struct / enum 作实参；
+  形参 / 返回值 / `let` 标注 / 嵌套容器元素（`vec[T]`）中的 T；体内调用其他
+  泛型（含自递归）。
+- **边界（GAPS §2）**：类型**推导**未做（必须写 `f[int]`，不能写 `f(5)`）；
+  多类型参数 / 泛型 struct / 泛型方法 / 约束（where）未做；泛型 fn 不能带注解。
+
+## 11. const 编译期求值（v1.11）
+
+```quelmara
+const KB: int = 1024
+const BUF: int = 4 * KB          // 编译期算术 + const 引用
+const HALF: int = BUF / 2        // C 截断除法，编译期算完
+let a: [BUF]int = ...            // 常量进表达式（原有内联机制）
+```
+
+- 整型：字面量 / 一元负号 / 括号 / `+ - * / %` / 已声明的 const 引用
+  （按声明序）。求值在解析期完成——没有函数调用、没有副作用，这是
+  "编译期求值"的安全边界。
+- 除法与模按 **C 截断语义**（与运行时 binop 一致）；编译期除零 fail-fast。
+- float / str / bool 仍仅字面量；类型标注 `const N: int = ...` 仅文档性。
+- **未做**（GAPS）：`const fn`（编译期执行任意纯函数）、编译期字符串拼接、
+  类型级算术。
