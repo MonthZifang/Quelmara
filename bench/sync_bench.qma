@@ -1,0 +1,84 @@
+// bench_sync.qma：atomic / mutex / 无锁栈 单线程开销（rdtsc 程序内自计时）
+// 测量纪律：本机进程冷启动 ~350ms（Hyper-V/VBS），微基准必须排除它。
+module bench_sync
+
+import std.sync
+
+fn spin_atomic(n: int) -> int {
+    let p = static_word(5)
+    let mut k = 0
+    while k < n {
+        atomic_add(p, 1)
+        k = k + 1
+    }
+    return mem_load64(p, 0)
+}
+
+fn spin_plain(n: int) -> int {
+    let mut k = 0
+    let mut s = 0
+    while k < n {
+        s = s + 1
+        k = k + 1
+    }
+    return s
+}
+
+fn spin_mutex(n: int) -> int {
+    let m = mutex_new()
+    let ctr = mem_alloc(8)
+    let mut k = 0
+    while k < n {
+        mutex_lock(m)
+        let v = mem_load64(ctr, 0)
+        mem_store64(ctr, 0, v + 1)
+        mutex_unlock(m)
+        k = k + 1
+    }
+    return mem_load64(ctr, 0)
+}
+
+fn spin_stack(n: int) -> int {
+    let s = stack_new()
+    let mut k = 0
+    while k < n {
+        stack_push(s, k)
+        stack_pop(s)
+        k = k + 1
+    }
+    return stack_pop(s)
+}
+
+fn main() {
+    let n = 2000000
+    // 预热（缓存/分支预测/内联路径热身）
+    let w1 = spin_plain(10000)
+    let w2 = spin_atomic(10000)
+    let w3 = spin_mutex(10000)
+    let w4 = spin_stack(10000)
+
+    let t0 = now_cycle()
+    let r1 = spin_plain(n)
+    let t1 = now_cycle()
+    let r2 = spin_atomic(n)
+    let t2 = now_cycle()
+    let r3 = spin_mutex(n)
+    let t3 = now_cycle()
+    let r4 = spin_stack(n)
+    let t4 = now_cycle()
+
+    assert(r1 == n and r2 == n and r3 == n and r4 == 0, "bench correct")
+    print("plain  inc :")
+    print(t1 - t0)
+    print("atomic add:")
+    print(t2 - t1)
+    print("mutex  RMW :")
+    print(t3 - t2)
+    print("stack push+pop:")
+    print(t4 - t3)
+    print("cycles/iter (n=2e6):")
+    print((t1 - t0) / n)
+    print((t2 - t1) / n)
+    print((t3 - t2) / n)
+    print((t4 - t3) / n)
+}

@@ -1,7 +1,7 @@
 # Quelmara 交接文档（HANDOVER）
 
 > 工作区状态（2026-10-21）：**已发布 v1.2；v1.3（自举）+ v1.4/v1.5（reactor + 性能 + 协议库）
-> + v1.6（标准库六件）+ v1.8（语言特性大补）+ v1.9（interface 动态分发）在工作区落地待提交**。  
+> + v1.6（标准库六件）+ v1.9（interface 动态分发）+ v1.10（atomic + std/sync）在工作区落地待提交**。  
 > 各版本特性、修复与回归项数的**权威记录**在 `CHANGELOG.md`；本文只保留  
 > 当前快照、差距清单与下一步排期，不再按轮复述。  
 > **完整能力边界（含"文档与代码不符"逐条核对、标准库缺口全表、优先级路线）见 `docs/GAPS.md`。**  
@@ -37,7 +37,19 @@
 | 词法 / 声明 / IR / 发射 | 99/99、90/90（1 跳过）、50/50（19 skip）、10/10 | `tests/lexdiff.py` 等 |
 | 三件门禁 | check_names / check_origin / check_docs 全 PASS | `tools/dev/check_*.py` |
 
-### 本轮（v1.9 工作区）新增：interface 动态分发
+### 本轮（v1.10 工作区）新增：并发与极致性能地基
+
+| 特性 | 语义 | 夹具/基准 | 边界 |
+|---|---|---|---|
+| `atomic_add/cas/fence` | `lock xadd` / `lock cmpxchg` / `mfence`，返回旧值 | `tests/t55_sync.qma` | 地址须 8 字节对齐；AArch64 未接 |
+| `spin_hint()` / `now_cycle()` | `pause` / `rdtsc`（EDX:EAX） | `bench/sync_bench.qma` | rdtsc 进 `_EFF`（不可挪过 call） |
+| `std/sync.qma` | 自旋锁 / Treiber 无锁栈 / WaitGroup（全 Quelmara） | 同上 | pop 单消费者（多消费者 ABA→GAPS §6.5.2） |
+| 实测（2e6 iter，rdtsc 自计时） | plain 2 / atomic 27 / mutex 28 / stack 106 cycles/iter | 同上 | mutex 无 libc 间接，比 glibc 快一个量级 |
+
+**新增 IR 指令登记纪律已从三处升级为五处**（`_subst_vregs` 是本轮新发现的第四处，
+漏它 = copy_prop 塌定义不替换使用 = 悬空 vreg 段错误；详见 `docs/GAPS.md §6.5.1`）。
+
+### 上一轮（v1.9 工作区）新增：interface 动态分发
 
 | 特性 | 语义 | 夹具 | 边界 |
 |---|---|---|---|

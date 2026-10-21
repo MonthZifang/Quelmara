@@ -562,6 +562,7 @@ def main():
     case_selfcheck("t52_iface", "tests/t52_iface.qma")
     case_selfcheck("t53_regress", "tests/t53_regress.qma")
     case_selfcheck("t54_iface_dyn", "tests/t54_iface_dyn.qma")
+    case_selfcheck("t55_sync", "tests/t55_sync.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),

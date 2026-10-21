@@ -303,3 +303,52 @@ python tools/stage0/qlm_cli.py build tests/bad/iface_dup_method.qma --target win
 | 3 | 一个表达式里两次调用 + 下标 → 整体偏移 | 同 #1 |
 
 排查手法与教训见 `docs/GAPS.md §6.5`。
+
+---
+
+## 9. 并发地基：atomic 内建 + std/sync（v1.10）
+
+### 9.1 atomic 内建（x86_64，ELF/PE 同编码）
+
+```quelmara
+let p = static_word(3)          // 或 mem_alloc(8)——地址必须 8 字节对齐
+let old = atomic_add(p, 1)      // lock xadd：*p += 1，返回**旧值**
+let old = atomic_cas(p, 50, 99) // lock cmpxchg：*p==50 时写 99，返回旧值
+let old = mem_xchg(p, 7)        // xchg（v1.5 已有）：交换，返回旧值
+atomic_fence()                  // mfence：全内存屏障
+spin_hint()                     // pause：自旋等待提示
+now_cycle() -> int              // rdtsc：周期计数（程序内自计时用）
+```
+
+- 成功/失败判断：`atomic_cas` 返回**旧值**，调用方比较 `old == expect`；
+- **无锁计数**：`atomic_add` 天然安全；**互斥**：CAS 自旋（见 std/sync）；
+- 语义：每条 atomic 自带全屏障（lock 前缀），store-load 顺序无需手补 fence。
+
+### 9.2 std/sync（Quelmara 自实现，零外部运行时）
+
+```quelmara
+import std.sync
+let m = mutex_new()             // 自旋锁（CAS + pause）
+mutex_lock(m) ... mutex_unlock(m)
+
+let s = stack_new()             // Treiber 无锁栈
+stack_push(s, v) / stack_pop(s) // 多生产者 push；pop 单消费者（见边界）
+
+let w = wg_new()                // WaitGroup
+wg_add(w, 3) ... wg_done(w) ... wg_wait(w)
+```
+
+### 9.3 实测（rdtsc 程序内自计时，2e6 次，bench/sync_bench.qma）
+
+| 操作 | cycles/iter | 备注 |
+|---|---|---|
+| 标量自增（基线） | **2** | 编译器已到指令数下限 |
+| `atomic_add`（lock xadd） | **27** | lock 前缀全核串行化，未争用 |
+| mutex lock+RMW+unlock | **28** | 无竞争 CAS 一次成功 + store；无 libc 间接 |
+| 无锁栈 push+pop | **106** | 两次 CAS + 两次 mem_alloc + 链操作 |
+
+### 9.4 边界
+
+- AArch64 发射层未接 atomic/rdtsc（编译期明确报错，与 trunc/vsum/vtable 同条边界）；
+- 栈 pop 多消费者有 ABA（需 tagged pointer，GAPS 登记）；本库 pop 按单消费者设计；
+- `now_cycle` 是墙钟近似（TSC 周期，非纳秒）；标定由调用方做。

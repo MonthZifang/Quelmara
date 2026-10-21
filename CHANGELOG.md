@@ -6,13 +6,60 @@
 
 ---
 
-> **版本号顺序说明**：下面并列的五节按主题分组（v1.9 = 接口动态分发，v1.8 = 语言特性，
-> v1.6 = 标准库 P0，v1.5 = 性能 + 协议库，v1.3 = 自举 + 可用性边界），
-> **物理顺序不代表版本先后**。v1.8 已提交（`e340962`），v1.4（IOCP reactor）已提交
-> （`d769435` / `b3e0fe2`）；v1.9 本轮提交；v1.3 / v1.5 / v1.6 仍待按节各打一个 commit。
+> **版本号顺序说明**：下面并列的六节按主题分组（v1.10 = 并发与性能地基，
+> v1.9 = 接口动态分发，v1.8 = 语言特性，v1.6 = 标准库 P0，v1.5 = 性能 + 协议库，
+> v1.3 = 自举 + 可用性边界），**物理顺序不代表版本先后**。
+> v1.8 已提交（`e340962`），v1.9 已提交（`92b05a3`），v1.4（IOCP reactor）已提交
+> （`d769435` / `b3e0fe2`）；v1.10 本轮提交；v1.3 / v1.5 / v1.6 仍待按节各打一个 commit。
 > 各节的回归/对拍项数是**当轮口径**，会随夹具增加而增长（例如 lexdiff 现 92/92、parsediff 现 88/88）；
 > 需要"当前实测值"请看 `HANDOVER.md §0` 或直接跑脚本。
 > 能力边界与缺口全表见 `docs/GAPS.md`。
+
+## 未发布（v1.10，工作区进行中）
+
+> 主题：**并发与极致性能地基**——atomic 原语（IR + lock 前缀编码）+ 无锁同步库
+> `std/sync`（Quelmara 自实现）+ `now_cycle()`（rdtsc 程序内自计时）。
+> 这是"网络并发 / IO / 内存管理安全都算极致性能"承诺的第一块：无锁数据结构与
+> 自旋互斥不再需要绕道运行库，全部一条 CPU 指令直达。
+>
+> 状态总表见 `docs/STATUS.md`，语义与实测见 `docs/LANG.md §9`。
+
+### 语言 / IR（全部有夹具）
+
+- **`atomic_add(addr, v) -> old`**：`lock xadd`（fetch-and-add），无锁计数器地基。
+- **`atomic_cas(addr, expect, new) -> old`**：`lock cmpxchg`（期望值走 RAX），
+  自旋锁 / 无锁栈的地基。
+- **`atomic_fence()`**：`mfence` 全内存屏障；**`spin_hint()`**：`pause` 自旋提示。
+- **`now_cycle() -> int`**：`rdtsc`（EDX:EAX 拼 64 位）。微基准必须排除本机
+  ~350ms 进程冷启动（Hyper-V/VBS），这是测量纪律的最后一块拼图。
+- 新 IR 指令 `atomic` / `mfence` / `pause` / `rdtsc`——**登记纪律升级为五处**：
+  `vreg_mentions`、`_map_ins`、`_EFF`、**`_subst_vregs`**（新发现）、`gen_instr`。
+  `_subst_vregs` 漏登记的后果（本轮实测）：copy_prop 塌掉 addr 的定义 mov 而
+  不替换 atomic 里的 use → 悬空 vreg → 调度器把 atomic 排到定义前 →
+  运行期地址是垃圾，段错误。
+
+### 标准库
+
+- **`std/sync.qma`**（全 Quelmara，零 Python 运行时）：自旋锁（CAS + pause）、
+  Treiber 无锁栈（多生产者 push / 单消费者 pop，多消费者 ABA 见 GAPS）、
+  WaitGroup（fork-join 屏障）。
+- **`bench/sync_bench.qma`**：rdtsc 自计时基准（`docs/LANG.md §9.3`）——
+  标量自增 2 cycles/iter、`atomic_add` 27、mutex 无竞争 RMW 28、
+  无锁栈 push+pop 106。
+
+### 修复
+
+- **架构守卫 bug（v1.5 遗留）**：`mem_xchg` 等内建的 x86_64 判据写成
+  `platform not in ("windows", "native")`，而 platform 实际取值是
+  `linux | windows` → Linux 链永远拒绝。统一改为 `self.arch != "x86_64"`（4 处）。
+
+### 验证
+
+- 夹具 `tests/t55_sync.qma`：4 线程 atomic 计数 40000 ✓、CAS 成败语义 ✓、
+  mutex 防丢更新（非原子 RMW ×2 线程 ×5000）✓、无锁栈并发 push 1000 元素
+  总和 ✓、WaitGroup 屏障 ✓。
+- PE 回归 **116 → 117 项**全绿；lexdiff 103/103、parsediff 89/89、emitdiff 10/10；
+  三道门禁 PASS。
 
 ## 未发布（v1.9，工作区进行中）
 

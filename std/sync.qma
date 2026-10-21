@@ -1,0 +1,117 @@
+// std/sync.qma —— 无锁同步原语（v1.10），Quelmara 自实现，零 Python/Node 运行时
+//
+// 为什么需要它：atomic_add/cas 内建（v1.10）给了"单条 CPU 指令级"的读改写，
+// 但真实并发程序需要的是组合出来的同步对象——自旋锁（临界区）、无锁栈
+// （MPSC 队列的地基）、WaitGroup（fork-join 屏障）。全部构建在
+// atomic_cas / atomic_add / spin_hint 之上，无任何全局解释器锁。
+//
+// 内存布局（全部 8 字节对齐，atomic 要求）：
+//   mutex  : [lock: 0=未锁 1=已锁]
+//   stack  : [head]；节点 = [next][value]（16 字节堆块）
+//   wg     : [count]
+//
+// 边界（诚实标注）：
+//   * 栈 pop 的 ABA 问题：单消费者（一个线程 pop）下不存在；多消费者需要
+//     带标签指针（tagged pointer），是 GAPS.md 的后续项；
+//   * 节点/锁对象不归还（堆是 bump 分配 + mem_free 显式归还，本库不自动 free）；
+//   * wg_wait 是自旋等待（无 futex/futex-wake，长等待场景请用 chan 组合）。
+
+// ---- 自旋锁 ----
+
+fn mutex_new() -> int {
+    // 锁对象 = 8 字节堆块；0 = 未锁，1 = 已锁
+    let m = mem_alloc(8)
+    mem_store64(m, 0, 0)
+    return m
+}
+
+fn mutex_lock(m: int) {
+    // CAS 自旋：旧值 0 = 抢锁成功；否则 pause 后重试
+    let mut old = atomic_cas(m, 0, 1)
+    while old != 0 {
+        spin_hint()
+        old = atomic_cas(m, 0, 1)
+    }
+}
+
+fn mutex_unlock(m: int) {
+    // 释放 = 写 0。x86 TSO 下普通 store 已有 release 语义；
+    // 等待方在下一轮 atomic_cas（带 lock 前缀，全屏障）看到它。
+    mem_store64(m, 0, 0)
+}
+
+// ---- 无锁栈（Treiber push / 单消费者 pop）----
+
+fn stack_new() -> int {
+    let s = mem_alloc(8)
+    mem_store64(s, 0, 0)     // head = 空
+    return s
+}
+
+fn stack_push(s: int, v: int) {
+    // 节点 = [next][value]；CAS 竞争 head，失败重读重挂
+    let n = mem_alloc(16)
+    mem_store64(n, 1, v)
+    let mut old = mem_load64(s, 0)
+    let mut done = 0
+    while done == 0 {
+        mem_store64(n, 0, old)
+        let cur = atomic_cas(s, old, n)
+        if cur == old {
+            done = 1
+        } else {
+            old = cur
+            spin_hint()
+        }
+    }
+}
+
+fn stack_pop(s: int) -> int {
+    // 返回栈顶 value；空栈返回 0（0 不是合法 payload 的调用方保证）。
+    // 单消费者下无 ABA：pop 的 CAS 失败只因为并发 push 改了 head，
+    // 而被弹出的节点不会再被引用。
+    let mut old = mem_load64(s, 0)
+    let mut val = 0
+    let mut done = 0
+    while done == 0 {
+        if old == 0 {
+            val = 0
+            done = 1
+        } else {
+            let nxt = mem_load64(old, 0)
+            let cur = atomic_cas(s, old, nxt)
+            if cur == old {
+                val = mem_load64(old, 1)
+                done = 1
+            } else {
+                old = cur
+                spin_hint()
+            }
+        }
+    }
+    return val
+}
+
+// ---- WaitGroup（fork-join 屏障）----
+
+fn wg_new() -> int {
+    let w = mem_alloc(8)
+    mem_store64(w, 0, 0)
+    return w
+}
+
+fn wg_add(w: int, n: int) {
+    atomic_add(w, n)
+}
+
+fn wg_done(w: int) {
+    atomic_add(w, -1)
+}
+
+fn wg_wait(w: int) {
+    // 自旋到计数归零。atomic_add 带 lock 前缀（全屏障），
+    // 计数写与 wg_done 之前的所有内存写在别的线程可见性上一致。
+    while mem_load64(w, 0) != 0 {
+        spin_hint()
+    }
+}

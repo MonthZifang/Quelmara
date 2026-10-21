@@ -419,6 +419,40 @@ class Enc:
         self.emit(rex(w=1, r=src, x=index, b=base), b"\x87",
                   modrm_mem(src, base, index, scale, disp))
 
+    def xadd_mr(self, base, index, scale, disp, src):
+        """lock xadd [mem], src：*mem += src，src 返回**旧值**（fetch-and-add）。
+
+        无锁计数器 / 队列序号的地基。lock 前缀必须在 REX 之前（F0 48 0F C1 /r）。
+        """
+        self.emit(b"\xf0", rex(w=1, r=src, x=index, b=base), b"\x0f\xc1",
+                  modrm_mem(src, base, index, scale, disp))
+
+    def cmpxchg_mr(self, base, index, scale, disp, src):
+        """lock cmpxchg [mem], src：RAX(期望值) 与 *mem 比较；相等则 *mem=src
+        且 ZF=1，否则 RAX=*mem（取回旧值）。CAS 循环的地基。
+
+        注意期望值固定走 RAX（ACC），调用方负责先物化。
+        """
+        self.emit(b"\xf0", rex(w=1, r=src, x=index, b=base), b"\x0f\xb1",
+                  modrm_mem(src, base, index, scale, disp))
+
+    def mfence(self):
+        """全内存屏障：串行化本核所有 load/store（SSE2，0F AE F0）。"""
+        self.emit(b"\x0f\xae\xf0")
+
+    def pause(self):
+        """自旋等待提示（F3 90，rep nop）：降功耗 + 避免内存序消歧流水线清空。"""
+        self.emit(b"\xf3\x90")
+
+    def rdtsc(self):
+        """读周期计数器（0F 31）：EDX = 高 32 位，EAX = 低 32 位。
+
+        32 位寄存器写入会把 64 位寄存器高半清零，所以 rdtsc 后
+        RAX/RDX 各自就是干净的 32 位值。RDX 不在分配池（仅传参用），
+        覆盖安全；RAX=ACC 是编码期临时，跨指令不驻留。
+        """
+        self.emit(b"\x0f\x31")
+
     def resolve(self):
         for patch, label in self.fixups:
             target = self.labels[label]
@@ -2090,13 +2124,59 @@ class Lower:
             # mem_xchg(addr, val) -> old：原子交换（x86_64 xchg 指令）。
             # 协议库的多 io 线程自旋锁靠它实现；net_serve 只在 Windows PE
             # 后端运行，故同样限定 x86_64。
-            if self.platform not in ("windows", "native"):
+            if self.arch != "x86_64":
                 raise SyntaxError("mem_xchg 目前只在 x86_64 后端实现")
             if len(e[2]) != 2:
                 raise SyntaxError("mem_xchg(addr, val) 需要两个实参")
             vals = [self.eval(a, fn, env) for a in e[2]]
             d = fn.new_v()
             fn.emit("xchg", d, vals[0], vals[1])
+            return d
+        if name == "atomic_add" and name not in self.fns_ast:
+            # atomic_add(addr, v) -> old：*addr += v，返回**旧值**（lock xadd）。
+            # 无锁计数器 / MPMC 队列序号的地基。addr 须 8 字节对齐
+            # （mem_alloc 产物或 static_word 槽）。
+            if self.arch != "x86_64":
+                raise SyntaxError("atomic_add 目前只在 x86_64 后端实现")
+            if len(e[2]) != 2:
+                raise SyntaxError("atomic_add(addr, v) 需要两个实参")
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            d = fn.new_v()
+            fn.emit("atomic", "add", d, vals[0], vals[1])
+            return d
+        if name == "atomic_cas" and name not in self.fns_ast:
+            # atomic_cas(addr, expect, new) -> old：旧值==expect 时写 new。
+            # 返回旧值，调用方比较判断是否成功（cmpxchg 语义）。
+            # 自旋锁：while atomic_cas(p, 0, 1) != 0 { spin_hint() }
+            if self.arch != "x86_64":
+                raise SyntaxError("atomic_cas 目前只在 x86_64 后端实现")
+            if len(e[2]) != 3:
+                raise SyntaxError("atomic_cas(addr, expect, new) 需要三个实参")
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            d = fn.new_v()
+            fn.emit("atomic", "cas", d, vals[0], vals[1], vals[2])
+            return d
+        if name == "atomic_fence" and name not in self.fns_ast:
+            # atomic_fence()：全内存屏障（mfence）。发布-订阅模式里
+            # "先写数据、再置 ready 标志"的顺序保证。
+            if self.arch != "x86_64":
+                raise SyntaxError("atomic_fence 目前只在 x86_64 后端实现")
+            fn.emit("mfence")
+            return ("imm", 0)
+        if name == "spin_hint" and name not in self.fns_ast:
+            # spin_hint()：pause 指令。自旋循环里降低功耗、避免流水线清空。
+            fn.emit("pause")
+            return ("imm", 0)
+        if name == "now_cycle" and name not in self.fns_ast:
+            # now_cycle() -> int：rdtsc 周期计数（EDX:EAX 拼 64 位）。
+            # 程序内自计时的地基——本机进程冷启动 ~350ms（Hyper-V/VBS），
+            # 微基准必须排除它，这是 docs/PERF.md 的测量纪律。
+            # 纯读（无副作用），不进 _EFF：调度器挪它只影响测量精度，
+            # 不影响正确性；跨测量段归一化由调用方做（读两次取差）。
+            if self.arch != "x86_64":
+                raise SyntaxError("now_cycle 目前只在 x86_64 后端实现")
+            d = fn.new_v()
+            fn.emit("rdtsc", d)
             return d
         if name in ("mem_load8", "mem_store8", "mem_load64", "mem_store64") \
                 and name not in self.fns_ast:
@@ -6770,6 +6850,16 @@ def _map_ins(ins, f):
         return ("trunc", V(ins[1]), S(ins[2]), ins[3], ins[4])
     if op == "vsum":
         return ("vsum", V(ins[1]), S(ins[2]), S(ins[3]))
+    if op == "atomic":
+        # ('atomic', sub, dst, addr, a[, b])：变长，cas 多一个操作数
+        return tuple(["atomic", ins[1], V(ins[2]), S(ins[3]), S(ins[4])]
+                     + ([S(ins[5])] if len(ins) > 5 else []))
+    if op == "mfence":
+        return ("mfence",)
+    if op == "pause":
+        return ("pause",)
+    if op == "rdtsc":
+        return ("rdtsc", V(ins[1]))
     raise AssertionError(f"_map_ins 缺少指令形态：{op}（内联会静默重命名错误）")
     if op == "winargs":
         return ("winargs", [V(x) for x in ins[1]])
@@ -7421,6 +7511,50 @@ class Codegen:
             self.enc.xchg_mr(ra, 4, 0, 0, ACC)
             if dst is not None:
                 self.commit(dst, ACC)
+        elif op == "atomic":
+            # ('atomic', sub, dst, addr, a[, b])（v1.10）：
+            #   add -> dst = 旧值；*addr += a          （lock xadd）
+            #   cas -> dst = 旧值；*addr==a 时 *addr=b （lock cmpxchg，期望走 RAX）
+            # 登记纪律：_EFF（调度器不可跨越）+ vreg_mentions + _map_ins 三处已同步。
+            sub, dst, addr = ins[1], ins[2], ins[3]
+            ra = self.fetch(SCRATCH2, addr)
+            if sub == "add":
+                rv = self.fetch(ACC, ins[4])
+                if rv != ACC:
+                    self.enc.mov_rr(ACC, rv)
+                self.enc.xadd_mr(ra, 4, 0, 0, ACC)
+                if dst is not None:
+                    self.commit(dst, ACC)
+            elif sub == "cas":
+                re = self.fetch(ACC, ins[4])
+                if re != ACC:
+                    self.enc.mov_rr(ACC, re)
+                rn = self.fetch(SCRATCH, ins[5])
+                self.enc.cmpxchg_mr(ra, 4, 0, 0, rn)
+                if dst is not None:
+                    self.commit(dst, ACC)     # RAX = 内存旧值（ZF 指示是否交换）
+            else:
+                raise SyntaxError(f"atomic 未知子操作 {sub}")
+        elif op == "mfence":
+            self.enc.mfence()
+        elif op == "pause":
+            self.enc.pause()
+        elif op == "rdtsc":
+            # dst = EDX:EAX（64 位 TSC）。纯读不进 _EFF：调度器挪它
+            # 只影响测量精度，不影响正确性（调用方读两次取差）。
+            self.enc.rdtsc()
+            rd = self.safe_dst_reg(ins[1])
+            if rd is None:
+                self.enc.mov_rr(SCRATCH2, 0)     # lo
+                self.enc.shl_i(2, 32)            # rdx = hi << 32
+                self.enc.alu_rr("or", SCRATCH2, 2)
+                self.commit(ins[1], SCRATCH2)
+            else:
+                if rd != 0:
+                    self.enc.mov_rr(rd, 0)       # rd = lo
+                self.enc.shl_i(2, 32)            # rdx = hi << 32
+                self.enc.alu_rr("or", rd, 2)     # rd |= hi（rdx 已不在池）
+                self.commit(ins[1], rd)
         elif op == "spawn_child":
             # 子线程起始点（clone 返回 0 后跳到这里）：
             # 参数块指针由父线程写在【新栈顶 - 8】，这里直接用 rsp 取，

@@ -1,6 +1,6 @@
 # Quelmara 状态总表（语言 / 工程化 / 性能 / 平台）
 
-> 口径：2026-10-21，`v1.9` 工作区（未提交内容含 v1.3 / v1.5 / v1.6 / v1.8 / v1.9）。
+> 口径：2026-10-21，`v1.10` 工作区（未提交内容含 v1.3 / v1.5 / v1.6 / v1.10）。
 > **本文只回答"现在到哪了"**。缺口的详细论证在 `docs/GAPS.md`，
 > 每个特性的精确语义在 `docs/LANG.md`，版本变更在 `CHANGELOG.md`。
 >
@@ -20,6 +20,9 @@
 > 所有权检查、`interface`（静态分发）都落地了，并且修掉了三个必现误编译。
 > v1.9 补上最后一块语言拼图：**接口值的 vtable 动态分发**（`let s: Shape = Circle{..}`、
 > `vec[Shape]`、接口形参/返回值），现在"多态"真的能用了。
+> v1.10 打下并发地基：`atomic_add/cas`（lock 前缀，一条 CPU 指令直达）+
+> `std/sync`（自旋锁 / Treiber 无锁栈 / WaitGroup，全 Quelmara 自实现）+
+> `now_cycle()`（rdtsc 自计时）——mutex 无竞争 28 cycles/iter，无 libc 间接。
 
 ---
 
@@ -36,6 +39,8 @@
 | `option[T]` / `result[T,E]` / `?` | ✅ | `tests/t31_result.qma`、`t34_option.qma` | 受控单态化，载荷限标量 |
 | 切片 `[]T` / 定长数组 `[N]T` | ✅ | `tests/t21_slice.qma`、`t36_arrparam.qma` | 数组值语义；切片是零拷贝视图 |
 | `chan[T]` / `spawn` / `parfor` | ✅ | `tests/t18_chan.qma`、`examples/parfor_sum.qma` | 有界 MPMC + 自旋锁 |
+| **atomic 原语 + std/sync** | ✅ **v1.10** | `tests/t55_sync.qma`、`bench/sync_bench.qma` | `atomic_add/cas/fence`（lock 前缀）+ 自旋锁/Treiber 栈/WaitGroup；AArch64 未接（明确报错）；栈 pop 单消费者（多消费者 ABA 见 GAPS） |
+| `now_cycle()`（rdtsc） | ✅ **v1.10** | `bench/sync_bench.qma` | 周期计数非纳秒；程序内自计时排除冷启动 |
 | `import`（扁平合并） | ✅ | `std/http.qma` 自身 | 无命名空间、无版本、无包管理 |
 | 函数值 + `callr` | 🟡 | `tests/t38_callr.qma` | ≤6 参、实参不能是 struct/slice、无捕获（无闭包） |
 | **真实整数宽度 `u8..u32/i8..i32`** | ✅ **v1.8** | `tests/t49_width.qma` | 见 §1.2：边界截断，表达式内按 C 提升 |
@@ -146,7 +151,7 @@ for x in v { print(x.area()) }   // 各回各家
 | Windows x86-64（PE32+） | ✅ 主平台 | `tests/run_win_tests.py` 113 项 | 无 CRT，只导入 kernel32/ws2_32 |
 | Linux x86-64（ELF64） | ✅ | `tests/run_native_tests.sh`（CI ubuntu） | 需 Linux 环境；本机沙箱被 WSL 黑名单拦住 → 交叉验证 SKIP |
 | Linux io_uring | ✅ | `tests/test_uring.sh`（CI） | 仅 5.1+ 内核 |
-| AArch64（ELF） | 🟡 | `tests/run_native_tests.sh` 模拟器执行级 | 无 chan/map/spawn；v1.8 新增 IR（`trunc`/`vsum`）与 v1.9 vtable 动态分发尚未进 A64 发射层 → IR 对拍里显式 SKIP（22 项）；A64 遇接口值编译期明确报错（`qlm_arm64.py` gen_all 拦截） |
+| AArch64（ELF） | 🟡 | `tests/run_native_tests.sh` 模拟器执行级 | 无 chan/map/spawn；v1.8 新增 IR（`trunc`/`vsum`）、v1.9 vtable 动态分发、v1.10 atomic/rdtsc 尚未进 A64 发射层 → IR 对拍里显式 SKIP；A64 遇以上形态编译期明确报错（`qlm_arm64.py` gen_all 拦截） |
 | macOS（Mach-O / kqueue） | ❌ | `docs/PLATFORM.md` 候选 | 无 |
 | wasm32/64 | ❌ | 路线图 | 无 |
 | TLS（https / wss） | 🟡 Phase A 2/3 | `docs/TLS.md` | SHA-256+HMAC ✅、AES-128-GCM ✅、X25519 ❌、握手 ❌ |

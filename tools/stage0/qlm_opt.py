@@ -71,6 +71,13 @@ def vreg_mentions(ins):
         return [ins[1]], ints([ins[2]])
     if op == "vsum":
         return [ins[1]], ints([ins[2], ins[3]])
+    if op == "atomic":
+        # ('atomic', sub, dst, addr, a[, b])：addr 与操作数 a/b 全是读改写
+        return [ins[2]], ints(ins[3:])
+    if op == "rdtsc":
+        return [ins[1]], []
+    if op in ("mfence", "pause"):
+        return [], []
     if op in ("label", "jmp"):
         return [], []
     if op in ("jz", "jnz"):
@@ -727,7 +734,12 @@ _EFF = ("call", "callr", "syscall", "winapi", "spawn_child", "xchg", "ret",
         "store", "store8", "load", "load8",
         # vsum 读一整段内存（最多 count*8 字节）：必须与访存保持原序，
         # 否则调度器会把它挪到数组初始化之前（v1.8 实测：归约少一个元素）。
-        "vsum")
+        "vsum",
+        # atomic 是读改写，mfence 是全屏障：都不可被调度器跨越或重排
+        # （v1.10 实测纪律：atomic 忘登记 _EFF 会造成计数静默丢失）。
+        # rdtsc 同理——它虽无副作用，但被挪过 call 会让测量差值变成
+        # 垃圾（实测 mutex 段 2e6 次锁操作只报 18 cycles）。
+        "atomic", "mfence", "rdtsc")
 # 基本块终止符。注意 args 必须独占一块：它从硬件参数寄存器（rdi/rsi/rdx/
 # rcx/r8/r9）搬值进 vreg，而变量移位量会用掉 rcx——一旦被调度到它后面
 # 就会拿到被污染的参数。因此 args 只能永远排在函数最前面。
@@ -1466,6 +1478,15 @@ def _subst_vregs(ins, sub):
         return ("winargs", [sub(x) for x in ins[1]])
     if op == "xchg":
         return ("xchg", sub(ins[1]), S(ins[2]), S(ins[3]))
+    if op == "atomic":
+        # ('atomic', sub, dst, addr, a[, b])：addr/a/b 都是 vreg 位置。
+        # 漏登记的后果（v1.10 实测）：copy_prop 塌掉 addr 的定义 mov，
+        # atomic 里的 use 不被替换 -> 悬空 vreg -> 调度器把它排到定义前
+        # -> 运行期地址是垃圾，段错误。
+        return tuple(["atomic", ins[1], sub(ins[2]), S(ins[3]), S(ins[4])]
+                     + ([S(ins[5])] if len(ins) > 5 else []))
+    if op in ("mfence", "pause"):
+        return ins
     return ins
 
 

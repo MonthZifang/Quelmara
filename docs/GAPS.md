@@ -223,10 +223,25 @@
 ### 6.5.1 仍存在的约束（不是 bug，是没做的优化）
 
 - **LICM 默认关闭**：x64 分配器布局敏感的段错误未根修（`QLM_ENABLE_LICM=1` 可开）；
-- `@simd` 只覆盖单一归约形状，不是向量化器；
-- 新增 IR 指令（`trunc` / `vsum`）必须同时登记到 `vreg_mentions`、`_map_ins`、`_EFF`
-  —— 漏一处就是「开优化才错」的静默误编译。本轮 `vsum` 被调度器挪到数组初始化之前、
-  归约少一个元素，就是这么来的。
+- `@simd` 只覆盖单一归约形状，不是向量化器；**float 归约**（`acc += a[i]`
+  的 `[N]float`，addsd/addpd 两路）未做——游戏物理/渲染热路径的下一块（P1）；
+  int min/max 归约同批；
+- **新增 IR 指令的登记纪律是五处**（v1.10 实测升级，漏任何一处都是
+  「开优化才错」的静默误编译）：
+  1. `qlm_opt.vreg_mentions`（defs/uses，寄存器分配与 DCE 依赖它）；
+  2. `qlm_native._map_ins`（内联重命名）；
+  3. `qlm_opt._EFF`（调度器不可跨越；rdtsc 这种纯读但**不可挪过 call** 的也要进）；
+  4. **`qlm_opt._subst_vregs`**（copy_prop 的操作数替换——漏了会导致 use 悬空：
+     定义被塌掉而使用点没替换，调度器把使用排到定义前，运行期寄存器是垃圾；
+     atomic 本轮实测踩中）；
+  5. `qlm_native.Codegen.gen_instr`（x86 编码）+ `qlm_arm64`（不支持时要显式拦截）。
+
+### 6.5.2 并发边界（v1.10 登记）
+
+- `std/sync` 无锁栈 pop 是**单消费者**设计；多消费者有 ABA（需要 tagged pointer
+  或 epoch reclamation，P2）；
+- WaitGroup 是自旋等待；阻塞式等待（futex/WaitOnAddress）在路线图上；
+- atomic/rdtsc/接口 vtable 都未进 AArch64 发射层（编译期明确报错）；
 
 ---
 
