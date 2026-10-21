@@ -120,7 +120,7 @@
 
 - 不要 `git reset --hard` / 不要删 `build/` 以外的任何目录；`archive/` 是旧快照。
 - 跑完任何改动，至少复跑：`run_win_tests.py` + `parsediff.py` + 三道门禁。
-- **新增 IR 指令的检查表**（`docs/STATUS.md §5.2`）：`vreg_mentions`、`_map_ins`、
+- **新增 IR 指令的检查表**（`docs/GAPS.md §6.5.1`）：`vreg_mentions`、`_map_ins`、
   `_EFF`（访存类）三处必须同时登记，否则就是"开优化才错"的静默误编译。
 - 大改动前先 `git status`：工作区常有大量未提交内容（v1.3–v1.8），别误判。
 - 提交粒度：按 `CHANGELOG.md` 的版本节各打一个 commit（v1.3 → v1.5 → v1.6 → v1.8），

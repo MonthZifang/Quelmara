@@ -9,12 +9,13 @@ Rosoto 快照（.ros/旧名），增量 diff 套不上去（会 422 GitRPC::BadO
 1. `git ls-tree -r HEAD` 取**完整树**（path/mode/sha）；
 2. 远端已有同 sha 的 blob 直接复用，其余逐个 POST /git/blobs；
 3. POST /git/trees（**不带 base_tree**，即整棵树替换）；
-4. POST /git/commits，parents = [远端 master, 本地 HEAD]（merge 提交：
-   远端历史与本地历史都保留，不是强推）；
-5. PATCH refs/heads/master；再把本地 master 指向这个 merge 提交（工作区不变）。
+4. POST /git/commits，parents = [远端 master]（快照提交，不重写远端历史；
+   本地提交对象不在远端，不能当 parent —— 会 422）；
+5. PATCH refs/heads/master。本地详细历史留在开发分支（如 rename/quelmara）。
 """
 import base64
 import json
+import pathlib
 import subprocess
 import sys
 import urllib.error
@@ -59,7 +60,10 @@ def api(method, path, body=None):
 
 def main():
     head = sh("git", "rev-parse", "HEAD").strip()
-    msg = sh("git", "log", "-1", "--format=%B").rstrip("\n")
+    # 提交消息：优先用 build/_merge_msg.txt（整棵树的合并提交要写清来龙去脉）
+    mp = pathlib.Path("build/_merge_msg.txt")
+    msg = (mp.read_text(encoding="utf-8").rstrip("\n") if mp.exists()
+           else sh("git", "log", "-1", "--format=%B").rstrip("\n"))
     an = sh("git", "log", "-1", "--format=%an").strip()
     ae = sh("git", "log", "-1", "--format=%ae").strip()
     ad = sh("git", "log", "-1", "--format=%aI").strip()
@@ -102,7 +106,8 @@ def main():
     tree = api("POST", f"/repos/{REPO}/git/trees", {"tree": entries})
     print(f"tree = {tree['sha'][:10]}")
     commit = api("POST", f"/repos/{REPO}/git/commits",
-                 {"message": msg, "tree": tree["sha"], "parents": [base_sha, head],
+                 # 单亲：只挂远端旧 head（本地提交对象不在远端，作 parent 会 422）
+                 {"message": msg, "tree": tree["sha"], "parents": [base_sha],
                   "author": {"name": an, "email": ae, "date": ad},
                   "committer": {"name": an, "email": ae, "date": ad}})
     api("PATCH", f"/repos/{REPO}/git/refs/heads/master",
