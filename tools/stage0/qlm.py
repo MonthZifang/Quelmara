@@ -1821,27 +1821,34 @@ VEC_SCALARS = ("int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8",
 
 
 def vec_elem_tag(t, line=None):
-    """vec 元素类型标签：标量原样返回，具名聚合返回 ('agg', Name)。
+    """vec 元素类型标签：标量原样返回，具名聚合返回 ('agg', Name)，
+    嵌套 vec 返回 ('vecinner', 内层标签)（v1.12：句柄 1 字标量语义）。
     只在解析期做语法级校验；是不是真的 struct/enum 由后端查符号表。"""
     if t[0] == "named" and t[1] in VEC_SCALARS:
         return t[1]
     if t[0] == "named":
         return ("agg", t[1])
-    raise SyntaxError(f"vec 元素类型只支持标量与具名类型，得到 {t!r}")
+    if t[0] == "vec":
+        # vec[vec[T]]：元素 = 内层 vec 的句柄（1 字，标量拷贝语义）。
+        # 内层标签供 get 取回时重新 mark（row.push 才认类型）。
+        return ("vecinner", vec_elem_tag(t[1]))
+    raise SyntaxError(f"vec 元素类型只支持标量、具名类型与嵌套 vec，得到 {t!r}")
 
 
 def _vec_tag_str(t):
-    """vec 元素标签串：标量原样，聚合 -> "agg:Name"（env 里用字符串传）"""
+    """vec 元素标签串：标量原样，聚合 -> "agg:Name"，嵌套 -> "vecinner:..."（env 里用字符串传）"""
     tag = vec_elem_tag(t)
-    return tag if isinstance(tag, str) else "agg:" + tag[1]
+    return tag if isinstance(tag, str) else ":".join(map(str, tag))
 
 
 def _vec_ewords(cg, t):
     """vec 元素占几个 8 字节槽（决定分配大小与拷贝宽度）。
     标量 1；struct = 字段数（字段各占 1 槽，嵌套聚合按 C 结构体布局也会是 1 槽指针式占位，
-    这条限制在 SPEC 里写明）；enum = 1 + 最大变体载荷数。"""
+    这条限制在 SPEC 里写明）；enum = 1 + 最大变体载荷数；嵌套 vec = 1（句柄）。"""
     tag = vec_elem_tag(t)
     if isinstance(tag, str):
+        return 1
+    if tag[0] == "vecinner":
         return 1
     name = tag[1]
     if name in cg.structs:

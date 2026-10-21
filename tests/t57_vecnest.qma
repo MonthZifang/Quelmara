@@ -1,0 +1,58 @@
+// t57_vecnest.qma：vec[vec[T]] 嵌套容器（v1.12 解锁）
+// 元素 = 内层 vec 的句柄（1 字标量拷贝语义）；get/pop 取回句柄后
+// 重挂内层标签，row.push/get 从此认领类型。句柄共享底层存储——
+// 通过取回的句柄 push 会反映到外层容器里（与句柄语义一致）。
+// 覆盖：int / str 内层、形参嵌套声明、双层遍历求和。
+module t57
+
+fn total(m: vec[vec[int]]) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < m.len() {
+        let row = m.get(i)
+        let mut j = 0
+        while j < row.len() {
+            s = s + row.get(j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return s
+}
+
+fn main() {
+    // int 内层
+    let m = vec[vec[int]].new(4)
+    let row = vec[int].new(4)
+    row.push(10)
+    row.push(20)
+    m.push(row)
+    let r2 = vec[int].new(4)
+    r2.push(30)
+    m.push(r2)
+
+    let got = m.get(0)
+    assert(got.len() == 2, "nested len")
+    assert(got.get(0) == 10, "nested elem0")
+    assert(got.get(1) == 20, "nested elem1")
+
+    got.push(50)                // 共享底层存储：外层看到的也是 3 个
+    let again = m.get(0)
+    assert(again.len() == 3, "shared storage")
+    assert(again.get(2) == 50, "shared elem")
+
+    assert(total(m) == 110, "nested sum via param")
+
+    // str 内层
+    let vv = vec[vec[str]].new(4)
+    let srow = vec[str].new(4)
+    srow.push("alpha")
+    srow.push("beta")
+    vv.push(srow)
+    let sgot = vv.get(0)
+    assert(sgot.len() == 2, "vv str len")
+    assert(sgot.get(0) == "alpha", "vv str elem0")
+    assert(sgot.get(1) == "beta", "vv str elem1")
+
+    print("vec of vec ok")
+}

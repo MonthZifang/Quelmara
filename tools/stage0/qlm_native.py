@@ -1222,12 +1222,7 @@ class Lower:
         if k == "vecnew":
             self.uses_vec = True
             et = e[1]
-            if et == ("named", "str"):
-                tag = "str"
-            elif et[0] == "named" and self.is_agg(et[1]):
-                tag = ("agg", et[1])
-            else:
-                tag = None
+            tag = self._vec_tag_of(et)
             cap = ("imm", 4)
             if e[2]:
                 if len(e[2]) != 1:
@@ -1806,6 +1801,9 @@ class Lower:
             fn.emit("call", d, "__vec_pop", [obj])
             if elem == "str":
                 self._mark_str(fn, d)
+            if isinstance(elem, tuple) and elem[0] == "vecinner":
+                # 嵌套 vec：弹出的是内层句柄，重挂内层标签（v1.12）
+                self._mark_vec(fn, d, elem[1])
             return d
         if m == "get":
             i = one_arg()
@@ -1817,6 +1815,10 @@ class Lower:
             fn.emit("call", d, "__vec_get", [obj, i])
             if elem == "str":
                 self._mark_str(fn, d)
+            if isinstance(elem, tuple) and elem[0] == "vecinner":
+                # 嵌套 vec：get 返回内层句柄，重挂内层标签——
+                # row.push / row.get 从此认领类型（v1.12 vec[vec[T]] 解锁）
+                self._mark_vec(fn, d, elem[1])
             return d
         if m == "set":
             if len(args) != 2:
@@ -2579,8 +2581,7 @@ class Lower:
         if ret and ret[0] == "map":
             return self._mark_map(fn, d, ret[1][1], ret[2][1])
         if ret and ret[0] == "vec":
-            et = "str" if ret[1] == ("named", "str") else None
-            return self._mark_vec(fn, d, et)
+            return self._mark_vec(fn, d, self._vec_tag_of(ret[1]))
         if ret and ret[0] == "rc":
             # rc[T] 返回值把"句柄 + payload 类型"一起带回来，
             # 否则调用方拿到的只是一个裸 int，后续 rc_* 全被拒。
@@ -3643,8 +3644,7 @@ class Lower:
                 self._mark_rc(fn, params[i], ty[1][1])
                 self._mark_struct(fn, params[i], ty[1][1])
             elif ty[0] == "vec":
-                et = "str" if ty[1] == ("named", "str") else None
-                self._mark_vec(fn, params[i], et)
+                self._mark_vec(fn, params[i], self._vec_tag_of(ty[1]))
             elif ty[0] == "array":
                 # 数组形参按值语义：就地拷一份，函数内改动不外泄
                 dst = self.alloc_array(fn, ty[1])
@@ -6746,6 +6746,18 @@ class Lower:
     @staticmethod
     def _vec_elem(fn, v):
         return getattr(fn, "vecelem", {}).get(v) if isinstance(v, int) else None
+
+    def _vec_tag_of(self, et):
+        """vec 元素标签（v1.12 统一入口）：str / ("agg", name) /
+        ("vecinner", 内层标签) / None（标量）。形参、返回值、vecnew 三处
+        共用——此前各自硬编码，嵌套 vec 拿不到标签导致 row.push 被拒。"""
+        if et == ("named", "str"):
+            return "str"
+        if et and et[0] == "named" and self.is_agg(et[1]):
+            return ("agg", et[1])
+        if et and et[0] == "vec":
+            return ("vecinner", self._vec_tag_of(et[1]))
+        return None
 
     @staticmethod
     def _map_of(fn, v):

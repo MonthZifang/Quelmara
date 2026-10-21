@@ -62,7 +62,7 @@
 | **局部类型标注** | 🟡 **v1.8 支持 `let x: T`**，但只有宽度类型参与语义（截断）；非宽度标注只作可读性，不做类型检查 | 仍不是完整类型检查器，写错类型不会报错 | 注释 / 单测 | **P1**（接 typeck） |
 | **闭包 / 函数值** | 🟡 函数名可作值，`callr` 间接调用（v1.4）。限制：**最多 6 个实参**、实参不能是 struct/slice（只能标量/str）、返回值按标量处理、**无捕获**（`qlm_native.py:2314-2330`） | 回调只能固定签名（`net_serve` 的 handler 就是被这条逼出来的形状） | 全局 `static_word` 传状态 | **P1**（放宽到 8 参 + 允许 struct 指针） |
 | **`match` 表达式** | 🟡 语言层 ✅（enum 解构/穷尽性/块臂）；**自举 parser Phase 1 未覆盖**：语句级直接 SKIP，表达式位置（`return match s {..}`）被当标识符，是 bodydiff 636 条分叉的一类（`bootstrap/parser/qlm_parse.qma:933`） | 自举 parser 自己还吃不下自己 | 该函数整体 SKIP | P1（自举主线） |
-| **`vec` 容器** | 🟡 元素 = 标量 / struct / enum ✅；**不支持 `vec[vec[T]]`、`vec[map]`**；struct 内嵌套聚合按 1 槽占位（`_vec_ewords` 注释）；句柄语义，无所有权 | 嵌套数据结构（AST 子节点、JSON 数组套数组）建模困难 | 扁平化 + 索引 | **P1** |
+| **`vec` 容器** | 🟡 **v1.12 解锁 `vec[vec[T]]`**：元素 = 内层 vec 的**句柄**（1 字标量拷贝语义），get/pop 取回后重挂内层标签（`tests/t57_vecnest.qma`，共享底层存储与句柄语义一致）。元素仍支持标量 / struct / enum；**`vec[map]` 不支持**（map 句柄标签未接 vecinner 通道，同法可加）；struct 内嵌套聚合按 1 槽占位（`_vec_ewords` 注释）；句柄语义，无所有权 | 嵌套数据结构（AST 子节点、JSON 数组套数组）可用了；句柄共享意味着没有"深拷贝一份子表"的语义 | 需要独立副本就手动 rebuild | ✅（`vec[map]` P2） |
 | **`map` 容器** | 🟡 K ∈ int/bool/str，**V ∈ int/str**（`map_kv_tag`）；不能 `map[str]Struct` | 配置表/符号表/索引结构受限 | 平行 map / 下标编码 | **P1** |
 | **所有权 + 借用检查** | 🟡 **v1.8 只对 `rc[T]` 句柄**做线性检查：use-after-drop / double-free / move-then-use 三类编译错误 + 泄漏编译警告（`tests/bad/own_*.qma`）。**不检查** struct/数组/str 的别名与生命周期，也不查并发数据竞争 | `rc` 之外仍是纪律；不能对外宣称"Rust 那套借用检查" | 文档约定 + 代码评审 | **P1**（扩到 vec/引用） |
 | **错误处理** | 🟡 `result[T,E]` 只两变体、载荷限标量；`?` 只接受两个单载荷变体。库层错误只能 **fail-fast 退出进程** 或返回 -1/空串 | 库无法把 errno + 上下文交给调用方；HTTP 服务端只能手写 400/431/501 兜住已知畸形请求，未覆盖路径一律进程退出 | 返回 int 码 + 全局错误字 | **P1** |

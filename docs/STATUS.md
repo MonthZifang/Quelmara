@@ -34,7 +34,7 @@
 |---|---|---|---|
 | 标量 / 控制流 / 函数 | ✅ | `tests/t1.qma` … `tests/t20.qma` | C 风格，无 `switch`（用 `match`） |
 | `struct` / `enum` / `match` | ✅ | `tests/t10_match.qma`、`t37_vecagg.qma` | `match` 必须穷尽 |
-| `vec[T]` | ✅ | `tests/t37_vecagg.qma` | 元素：标量 / struct / enum；`vec[vec[T]]` ❌ |
+| `vec[T]` | ✅ | `tests/t37_vecagg.qma`、`t57_vecnest.qma` | 元素：标量 / struct / enum / **嵌套 vec（v1.12，句柄语义）**；`vec[map]` ❌ |
 | `map[K]V` | ✅ | `tests/t25_map.qma` | K/V 仅 int/bool/str |
 | `option[T]` / `result[T,E]` / `?` | ✅ | `tests/t31_result.qma`、`t34_option.qma` | 受控单态化，载荷限标量 |
 | 切片 `[]T` / 定长数组 `[N]T` | ✅ | `tests/t21_slice.qma`、`t36_arrparam.qma` | 数组值语义；切片是零拷贝视图 |
