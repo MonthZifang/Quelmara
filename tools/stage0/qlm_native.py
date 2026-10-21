@@ -240,6 +240,9 @@ class Enc:
     def sar_i(self, dst, imm):
         self.emit(rex(w=1, b=dst), b"\xc1", modrm_reg(7, dst), bytes([imm & 0xFF]))
 
+    def shr_i(self, dst, imm):
+        self.emit(rex(w=1, b=dst), b"\xc1", modrm_reg(5, dst), bytes([imm & 0xFF]))
+
     def shift_cl(self, dst, kind):
         ext = {"shl": 4, "shr": 5, "sar": 7}[kind]
         self.emit(rex(w=1, b=dst), b"\xd3", modrm_reg(ext, dst))
@@ -292,6 +295,41 @@ class Enc:
     # ---- SSE2 打包（v1.8 @simd）----
     def pxor_x(self, xd, xs):
         self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\xef", modrm_reg(xd, xs))
+
+    # ---- SHA-NI 指令族（v1.15，CPUID leaf 7 EBX[29]）----
+    # 全部 xmm-xmm reg,rm 形态（WIG：无需 REX.W），操作数是 xmm 槽号 0-7。
+    # 隐含操作数：sha256rnds2 固定用 XMM0 作为消息调度输入（Intel 约定）。
+    def sha256rnds2(self, xd, xs):
+        # F2 0F 38 CB /r：xmd = rounds(xmd, xms, XMM0)
+        self.emit(b"\xf2", rex(r=xd, b=xs), b"\x0f\x38\xcb", modrm_reg(xd, xs))
+
+    def sha256msg1(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x38\xcc", modrm_reg(xd, xs))
+
+    def sha256msg2(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x38\xcd", modrm_reg(xd, xs))
+
+    def sha256nexte(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x38\xce", modrm_reg(xd, xs))
+
+    def paddd(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\xfe", modrm_reg(xd, xs))
+
+    def pshufd(self, xd, xs, imm):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x70", modrm_reg(xd, xs),
+                  bytes([imm & 0xFF]))
+
+    def palignr(self, xd, xs, imm):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x3a\x0f", modrm_reg(xd, xs),
+                  bytes([imm & 0xFF]))
+
+    def movdqu_mr(self, base, index, scale, disp, x):
+        """movdqu [base + index*2^scale + disp], xmm（非对齐存储）"""
+        self.emit(b"\x66", rex(r=x, x=index, b=base), b"\x0f\x7f",
+                  modrm_mem(x, base, index, scale, disp))
+
+    def cpuid(self):
+        self.emit(b"\x0f\xa2")
 
     def movdqu_rm(self, x, base, index, scale, disp):
         """movdqu xmm, [base + index*2^scale + disp]（非对齐）"""
@@ -520,6 +558,11 @@ class Fn:
 # 与结构体/枚举一样走聚合 ABI（隐藏出参指针返回 / 地址传递），
 # 因此作函数参数/返回值零改动复用。
 SLICE_WORDS = 2
+
+
+_XMM_BUILTINS = ("cpu_sha", "xmm_load", "xmm_store", "sha_nexte", "sha_rnds2",
+                 "sha_msg1", "sha_msg2", "xmm_paddd", "xmm_pxor",
+                 "xmm_pshufd", "xmm_palignr")
 
 
 class Lower:
@@ -2220,6 +2263,60 @@ class Lower:
             d = fn.new_v()
             fn.emit("bin", "add", d, vals[0], vals[1])
             return d
+        if name == "cpu_sha" and name not in self.fns_ast:
+            # cpu_sha() -> int：SHA-NI 特征位（CPUID leaf 7 EBX[29]，v1.15）。
+            # 1 = 支持（走 SHA-NI 快路径），0 = 降级标量。探测一次缓存即可。
+            if len(e[2]) != 0:
+                raise SyntaxError("cpu_sha() 不接受实参")
+            if self.arch not in ("x86_64",):
+                raise SyntaxError("cpu_sha 目前只在 x86_64 后端实现")
+            d = fn.new_v()
+            fn.emit("cpuid_sha", d)
+            return d
+        if name in _XMM_BUILTINS and name not in self.fns_ast:
+            # XMM / SHA-NI 操作族（v1.15）：操作数是 xmm 槽号（0-7 的编译期
+            # 常量）——固定槽协议由库层维护（寄存器分配器不参与 xmm 管理）。
+            #   xmm_load(dst_x, addr)  xmm_store(addr, src_x)
+            #   sha_nexte/sha_rnds2/sha_msg1/sha_msg2(d_x, s_x)
+            #   xmm_paddd/xmm_pxor(d_x, s_x)
+            #   xmm_pshufd(d_x, s_x, imm8)  xmm_palignr(d_x, s_x, imm8)
+            if self.arch != "x86_64":
+                raise SyntaxError(f"{name} 目前只在 x86_64 后端实现")
+            arity = {"xmm_pshufd": 3, "xmm_palignr": 3}.get(name, 2)
+            if len(e[2]) != arity:
+                raise SyntaxError(f"{name} 需要 {arity} 个实参")
+            if name == "cpu_sha":
+                d = fn.new_v()
+                fn.emit("cpuid_sha", d)
+                return d
+            vals = []
+            for a in e[2][:2]:
+                v = self.eval(a, fn, env)
+                if v[0] != "imm" or not (0 <= v[1] <= 7):
+                    raise SyntaxError(
+                        f"{name} 的 xmm 槽参数必须是 0-7 的编译期常量")
+                vals.append(v[1])
+            # xmm 槽在 IR 里用**负数编码** -(x+1)：vreg 是非负 int，
+            # 负数天然不冲突（mentions/subst 过滤负 int 即"非 vreg"）
+            def xn(x):
+                return -(int(x) + 1)
+
+            if name == "xmm_load":
+                av = self.eval(e[2][1], fn, env)
+                fn.emit("xmm_ld", xn(vals[0]), av)
+                return ("imm", 0)
+            if name == "xmm_store":
+                av = self.eval(e[2][0], fn, env)
+                fn.emit("xmm_st", av, xn(vals[1]))
+                return ("imm", 0)
+            if arity == 2:
+                fn.emit(name, xn(vals[0]), xn(vals[1]))
+            else:
+                vi = self.eval(e[2][2], fn, env)
+                if vi[0] != "imm":
+                    raise SyntaxError(f"{name} 的立即数必须是编译期常量")
+                fn.emit(name, xn(vals[0]), xn(vals[1]), vi[1] & 0xFF)
+            return ("imm", 0)
         if name == "mem_copy" and name not in self.fns_ast:
             if len(e[2]) != 3:
                 raise SyntaxError("mem_copy(dst, src, n) 需要三个实参")
@@ -6941,6 +7038,13 @@ def _map_ins(ins, f):
         return ("syscall", V(ins[1]) if ins[1] is not None else None, ins[2], L(ins[3]))
     if op == "winapi":
         return ("winapi", V(ins[1]) if ins[1] is not None else None, ins[2], L(ins[3]))
+    if op == "cpuid_sha":
+        return ("cpuid_sha", V(ins[1]))
+    if op in ("xmm_ld", "xmm_st", "sha_nexte", "sha_rnds2", "sha_msg1",
+              "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd", "xmm_palignr"):
+        # xmm 槽负数编码保留，地址实参（正 int）重命名
+        return tuple(v if isinstance(v, int) and v < 0 else
+                     (f(v) if isinstance(v, int) else v) for v in ins)
     if op == "xchg":
         return ("xchg", V(ins[1]), S(ins[2]), S(ins[3]))
     if op == "args":
@@ -7370,6 +7474,62 @@ class Codegen:
     def gen_instr(self, ins):
         enc = self.enc
         op = ins[0]
+        if op == "cpuid_sha":
+            # SHA-NI 特征探测：CPUID leaf 7（ECX=0）EBX[29]。
+            # cpuid 破坏 RAX/RBX/RCX/RDX（RAX 是 ACC、RBX 在池）——push/pop
+            # 全保护，结果经 R11 中转（R11 非池，pop 不会覆盖它）。探测一次
+            # 成本无所谓，正确性优先。arm64 无 cpuid：gen 为常量 0。
+            _, dst = ins
+            R11 = 11
+            enc.push(RAX)
+            enc.push(RBX)
+            enc.push(RCX)
+            enc.push(RDX)
+            enc.mov_ri(RAX, 7)
+            enc.mov_ri(RCX, 0)
+            enc.cpuid()
+            enc.mov_rr(R11, RBX)
+            enc.shr_i(R11, 29)
+            enc.alu_ri("and", R11, 1)
+            enc.pop(RDX)
+            enc.pop(RCX)
+            enc.pop(RBX)
+            enc.pop(RAX)
+            self.commit(dst, R11)
+            return
+        if op in ("xmm_ld", "xmm_st", "sha_nexte", "sha_rnds2", "sha_msg1",
+                  "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd",
+                  "xmm_palignr"):
+            # SHA-NI / XMM 族（v1.15）：操作数是 xmm 槽号 imm（0-7），
+            # 地址实参是 vreg（经 mat 映射）。固定槽协议（STATE0=XMM0 等）
+            # 由库层维护——寄存器分配器完全不参与 xmm 的管理。
+            if op == "xmm_ld":
+                _, x, addr = ins
+                enc.movdqu_rm(-int(x) - 1, self.mat(SCRATCH, addr), 0, 0, 0)
+                return
+            if op == "xmm_st":
+                _, addr, x = ins
+                enc.movdqu_mr(self.mat(SCRATCH, addr), 0, 0, 0, -int(x) - 1)
+                return
+            _, d, s = ins[:3]
+            d, s = -int(d) - 1, -int(s) - 1   # 负数编码 -(x+1) -> 槽号 x
+            if op == "sha_nexte":
+                enc.sha256nexte(d, s)
+            elif op == "sha_rnds2":
+                enc.sha256rnds2(d, s)
+            elif op == "sha_msg1":
+                enc.sha256msg1(d, s)
+            elif op == "sha_msg2":
+                enc.sha256msg2(d, s)
+            elif op == "xmm_paddd":
+                enc.paddd(d, s)
+            elif op == "xmm_pxor":
+                enc.pxor_x(d, s)
+            elif op == "xmm_pshufd":
+                enc.pshufd(d, s, ins[3])
+            elif op == "xmm_palignr":
+                enc.palignr(d, s, ins[3])
+            return
         if op == "vsum":
             # SSE2 两路（paddq）+ 标量尾。4 路要 AVX2，见 docs/PERF.md。
             _, dst, base, count = ins

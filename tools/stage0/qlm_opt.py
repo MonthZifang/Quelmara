@@ -112,6 +112,13 @@ def vreg_mentions(ins):
         return [], []
     if op == "xchg":
         return [ins[1]], ints([ins[2], ins[3]])
+    if op == "cpuid_sha":
+        return [ins[1]], []
+    if op in ("xmm_ld", "xmm_st", "sha_nexte", "sha_rnds2", "sha_msg1",
+              "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd", "xmm_palignr"):
+        # SHA-NI / XMM 族：操作数是 xmm 槽号（**负数编码** -(x+1)，不与
+        # vreg 正数空间冲突）；仅地址实参是 vreg（正 int）
+        return [], [x for x in ins[1:] if isinstance(x, int) and x >= 0]
     raise SyntaxError(f"未知指令 {ins!r}")
 
 
@@ -739,7 +746,12 @@ _EFF = ("call", "callr", "syscall", "winapi", "spawn_child", "xchg", "ret",
         # （v1.10 实测纪律：atomic 忘登记 _EFF 会造成计数静默丢失）。
         # rdtsc 同理——它虽无副作用，但被挪过 call 会让测量差值变成
         # 垃圾（实测 mutex 段 2e6 次锁操作只报 18 cycles）。
-        "atomic", "mfence", "rdtsc")
+        "atomic", "mfence", "rdtsc",
+        # SHA-NI / XMM 族（v1.15）：xmm_ld/st 读内存，sha_* 有外部语义
+        # （xmm 固定槽协议）——调度器一律不跨越、不重排
+        "cpuid_sha", "xmm_ld", "xmm_st", "sha_nexte", "sha_rnds2",
+        "sha_msg1", "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd",
+        "xmm_palignr")
 # 基本块终止符。注意 args 必须独占一块：它从硬件参数寄存器（rdi/rsi/rdx/
 # rcx/r8/r9）搬值进 vreg，而变量移位量会用掉 rcx——一旦被调度到它后面
 # 就会拿到被污染的参数。因此 args 只能永远排在函数最前面。
@@ -1517,6 +1529,13 @@ def _subst_vregs(ins, sub):
         return ("args", [sub(x) for x in ins[1]])
     if op == "winargs":
         return ("winargs", [sub(x) for x in ins[1]])
+    if op == "cpuid_sha":
+        return ("cpuid_sha", sub(ins[1]))
+    if op in ("xmm_ld", "xmm_st", "sha_nexte", "sha_rnds2", "sha_msg1",
+              "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd", "xmm_palignr"):
+        # xmm 槽是负数编码（非 vreg），只有地址实参是 vreg（正 int）
+        return tuple(v if isinstance(v, int) and v < 0 else
+                     (sub(v) if isinstance(v, int) else v) for v in ins)
     if op == "xchg":
         return ("xchg", sub(ins[1]), S(ins[2]), S(ins[3]))
     if op == "atomic":
