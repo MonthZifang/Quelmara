@@ -1,0 +1,88 @@
+// t58_stdmin.qma —— std 五件套缺件验收（v1.16）：fs / sleep / rand / sort / log
+module t58
+
+import std.str
+import std.rand
+import std.sort
+import std.log
+
+fn main() {
+    // ---------- fs：写 → 存在 → 大小 → 读 → 删 ----------
+    write_text("build/t58_probe.txt", "hello fs")
+    assert(file_exists("build/t58_probe.txt") == 1, "fs exists")
+    assert(file_size("build/t58_probe.txt") == 8, "fs size")
+    assert(read_text("build/t58_probe.txt") == "hello fs", "fs read")
+    assert(file_exists("build/t58_no_such_file") == 0, "fs missing")
+    assert(fs_remove("build/t58_probe.txt") == 0, "fs remove")
+    assert(file_exists("build/t58_probe.txt") == 0, "fs removed")
+    // mkdir + remove 目录里的文件（mkdir 幂等：已存在不算失败）
+    if fs_mkdir("build/t58_dir") != 0 {
+        assert(file_exists("build/t58_dir") == 1, "mkdir or exists")
+    }
+    write_text("build/t58_dir/in.txt", "x")
+    assert(file_size("build/t58_dir/in.txt") == 1, "size in dir")
+    assert(fs_remove("build/t58_dir/in.txt") == 0, "rm in dir")
+
+    // ---------- sleep：粗测（sleep 50ms，实际 >= 45ms） ----------
+    let t0 = now_ns()
+    sleep_ms(50)
+    let dt = (now_ns() - t0) / 1000000
+    assert(dt >= 45, "sleep at least")
+
+    // ---------- rand：非零、范围、可复现 ----------
+    rand_seed(42)
+    let a = rand_below(1000)
+    rand_seed(42)
+    let b = rand_below(1000)
+    assert(a == b, "rand reproducible")
+    let mut i = 0
+    let mut in_range = 1
+    while i < 1000 {
+        let x = rand_below(100)
+        if x < 0 || x >= 100 {
+            in_range = 0
+        }
+        i = i + 1
+    }
+    assert(in_range == 1, "rand range")
+    let d1 = rand_below(1000000)
+    let d2 = rand_below(1000000)
+    assert(d1 != d2, "rand differs")
+    assert(rand_range(5, 10) >= 5 && rand_range(5, 10) < 10, "rand range lo hi")
+
+    // ---------- sort：快排 + 插入路径 + 逆序 + 重复元素 ----------
+    let v = vec[int].new(64)
+    let mut k = 0
+    while k < 64 {
+        v.push(63 - k)              // 逆序输入
+        k = k + 1
+    }
+    sort_int(v)
+    assert(is_sorted(v) == 1, "sorted reverse")
+    assert(v.get(0) == 0 && v.get(63) == 63, "sorted bounds")
+
+    let w = vec[int].new(4)
+    let mut k = 0
+    while k < 200 {
+        w.push(rand_below(10000))
+        k = k + 1
+    }
+    sort_int(w)
+    assert(is_sorted(w) == 1, "sorted random")
+
+    let dup = vec[int].new(4)
+    dup.push(7)
+    dup.push(7)
+    dup.push(3)
+    dup.push(7)
+    sort_int(dup)
+    assert(is_sorted(dup) == 1, "sorted dup")
+    assert(dup.get(0) == 3, "dup first")
+
+    // ---------- log：三级别输出（人眼校验行格式） ----------
+    log_info("t58 fs/time/rand/sort all ok")
+    log_warn("warning channel")
+    log_error("error channel")
+
+    print("ok t58_stdmin")
+}

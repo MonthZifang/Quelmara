@@ -1,0 +1,68 @@
+// std/rand.qma —— 伪随机数（v1.16）
+// xorshift64*（Vigna）：状态 64 位，周期 2^64-1，质量远超裸 LCG。
+// 种子默认取 now_ns()（混合后保证非零）；rand_seed 可显式播种（可复现）。
+// 线程安全：state 在全局槽，多线程并发使用未加锁（登记 GAPS）。
+// ---------------------------------------------------------------------------
+
+import std.core
+
+const RAND_W = 8          // static_word(8) = 状态（0 = 未播种）
+
+const RAND_MUL = 2685821657736338717
+
+// rand_seed(s)：显式播种。s 经混合避免弱种子（如全 0）。
+fn rand_seed(s: int) {
+    let x = s ^ (s >> 30)
+    x = x * 0xBF58476D1CE4E5B9
+    x = x ^ (x >> 27)
+    x = x * 0x94D049BB133111EB
+    x = x ^ (x >> 31)
+    if x == 0 {
+        x = 1
+    }
+    mem_store64(static_word(RAND_W), 0, x)
+}
+
+// _rand_state()：取当前状态（未播种则用 now_ns 混合初始化）
+fn _rand_state() -> int {
+    let st = static_word(RAND_W)
+    let mut x = mem_load64(st, 0)
+    if x == 0 {
+        x = now_ns()
+        x = x ^ (x >> 30)
+        x = x * 0xBF58476D1CE4E5B9
+        x = x ^ (x >> 27)
+        x = x * 0x94D049BB133111EB
+        x = x ^ (x >> 31)
+        if x == 0 {
+            x = 1
+        }
+    }
+    return x
+}
+
+// rand_next() -> int：产出 64 位伪随机数（可能为负——int 是有符号 64 位）
+fn rand_next() -> int {
+    let st = static_word(RAND_W)
+    let mut x = _rand_state()
+    x = x ^ (x >> 12)
+    x = (x << 25) ^ x
+    x = x ^ (x >> 27)
+    mem_store64(st, 0, x)
+    return x * RAND_MUL
+}
+
+// rand_below(n) -> int：[0, n) 的非负随机数（n > 0）。
+// 取 rand_next 的高位（低位质量差）并钳到非负。
+fn rand_below(n: int) -> int {
+    if n <= 0 {
+        return 0
+    }
+    let x = (rand_next() >> 1) & 0x7FFFFFFFFFFFFFFF
+    return x % n
+}
+
+// rand_range(lo, hi) -> int：[lo, hi) 的随机数（hi > lo）
+fn rand_range(lo: int, hi: int) -> int {
+    return lo + rand_below(hi - lo)
+}

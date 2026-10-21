@@ -1,0 +1,51 @@
+// std/log.qma —— 极简日志（v1.16）
+// 每行：[级别][启动以来毫秒] 消息。输出到 stdout（print 通道，行缓冲）。
+// stderr 通道、时间戳绝对时间、日志级别过滤——登记 GAPS（需 stderr
+// 写内建 + 本地时间获取）。
+// ---------------------------------------------------------------------------
+
+import std.core
+import std.str
+
+const _T0_W = 9          // static_word(9) = 首条日志的 now_ns（相对时间基准）
+
+fn _log_line(tag: str, msg: str) {
+    let st = static_word(_T0_W)
+    let mut t0 = mem_load64(st, 0)
+    if t0 == 0 {
+        t0 = now_ns()
+        mem_store64(st, 0, t0)
+    }
+    let ms = (now_ns() - t0) / 1000000
+    // 一行：[tag][ms] msg\n —— str_alloc 批量构造（v1.14 原语）
+    let tn = len(tag)
+    let mn = len(msg)
+    let line = str_alloc(tn + mn + 1)
+    let w = mem_ptr(line, 0)
+    mem_copy(w, tag, tn)
+    w = mem_ptr(w, tn)
+    // [ms] 数字：手写 itoa（reverse 顺序写入缓冲尾部再拷）——用 to_str()
+    let ms_s = ms.to_str()
+    mem_copy(w, "[", 1)
+    w = mem_ptr(w, 1)
+    mem_copy(w, ms_s, len(ms_s))
+    w = mem_ptr(w, len(ms_s))
+    mem_copy(w, "] ", 2)
+    w = mem_ptr(w, 2)
+    mem_copy(w, msg, mn)
+    w = mem_ptr(w, mn)
+    mem_store8(w, 0, 10)
+    print(line)
+}
+
+fn log_info(msg: str) {
+    _log_line("[INFO]", msg)
+}
+
+fn log_warn(msg: str) {
+    _log_line("[WARN]", msg)
+}
+
+fn log_error(msg: str) {
+    _log_line("[ERROR]", msg)
+}

@@ -1,0 +1,81 @@
+// std/sort.qma —— 排序（v1.16）
+// sort_int：vec[int] 快排（Lomuto 分区，尾递归消除——大半递归走循环）。
+// 排序是"通用代码写不完整"清单的最后一个纯算法缺件；
+// 泛型 cmp 版等函数值放宽后加（GAPS §2）。
+// ---------------------------------------------------------------------------
+
+// sort_int(v)：就地升序排序 vec[int]。
+fn sort_int(v: vec[int]) {
+    _qsort(v, 0, len(v) - 1)
+}
+
+// _partition：Lomuto，以 v[hi] 为轴，返回轴的最终位置
+fn _partition(v: vec[int], lo: int, hi: int) -> int {
+    let pivot = v.get(hi)
+    let mut i = lo - 1
+    let mut j = lo
+    while j < hi {
+        if v.get(j) <= pivot {
+            i = i + 1
+            let t = v.get(i)
+            v.set(i, v.get(j))
+            v.set(j, t)
+        }
+        j = j + 1
+    }
+    let t = v.get(i + 1)
+    v.set(i + 1, v.get(hi))
+    v.set(hi, t)
+    return i + 1
+}
+
+// _qsort：小段（< 16）用插入排序（分支预测友好），其余快排
+fn _qsort(v: vec[int], lo: int, hi: int) {
+    while lo < hi {
+        if hi - lo < 16 {
+            _isort(v, lo, hi)
+            return
+        }
+        let p = _partition(v, lo, hi)
+        // 递归小的一半、循环大的一半（栈深 O(log n)）
+        if p - lo < hi - p {
+            _qsort(v, lo, p - 1)
+            lo = p + 1
+        } else {
+            _qsort(v, p + 1, hi)
+            hi = p - 1
+        }
+    }
+}
+
+fn _isort(v: vec[int], lo: int, hi: int) {
+    let mut i = lo + 1
+    while i <= hi {
+        let key = v.get(i)
+        let mut j = i - 1
+        let mut go = 1
+        while j >= lo && go == 1 {
+            if v.get(j) > key {
+                v.set(j + 1, v.get(j))
+                j = j - 1
+            } else {
+                go = 0
+            }
+        }
+        v.set(j + 1, key)
+        i = i + 1
+    }
+}
+
+// is_sorted(v) -> int：升序校验（1/0）
+fn is_sorted(v: vec[int]) -> int {
+    let n = len(v)
+    let mut i = 1
+    while i < n {
+        if v.get(i - 1) > v.get(i) {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}

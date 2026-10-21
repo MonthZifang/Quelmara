@@ -2347,6 +2347,135 @@ class Lower:
             d = fn.new_v()
             fn.emit("call", d, "__mem_to_str", vals)
             return self._mark_str(fn, d)
+        if name == "sleep_ms" and name not in self.fns_ast:
+            # sleep_ms(ms)：线程挂起指定毫秒（v1.16）。
+            # Windows：kernel32.Sleep(ms)；Linux：nanosleep(timespec{ms/1000,
+            # (ms%1000)*1e6}, 0)，timespec 用帧槽 2 字。
+            if len(e[2]) != 1:
+                raise SyntaxError("sleep_ms(ms) 需要一个实参")
+            ms = self.eval(e[2][0], fn, env)
+            if self.platform == "windows":
+                fn.emit("winapi", None, "Sleep", [ms])
+            else:
+                ts = fn.new_struct_slot(2)
+                ta = fn.new_v()
+                fn.emit("frameaddr", ta, ts)
+                sec = fn.new_v()
+                fn.emit("bin", "div", sec, ms, ("imm", 1000))
+                rem = fn.new_v()
+                fn.emit("bin", "mod", rem, ms, ("imm", 1000))
+                nsl = fn.new_v()
+                fn.emit("bin", "mul", nsl, rem, ("imm", 1000000))
+                fn.emit("store", ta, ("imm", 0), sec)
+                fn.emit("store", ta, ("imm", 1), nsl)
+                fn.emit("syscall", None, self.sc["nanosleep"],
+                        [ta, ("imm", 0), ("imm", 0), ("imm", 0), ("imm", 0), ("imm", 0)])
+            return ("imm", 0)
+        if name == "file_exists" and name not in self.fns_ast:
+            # file_exists(path) -> int：0/1（v1.16）。
+            # Windows：GetFileAttributesA != INVALID(0xFFFFFFFF)；Linux：access(path, F_OK)
+            if len(e[2]) != 1:
+                raise SyntaxError("file_exists(path) 需要一个实参")
+            pa = self.eval(e[2][0], fn, env)
+            if self.platform == "windows":
+                attr = fn.new_v()
+                fn.emit("winapi", attr, "GetFileAttributesA", [pa])
+                # winapi 返回 32 位值（RAX 高 32 为 0）——先符号扩展到 64 位
+                # 再与 -1 比较（0xFFFFFFFF 符号扩展后才是 -1）
+                sx = fn.new_v()
+                fn.emit("bin", "shl", sx, attr, ("imm", 32))
+                fn.emit("bin", "sar", sx, sx, ("imm", 32))
+                d = fn.new_v()
+                fn.emit("cmpset", "ne", d, sx, ("imm", -1))
+                return d
+            fn.emit("syscall", d, self.sc["access"],
+                    [("imm", -100), pa, ("imm", 0), ("imm", 0), ("imm", 0), ("imm", 0)])
+            z = fn.new_v()
+            fn.emit("cmpset", "e", z, d, ("imm", 0))
+            return z
+        if name in ("file_size", "fs_mkdir", "fs_remove") and name not in self.fns_ast:
+            # 文件系统最小集（v1.16）：
+            #   file_size(path) -> 字节数（失败 -1）
+            #   fs_mkdir(path) -> 0 成功 / -1 失败（已存在也算失败，与 POSIX 同）
+            #   fs_remove(path) -> 0 成功 / -1 失败（仅文件；目录用 fs_rmdir——未做）
+            # Windows：CreateFileA+GetFileSize+CloseHandle / CreateDirectoryA / DeleteFileA
+            # Linux：openat+lseek(SEEK_END)+close / mkdir(0o755) / unlink
+            if len(e[2]) != 1:
+                raise SyntaxError(f"{name}(path) 需要一个实参")
+            pa = self.eval(e[2][0], fn, env)
+            if name == "fs_mkdir":
+                if self.platform == "windows":
+                    d = fn.new_v()
+                    fn.emit("winapi", d, "CreateDirectoryA", [pa, ("imm", 0)])
+                    # 非 0 = 成功 → 返回 0；0 = 失败 → 返回 -1
+                    ok = fn.new_v()
+                    fn.emit("cmpset", "ne", ok, d, ("imm", 0))
+                    r = fn.new_v()
+                    fn.emit("bin", "sub", r, ok, ("imm", 1))
+                    return r
+                fn.emit("syscall", d, self.sc["mkdir"],
+                        [pa, ("imm", 493), ("imm", 0), ("imm", 0), ("imm", 0), ("imm", 0)])
+                # POSIX：0 成功 / -1 失败——非 0 的 -1 保留、0 保留
+                z = fn.new_v()
+                fn.emit("cmpset", "e", z, d, ("imm", 0))
+                r = fn.new_v()
+                fn.emit("bin", "sub", r, z, ("imm", 1))
+                return r
+            if name == "fs_remove":
+                if self.platform == "windows":
+                    d = fn.new_v()
+                    fn.emit("winapi", d, "DeleteFileA", [pa])
+                    ok = fn.new_v()
+                    fn.emit("cmpset", "ne", ok, d, ("imm", 0))
+                    r = fn.new_v()
+                    fn.emit("bin", "sub", r, ok, ("imm", 1))
+                    return r
+                fn.emit("syscall", d, self.sc["unlink"],
+                        [pa, ("imm", 0), ("imm", 0), ("imm", 0), ("imm", 0), ("imm", 0)])
+                z = fn.new_v()
+                fn.emit("cmpset", "e", z, d, ("imm", 0))
+                r = fn.new_v()
+                fn.emit("bin", "sub", r, z, ("imm", 1))
+                return r
+            # file_size
+            if self.platform == "windows":
+                h = fn.new_v()
+                fn.emit("winapi", h, "CreateFileA",
+                        [pa, ("imm", -2147483648), ("imm", 0), ("imm", 0),
+                         ("imm", 3), ("imm", 0), ("imm", 0)])
+                bad = fn.new_v()
+                fn.emit("cmpset", "e", bad, h, ("imm", -1))
+                sz = fn.new_v()
+                l_fail = fn.label("fsf")
+                l_end = fn.label("fsd")
+                fn.emit("jnz", bad, l_fail)
+                fn.emit("winapi", sz, "GetFileSize", [h, ("imm", 0)])
+                fn.emit("winapi", None, "CloseHandle", [h])
+                fn.emit("jmp", l_end)
+                fn.emit("label", l_fail)
+                fn.emit("mov", sz, ("imm", -1))
+                fn.emit("label", l_end)
+                return sz
+            fd = fn.new_v()
+            fn.emit("syscall", fd, self.sc["openat"],
+                    [("imm", -100), pa, ("imm", 0), ("imm", 0), ("imm", 0), ("imm", 0)])
+            neg = fn.new_v()
+            fn.emit("bin", "sub", neg, ("imm", 0), fd)
+            pos = fn.new_v()
+            fn.emit("cmpset", "g", pos, fd, ("imm", 0))   # fd > 0 才继续
+            l_ok = fn.label("fso")
+            fn.emit("jnz", pos, l_ok)
+            sz2 = fn.new_v()
+            fn.emit("mov", sz2, ("imm", -1))
+            l_end = fn.label("fse2")
+            fn.emit("jmp", l_end)
+            fn.emit("label", l_ok)
+            cur = fn.new_v()
+            fn.emit("syscall", cur, self.sc["lseek"],
+                    [fd, ("imm", 0), ("imm", 2), ("imm", 0), ("imm", 0), ("imm", 0)])
+            fn.emit("syscall", None, self.sc["close"], [fd])
+            fn.emit("label", l_end)
+            return cur
         if name == "read_text" and name not in self.fns_ast:
             # read_text(path) -> str：整文件读入（NUL 结尾）。失败 fail-fast。
             if len(e[2]) != 1:
@@ -7291,11 +7420,15 @@ SYSCALLS = {
     "x86_64": {"write": 1, "exit": 60, "mmap": 9, "clone": 56, "wait4": 61,
                "yield": 24, "read": 0, "close": 3, "openat": 257,
                "socket": 41, "bind": 49, "listen": 50, "accept": 43,
-               "sendto": 44, "recvfrom": 45, "clock_gettime": 228},
+               "sendto": 44, "recvfrom": 45, "clock_gettime": 228,
+               "mkdir": 83, "unlink": 87, "access": 21, "lseek": 8,
+               "nanosleep": 35, "getpid": 39},
     "aarch64": {"write": 64, "exit": 93, "mmap": 222, "clone": 220, "wait4": 260,
                 "yield": 124, "read": 63, "close": 57, "openat": 56,
                 "socket": 198, "bind": 200, "listen": 201, "accept": 202,
-                "sendto": 206, "recvfrom": 207, "clock_gettime": 113},
+                "sendto": 206, "recvfrom": 207, "clock_gettime": 113,
+                "mkdir": 34, "unlink": 35, "access": 48, "lseek": 62,
+                "nanosleep": 101, "getpid": 172},
 }
 
 # 小对象尺寸类数量：32 字节粒度，覆盖 32..1024 字节（__alloc/__free 空闲链）
