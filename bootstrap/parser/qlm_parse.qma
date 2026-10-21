@@ -520,6 +520,14 @@ fn parse_primary(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
         ks.set("nm", w)
         if w == "true" { return "(bool 1)" }
         if w == "false" { return "(bool 0)" }
+        // Phase 2 保留字出现在表达式位置（return match x {..} / spawn fib(20)）：
+        // 与 stage-0 的 astbody 同判 UNSUPPORTED——必须 skip 而不是
+        // 当标识符 dump 成 (name match)（v1.13 修，SKIP 不同步大户）。
+        // 这些词是语言关键字，不可能作为变量名，无条件 skip。
+        if w == "match" || w == "spawn" || w == "select" || w == "arena" {
+            k.set("skip", 1)
+            return ""
+        }
         if w == "vec" && cur_get(k) < n && src[cur_get(k)] == 91 {
             cur_set(k, cur_get(k) + 1)
             let tname = read_name(src, n, k)
@@ -557,6 +565,11 @@ fn parse_primary(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
         }
         if w == "map" && cur_get(k) < n && src[cur_get(k)] == 91 {
             k.set("skip", 1)                           // map 字面量 Phase 2
+            return ""
+        }
+        if (w == "option" || w == "result") && cur_get(k) < n && src[cur_get(k)] == 91 {
+            // option[int].none() 等类型级构造：astbody 同判 UNSUPPORTED
+            k.set("skip", 1)
             return ""
         }
         // name 后跟 { 且未禁用 -> structlit
@@ -671,7 +684,29 @@ fn parse_postfix(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
                             }
                         }
                         if pure == 1 {
-                            out = "(call " + dotted + "." + nm + args + ")"
+                            // 纯链 + 调用：首段首字母大写 = 枚举构造（类型命名
+                            // 惯例 PascalCase），dump 成 (enumlit T.V <A>...)；
+                            // 小写 = 变量方法调用，dump 成 (method (name s) m <A>...)
+                            // ——与 stage-0 astbody 的符号表判定结果一致（v1.13）
+                            let mut big = 0
+                            if len(dotted) > 0 && dotted[0] >= 65 && dotted[0] <= 90 {
+                                big = 1
+                            }
+                            if big == 1 {
+                                out = "(enumlit " + dotted + "." + nm + args + ")"
+                            } else {
+                                let mut recv = "(name " + dotted + ")"
+                                let mut hasdot = 0
+                                let mut q = 0
+                                while q < len(dotted) {
+                                    if dotted[q] == 46 { hasdot = 1 }
+                                    q += 1
+                                }
+                                if hasdot == 1 {
+                                    recv = "(path " + dotted + ")"
+                                }
+                                out = "(method " + recv + " " + nm + args + ")"
+                            }
                             dotted = ""
                             pure = 0
                             k.set("lk", 3)
@@ -1331,8 +1366,21 @@ fn parse_expr(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
 // ---- body 模式入口：fn 签名 + 函数体协议行 ----
 
 fn body_mode_fn(src: str, n: int, k: map[str]int, ks: map[str]str, fname: str) {
-    // 已消费 'fn'；跳参数括号与返回类型，进 { 协议输出
+    // 已消费 'fn'；跳泛型参数 [T]（v1.11）、参数括号与返回类型，进 { 协议输出
     skip_ws(src, n, k)
+    if cur_get(k) < n && src[cur_get(k)] == 91 {
+        // 泛型模板：astbody 侧泛型 fn 不进 fns_ast（不 dump）——这里
+        // 跳过 [..] 后照常走（函数体里依旧是 Phase 1 形态则 dump 一致）
+        let mut depth = 1
+        cur_set(k, cur_get(k) + 1)
+        while cur_get(k) < n && depth > 0 {
+            let c = src[cur_get(k)]
+            if c == 91 { depth += 1 }
+            if c == 93 { depth -= 1 }
+            cur_set(k, cur_get(k) + 1)
+        }
+        skip_ws(src, n, k)
+    }
     if cur_get(k) < n && src[cur_get(k)] == 40 {
         cur_set(k, cur_get(k) + 1)
         let mut depth = 1
