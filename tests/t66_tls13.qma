@@ -1,0 +1,151 @@
+// t66_tls13.qma：TLS 1.3 密钥调度 + 记录层 —— v1.21
+// 覆盖：RFC 5869 HKDF 三个用例、RFC 8448 §3 密钥链（early→handshake→traffic→key/iv）、
+//       nonce 构造、AEAD 记录封装往返、握手消息/记录头编码。
+module t66
+
+import std.hex
+import std.tls13
+
+fn eqh(a: str, h: str) -> int {
+    if hex_encode(a) == h {
+        return 1
+    }
+    return 0
+}
+
+fn repeat_byte(b: int, n: int) -> str {
+    let v = vec[int].new(n + 1)
+    let mut i = 0
+    while i < n {
+        v.push(b)
+        i = i + 1
+    }
+    return str_from_bytes(v)
+}
+
+// [from, to] 逐字节递增
+fn seq_bytes(from: int, to: int) -> str {
+    let v = vec[int].new(to - from + 2)
+    let mut i = from
+    while i <= to {
+        v.push(i)
+        i = i + 1
+    }
+    return str_from_bytes(v)
+}
+
+fn main() {
+    // ================= RFC 5869 HKDF 测试用例 =================
+
+    // TC1：22 字节 0x0b / 13 字节 salt / 10 字节 info / L=42
+    let ikm1 = repeat_byte(0x0b, 22)
+    let salt1 = hex_decode("000102030405060708090a0b0c")
+    let info1 = hex_decode("f0f1f2f3f4f5f6f7f8f9")
+    let prk1 = hkdf_extract(salt1, ikm1)
+    assert(eqh(prk1, "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5") == 1,
+           "hkdf tc1 prk")
+    assert(eqh(hkdf_expand(prk1, info1, 42),
+               "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865") == 1,
+           "hkdf tc1 okm")
+
+    // TC2：80 字节递增输入 / L=82（跨 3 个 HMAC 块）
+    let ikm2 = seq_bytes(0x00, 0x4f)
+    let salt2 = seq_bytes(0x60, 0xaf)
+    let info2 = seq_bytes(0xb0, 0xff)
+    let prk2 = hkdf_extract(salt2, ikm2)
+    assert(eqh(prk2, "06a6b88c5853361a06104c9ceb35b45cef760014904671014a193f40c15fc244") == 1,
+           "hkdf tc2 prk")
+    assert(eqh(hkdf_expand(prk2, info2, 82),
+               "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87") == 1,
+           "hkdf tc2 okm")
+
+    // TC3：空 salt / 空 info
+    let prk3 = hkdf_extract("", ikm1)
+    assert(eqh(prk3, "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04") == 1,
+           "hkdf tc3 prk")
+    assert(eqh(hkdf_expand(prk3, "", 42),
+               "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8") == 1,
+           "hkdf tc3 okm")
+
+    // ================= RFC 8448 §3 TLS 1.3 密钥链 =================
+
+    // 空 transcript 的 SHA-256
+    assert(eqh(tls_empty_hash(),
+               "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 1,
+           "empty transcript hash")
+
+    // early_secret = HKDF-Extract(0, 0)
+    let early = tls_early_secret()
+    assert(eqh(early, "33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a") == 1,
+           "rfc8448 early secret")
+
+    // Derive-Secret(early, "derived", "")
+    let derived = tls_derive_secret(early, "derived", tls_empty_hash())
+    assert(eqh(derived, "6f2615a108c702c5678f54fc9dbab69716c076189c48250cebeac3576c3611ba") == 1,
+           "rfc8448 derived")
+
+    // handshake_secret = HKDF-Extract(derived, ECDHE)
+    let shared = hex_decode("8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d")
+    let hs = tls_handshake_secret(early, shared)
+    assert(eqh(hs, "1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac") == 1,
+           "rfc8448 handshake secret")
+
+    // 握手流量密钥（RFC 给出 secret，本模块据此派生 key/iv）
+    let c_hs = hex_decode("b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21")
+    let s_hs = hex_decode("b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38")
+    assert(eqh(tls_traffic_key(c_hs), "dbfaa693d1762c5b666af5d950258d01") == 1,
+           "client hs key")
+    assert(eqh(tls_traffic_iv(c_hs), "5bd3c71b836e0b76bb73265f") == 1,
+           "client hs iv")
+    assert(eqh(tls_traffic_key(s_hs), "3fce516009c21727d0f2e4e86ee403bc") == 1,
+           "server hs key")
+    assert(eqh(tls_traffic_iv(s_hs), "5d313eb2671276ee13000b30") == 1,
+           "server hs iv")
+
+    // ================= nonce 构造 =================
+    let iv = tls_traffic_iv(s_hs)
+    assert(eqh(tls_nonce(iv, 0), "5d313eb2671276ee13000b30") == 1, "nonce seq=0")
+    assert(eqh(tls_nonce(iv, 1), "5d313eb2671276ee13000b31") == 1, "nonce seq=1")
+    assert(eqh(tls_nonce(iv, 256), "5d313eb2671276ee13000a30") == 1, "nonce seq=256")
+
+    // ================= AEAD 记录封装 =================
+    let key = tls_traffic_key(s_hs)
+    let plain = "GET / HTTP/1.1\r\n\r\n"
+    let rec = tls_seal_record(key, iv, 0, TLS_CT_HANDSHAKE, plain)
+    // 记录头：17 03 03 + 长度
+    assert(rec[0] == 23, "record type = application_data")
+    assert(rec[1] == 3 && rec[2] == 3, "record legacy version 0303")
+    assert(((rec[3] << 8) | rec[4]) == len(plain) + 1 + 16, "record length")
+    // 去掉 5 字节头后解密（注意 substr 的第二参是长度）
+    let sealed = substr(rec, 5, len(rec) - 5)
+    let back = tls_open_record(key, iv, 0, sealed)
+    assert(back == plain, "aead record round-trip")
+    // 篡改一个字节必须失败（返回空串）
+    let mut tampered = vec[int].new(len(sealed) + 1)
+    let mut i = 0
+    while i < len(sealed) {
+        tampered.push(sealed[i])
+        i = i + 1
+    }
+    tampered.set(0, tampered.get(0) ^ 0x01)
+    assert(len(tls_open_record(key, iv, 0, str_from_bytes(tampered))) == 0, "tampered rejected")
+
+    // 同一明文不同 seq 必须产生不同密文（nonce 不同）
+    let rec1 = tls_seal_record(key, iv, 1, TLS_CT_HANDSHAKE, plain)
+    assert(hex_encode(rec) != hex_encode(rec1), "nonce 影响密文")
+
+    // ================= 帧编码 =================
+    let hs = tls_hs_msg(TLS_HS_FINISHED, "abc")
+    assert(hex_encode(hs) == "14000003616263", "handshake header")
+    let r = tls_record(TLS_CT_HANDSHAKE, "abc")
+    assert(hex_encode(r) == "1603030003616263", "record header")
+    assert(hex_encode(tls_u16(0x1234)) == "1234", "u16")
+    assert(hex_encode(tls_u24(0x123456)) == "123456", "u24")
+
+    // ================= finished 派生 =================
+    let fk = tls_finished_key(c_hs)
+    assert(len(fk) == 32, "finished key len")
+    assert(len(tls_finished_verify_data(fk, tls_empty_hash())) == 32, "verify_data len")
+
+    print("ok t66_tls13")
+}

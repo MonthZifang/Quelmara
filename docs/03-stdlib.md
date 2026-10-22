@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-27 个模块，**312 个公开函数**（另有 141 个 `_` 前缀的内部函数）。
+28 个模块，**337 个公开函数**（另有 141 个 `_` 前缀的内部函数）。
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -24,6 +24,7 @@
 | `std/sha256` | SHA-256 + HMAC-SHA256 | 11 / 11 |
 | `std/aes` | AES-128-GCM | 6 / 26 |
 | `std/x25519` | X25519 密钥交换（RFC 7748，TLS ECDHE 地基） | 3 / 21 |
+| `std/tls13` | TLS 1.3 密钥调度 + AEAD 记录层（v1.21） | 25 / 25 |
 | `std/b64` | base64 编解码 | 5 / 5 |
 | `std/http` | HTTP/1.1 服务端 | 33 / 40 |
 | `std/ws` | WebSocket 服务端（RFC 6455） | 14 / 24 |
@@ -511,6 +512,38 @@ fn timer_poll() -> int
 fn timer_pending() -> int
 ```
 
+### `std/tls13.qma`
+
+TLS 1.3 密钥调度（HKDF-Expand-Label）+ AEAD 记录层
+
+```quelmara
+fn tls_zeros(n: int) -> str
+fn tls_hash(s: str) -> str
+fn tls_hmac(key: str, msg: str) -> str
+fn hkdf_extract(salt: str, ikm: str) -> str
+fn hkdf_expand(prk: str, info: str, n: int) -> str
+fn hkdf_expand_label(secret: str, label: str, ctx: str, n: int) -> str
+fn tls_derive_secret(secret: str, label: str, transcript_hash: str) -> str
+fn tls_early_secret() -> str
+fn tls_empty_hash() -> str
+fn tls_handshake_secret(early: str, shared: str) -> str
+fn tls_master_secret(handshake: str) -> str
+fn tls_traffic_key(secret: str) -> str
+fn tls_traffic_iv(secret: str) -> str
+fn tls_finished_key(secret: str) -> str
+fn tls_finished_verify_data(finished_key: str, transcript_hash: str) -> str
+fn tls_nonce(iv: str, seq: int) -> str
+fn tls_aad(ctype: int, cipher_len: int) -> str
+fn tls_seal(key: str, nonce: str, aad: str, plain: str) -> str
+fn tls_open(key: str, nonce: str, aad: str, sealed: str) -> str
+fn tls_record(ctype: int, payload: str) -> str
+fn tls_seal_record(key: str, iv: str, seq: int, ctype: int, plain: str) -> str
+fn tls_open_record(key: str, iv: str, seq: int, sealed: str) -> str
+fn tls_hs_msg(mtype: int, body: str) -> str
+fn tls_u16(v: int) -> str
+fn tls_u24(v: int) -> str
+```
+
 ### `std/url.qma`
 
 URL 解析 / query 取值 / 编码解码
@@ -574,6 +607,7 @@ fn x25519_base(k: str) -> str
 | `std/math` | `sqrt`（牛顿，相对误差 <1e-15）、`cbrt`、`floor/ceil/round/trunc_f`、`powi`、`gcd/lcm/isqrt`、NaN/inf 判定 | 无 `exp/log/pow(x,y)/sin/cos`（需要超越函数库）；`floor` 等受 int64 范围限制 |
 | `std/aes` | AES-128-GCM 加解密（FIPS/NIST 向量通过） | AES-256、AES-NI 加速 |
 | `std/x25519` | X25519 标量乘 / 公钥生成 / 共享密钥（RFC 7748 向量全过） | 单次约 7 ms（约 100× 于优化过的 C）；无 X448、无 Ed25519 |
+| `std/tls13` | HKDF（RFC 5869）、Expand-Label、key schedule、AEAD 记录封装、Finished 派生 | **无握手状态机、无 X.509、无 RSA/ECDSA 签名验证**——还不能独立完成真实握手 |
 | `std/sha256` | SHA-256、HMAC-SHA256 | SHA-NI 硬件加速（基础设施已就绪，本机 CPU 无该扩展） |
 | `std/net` | 阻塞 TCP（IPv4 字面量） | 域名解析、IPv6、批量收发 |
 | `std/net/udp` | open/bind/sendto/recvfrom + 地址解析 | 可靠 UDP、批量收发、IPv6 |

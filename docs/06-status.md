@@ -9,10 +9,10 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=127 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
-| 词法器对拍 | **PASS=112 FAIL=0**（112 个源文件） | `python tests/lexdiff.py` |
-| 声明级 AST 对拍 | **PASS=97 FAIL=0**（跳过 3 个：`t52_iface` / `t54_iface_dyn` / `t56_generic`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
-| 函数体 dump 对拍 | **一致 789 / 分叉 685 / SKIP 同步 18 / SKIP 不同步 18** | `python tests/bodydiff.py` |
+| PE 回归（主回归） | **PASS=128 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
+| 词法器对拍 | **PASS=113 FAIL=0**（113 个源文件） | `python tests/lexdiff.py` |
+| 声明级 AST 对拍 | **PASS=98 FAIL=0**（跳过 3 个：`t52_iface` / `t54_iface_dyn` / `t56_generic`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
+| 函数体 dump 对拍 | **一致 797 / 分叉 744 / SKIP 同步 18 / SKIP 不同步 18** | `python tests/bodydiff.py` |
 | IR 架构无关对拍 | **PASS=56 FAIL=0 SKIP=35**，并行后 **49 s**（原串行 5 min 41 s） | `python tests/irdiff.py` |
 | 发射层确定性对拍 | **PASS=10 FAIL=0** | `python tests/emitdiff.py` |
 | gzip 解码互操作 | **PASS=63 FAIL=0**（zlib 9 种编码组合 × 7 类输入）+ **损坏输入拒绝 5/5** | `python tests/gzip_inflate_test.py` |
@@ -135,7 +135,7 @@ python tools/stage0/qlm_cli.py run bench/sync_bench.qma --target win
 | AArch64（ELF64） | 🟡 | `tests/a64_emu.py` 执行级 | 无 chan/map/spawn/vtable/atomic/SHA；遇不支持形态编译期报错 |
 | macOS（Mach-O） | ❌ | — | 无 |
 | wasm32/64 | ❌ | — | 无 |
-| TLS（https/wss） | 🟡 Phase A 3/3 | `std/sha256` + `std/aes`(GCM) + `std/x25519` 齐备 | 缺记录层、握手状态机、X.509 |
+| TLS（https/wss） | 🟡 记录层就绪 | `std/sha256`+`std/aes`+`std/x25519`+**`std/tls13`（密钥调度/记录层）** | 缺握手状态机、X.509、RSA/ECDSA 签名验证 |
 
 ## 6. 已知风险
 

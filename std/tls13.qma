@@ -1,0 +1,297 @@
+// std/tls13.qma —— TLS 1.3 密钥调度（RFC 8446 §7.1）+ 记录层（§5.2）—— v1.21
+//
+// 为什么需要它：密码学零件（SHA-256/HMAC、AES-128-GCM、X25519）已经齐了，
+// 缺的是把它们串成握手的那层"胶水"：HKDF-Expand-Label、key schedule、
+// AEAD 记录封装。没有这层，https 客户端无从下手。
+//
+// 本模块**不做网络**：只提供纯函数——给 secret 和 transcript hash，算出
+// 流量密钥与 IV；给 key/nonce/aad/明文，算出密文记录。这样可以在没有
+// 连接的情况下用 RFC 向量逐字节验证。
+//
+// 验证：tests/t66_tls13.qma
+//   * RFC 5869 HKDF 三个测试用例（含长输入、空 salt/info）
+//   * RFC 8448 §3 完整密钥链：early → derived → handshake → c/s hs traffic → key/iv
+//
+// 边界（docs/07-gaps.md）：没有握手状态机、没有 X.509、没有签名验证
+// （RSA/ECDSA 未实现），所以还不能独立完成一次真实握手。
+
+import std.sha256
+import std.aes
+
+const TLS_HASH_LEN = 32
+const TLS_KEY_LEN = 16          // AES-128-GCM
+const TLS_IV_LEN = 12
+const TLS_TAG_LEN = 16
+
+// 内容类型（RFC 8446 §5.1）
+const TLS_CT_CHANGE_CIPHER_SPEC = 20
+const TLS_CT_ALERT = 21
+const TLS_CT_HANDSHAKE = 22
+const TLS_CT_APPLICATION_DATA = 23
+
+// 握手消息类型（RFC 8446 §4）
+const TLS_HS_CLIENT_HELLO = 1
+const TLS_HS_SERVER_HELLO = 2
+const TLS_HS_ENCRYPTED_EXTENSIONS = 8
+const TLS_HS_CERTIFICATE = 11
+const TLS_HS_CERTIFICATE_VERIFY = 15
+const TLS_HS_FINISHED = 20
+
+// ---------------------------------------------------------------------------
+// 基础工具
+// ---------------------------------------------------------------------------
+
+fn tls_zeros(n: int) -> str {
+    let v = vec[int].new(n)
+    let mut i = 0
+    while i < n {
+        v.push(0)
+        i = i + 1
+    }
+    return str_from_bytes(v)
+}
+
+// SHA-256 → 32 字节 str
+fn tls_hash(s: str) -> str {
+    return mem_str(sha256_str(s), TLS_HASH_LEN)
+}
+
+// HMAC-SHA256 → 32 字节 str
+fn tls_hmac(key: str, msg: str) -> str {
+    return mem_str(hmac_sha256_str(key, msg), TLS_HASH_LEN)
+}
+
+// ---------------------------------------------------------------------------
+// HKDF（RFC 5869）
+// ---------------------------------------------------------------------------
+
+// HKDF-Extract：PRK = HMAC(salt, IKM)。salt 为空时按 RFC 用全零 32 字节。
+fn hkdf_extract(salt: str, ikm: str) -> str {
+    let s = salt
+    if len(s) == 0 {
+        s = tls_zeros(TLS_HASH_LEN)
+    }
+    return tls_hmac(s, ikm)
+}
+
+// HKDF-Expand：OKM = T(1) || T(2) || …，T(i) = HMAC(PRK, T(i-1) || info || i)
+fn hkdf_expand(prk: str, info: str, n: int) -> str {
+    if n <= 0 || n > 255 * TLS_HASH_LEN {
+        assert(false, "hkdf_expand: 长度非法")
+    }
+    let out = vec[int].new(n + TLS_HASH_LEN)
+    let mut prev = ""
+    let mut produced = 0
+    let mut counter = 1
+    while produced < n {
+        let block = tls_hmac(prk, prev + info + chr(counter))
+        let mut i = 0
+        while i < TLS_HASH_LEN && produced < n {
+            out.push(block[i])
+            produced = produced + 1
+            i = i + 1
+        }
+        prev = block
+        counter = counter + 1
+    }
+    return str_from_bytes(out)
+}
+
+// HKDF-Expand-Label（RFC 8446 §7.1）
+//   struct { uint16 length; opaque label<7..255>; opaque context<0..255>; }
+//   label = "tls13 " + Label
+fn hkdf_expand_label(secret: str, label: str, ctx: str, n: int) -> str {
+    let full = "tls13 " + label
+    let ln = len(full)
+    let cn = len(ctx)
+    if ln > 255 || cn > 255 {
+        assert(false, "hkdf_expand_label: label/context 过长")
+    }
+    let info = vec[int].new(ln + cn + 8)
+    info.push((n >> 8) & 0xFF)
+    info.push(n & 0xFF)
+    info.push(ln)
+    let mut i = 0
+    while i < ln {
+        info.push(full[i])
+        i = i + 1
+    }
+    info.push(cn)
+    i = 0
+    while i < cn {
+        info.push(ctx[i])
+        i = i + 1
+    }
+    return hkdf_expand(secret, str_from_bytes(info), n)
+}
+
+// Derive-Secret(Secret, Label, Messages)
+//   = HKDF-Expand-Label(Secret, Label, Transcript-Hash(Messages), Hash.length)
+fn tls_derive_secret(secret: str, label: str, transcript_hash: str) -> str {
+    return hkdf_expand_label(secret, label, transcript_hash, TLS_HASH_LEN)
+}
+
+// ---------------------------------------------------------------------------
+// 密钥调度（RFC 8446 §7.1，无 PSK / 无 0-RTT）
+// ---------------------------------------------------------------------------
+
+// early_secret = HKDF-Extract(0, 0)
+fn tls_early_secret() -> str {
+    let z = tls_zeros(TLS_HASH_LEN)
+    return hkdf_extract(z, z)
+}
+
+// 空 transcript 的哈希（SHA-256("")）
+fn tls_empty_hash() -> str {
+    return tls_hash("")
+}
+
+// handshake_secret = HKDF-Extract(Derive-Secret(early, "derived", ""), ECDHE)
+fn tls_handshake_secret(early: str, shared: str) -> str {
+    let derived = tls_derive_secret(early, "derived", tls_empty_hash())
+    return hkdf_extract(derived, shared)
+}
+
+// master_secret = HKDF-Extract(Derive-Secret(handshake, "derived", ""), 0…0)
+fn tls_master_secret(handshake: str) -> str {
+    let derived = tls_derive_secret(handshake, "derived", tls_empty_hash())
+    return hkdf_extract(derived, tls_zeros(TLS_HASH_LEN))
+}
+
+// 流量密钥 / IV（RFC 8446 §7.3）
+fn tls_traffic_key(secret: str) -> str {
+    return hkdf_expand_label(secret, "key", "", TLS_KEY_LEN)
+}
+
+fn tls_traffic_iv(secret: str) -> str {
+    return hkdf_expand_label(secret, "iv", "", TLS_IV_LEN)
+}
+
+// finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)
+fn tls_finished_key(secret: str) -> str {
+    return hkdf_expand_label(secret, "finished", "", TLS_HASH_LEN)
+}
+
+// Finished 的 verify_data = HMAC(finished_key, Transcript-Hash(handshake))
+fn tls_finished_verify_data(finished_key: str, transcript_hash: str) -> str {
+    return tls_hmac(finished_key, transcript_hash)
+}
+
+// ---------------------------------------------------------------------------
+// 记录层（RFC 8446 §5.2 / §5.3）
+// ---------------------------------------------------------------------------
+
+// nonce = IV XOR (seq 按大端放在最后 8 字节)
+fn tls_nonce(iv: str, seq: int) -> str {
+    if len(iv) != TLS_IV_LEN {
+        assert(false, "tls_nonce: IV 必须是 12 字节")
+    }
+    let out = vec[int].new(TLS_IV_LEN + 1)
+    let mut i = 0
+    while i < TLS_IV_LEN {
+        out.push(iv[i])
+        i = i + 1
+    }
+    let mut k = 0
+    while k < 8 {
+        let shift = (7 - k) * 8
+        let b = (seq >>> shift) & 0xFF
+        out.set(4 + k, out.get(4 + k) ^ b)
+        k = k + 1
+    }
+    return str_from_bytes(out)
+}
+
+// TLSCiphertext 的附加认证数据：type || legacy_version || length(密文+tag)
+fn tls_aad(ctype: int, cipher_len: int) -> str {
+    let out = vec[int].new(6)
+    out.push(ctype)
+    out.push(0x03)
+    out.push(0x03)
+    out.push((cipher_len >> 8) & 0xFF)
+    out.push(cipher_len & 0xFF)
+    return str_from_bytes(out)
+}
+
+// 加密：返回 密文||tag（不含记录头）
+fn tls_seal(key: str, nonce: str, aad: str, plain: str) -> str {
+    return gcm_encrypt(key, nonce, aad, plain)
+}
+
+// 解密：tag 不匹配返回 ""
+fn tls_open(key: str, nonce: str, aad: str, sealed: str) -> str {
+    return gcm_decrypt(key, nonce, aad, sealed)
+}
+
+// 完整记录：type || 0x0303 || len || payload（明文记录，如 ClientHello）
+fn tls_record(ctype: int, payload: str) -> str {
+    let n = len(payload)
+    if n > 16384 {
+        assert(false, "tls_record: 记录超过 16384 字节")
+    }
+    let out = vec[int].new(n + 6)
+    out.push(ctype)
+    out.push(0x03)
+    out.push(0x03)
+    out.push((n >> 8) & 0xFF)
+    out.push(n & 0xFF)
+    let mut i = 0
+    while i < n {
+        out.push(payload[i])
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+// 加密记录：type(23) || 0x0303 || len || (密文||tag)
+fn tls_seal_record(key: str, iv: str, seq: int, ctype: int, plain: str) -> str {
+    let inner = plain + chr(ctype)          // TLS 1.3 把真实类型放在明文末尾
+    let nonce = tls_nonce(iv, seq)
+    let clen = len(inner) + TLS_TAG_LEN
+    let sealed = tls_seal(key, nonce, tls_aad(TLS_CT_APPLICATION_DATA, clen), inner)
+    return tls_record(TLS_CT_APPLICATION_DATA, sealed)
+}
+
+// 解密记录：payload 是去掉 5 字节记录头后的密文||tag
+fn tls_open_record(key: str, iv: str, seq: int, sealed: str) -> str {
+    let nonce = tls_nonce(iv, seq)
+    let inner = tls_open(key, nonce, tls_aad(TLS_CT_APPLICATION_DATA, len(sealed)), sealed)
+    if len(inner) == 0 {
+        return ""
+    }
+    // 去掉末尾的内容类型字节（调用方按需检查）
+    return substr(inner, 0, len(inner) - 1)
+}
+
+// 握手消息头：type || 3 字节长度
+fn tls_hs_msg(mtype: int, body: str) -> str {
+    let n = len(body)
+    let out = vec[int].new(n + 5)
+    out.push(mtype)
+    out.push((n >> 16) & 0xFF)
+    out.push((n >> 8) & 0xFF)
+    out.push(n & 0xFF)
+    let mut i = 0
+    while i < n {
+        out.push(body[i])
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+// 16 位大端整数（构造扩展、长度前缀时用）
+fn tls_u16(v: int) -> str {
+    let out = vec[int].new(3)
+    out.push((v >> 8) & 0xFF)
+    out.push(v & 0xFF)
+    return str_from_bytes(out)
+}
+
+// 24 位大端整数
+fn tls_u24(v: int) -> str {
+    let out = vec[int].new(4)
+    out.push((v >> 16) & 0xFF)
+    out.push((v >> 8) & 0xFF)
+    out.push(v & 0xFF)
+    return str_from_bytes(out)
+}

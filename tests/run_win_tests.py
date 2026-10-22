@@ -573,6 +573,7 @@ def main():
     case_selfcheck("t63_inflate", "tests/t63_inflate.qma")
     case_selfcheck("t64_math", "tests/t64_math.qma")
     case_selfcheck("t65_x25519", "tests/t65_x25519.qma")
+    case_selfcheck("t66_tls13", "tests/t66_tls13.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),
