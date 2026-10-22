@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-39 个模块，**447 个公开函数**（另有 216 个 `_` 前缀的内部函数）。
+40 个模块，**452 个公开函数**（另有 216 个 `_` 前缀的内部函数）。
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -336,6 +336,18 @@ fn clamp_f(x: f64, lo: f64, hi: f64) -> f64
 fn isqrt(n: int) -> int
 fn gcd(a: int, b: int) -> int
 fn lcm(a: int, b: int) -> int
+```
+
+### `std/md5.qma`
+
+MD5（RFC 1321，仅兼容用途，不要用于密码）
+
+```quelmara
+fn md5_load_block(block: int, w: int) -> int
+fn md5_block(state: int, block: int, w: int) -> int
+fn md5_init(state: int) -> int
+fn md5_str(s: str) -> int
+fn md5_hex(s: str) -> str
 ```
 
 ### `std/mem.qma`

@@ -1,0 +1,28 @@
+// t80_md5.qma：MD5（RFC 1321 附录 A.5 全部 7 个向量，v1.35）
+module t80
+
+import std.core
+import std.md5
+import std.str
+
+fn main() {
+    assert(md5_hex("") == "d41d8cd98f00b204e9800998ecf8427e", "empty")
+    assert(md5_hex("a") == "0cc175b9c0f1b6a831c399e269772661", "a")
+    assert(md5_hex("abc") == "900150983cd24fb0d6963f7d28e17f72", "abc")
+    assert(md5_hex("message digest") == "f96b697d7cb7938d525a2f31aaf161d0", "message digest")
+    assert(md5_hex("abcdefghijklmnopqrstuvwxyz") == "c3fcd3d76192e4007dfb496cca67e13b", "alphabet")
+    assert(md5_hex("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+           == "d174ab98d277d9f5a5611c2c9f419d9f", "alnum")
+    assert(md5_hex("12345678901234567890123456789012345678901234567890123456789012345678901234567890")
+           == "57edf4a22be3c955ac49da2e2107b67a", "digits")
+    // 边界：55/56/64 字节（填充跨块）
+    let a55 = str_repeat("x", 55)
+    let a56 = str_repeat("x", 56)
+    let a64 = str_repeat("x", 64)
+    assert(len(md5_hex(a55)) == 32, "55 len")
+    assert(len(md5_hex(a56)) == 32, "56 len")
+    assert(len(md5_hex(a64)) == 32, "64 len")
+    assert(md5_hex(a55) != md5_hex(a56), "55 != 56")
+    assert(md5_hex(a56) != md5_hex(a64), "56 != 64")
+    print("ok t80_md5")
+}

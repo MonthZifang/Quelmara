@@ -6945,6 +6945,8 @@ class Lower:
         if self.uses_memchr:
             self.out.append(f)
 
+
+
         # __memdiff(a, b, n) -> int：首个不同字节的下标，全等返回 n（v1.30）
         # 8 字节字比较：字相等就整字跳过，字不等再逐字节定位（公共前缀长度）。
         # 这是 LZ77 匹配长度的核心——gzip 编码的内层热点原来是一字节一次比较。

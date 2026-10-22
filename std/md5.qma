@@ -1,0 +1,299 @@
+// std/md5.qma —— MD5（RFC 1321，v1.35）
+//
+// 为什么还要 MD5：它不是安全哈希，但生态里到处是它——旧接口签名、ETag、
+// 文件校验、S3 分片 ETag、某些数据库的密码列。没有它就得让调用方自己实现。
+//
+// 定位纪律（写进文档，不做惊喜）：
+//   * **不要**用它做密码哈希或任何需要抗碰撞的场合（用 std/sha256 + HMAC）；
+//   * 输入按字节处理，不做 UTF-8 归一；
+//   * 输出是小端 16 字节，`md5_hex` 给出 32 位小写十六进制。
+//
+// 实现：64 轮全展开（无循环、无表查），轮常量是 const，位移是字面量。
+// 每一步拆成两条语句（先算 t 再算轮转），因为语言没有 `<<<` 运算符，
+// 手写 `(x << s) | (x >> (32-s))` 放在一个表达式里会重复求值 x。
+
+const MD5T0 = 0xD76AA478
+const MD5T1 = 0xE8C7B756
+const MD5T2 = 0x242070DB
+const MD5T3 = 0xC1BDCEEE
+const MD5T4 = 0xF57C0FAF
+const MD5T5 = 0x4787C62A
+const MD5T6 = 0xA8304613
+const MD5T7 = 0xFD469501
+const MD5T8 = 0x698098D8
+const MD5T9 = 0x8B44F7AF
+const MD5T10 = 0xFFFF5BB1
+const MD5T11 = 0x895CD7BE
+const MD5T12 = 0x6B901122
+const MD5T13 = 0xFD987193
+const MD5T14 = 0xA679438E
+const MD5T15 = 0x49B40821
+const MD5T16 = 0xF61E2562
+const MD5T17 = 0xC040B340
+const MD5T18 = 0x265E5A51
+const MD5T19 = 0xE9B6C7AA
+const MD5T20 = 0xD62F105D
+const MD5T21 = 0x02441453
+const MD5T22 = 0xD8A1E681
+const MD5T23 = 0xE7D3FBC8
+const MD5T24 = 0x21E1CDE6
+const MD5T25 = 0xC33707D6
+const MD5T26 = 0xF4D50D87
+const MD5T27 = 0x455A14ED
+const MD5T28 = 0xA9E3E905
+const MD5T29 = 0xFCEFA3F8
+const MD5T30 = 0x676F02D9
+const MD5T31 = 0x8D2A4C8A
+const MD5T32 = 0xFFFA3942
+const MD5T33 = 0x8771F681
+const MD5T34 = 0x6D9D6122
+const MD5T35 = 0xFDE5380C
+const MD5T36 = 0xA4BEEA44
+const MD5T37 = 0x4BDECFA9
+const MD5T38 = 0xF6BB4B60
+const MD5T39 = 0xBEBFBC70
+const MD5T40 = 0x289B7EC6
+const MD5T41 = 0xEAA127FA
+const MD5T42 = 0xD4EF3085
+const MD5T43 = 0x04881D05
+const MD5T44 = 0xD9D4D039
+const MD5T45 = 0xE6DB99E5
+const MD5T46 = 0x1FA27CF8
+const MD5T47 = 0xC4AC5665
+const MD5T48 = 0xF4292244
+const MD5T49 = 0x432AFF97
+const MD5T50 = 0xAB9423A7
+const MD5T51 = 0xFC93A039
+const MD5T52 = 0x655B59C3
+const MD5T53 = 0x8F0CCC92
+const MD5T54 = 0xFFEFF47D
+const MD5T55 = 0x85845DD1
+const MD5T56 = 0x6FA87E4F
+const MD5T57 = 0xFE2CE6E0
+const MD5T58 = 0xA3014314
+const MD5T59 = 0x4E0811A1
+const MD5T60 = 0xF7537E82
+const MD5T61 = 0xBD3AF235
+const MD5T62 = 0x2AD7D2BB
+const MD5T63 = 0xEB86D391
+
+// 读 16 个小端字（MD5 与 SHA-256 相反：消息字是小端）
+fn md5_load_block(block: int, w: int) -> int {
+    let mut i = 0
+    while i < 16 {
+        let b0 = mem_load8(block, i * 4)
+        let b1 = mem_load8(block, i * 4 + 1)
+        let b2 = mem_load8(block, i * 4 + 2)
+        let b3 = mem_load8(block, i * 4 + 3)
+        mem_store64(w, i, (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & 0xFFFFFFFF)
+        i = i + 1
+    }
+    return 0
+}
+
+fn md5_block(state: int, block: int, w: int) -> int {
+    md5_load_block(block, w)
+    let mut a = mem_load64(state, 0)
+    let mut b = mem_load64(state, 1)
+    let mut c = mem_load64(state, 2)
+    let mut d = mem_load64(state, 3)
+    let t0 = (a + ((b & c) | ((b ^ 0xFFFFFFFF) & d)) + mem_load64(w, 0) + MD5T0) & 0xFFFFFFFF
+    a = (b + (((t0 << 7) | (t0 >> 25)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t1 = (d + ((a & b) | ((a ^ 0xFFFFFFFF) & c)) + mem_load64(w, 1) + MD5T1) & 0xFFFFFFFF
+    d = (a + (((t1 << 12) | (t1 >> 20)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t2 = (c + ((d & a) | ((d ^ 0xFFFFFFFF) & b)) + mem_load64(w, 2) + MD5T2) & 0xFFFFFFFF
+    c = (d + (((t2 << 17) | (t2 >> 15)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t3 = (b + ((c & d) | ((c ^ 0xFFFFFFFF) & a)) + mem_load64(w, 3) + MD5T3) & 0xFFFFFFFF
+    b = (c + (((t3 << 22) | (t3 >> 10)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t4 = (a + ((b & c) | ((b ^ 0xFFFFFFFF) & d)) + mem_load64(w, 4) + MD5T4) & 0xFFFFFFFF
+    a = (b + (((t4 << 7) | (t4 >> 25)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t5 = (d + ((a & b) | ((a ^ 0xFFFFFFFF) & c)) + mem_load64(w, 5) + MD5T5) & 0xFFFFFFFF
+    d = (a + (((t5 << 12) | (t5 >> 20)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t6 = (c + ((d & a) | ((d ^ 0xFFFFFFFF) & b)) + mem_load64(w, 6) + MD5T6) & 0xFFFFFFFF
+    c = (d + (((t6 << 17) | (t6 >> 15)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t7 = (b + ((c & d) | ((c ^ 0xFFFFFFFF) & a)) + mem_load64(w, 7) + MD5T7) & 0xFFFFFFFF
+    b = (c + (((t7 << 22) | (t7 >> 10)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t8 = (a + ((b & c) | ((b ^ 0xFFFFFFFF) & d)) + mem_load64(w, 8) + MD5T8) & 0xFFFFFFFF
+    a = (b + (((t8 << 7) | (t8 >> 25)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t9 = (d + ((a & b) | ((a ^ 0xFFFFFFFF) & c)) + mem_load64(w, 9) + MD5T9) & 0xFFFFFFFF
+    d = (a + (((t9 << 12) | (t9 >> 20)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t10 = (c + ((d & a) | ((d ^ 0xFFFFFFFF) & b)) + mem_load64(w, 10) + MD5T10) & 0xFFFFFFFF
+    c = (d + (((t10 << 17) | (t10 >> 15)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t11 = (b + ((c & d) | ((c ^ 0xFFFFFFFF) & a)) + mem_load64(w, 11) + MD5T11) & 0xFFFFFFFF
+    b = (c + (((t11 << 22) | (t11 >> 10)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t12 = (a + ((b & c) | ((b ^ 0xFFFFFFFF) & d)) + mem_load64(w, 12) + MD5T12) & 0xFFFFFFFF
+    a = (b + (((t12 << 7) | (t12 >> 25)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t13 = (d + ((a & b) | ((a ^ 0xFFFFFFFF) & c)) + mem_load64(w, 13) + MD5T13) & 0xFFFFFFFF
+    d = (a + (((t13 << 12) | (t13 >> 20)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t14 = (c + ((d & a) | ((d ^ 0xFFFFFFFF) & b)) + mem_load64(w, 14) + MD5T14) & 0xFFFFFFFF
+    c = (d + (((t14 << 17) | (t14 >> 15)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t15 = (b + ((c & d) | ((c ^ 0xFFFFFFFF) & a)) + mem_load64(w, 15) + MD5T15) & 0xFFFFFFFF
+    b = (c + (((t15 << 22) | (t15 >> 10)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t16 = (a + ((d & b) | ((d ^ 0xFFFFFFFF) & c)) + mem_load64(w, 1) + MD5T16) & 0xFFFFFFFF
+    a = (b + (((t16 << 5) | (t16 >> 27)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t17 = (d + ((c & a) | ((c ^ 0xFFFFFFFF) & b)) + mem_load64(w, 6) + MD5T17) & 0xFFFFFFFF
+    d = (a + (((t17 << 9) | (t17 >> 23)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t18 = (c + ((b & d) | ((b ^ 0xFFFFFFFF) & a)) + mem_load64(w, 11) + MD5T18) & 0xFFFFFFFF
+    c = (d + (((t18 << 14) | (t18 >> 18)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t19 = (b + ((a & c) | ((a ^ 0xFFFFFFFF) & d)) + mem_load64(w, 0) + MD5T19) & 0xFFFFFFFF
+    b = (c + (((t19 << 20) | (t19 >> 12)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t20 = (a + ((d & b) | ((d ^ 0xFFFFFFFF) & c)) + mem_load64(w, 5) + MD5T20) & 0xFFFFFFFF
+    a = (b + (((t20 << 5) | (t20 >> 27)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t21 = (d + ((c & a) | ((c ^ 0xFFFFFFFF) & b)) + mem_load64(w, 10) + MD5T21) & 0xFFFFFFFF
+    d = (a + (((t21 << 9) | (t21 >> 23)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t22 = (c + ((b & d) | ((b ^ 0xFFFFFFFF) & a)) + mem_load64(w, 15) + MD5T22) & 0xFFFFFFFF
+    c = (d + (((t22 << 14) | (t22 >> 18)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t23 = (b + ((a & c) | ((a ^ 0xFFFFFFFF) & d)) + mem_load64(w, 4) + MD5T23) & 0xFFFFFFFF
+    b = (c + (((t23 << 20) | (t23 >> 12)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t24 = (a + ((d & b) | ((d ^ 0xFFFFFFFF) & c)) + mem_load64(w, 9) + MD5T24) & 0xFFFFFFFF
+    a = (b + (((t24 << 5) | (t24 >> 27)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t25 = (d + ((c & a) | ((c ^ 0xFFFFFFFF) & b)) + mem_load64(w, 14) + MD5T25) & 0xFFFFFFFF
+    d = (a + (((t25 << 9) | (t25 >> 23)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t26 = (c + ((b & d) | ((b ^ 0xFFFFFFFF) & a)) + mem_load64(w, 3) + MD5T26) & 0xFFFFFFFF
+    c = (d + (((t26 << 14) | (t26 >> 18)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t27 = (b + ((a & c) | ((a ^ 0xFFFFFFFF) & d)) + mem_load64(w, 8) + MD5T27) & 0xFFFFFFFF
+    b = (c + (((t27 << 20) | (t27 >> 12)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t28 = (a + ((d & b) | ((d ^ 0xFFFFFFFF) & c)) + mem_load64(w, 13) + MD5T28) & 0xFFFFFFFF
+    a = (b + (((t28 << 5) | (t28 >> 27)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t29 = (d + ((c & a) | ((c ^ 0xFFFFFFFF) & b)) + mem_load64(w, 2) + MD5T29) & 0xFFFFFFFF
+    d = (a + (((t29 << 9) | (t29 >> 23)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t30 = (c + ((b & d) | ((b ^ 0xFFFFFFFF) & a)) + mem_load64(w, 7) + MD5T30) & 0xFFFFFFFF
+    c = (d + (((t30 << 14) | (t30 >> 18)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t31 = (b + ((a & c) | ((a ^ 0xFFFFFFFF) & d)) + mem_load64(w, 12) + MD5T31) & 0xFFFFFFFF
+    b = (c + (((t31 << 20) | (t31 >> 12)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t32 = (a + (b ^ c ^ d) + mem_load64(w, 5) + MD5T32) & 0xFFFFFFFF
+    a = (b + (((t32 << 4) | (t32 >> 28)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t33 = (d + (a ^ b ^ c) + mem_load64(w, 8) + MD5T33) & 0xFFFFFFFF
+    d = (a + (((t33 << 11) | (t33 >> 21)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t34 = (c + (d ^ a ^ b) + mem_load64(w, 11) + MD5T34) & 0xFFFFFFFF
+    c = (d + (((t34 << 16) | (t34 >> 16)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t35 = (b + (c ^ d ^ a) + mem_load64(w, 14) + MD5T35) & 0xFFFFFFFF
+    b = (c + (((t35 << 23) | (t35 >> 9)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t36 = (a + (b ^ c ^ d) + mem_load64(w, 1) + MD5T36) & 0xFFFFFFFF
+    a = (b + (((t36 << 4) | (t36 >> 28)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t37 = (d + (a ^ b ^ c) + mem_load64(w, 4) + MD5T37) & 0xFFFFFFFF
+    d = (a + (((t37 << 11) | (t37 >> 21)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t38 = (c + (d ^ a ^ b) + mem_load64(w, 7) + MD5T38) & 0xFFFFFFFF
+    c = (d + (((t38 << 16) | (t38 >> 16)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t39 = (b + (c ^ d ^ a) + mem_load64(w, 10) + MD5T39) & 0xFFFFFFFF
+    b = (c + (((t39 << 23) | (t39 >> 9)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t40 = (a + (b ^ c ^ d) + mem_load64(w, 13) + MD5T40) & 0xFFFFFFFF
+    a = (b + (((t40 << 4) | (t40 >> 28)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t41 = (d + (a ^ b ^ c) + mem_load64(w, 0) + MD5T41) & 0xFFFFFFFF
+    d = (a + (((t41 << 11) | (t41 >> 21)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t42 = (c + (d ^ a ^ b) + mem_load64(w, 3) + MD5T42) & 0xFFFFFFFF
+    c = (d + (((t42 << 16) | (t42 >> 16)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t43 = (b + (c ^ d ^ a) + mem_load64(w, 6) + MD5T43) & 0xFFFFFFFF
+    b = (c + (((t43 << 23) | (t43 >> 9)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t44 = (a + (b ^ c ^ d) + mem_load64(w, 9) + MD5T44) & 0xFFFFFFFF
+    a = (b + (((t44 << 4) | (t44 >> 28)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t45 = (d + (a ^ b ^ c) + mem_load64(w, 12) + MD5T45) & 0xFFFFFFFF
+    d = (a + (((t45 << 11) | (t45 >> 21)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t46 = (c + (d ^ a ^ b) + mem_load64(w, 15) + MD5T46) & 0xFFFFFFFF
+    c = (d + (((t46 << 16) | (t46 >> 16)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t47 = (b + (c ^ d ^ a) + mem_load64(w, 2) + MD5T47) & 0xFFFFFFFF
+    b = (c + (((t47 << 23) | (t47 >> 9)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t48 = (a + (c ^ (b | (d ^ 0xFFFFFFFF))) + mem_load64(w, 0) + MD5T48) & 0xFFFFFFFF
+    a = (b + (((t48 << 6) | (t48 >> 26)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t49 = (d + (b ^ (a | (c ^ 0xFFFFFFFF))) + mem_load64(w, 7) + MD5T49) & 0xFFFFFFFF
+    d = (a + (((t49 << 10) | (t49 >> 22)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t50 = (c + (a ^ (d | (b ^ 0xFFFFFFFF))) + mem_load64(w, 14) + MD5T50) & 0xFFFFFFFF
+    c = (d + (((t50 << 15) | (t50 >> 17)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t51 = (b + (d ^ (c | (a ^ 0xFFFFFFFF))) + mem_load64(w, 5) + MD5T51) & 0xFFFFFFFF
+    b = (c + (((t51 << 21) | (t51 >> 11)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t52 = (a + (c ^ (b | (d ^ 0xFFFFFFFF))) + mem_load64(w, 12) + MD5T52) & 0xFFFFFFFF
+    a = (b + (((t52 << 6) | (t52 >> 26)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t53 = (d + (b ^ (a | (c ^ 0xFFFFFFFF))) + mem_load64(w, 3) + MD5T53) & 0xFFFFFFFF
+    d = (a + (((t53 << 10) | (t53 >> 22)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t54 = (c + (a ^ (d | (b ^ 0xFFFFFFFF))) + mem_load64(w, 10) + MD5T54) & 0xFFFFFFFF
+    c = (d + (((t54 << 15) | (t54 >> 17)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t55 = (b + (d ^ (c | (a ^ 0xFFFFFFFF))) + mem_load64(w, 1) + MD5T55) & 0xFFFFFFFF
+    b = (c + (((t55 << 21) | (t55 >> 11)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t56 = (a + (c ^ (b | (d ^ 0xFFFFFFFF))) + mem_load64(w, 8) + MD5T56) & 0xFFFFFFFF
+    a = (b + (((t56 << 6) | (t56 >> 26)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t57 = (d + (b ^ (a | (c ^ 0xFFFFFFFF))) + mem_load64(w, 15) + MD5T57) & 0xFFFFFFFF
+    d = (a + (((t57 << 10) | (t57 >> 22)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t58 = (c + (a ^ (d | (b ^ 0xFFFFFFFF))) + mem_load64(w, 6) + MD5T58) & 0xFFFFFFFF
+    c = (d + (((t58 << 15) | (t58 >> 17)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t59 = (b + (d ^ (c | (a ^ 0xFFFFFFFF))) + mem_load64(w, 13) + MD5T59) & 0xFFFFFFFF
+    b = (c + (((t59 << 21) | (t59 >> 11)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t60 = (a + (c ^ (b | (d ^ 0xFFFFFFFF))) + mem_load64(w, 4) + MD5T60) & 0xFFFFFFFF
+    a = (b + (((t60 << 6) | (t60 >> 26)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t61 = (d + (b ^ (a | (c ^ 0xFFFFFFFF))) + mem_load64(w, 11) + MD5T61) & 0xFFFFFFFF
+    d = (a + (((t61 << 10) | (t61 >> 22)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t62 = (c + (a ^ (d | (b ^ 0xFFFFFFFF))) + mem_load64(w, 2) + MD5T62) & 0xFFFFFFFF
+    c = (d + (((t62 << 15) | (t62 >> 17)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    let t63 = (b + (d ^ (c | (a ^ 0xFFFFFFFF))) + mem_load64(w, 9) + MD5T63) & 0xFFFFFFFF
+    b = (c + (((t63 << 21) | (t63 >> 11)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    mem_store64(state, 0, (mem_load64(state, 0) + a) & 0xFFFFFFFF)
+    mem_store64(state, 1, (mem_load64(state, 1) + b) & 0xFFFFFFFF)
+    mem_store64(state, 2, (mem_load64(state, 2) + c) & 0xFFFFFFFF)
+    mem_store64(state, 3, (mem_load64(state, 3) + d) & 0xFFFFFFFF)
+    return 0
+}
+
+fn md5_init(state: int) -> int {
+    mem_store64(state, 0, 0x67452301)
+    mem_store64(state, 1, 0xEFCDAB89)
+    mem_store64(state, 2, 0x98BADCFE)
+    mem_store64(state, 3, 0x10325476)
+    return 0
+}
+
+// md5_str(s) -> int：16 字节摘要缓冲（调用方 mem_free(dig, 16)）
+fn md5_str(s: str) -> int {
+    let n = len(s)
+    let total = ((n + 9 + 63) / 64) * 64
+    let buf = mem_alloc(total)
+    mem_copy(buf, s, n)
+    mem_store8(buf, n, 0x80)
+    mem_zero(buf + n + 1, total - n - 1)
+    // 长度按**小端** 64 位写在末尾（SHA-256 是大端，这里不一样）
+    let bits = n * 8
+    let mut i = 0
+    while i < 8 {
+        mem_store8(buf, total - 8 + i, (bits >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+    let state = mem_alloc(32)
+    md5_init(state)
+    let w = mem_alloc(16 * 8)
+    let mut off = 0
+    while off < total {
+        md5_block(state, buf + off, w)
+        off = off + 64
+    }
+    let out = mem_alloc(16)
+    let mut k = 0
+    while k < 4 {
+        let v = mem_load64(state, k)
+        mem_store8(out, k * 4, v & 0xFF)
+        mem_store8(out, k * 4 + 1, (v >> 8) & 0xFF)
+        mem_store8(out, k * 4 + 2, (v >> 16) & 0xFF)
+        mem_store8(out, k * 4 + 3, (v >> 24) & 0xFF)
+        k = k + 1
+    }
+    mem_free(buf, total)
+    mem_free(w, 16 * 8)
+    mem_free(state, 32)
+    return out
+}
+
+// md5_hex(s) -> str：32 位小写十六进制
+fn md5_hex(s: str) -> str {
+    let dig = md5_str(s)
+    let out = mem_alloc(33)
+    let hexd = "0123456789abcdef"
+    let mut i = 0
+    while i < 16 {
+        let v = mem_load8(dig, i)
+        mem_store8(out, i * 2, hexd[(v >> 4) & 0xF])
+        mem_store8(out, i * 2 + 1, hexd[v & 0xF])
+        i = i + 1
+    }
+    mem_store8(out, 32, 0)
+    let r = mem_str(out, 32)
+    mem_free(out, 33)
+    mem_free(dig, 16)
+    return r
+}
