@@ -260,26 +260,16 @@ phi copy。距 GCC ~3.5 cycles/iter 还有 ~3.6 倍，差距在：
   循环窗口证明跨"两次独立 len 读取"生效——`while i < n { s[i] }` 的
   bounds 检查 4 条 jcc → **0**。全部 str/vec 密集循环普适受益。
 
-**@simd f64 归约（v1.16 尝试，回滚待专项）**：
-- 语义目标：`acc += a[i]`（acc 为 f64、a 为 [N]f64）走 SSE2 addpd 两路 + 标量尾。
+**@simd f64 归约（v1.16b 已落地）**：
+- `acc += a[i]`（acc 为 f64、a 为 [N]f64）走 SSE2 addpd 两路 + 标量尾，
+  65536 元素 <1ms。两个根因（lea disp 笔误 + f64 数组元素类型传播缺失）
+  全部修复，t59_simdf64 覆盖（2 的幂逐位一致 / 标量尾 / 大数组）。
 - 浮点结合性让渡：两路求和顺序与标量不同，结果可能不逐位相等
   （docs/LANG.md §@simd 需写明；2 的幂测试值可逐位验证）。
-- 已落地的部分：encoder（movupd_rm/addpd/movhlps/addsd，全部标准形态）、
-  vsumd gen（pxor 清零 + movupd/addpd + movhlps/addsd 水平合并 +
-  movq 位模式提取 + 标量尾）、lower 的 f64 识别（acc 的 float 标记即契约）、
-  五处登记、arraylit 放开 f64 元素（1 槽位模式）。
-- **回滚原因**：m12 实测（simd+scalar 混用）死循环，且 simd 和 ≠ 标量和
-  （s>254 真、==255 假——元素读取或位模式链路有未爆雷）。假设链：
-  movupd 编码 ✓ / addpd 编码 ✓ / movhlps 方向 ✓ / 数组按值拷贝 ✓ /
-  fimm 位模式 ✓——单点核对全对但行为错，需要 **gdb/反汇编级定位**
-  （或 QEMU 单步），不是改改就好的事。
-- 专项任务清单：① 反汇编 dump 对照手写期望序列；② 逐指令
-  单元素 trace（1 元素/2 元素/3 元素的 vsumd 结果）；③ fcmpset 的
-  f64 == 语义核对（m11 连 128.0 都不匹配的疑点）；④ movupd 非对齐
-  在帧槽对齐下的实际地址（可能是 base 物化错误——mat(SCRATCH, base)
-  把数组帧地址物化后，调用返回时帧指针是否仍有效——**候选根因：
-  sum_simd 形参数组是拷贝帧，@simd 循环在其上遍历，但 gen 序列的
-  bp 物化时机与帧指针寄存器冲突**）。
+- 点积 `a[i]*b[i]` 需要 AVX2 vpmullq（SSE2 64 位乘语义不一致）——路线 3。
+- 编译期死循环检测（check_suspicious_loops）已落地：guard 变量不更新
+  + 常量上界 → 警告 + fn 名与循环序号；内联展开后的死循环同样命中。
+  源码行号传播登记 GAPS（AST 行号链路）。
 
 **路线（按赢回幅度排序）**：
 1. **SHA-NI 双路径**（P1，预计 20-40 倍）：编码器加 4 条指令
