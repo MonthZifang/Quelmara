@@ -21,11 +21,14 @@
 const CRC32_TAB_W = 6          // static_word(6) = CRC32 查表指针（256 × 8B）
 
 fn _crc32_table() -> int {
+    // slice-by-4：T0 = 标准表；Tk[i] = (Tk-1[i] >> 8) ^ T0[Tk-1[i] & 0xFF]。
+    // 4 表 8KB 一次分配，static_word 惰性缓存（进程级一次）。
     let p = mem_load64(static_word(CRC32_TAB_W), 0)
     if p != 0 {
         return p
     }
-    let tbl = mem_alloc(256 * 8)
+    let all = mem_alloc(4 * 256 * 8)
+    let t0 = all
     let mut i = 0
     while i < 256 {
         let mut c = i
@@ -38,20 +41,47 @@ fn _crc32_table() -> int {
             }
             k = k + 1
         }
-        mem_store64(tbl, i, c & 0xFFFFFFFF)
+        mem_store64(t0, i, c & 0xFFFFFFFF)
         i = i + 1
     }
-    mem_store64(static_word(CRC32_TAB_W), 0, tbl)
-    return tbl
+    let mut k = 1
+    while k < 4 {
+        let prev = all + (k - 1) * 256 * 8
+        let cur = all + k * 256 * 8
+        let mut i = 0
+        while i < 256 {
+            let v = mem_load64(prev, i)
+            mem_store64(cur, i, (v >> 8) ^ mem_load64(t0, v & 0xFF))
+            i = i + 1
+        }
+        k = k + 1
+    }
+    mem_store64(static_word(CRC32_TAB_W), 0, all)
+    return all
 }
 
 fn crc32(s: str) -> int {
-    let tbl = _crc32_table()
+    // slice-by-4（v1.17f，mem_load32 内建落地后重启）：4 张表 8KB，
+    // 主循环每迭代吃 4 字节（一次 32 位读 + 4 次查表，替代 4 次
+    // 逐字节读查）。表配对：最低字节配 T3（zlib crc32.c 同款，
+    // 标准向量 CRC("123456789") = 0xCBF43926 已验证）。
+    // v1.17 首版用 4 次 mem_load8 组合——10 条指令抵消了表查收益；
+    // mov r32, r/m32 一次读是这个优化的前置条件。
+    let all = _crc32_table()
+    let t0 = all
+    let t1 = all + 256 * 8
+    let t2 = all + 512 * 8
+    let t3 = all + 768 * 8
     let n = len(s)
     let mut c = 0xFFFFFFFF
     let mut i = 0
+    while i + 4 <= n {
+        let x = c ^ mem_load32(s, i)
+        c = mem_load64(t3, x & 0xFF) ^ mem_load64(t2, (x >> 8) & 0xFF) ^ mem_load64(t1, (x >> 16) & 0xFF) ^ mem_load64(t0, (x >> 24) & 0xFF)
+        i = i + 4
+    }
     while i < n {
-        c = (c >> 8) ^ mem_load64(tbl, (c ^ s[i]) & 0xFF)
+        c = (c >> 8) ^ mem_load64(t0, (c ^ mem_load8(s, i)) & 0xFF)
         i = i + 1
     }
     return (c ^ 0xFFFFFFFF) & 0xFFFFFFFF
@@ -313,26 +343,32 @@ fn deflate_raw(s: str) -> str {
                 if dist > 32768 {
                     cand = 0
                 } else {
-                    // 首字节快速否决：大多数候选拿 2 次下标就出局
-                    // （相对逐字节全比 ~4×；全部是通用手法，无形状特调）
+                    // 两级否决（zlib deflate.c 同款手法，纯通用）：
+                    // 1) 盲比否决——候选要能**超过**当前 best_len 才值得
+                    //    全比，先看 s[cp+best_len] == s[pos+best_len]，
+                    //    一次读出局（重复文本下链上候选从 ~258 次读降
+                    //    到 1 次；best_len 随匹配变长否决越来越强）
+                    // 2) 首字节否决——盲比过了再看首字节
+                    let maxl = n - pos
+                    let mut limit = 258
+                    if maxl < limit {
+                        limit = maxl
+                    }
                     let mut l = 0
-                    if mem_load8(s, cp) == mem_load8(s, pos) {
-                        let maxl = n - pos
-                        let mut limit = 258
-                        if maxl < limit {
-                            limit = maxl
-                        }
-                        let mut stop = 0
-                        while l < limit && stop == 0 {
-                            if mem_load8(s, cp + l) != mem_load8(s, pos + l) {
-                                stop = 1
-                            } else {
-                                l = l + 1
+                    if best_len < limit && mem_load8(s, cp + best_len) == mem_load8(s, pos + best_len) {
+                        if mem_load8(s, cp) == mem_load8(s, pos) {
+                            let mut stop = 0
+                            while l < limit && stop == 0 {
+                                if mem_load8(s, cp + l) != mem_load8(s, pos + l) {
+                                    stop = 1
+                                } else {
+                                    l = l + 1
+                                }
                             }
-                        }
-                        if l > best_len {
-                            best_len = l
-                            best_dist = dist
+                            if l > best_len {
+                                best_len = l
+                                best_dist = dist
+                            }
                         }
                     }
                     cand = mem_load64(prev, cp)

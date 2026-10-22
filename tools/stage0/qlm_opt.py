@@ -41,7 +41,7 @@ BRANCHES = ("jmp", "jz", "jnz", "jcc", "ret")
 COMMUTATIVE = ("add", "mul", "and", "or", "xor")
 # 绝不陷入的纯运算:可被投机执行(LICM 安全集)
 NON_TRAPPING = ("add", "sub", "mul", "and", "or", "xor", "shl", "shr", "sar", "umulhi")
-PURE = {"mov", "bin", "neg", "not", "cmpset", "load", "load8", "movaddr", "frameaddr",
+PURE = {"mov", "bin", "neg", "not", "cmpset", "load", "load8", "load32", "movaddr", "frameaddr",
         "fbin", "fneg", "fcmpset", "fcvt", "cssub"}
 
 
@@ -94,7 +94,7 @@ def vreg_mentions(ins):
         return ints([ins[1]]), ints([ins[2], ins[3]])
     if op == "ret":
         return [], ints([ins[1]])
-    if op in ("load", "load8"):
+    if op in ("load", "load8", "load32"):
         return [ins[1]], ints([ins[2], ins[3]])
     if op in ("store", "store8"):
         return [], ints([ins[1], ins[2], ins[3]])
@@ -353,7 +353,7 @@ def _cse_key(ins):
         if repr(a) > repr(b):
             a, b = b, a
         return ("bin", ins[1], a, b)
-    if op in ("mov", "neg", "not", "cmpset", "load", "load8", "movaddr"):
+    if op in ("mov", "neg", "not", "cmpset", "load", "load8", "load32", "movaddr"):
         return ins
     return None
 
@@ -730,7 +730,7 @@ def opt_strength_reduce(fn, rounds=3):
 # 让下一条无关指令填上延迟槽。与内联/展开/强度削减叠加生效。
 # ---------------------------------------------------------------------------
 _LAT = {"mov": 1, "neg": 1, "not": 1, "cmpset": 2,
-        "load": 5, "load8": 5, "store": 1, "store8": 1,
+        "load": 5, "load8": 5, "load32": 5, "store": 1, "store8": 1,
         "movaddr": 1, "call": 6, "callr": 6, "cssub": 2, "syscall": 20,
         "winapi": 12, "args": 1, "winargs": 1, "spawn_child": 8, "xchg": 6}
 _BIN_LAT = {"add": 1, "sub": 1, "and": 1, "or": 1, "xor": 1,
@@ -774,7 +774,7 @@ def check_suspicious_loops(fns):
 
 
 _EFF = ("call", "callr", "syscall", "winapi", "spawn_child", "xchg", "ret",
-        "store", "store8", "load", "load8",
+        "store", "store8", "load", "load8", "load32",
         # vsum 读一整段内存（最多 count*8 字节）：必须与访存保持原序，
         # 否则调度器会把它挪到数组初始化之前（v1.8 实测：归约少一个元素）。
         "vsum", "vsumd",
@@ -1549,7 +1549,7 @@ def _subst_vregs(ins, sub):
         return ("cssub", sub(ins[1]), S(ins[2]), S(ins[3]))
     if op == "ret":
         return ("ret", S(ins[1]) if ins[1] is not None else None)
-    if op in ("load", "load8"):
+    if op in ("load", "load8", "load32"):
         return (op, sub(ins[1]), S(ins[2]), S(ins[3]))
     if op in ("store", "store8"):
         return (op, S(ins[1]), S(ins[2]), S(ins[3]))

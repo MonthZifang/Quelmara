@@ -204,6 +204,12 @@ class Enc:
         self.emit(rex(w=1, r=dst, x=index, b=base), b"\x0f\xb6",
                   modrm_mem(dst, base, index, scale, disp))
 
+    def mov32_rm(self, dst, base, index, scale, disp):
+        # MOV r32, r/m32（8B /r，无 REX.W——x86-32 位写零扩展到 64 位，
+        # u32 语义正是 crc32 这类校验和需要的）
+        self.emit(rex(r=dst, x=index, b=base), b"\x8b",
+                  modrm_mem(dst, base, index, scale, disp))
+
     def mov8_mr(self, base, index, scale, disp, src):
         self.emit(rex(r=src, x=index, b=base), b"\x88",
                   modrm_mem(src, base, index, scale, disp))
@@ -2295,7 +2301,7 @@ class Lower:
             d = fn.new_v()
             fn.emit("rdtsc", d)
             return d
-        if name in ("mem_load8", "mem_store8", "mem_load64", "mem_store64") \
+        if name in ("mem_load8", "mem_load32", "mem_store8", "mem_load64", "mem_store64") \
                 and name not in self.fns_ast:
             # mem_load8(p, i)        -> int   读第 i 个字节（0..255）
             # mem_store8(p, i, v)    -> 0     写第 i 个字节
@@ -2314,6 +2320,9 @@ class Lower:
             d = fn.new_v()
             if name == "mem_load8":
                 fn.emit("load8", d, vals[0], vals[1])
+            elif name == "mem_load32":
+                # u32 语义：零扩展（crc32/校验和的直接消费形态）
+                fn.emit("load32", d, vals[0], vals[1])
             else:
                 fn.emit("load", d, vals[0], vals[1])
             return d
@@ -7501,7 +7510,7 @@ def _map_ins(ins, f):
         return ("cssub", V(ins[1]), S(ins[2]), S(ins[3]))
     if op == "ret":
         return ("ret", S(ins[1]) if ins[1] is not None else None)
-    if op in ("load", "load8"):
+    if op in ("load", "load8", "load32"):
         return (op, V(ins[1]), S(ins[2]), S(ins[3]))
     if op in ("store", "store8"):
         return (op, S(ins[1]), S(ins[2]), S(ins[3]))
@@ -8243,13 +8252,16 @@ class Codegen:
                     enc.mov_rr(ACC, r)
             self.emit_epilogue()
             enc.ret()
-        elif op in ("load", "load8"):
+        elif op in ("load", "load8", "load32"):
             rd = self.safe_dst_reg(ins[1], [ins[2], ins[3]])
             fb = self.fetch(SCRATCH2, ins[2])
             fi = self.fetch(SCRATCH, ins[3])
             target = rd if rd is not None else ACC
             if op == "load":
                 enc.mov_rm(target, fb, fi, 3, 0)
+            elif op == "load32":
+                # 字节偏移寻址（同 load8）：scale 0——不是 load64 的槽索引
+                enc.mov32_rm(target, fb, fi, 0, 0)
             else:
                 enc.movzx8_rm(target, fb, fi, 0, 0)
             if rd is None:
