@@ -23,6 +23,7 @@ EXE = os.path.join(ROOT, "build", "qlm_parse.qex")
 # stage-1 parser 的语法缺口（v1.8）：这些文件跳过声明级对拍。
 # 补进 bootstrap/parser/qlm_parse.qma 后把这里清空，数字自然回升。
 PARSE1_PENDING = {"t52_iface.qma", "t54_iface_dyn.qma", "t56_generic.qma",
+                  "t81_generic_infer.qma",
                   "iface_missing.qma", "iface_rettype.qma", "iface_no_impl.qma",
                   "iface_dup_method.qma"}
 
@@ -39,7 +40,8 @@ def collect():
     for f in skip:
         files.remove(f)
     if skip:
-        print(f"[parsediff] 跳过 {len(skip)} 个文件（stage-1 未支持 interface/impl）："
+        print(f"[parsediff] 跳过 {len(skip)} 个文件（stage-1 未支持 "
+              "interface/impl/泛型）："
               + ", ".join(os.path.basename(f) for f in sorted(skip)))
     return sorted(files)
 

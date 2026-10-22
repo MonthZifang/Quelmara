@@ -749,15 +749,18 @@ class Parser:
         name = self.eat("NAME").val
         tparams = None
         if self.at("SYM", "["):
-            # 用户泛型（v1.11）：fn name[T](x: T) -> T { ... }。
-            # 单类型参数；**显式实例化**（调用点写 f[int](...)），
-            # 类型推导 / 多参 / 约束未做（docs/GAPS.md §2）。
+            # 用户泛型（v1.11 起；v1.36 支持多类型参数）：
+            # fn name[A, B](a: A, b: B) -> ... { ... }。
+            # 调用点可显式实例化 f[int, str](...)，也可省略方括号由推导
+            # 补全（v1.36，见 expand_generics / _GenInfer）。
             bracket = self.next()
             tparams = [self.eat("NAME").val]
-            if self.at("SYM", ","):
+            while self.at("SYM", ","):
+                self.next()
+                tparams.append(self.eat("NAME").val)
+            if len(set(tparams)) != len(tparams):
                 raise SyntaxError(
-                    f"line {bracket.line}: 用户泛型 v1.11 只支持单类型参数 T"
-                    "（多参在 docs/GAPS.md §2 路线上）")
+                    f"line {bracket.line}: 泛型类型参数重名：{tparams}")
             self.eat("SYM", "]")
         self.eat("SYM", "(")
         params = []
@@ -1388,21 +1391,25 @@ class Parser:
                 self.eat("SYM", "}")
                 return ("structlit", path, fields)
             if self.at("SYM", "[") and len(path) == 1 and path[0] in self.generic_fns:
-                # 泛型显式实例化：f[int](...)（v1.11）。
+                # 泛型显式实例化：f[int, str](...)（v1.11 单参；v1.36 多参）。
                 # 之所以不歧义：语言没有"下标后调用"（函数指针数组），
                 # 而 f 在泛型模板集合里——唯一解释就是实例化。
                 g = self.next()
-                ty = self.parse_type()
-                if ty[0] != "named" or "." in ty[1]:
-                    raise SyntaxError(
-                        f"line {g.line}: 泛型实参 v1.11 只支持单个具名类型"
-                        "（标量 / struct / enum；vec/map 嵌套见 GAPS §2）")
+                tys = [self.parse_type()]
+                while self.at("SYM", ","):
+                    self.next()
+                    tys.append(self.parse_type())
+                for ty in tys:
+                    if ty[0] != "named" or "." in ty[1]:
+                        raise SyntaxError(
+                            f"line {g.line}: 泛型实参只支持具名类型"
+                            "（标量 / struct / enum；vec/map 嵌套见 07-gaps §1）")
                 self.eat("SYM", "]")
                 self.eat("SYM", "(")
                 args = self.parse_args()
                 if any(a[0] == "namedarg" for a in args):
                     raise SyntaxError(f"line {g.line}: 泛型调用不支持命名实参")
-                return ("gcall", path[0], ty[1], args)
+                return ("gcall", path[0], tuple(t[1] for t in tys), args, g.line)
             if self.at("SYM", "("):
                 self.next()
                 args = self.parse_args()
@@ -1410,6 +1417,12 @@ class Parser:
                     return self.mk_enumlit(path, args, t.line)
                 if any(a[0] == "namedarg" for a in args):
                     raise SyntaxError(f"line {t.line}: 普通函数调用不支持命名实参")
+                if len(path) == 1 and path[0] in self.generic_fns:
+                    # 泛型隐式调用（v1.36）：f(...) 不带类型方括号——
+                    # 类型实参在单态化期由实参推导（_GenInfer），推不出就
+                    # 报错并提示显式实例化。跨文件前向泛型（被调用方后解析）
+                    # 仍要求显式方括号——解析期还不知道它是泛型。
+                    return ("gcall_infer", path[0], args, t.line)
                 return ("call", path, args)
             if ev is not None:
                 # 無載荷變體：`Color.Red` 即值
@@ -1448,87 +1461,424 @@ def _qpm_candidates(imp, main_dir):
     return [os.path.normpath(os.path.join(main_dir, ".qpm", "deps", rel))]
 
 
-def expand_generics(fns, generic_fns, structs, enums):
-    """用户泛型单态化（v1.11）：收集全部 gcall 节点，按 (fn, T) 复制模板成
-    具名实例 `f__<T>`，体内类型参数 ("named", T) 全替换、体内 gcall 递归
-    实例化后降为普通 call。**Lower 与后端零改动**——pass 之后 AST 里不再有
-    泛型痕迹（模板不进发射列表，只有实例存在）。
+# ---------------------------------------------------------------------------
+# 2c. 用户泛型：多类型参数 + 调用点推导（v1.36）
+# ---------------------------------------------------------------------------
 
-    支持范围（诚实边界，docs/GAPS.md §2）：
-      * 单类型参数 T；**显式实例化** f[int](...)（类型推导未做）；
+_GEN_SCALARS = {"int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8",
+                "bool", "str", "float", "f64", "f32"}
+_GEN_INTS = {"int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8"}
+
+
+def _ty_str(t):
+    """类型 AST -> 可读串（错误信息用）"""
+    if t is None:
+        return "void"
+    if not isinstance(t, tuple):
+        return repr(t)
+    k = t[0]
+    if k == "named":
+        return t[1]
+    if k == "vec":
+        return "vec[" + _ty_str(t[1]) + "]"
+    if k == "map":
+        return "map[" + _ty_str(t[1]) + "]" + _ty_str(t[2])
+    if k == "slice":
+        return "[]" + _ty_str(t[1])
+    if k == "array":
+        return "[" + str(t[1]) + "]" + _ty_str(t[2])
+    if k == "rc":
+        return "rc[" + _ty_str(t[1]) + "]"
+    if k == "chan":
+        return "chan[" + _ty_str(t[1]) + "]"
+    return k
+
+
+def _ty_subst(t, mapping):
+    """类型 AST 的类型参数替换（named/vec/map/slice/array/rc/chan 全形态）。
+    变量引用是 ("name", s)、类型是 ("named", s)——替换只认后者，天然不撞。"""
+    if not isinstance(t, tuple):
+        return t
+    k = t[0]
+    if k == "named" and len(t) == 2 and t[1] in mapping:
+        return ("named", mapping[t[1]])
+    if k == "vec":
+        return ("vec", _ty_subst(t[1], mapping))
+    if k == "map":
+        return ("map", _ty_subst(t[1], mapping), _ty_subst(t[2], mapping))
+    if k == "slice":
+        return ("slice", _ty_subst(t[1], mapping))
+    if k == "array":
+        return ("array", t[1], _ty_subst(t[2], mapping))
+    if k == "rc":
+        return ("rc", _ty_subst(t[1], mapping))
+    if k == "chan":
+        return ("chan", _ty_subst(t[1], mapping))
+    return t
+
+
+class _GenInfer:
+    """泛型调用点推导（v1.36）：函数内轻量类型环境 + 一元化。
+
+    推导来源：int/float/str/bool 字面量、结构体与枚举字面量、非泛型函数
+    返回类型、泛型实例返回类型、let 标注与变量环境、vec/map/array 元素
+    一元化、结构体字段类型。
+
+    推断是**流不敏感、尽力而为**的：推不出就返回 None——单态化期据此报错
+    （提示显式实例化），环境构建期静默放弃。推导只决定"实例化到哪个类型"，
+    真实类型检查仍由 Lower 负责（实例的形参/实参类型不匹配由 Lower 报）。
+    """
+
+    def __init__(self, generic_fns, structs, enums, fn_ret):
+        self.generic_fns = generic_fns
+        self.structs = structs
+        self.enums = enums
+        self.fn_ret = fn_ret
+
+    # ---- 表达式 -> 类型（tp_map：当前实例映射，应用于推断结果） ----
+    def infer(self, e, env, tp_map=None):
+        t = self._infer(e, env)
+        if t is None:
+            return None
+        return _ty_subst(t, tp_map) if tp_map else t
+
+    def _infer(self, e, env):
+        if not isinstance(e, tuple) or not e:
+            return None
+        k = e[0]
+        if k == "num":
+            v = e[1]
+            if isinstance(v, bool):
+                return ("named", "bool")
+            return ("named", "int") if isinstance(v, int) else ("named", "float")
+        if k == "fnum":
+            # ("fnum", 值, "f32"|"f64")——浮点字面量（v0.10 起的形态）
+            return ("named", e[2])
+        if k == "vecnew":
+            return ("vec", e[1])          # vec[T].new(cap)
+        if k == "mapnew":
+            return e[1]                   # ("map", kt, vt)
+        if k == "chanopen":
+            return ("chan", e[1])
+        if k == "arraylit" and e[1]:
+            return ("array", len(e[1]), self._infer(e[1][0], env))
+        if k == "str":
+            return ("named", "str")
+        if k == "bool":
+            return ("named", "bool")
+        if k == "name":
+            return env.get(e[1])
+        if k == "structlit" and len(e[1]) == 1 and e[1][0] in self.structs:
+            return ("named", e[1][0])
+        if k == "enumlit" and e[1] and e[1][0] in self.enums:
+            return ("named", e[1][0])
+        if k == "call" and len(e[1]) == 1 and e[1][0] not in env:
+            return self._call_ret(e[1][0], e[2], env)
+        if k == "gcall_infer":
+            got = self.infer_gcall(e[1], e[2], env, None, None, False)
+            return got[1] if got else None
+        if k == "gcall":
+            return self._gcall_ret(e[1], e[2], e[3])
+        if k == "index":
+            at = self._infer(e[1])
+            if at is not None and at[0] == "named" and at[1] == "str":
+                return ("named", "int")     # str 下标得字节值
+            return self._elem(at)
+        if k == "sliceof":
+            el = self._elem(self._infer(e[1]))
+            return ("slice", el) if el is not None else None
+        if k == "field":
+            st = self._infer(e[1])
+            if st is not None and st[0] == "named" and st[1] in self.structs:
+                for fn_, ft in self.structs[st[1]]:
+                    if fn_ == e[2]:
+                        return ft
+            return None
+        if k == "binop":
+            return self._binop_ty(e, env)
+        if k == "unop":
+            if e[1] == "!":
+                return ("named", "bool")
+            return self._infer(e[2], env) or ("named", "int")
+        if k == "method":
+            return self._method_ty(e, env)
+        return None
+
+    def _binop_ty(self, e, env):
+        op = e[1]
+        ta, tb = self._infer(e[2], env), self._infer(e[3], env)
+        if op in ("==", "!=", "<", ">", "<=", ">=", "&&", "||"):
+            return ("named", "bool")
+        if op == "+" and ((ta or ("",))[1:2] == ("str",)
+                          or (tb or ("",))[1:2] == ("str",)):
+            return ("named", "str")
+        names = [t[1] for t in (ta, tb)
+                 if t is not None and t[0] == "named"]
+        if any(n in ("float", "f64", "f32") for n in names):
+            return ("named", "float")
+        if names and all(n in _GEN_INTS for n in names):
+            return ta if ta == tb else ("named", "int")
+        return None
+
+    def _method_ty(self, e, env):
+        ot = self._infer(e[1], env)
+        if e[2] == "len":
+            return ("named", "int")
+        if ot is None:
+            return None
+        if ot[0] == "vec" and e[2] in ("get", "pop"):
+            return ot[1]
+        if ot[0] == "map" and e[2] == "get":
+            return ot[2]
+        return None
+
+    def _elem(self, t):
+        if not isinstance(t, tuple):
+            return None
+        if t[0] in ("vec", "slice"):
+            return t[1]
+        if t[0] in ("map", "array"):
+            return t[-1]
+        return None
+
+    def _call_ret(self, fname, args, env):
+        if fname in self.generic_fns:
+            got = self.infer_gcall(fname, args, env, None, None, False)
+            return got[1] if got else None
+        return self.fn_ret.get(fname)
+
+    def _gcall_ret(self, fname, tynames, args):
+        """显式实例化调用的返回类型（环境构建期用；类型实参可含符号参数）"""
+        tmpl = self.generic_fns.get(fname)
+        if tmpl is None:
+            return None
+        tps = tmpl.get("type_params") or []
+        if len(tynames) != len(tps):
+            return None
+        return _ty_subst(tmpl.get("ret"), dict(zip(tps, tynames)))
+
+    # ---- 一元化 ----
+    def unify(self, tpl_ty, arg_ty, bindings, tps, line, fname, strict):
+        """模板形参类型 tpl_ty 与实参类型 arg_ty 对齐，填充 bindings[T] = 类型。
+        容器形态递归（vec[T] ~ vec[int] 推出 T=int）；结构相同返回 True。"""
+        if not isinstance(tpl_ty, tuple) or not isinstance(arg_ty, tuple):
+            return False
+        if tpl_ty[0] == "named" and len(tpl_ty) == 2 and tpl_ty[1] in tps:
+            prev = bindings.get(tpl_ty[1])
+            if prev is None:
+                if not self._legal(arg_ty):
+                    if strict:
+                        raise SyntaxError(
+                            f"line {line}: 泛型 {fname} 的类型参数 {tpl_ty[1]} "
+                            f"推导为 {_ty_str(arg_ty)}——泛型实参只支持具名类型"
+                            "（标量 / struct / enum）")
+                    return False
+                bindings[tpl_ty[1]] = arg_ty
+            elif _ty_str(prev) != _ty_str(arg_ty):
+                if strict:
+                    raise SyntaxError(
+                        f"line {line}: 泛型 {fname} 的类型参数 {tpl_ty[1]} "
+                        f"推导冲突：{_ty_str(prev)} vs {_ty_str(arg_ty)}")
+                return False
+            return True
+        if tpl_ty[0] in ("vec", "slice", "rc", "chan") \
+                and arg_ty[0] == tpl_ty[0]:
+            return self.unify(tpl_ty[1], arg_ty[1], bindings, tps,
+                              line, fname, strict)
+        if tpl_ty[0] == "array" and arg_ty[0] == "array" \
+                and tpl_ty[1] == arg_ty[1]:
+            return self.unify(tpl_ty[2], arg_ty[2], bindings, tps,
+                              line, fname, strict)
+        if tpl_ty[0] == "map" and arg_ty[0] == "map":
+            return (self.unify(tpl_ty[1], arg_ty[1], bindings, tps,
+                               line, fname, strict)
+                    or self.unify(tpl_ty[2], arg_ty[2], bindings, tps,
+                                  line, fname, strict))
+        if _ty_str(tpl_ty) == _ty_str(arg_ty):
+            return True     # 结构相同、无类型参数——不绑定但算匹配
+        return False
+
+    def _legal(self, t):
+        return (isinstance(t, tuple) and t[0] == "named" and len(t) == 2
+                and "." not in t[1]
+                and (t[1] in _GEN_SCALARS or t[1] in self.structs
+                     or t[1] in self.enums))
+
+    # ---- 推导入口 ----
+    def infer_gcall(self, fname, args, env, tp_map, line, strict):
+        """推导泛型调用的类型实参。strict=True 时推不出/冲突即报错。
+        返回 (类型实参元组, 实例返回类型)；非 strict 失败返回 None。"""
+        tmpl = self.generic_fns.get(fname)
+        if tmpl is None:
+            if strict:
+                raise SyntaxError(f"line {line}: {fname!r} 不是泛型函数")
+            return None
+        tps = tmpl.get("type_params") or []
+        bindings = {}
+        for (pname, pty), arg in zip(tmpl.get("params") or [], args or []):
+            aty = self.infer(arg, env, tp_map)
+            self.unify(pty, aty, bindings, tps, line, fname, strict)
+        missing = [tp for tp in tps if tp not in bindings]
+        if missing:
+            if strict:
+                raise SyntaxError(
+                    f"line {line}: 泛型调用 {fname}(...) 推不出类型参数 "
+                    + ", ".join(missing)
+                    + f"——请显式实例化 {fname}[{', '.join(tps)}](...)，"
+                    "或让至少一个实参的类型可推导（字面量 / 标注 / 具名返回）")
+            return None
+        tynames = tuple(bindings[tp][1] for tp in tps)
+        return tynames, _ty_subst(tmpl.get("ret"), bindings)
+
+    # ---- 变量类型环境（流不敏感、按语句序、后写覆盖） ----
+    def compute_env(self, body, params):
+        env = {}
+        for n, t in (params or []):
+            env[n] = t
+        self._walk_stmts(body, env)
+        return env
+
+    def _walk_stmts(self, stmts, env):
+        if not isinstance(stmts, list):
+            return
+        for s in stmts:
+            self._walk_stmt(s, env)
+
+    def _walk_stmt(self, s, env):
+        if not isinstance(s, tuple) or not s:
+            return
+        k = s[0]
+        if k == "let":
+            anno = (s[4][1] if len(s) > 4 and isinstance(s[4], tuple)
+                    and s[4][0] == "as" else None)
+            if anno is not None:
+                env[s[2]] = anno
+            else:
+                t = self._infer(s[3], env)
+                if t is not None:
+                    env[s[2]] = t
+            return
+        if k == "assign" and s[2] == "=":
+            t = self._infer(s[3], env)
+            if t is not None:
+                env[s[1]] = t
+            return
+        if k in ("for", "parfor"):
+            env[s[1]] = ("named", "int")
+            self._walk_stmts(s[4], env)
+            return
+        if k == "foreach":
+            el = self._elem(self._infer(s[2], env))
+            if el is not None:
+                env[s[1]] = el
+            self._walk_stmts(s[3], env)
+            return
+        # 容器语句泛型递归（if/while/match/arena/annot/return/expr……）。
+        # 表达式里没有语句定义，递归进去不会误绑变量。
+        for v in s[1:]:
+            if isinstance(v, list):
+                self._walk_stmts(v, env)
+            elif isinstance(v, tuple):
+                self._walk_stmt(v, env)
+
+
+def expand_generics(fns, generic_fns, structs, enums):
+    """用户泛型单态化（v1.11 起；v1.36：多类型参数 + 调用点推导）。
+
+    收集全部泛型调用（显式 gcall / 隐式 gcall_infer），按类型实参元组复制
+    模板成具名实例 `f__T1_T2`：体内类型参数全替换、体内泛型调用递归实例化
+    后降为普通 call。**Lower 与后端零改动**——pass 之后 AST 里不再有泛型
+    痕迹（模板不进发射列表，只有实例存在）。
+
+    v1.36 新增：
+      * 多类型参数 `fn f[A, B](...)`；显式 `f[int, str](...)` 与隐式
+        `f(...)`（类型实参由实参推导，_GenInfer：流不敏感、尽力而为）；
+      * 隐式调用推不出全部类型参数时编译期报错并提示显式实例化；
+      * 修掉 v1.11 埋的 tp_lit 形态 bug：`T { ... }` 单态化结果此前是
+        ("structlit", <字符串>, ...)，多字符结构体名会被下游按字符 join
+        （"Point" -> "P.o.i.n.t" 直接报错）——现改为路径列表，与解析器一致。
+
+    支持范围（诚实边界，docs/07-gaps.md §1）：
+      * 类型实参只接受具名类型（标量 / struct / enum）；容器类型实参不做；
       * T 可出现在：形参 / 返回值 / let 标注 / 嵌套容器元素（vec[T] 等）；
-      * 泛型体内可调用其他泛型（含自递归 f[int]）；
-      * 不支持：泛型 struct、泛型方法、约束、多类型参数。
+      * 泛型体内可调用其他泛型（含自递归，显式或推导）；
+      * 泛型模板不支持注解（@simd/@extern），fail-fast 在 parse_program；
+      * 推导是流不敏感的：分支里改绑类型可能推错，Lower 会抓住不匹配；
+      * 不支持：泛型 struct、泛型方法、类型约束（trait bound）。
     """
     import copy
-    SCALARS = {"int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8",
-               "bool", "str", "float", "f64", "f32"}
-    instances = {}   # (fname, tyname) -> instance fn dict（先注册后填体，支持自递归）
+    instances = {}   # (fname, 类型实参元组) -> 实例 fn dict（先注册后填体）
 
-    def ensure(fname, tyname, line):
-        key = (fname, tyname)
+    infer = _GenInfer(generic_fns, structs, enums,
+                      {f["name"]: f.get("ret") for f in fns})
+
+    def legal(tyname):
+        return (tyname in _GEN_SCALARS or tyname in structs
+                or tyname in enums)
+
+    def ensure(fname, tynames, line):
+        key = (fname, tynames)
         if key in instances:
             return instances[key]
         tmpl = generic_fns.get(fname)
         if tmpl is None:
+            raise SyntaxError(f"line {line}: {fname!r} 不是泛型函数")
+        tps = tmpl.get("type_params") or []
+        if len(tynames) != len(tps):
             raise SyntaxError(
-                f"line {line}: {fname}[{tyname}] —— {fname!r} 不是泛型函数")
-        legal = tyname in SCALARS or tyname in structs or tyname in enums
-        if not legal:
-            raise SyntaxError(
-                f"line {line}: 泛型实参 {tyname!r} 不是已知类型"
-                "（标量 / struct / enum）")
+                f"line {line}: 泛型 {fname} 需要 {len(tps)} 个类型实参"
+                f"（[{'、'.join(tps)}]），得到 {len(tynames)} 个")
+        for tyn in tynames:
+            if not legal(tyn):
+                raise SyntaxError(
+                    f"line {line}: 泛型实参 {tyn!r} 不是已知类型"
+                    "（标量 / struct / enum）")
         inst = copy.deepcopy(tmpl)
-        inst["name"] = f"{fname}__{tyname}"
-        inst.pop("type_params", None)
-        if inst["name"] in {f["name"] for f in fns}:
+        iname = fname + "__" + "_".join(tynames)
+        if iname in {f["name"] for f in fns}:
             raise SyntaxError(
-                f"泛型实例 {inst['name']!r} 与已有函数重名（请改名）")
-        instances[key] = inst            # 先注册：体内自递归 f[同T] 直接引用
-        tp = tmpl["type_params"][0]
-        inst["params"] = [(n, subst(t, tp, tyname)) for n, t in inst["params"]]
-        inst["ret"] = subst(inst["ret"], tp, tyname)
-        inst["body"] = subst(inst["body"], tp, tyname)
+                f"泛型实例 {iname!r} 与已有函数重名（请改名）")
+        inst["name"] = iname
+        inst.pop("type_params", None)
+        instances[key] = inst            # 先注册：体内自递归直接引用
+        tp_map = dict(zip(tps, tynames))
+        env = infer.compute_env(tmpl.get("body"), tmpl.get("params"))
+        inst["params"] = [(n, _ty_subst(t, tp_map)) for n, t in inst["params"]]
+        inst["ret"] = _ty_subst(inst.get("ret"), tp_map)
+        inst["body"] = subst(inst.get("body"), tp_map, env)
         return inst
 
-    def subst(x, tp, tyname):
-        # ("named", T) -> ("named", 实例类型)；gcall -> 普通 call；
-        # ("tp_lit", T, fields) -> ("structlit", 实例类型, fields)。
-        # 变量引用是 ("name", s)、类型是 ("named", s)——天然不撞。
+    def subst(x, tp_map, env):
+        # ("named", T) -> ("named", 实例类型)；tp_lit -> structlit（路径列表）；
+        # gcall / gcall_infer -> 普通 call（实例名）。
         if isinstance(x, tuple):
-            if x[0] == "named" and len(x) == 2 and x[1] == tp:
-                return ("named", tyname)
-            if x[0] == "tp_lit" and x[1] == tp:
-                return ("structlit", tyname,
-                        {k: subst(v, tp, tyname) for k, v in x[2].items()})
+            if x[0] == "named" and len(x) == 2 and x[1] in tp_map:
+                return ("named", tp_map[x[1]])
+            if x[0] == "tp_lit" and x[1] in tp_map:
+                return ("structlit", [tp_map[x[1]]],
+                        {k: subst(v, tp_map, env) for k, v in x[2].items()})
             if x[0] == "gcall":
-                # 体内 gcall：类型参数随实例化替换（f[T] -> f__<tyname>），
-                # 显式具体类型（f[int]）按原样实例化。
-                ty2 = tyname if x[2] == tp else x[2]
-                inner = ensure(x[1], ty2, 0)
+                ty2 = tuple(tp_map.get(t, t) for t in x[2])
+                inner = ensure(x[1], ty2, x[4] if len(x) > 4 else 0)
                 return ("call", [inner["name"]],
-                        [subst(a, tp, tyname) for a in x[3]])
-            return tuple(subst(v, tp, tyname) for v in x)
+                        [subst(a, tp_map, env) for a in x[3]])
+            if x[0] == "gcall_infer":
+                # ("gcall_infer", fname, args, line)——4 元素，行号在 x[3]
+                got = infer.infer_gcall(x[1], x[2], env, tp_map, x[3], True)
+                inner = ensure(x[1], got[0], x[3])
+                return ("call", [inner["name"]],
+                        [subst(a, tp_map, env) for a in x[2]])
+            return tuple(subst(v, tp_map, env) for v in x)
         if isinstance(x, list):
-            return [subst(v, tp, tyname) for v in x]
-        return x
-
-    def subst_main(x):
-        # 主（非泛型）函数体：只降级 gcall（无类型参数替换）。
-        if isinstance(x, tuple):
-            if x[0] == "gcall":
-                inner = ensure(x[1], x[2], 0)
-                return ("call", [inner["name"]], [subst_main(a) for a in x[3]])
-            return tuple(subst_main(v) for v in x)
-        if isinstance(x, list):
-            return [subst_main(v) for v in x]
+            return [subst(v, tp_map, env) for v in x]
         return x
 
     out = []
     for f in fns:
         if f.get("type_params"):
-            continue                       # 模板不发射（正常不会出现在 fns）
-        f["body"] = subst_main(f["body"])
+            continue                       # 模板不发射（只有实例存在）
+        env = infer.compute_env(f.get("body"), f.get("params"))
+        f["body"] = subst(f.get("body"), {}, env)
         out.append(f)
     for inst in instances.values():
         out.append(inst)

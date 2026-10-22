@@ -1,0 +1,120 @@
+// t81_generic_infer.qma：用户泛型多类型参数 + 调用点推导（v1.36）
+// 覆盖：
+//   1) 单参隐式推导：int / str / float 字面量
+//   2) 多类型参数 f[A, B]：按位置分别推导
+//   3) 显式多参实例化 f[int, str](...) 仍然可用
+//   4) let 标注 / 结构体字面量 / 函数返回类型 三种推导来源
+//   5) vec[T] 形参的元素一元化（T 从 vec[int] 推出 int）
+//   6) 泛型体内调泛型（嵌套推导）：外层实例化后内联实例
+//   7) T { ... } 占位字面量 + 多字符结构体名（回归 v1.11 形态 bug）
+//   8) 跨文件泛型：std/gen 的模板经 import 后隐式调用
+// 编译期错误路径（命令行已验证，不在本运行时用例内）：
+//   * 推不出（唯一约束形参不是类型参数）-> 报错并提示显式实例化
+//   * 推导冲突（same(1, "s")）-> 报错 int vs str
+//   * 显式个数不符（two[int](1,2)）-> 报错需要 2 个得到 1 个
+module t81
+
+import std.gen
+
+struct Point { x: int, y: int }
+
+fn mk_point() -> Point {
+    return Point { x: 1, y: 2 }
+}
+
+// 单类型参数：隐式推导主战场
+fn ident[T](v: T) -> T {
+    return v
+}
+
+// 多类型参数
+fn first_of[A, B](a: A, b: B) -> A {
+    return a
+}
+
+fn second_of[A, B](a: A, b: B) -> B {
+    return b
+}
+
+// 容器形参：vec[T] 元素一元化
+fn vcount[T](xs: vec[T]) -> int {
+    let mut n = 0
+    let mut i = 0
+    while i < len(xs) {
+        if xs.get(i) >= 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// 泛型体内调泛型（隐式）：A/B 随外层实例化落地
+fn pair_swap[A, B](a: A, b: B) -> B {
+    let x = first_of(a, b)
+    let y = second_of(a, b)
+    return y
+}
+
+// T { ... } 占位字面量（多字符结构体名 Point——v1.11 曾在此崩）
+fn xscale[T](p: T, k: int) -> T {
+    return T { x: p.x * k, y: p.y * k }
+}
+
+fn main() {
+    // 1) 字面量推导：int / str / float
+    assert(ident(42) == 42, "infer int")
+    assert(ident("hi") == "hi", "infer str")
+    assert(ident(1.5) == 1.5, "infer float")
+
+    // 2) 多参推导：A=int, B=str
+    assert(first_of(7, "x") == 7, "multi A")
+    assert(second_of(7, "x") == "x", "multi B")
+
+    // 3) 显式多参实例化
+    assert(first_of[int, str](9, "y") == 9, "explicit multi")
+    assert(second_of[str, int]("y", 9) == 9, "explicit multi 2")
+
+    // 4) let 标注 / 结构体字面量 / 调用返回
+    let p: Point = Point { x: 3, y: 4 }
+    let q = ident(p)
+    assert(q.x == 3 and q.y == 4, "infer from anno")
+    let r = ident(Point { x: 5, y: 6 })
+    assert(r.x == 5, "infer from structlit")
+    let s = ident(mk_point())
+    assert(s.x == 1, "infer from call ret")
+
+    // 5) vec[T] 元素一元化
+    let v = vec[int].new(4)
+    v.push(3)
+    v.push(-1)
+    v.push(7)
+    assert(vcount(v) == 2, "vec elem unify")
+
+    // 6) 嵌套推导
+    assert(pair_swap(1, "z") == "z", "nested generic infer")
+
+    // 7) T{} 字面量 + 多字符结构体名
+    let big = xscale(Point { x: 6, y: 7 }, 10)
+    assert(big.x == 60 and big.y == 70, "tp lit multi-char")
+
+    // 8) 跨文件泛型（std/gen，import 后隐式调用）
+    assert(gen_min(3, 8) == 3, "gen_min int")
+    assert(gen_max(3, 8) == 8, "gen_max int")
+    assert(gen_min(2.5, 1.5) == 1.5, "gen_min float")
+    assert(gen_clamp(15, 0, 10) == 10, "clamp hi")
+    assert(gen_clamp(-5, 0, 10) == 0, "clamp lo")
+    assert(gen_clamp(5, 0, 10) == 5, "clamp mid")
+    assert(gen_dist(3, 10) == 7, "dist")
+    assert(gen_dist(2.5, 1.0) == 1.5, "dist float")
+    assert(gen_first(v) == 3, "gen_first")
+    assert(gen_last(v) == 7, "gen_last")
+    assert(gen_contains(v, 7), "contains hit")
+    assert(!gen_contains(v, 99), "contains miss")
+    assert(gen_index_of(v, -1) == 1, "index_of")
+    assert(gen_index_of(v, 99) == -1, "index_of miss")
+    gen_reverse(v)
+    assert(gen_first(v) == 7 and gen_last(v) == 3, "reverse")
+
+    print("generic infer ok")
+}

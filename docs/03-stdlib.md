@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-40 个模块，**452 个公开函数**（另有 216 个 `_` 前缀的内部函数）。
+41 个模块，**461 个公开函数**（另有 216 个 `_` 前缀的内部函数）。
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -154,6 +154,22 @@ fn heap_new(cap: int) -> vec[int]
 fn heap_push(h: vec[int], key: int)
 fn heap_peek(h: vec[int]) -> int
 fn heap_pop(h: vec[int]) -> int
+```
+
+### `std/gen.qma`
+
+泛型算法库（min/max/clamp/dist/contains/index_of/reverse，调用点推导单态化）
+
+```quelmara
+fn gen_min[T](a: T, b: T) -> T
+fn gen_max[T](a: T, b: T) -> T
+fn gen_clamp[T](v: T, lo: T, hi: T) -> T
+fn gen_dist[T](a: T, b: T) -> T
+fn gen_first[T](xs: vec[T]) -> T
+fn gen_last[T](xs: vec[T]) -> T
+fn gen_contains[T](xs: vec[T], v: T) -> bool
+fn gen_index_of[T](xs: vec[T], v: T) -> int
+fn gen_reverse[T](xs: vec[T])
 ```
 
 ### `std/gzip.qma`

@@ -25,6 +25,7 @@ DESC = {
     "std/cli.qma": "命令行 flag 解析（--k=v / --k v / -k v）",
     "std/deque.qma": "双端队列（两端 O(1) + 自动扩容）",
     "std/ds.qma": "环形缓冲与二叉最小堆",
+    "std/gen.qma": "泛型算法库（min/max/clamp/dist/contains/index_of/reverse，调用点推导单态化）",
     "std/gzip.qma": "DEFLATE 编码 + gzip 包装 + CRC-32；v1.19 起含 inflate 解码",
     "std/hash.qma": "FNV-1a 32/64 非密码学哈希（缓存键 / 分片）",
     "std/hex.qma": "十六进制编解码",

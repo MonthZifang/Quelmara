@@ -161,18 +161,31 @@ print(s.area())                    // vt[slot] -> callr，运行期派发
 
 ```quelmara
 fn pick_first[T](a: T, b: T) -> T { return a }
+fn pair[A, B](a: A, b: B) -> A { return a }        // 多类型参数（v1.36）
 fn fact[T](n: T) -> T {
     if n <= 1 { return 1 }
-    return n * fact[T](n - 1)      // 自递归可用
+    return n * fact[T](n - 1)      // 自递归可用（显式或推导）
 }
 
-let x = pick_first[int](1, 2)      // 必须显式写类型实参
-let s = pick_first[str]("a", "b")
+let x = pick_first(1, 2)            // 隐式：T 由实参推导（v1.36）
+let s = pick_first("a", "b")        // T = str
+let p = pair(1, "x")                // A=int, B=str
+let e = pick_first[int](1, 2)       // 显式实例化仍然可用
+let m = pair[int, str](1, "x")      // 显式多参
 ```
 
-编译期把模板深拷贝成具名实例（`fact__int`），调用点降为普通 `call`——**零运行时分发开销**。
+编译期把模板深拷贝成具名实例（`fact__int`、`pair__int_str`），调用点降为普通 `call`——**零运行时分发开销**。
 
-边界：单类型参数、必须显式实例化（无推导）、无约束（where）、无泛型 struct、无泛型方法。
+推导规则（v1.36）：省略类型方括号时，类型实参按形参—实参一元化推出。推导来源：
+字面量（int/float/str/bool）、结构体与枚举字面量、`let` 标注、非泛型函数返回类型、
+泛型实例返回类型、`vec[T]`/`map[K]V`/数组元素类型（容器形参把元素类型交给 T）、
+结构体字段类型。推导是**流不敏感**的（按语句序收集变量类型、后写覆盖）；推不出
+全部类型参数时编译期报错并提示显式实例化，实参互相矛盾（如 `same(1, "s")`）报冲突。
+
+边界：类型实参只接受具名类型（标量 / struct / enum，容器类型实参不做）；无约束
+（where / trait bound）、无泛型 struct、无泛型方法；模板不支持注解（@simd/@extern）；
+跨文件调用时若被调用方在调用方之后解析，仍需显式方括号（解析期还不知道它是泛型）。
+开箱即用的泛型算法（min/max/clamp/contains/index_of/reverse）见 `std/gen`。
 
 ### 4.6 常量（编译期算术）
 
@@ -430,7 +443,8 @@ rc_drop(c)               // count 1
 6. **`"\xNN"`（≥0x80）是原始字节**，不是 Unicode 码点。
 7. **struct 赋值是值拷贝**，改副本不影响原值；`vec` 是句柄，共享底层存储。
 8. **`match` 必须穷尽**，`_` 只能放最后。
-9. **泛型必须显式实例化**：`f[int](...)`，写 `f(...)` 会被当成普通函数找不到。
+9. **泛型调用推不出类型参数时报错**：`f(...)` 按实参推导；推不出（如唯一约束形参
+   不是类型参数）时报错并提示 `f[T](...)`。跨文件前向泛型（被调用方后解析）仍须显式。
 10. **`vec[map]` 不支持**，需要时用两个平行 `vec` 或编码下标。
 11. **`substr(s, start, count)` 的第二参是长度，不是结束位置**——`substr("abcde", 1, 4)` 得
     `"bcde"`（4 个字符），不是 `"bcd"`。切片语法 `s[lo..hi]` 才是左闭右开。
