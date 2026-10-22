@@ -1,0 +1,89 @@
+// t74_set_deque.qma：set[int]/set[str] 与双端队列（v1.29）
+module t74
+
+import std.core
+import std.set
+import std.deque
+
+fn main() {
+    // ---- set[int] ----
+    let s = iset_new(8)
+    assert(iset_add(s, 3) == 1, "add new")
+    assert(iset_add(s, 3) == 0, "add dup")
+    assert(iset_add(s, 9) == 1, "add another")
+    assert(iset_len(s) == 2, "len 2")
+    assert(iset_has(s, 9), "has 9")
+    assert(!iset_has(s, 4), "no 4")
+    assert(iset_del(s, 9) == 1, "del existing")
+    assert(iset_del(s, 9) == 0, "del again")
+    assert(iset_len(s) == 1, "len 1 after del")
+
+    let a = iset_new(8)
+    let b = iset_new(8)
+    iset_add(a, 1)
+    iset_add(a, 2)
+    iset_add(a, 3)
+    iset_add(b, 2)
+    iset_add(b, 3)
+    iset_add(b, 4)
+    assert(iset_union_into(a, b) == 1, "union adds 4 only")
+    assert(iset_len(a) == 4, "union len")
+    assert(len(iset_isect(a, b)) == 3, "isect 2,3,4")
+    assert(len(iset_diff(b, iset_new(4))) == 3, "diff of empty = all")
+    assert(len(iset_to_vec(a)) == 4, "to_vec")
+
+    // ---- set[str] ----
+    let t = sset_new(8)
+    assert(sset_add(t, "content-type") == 1, "str add")
+    assert(sset_add(t, "content-type") == 0, "str dup")
+    assert(sset_has(t, "content-type"), "str has")
+    assert(sset_del(t, "nope") == 0, "str del miss")
+    assert(sset_len(t) == 1, "str len")
+    assert(sset_del(t, "content-type") == 1, "str del hit")
+    assert(sset_len(t) == 0, "str len 0")
+
+    // ---- deque：扩容 + 两端 ----
+    let d = dq_new(4)
+    assert(dq_len(d) == 0, "empty len")
+    assert(dq_cap(d) == 4, "initial cap")
+    assert(dq_pop_front(d) == -1, "pop empty")
+    assert(dq_pop_back(d) == -1, "pop back empty")
+
+    let mut i = 0
+    while i < 10 {
+        dq_push_back(d, i)
+        i = i + 1
+    }
+    assert(dq_len(d) == 10, "len 10 after grow")
+    assert(dq_cap(d) >= 10, "grown cap")
+    assert(dq_get(d, 0) == 0, "get 0")
+    assert(dq_get(d, 9) == 9, "get 9")
+    assert(dq_get(d, 10) == -1, "get oob")
+    assert(dq_peek_front(d) == 0, "peek front")
+    assert(dq_peek_back(d) == 9, "peek back")
+
+    dq_push_front(d, 100)
+    assert(dq_peek_front(d) == 100, "push_front")
+    assert(dq_len(d) == 11, "len 11")
+    assert(dq_pop_back(d) == 9, "pop_back 9")
+    assert(dq_pop_front(d) == 100, "pop_front 100")
+    assert(dq_pop_front(d) == 0, "pop_front 0")
+
+    // 环形回绕：头部偏移后继续两端进出
+    dq_push_back(d, 55)
+    dq_push_front(d, 44)
+    assert(dq_get(d, 0) == 44, "wrapped get 0")
+    assert(dq_get(d, 1) == 1, "wrapped get 1")
+    assert(dq_len(d) == 10, "wrapped len")
+
+    dq_set(d, 0, 7)
+    assert(dq_get(d, 0) == 7, "set")
+    assert(dq_set(d, 99, 1) == -1, "set oob")
+
+    dq_clear(d)
+    assert(dq_len(d) == 0, "clear")
+    assert(dq_cap(d) >= 10, "cap kept after clear")
+
+    dq_free(d)
+    print("ok t74_set_deque")
+}

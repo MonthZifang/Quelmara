@@ -245,7 +245,7 @@ return expr
 | 接收者 | 方法 |
 |---|---|
 | `vec[T]` | `push` `pop` `get` `set` `len` `clear` |
-| `map[K]V` | `put` `get` `del` `has` `len` `clear` |
+| `map[K]V` | `set` `get` `del` `has`（长度用 `len(m)`；**没有** `clear`，清空请新建） |
 | `chan[T]` | `send` `recv` `close` |
 | `int` / `f64` | `to_str` `to_int` |
 | `option[T]` | 构造 `option[int].some(x)` / `.none()`；解构走 `match Option.Some/None` |
@@ -300,6 +300,7 @@ fn add_one(n: int) -> result[int, str] {
 | `str_from_bytes(v)` | 从 `vec[int]` 构造 |
 | `mem_ptr(p, off)` | 指针偏移（**str 指针算术必须用它**，`s + n` 会被拼接劫持） |
 | `mem_copy(dst, src, n)` / `mem_zero(p, n)` / `mem_cmp(a, b, n)` | 内存操作 |
+| `mem_chr(p, n, byte)` | 在 n 字节内找首个等于 byte 的字节，返回下标或 -1（v1.29，8 字节 SWAR） |
 | `mem_str(p, n)` | 内存转 str |
 | `mem_load8/32/64(p)`、`mem_store8/64(p, v)` | 裸读写（8/32 是字节偏移，64 是槽索引 ×8） |
 | `mem_alloc(n)` / `mem_free(p)` | 裸分配/释放 |

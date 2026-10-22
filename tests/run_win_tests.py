@@ -511,6 +511,24 @@ def main():
             else bad(f"arg(0) {lines[4:5]!r}")
         ok("args 自校验通过（assert）") if rc == 0 else bad(f"args rc={rc} stderr={stderr[-160:]!r}")
 
+    print("== [3d2] std/cli flag 解析（v1.29） ==")
+    out = os.path.join(ROOT, "build", "win_cli.qex")
+    build(os.path.join(ROOT, "tests/t77_cli.qma"), out)
+    r = run(out, args=["--name=qm", "-p", "9000", "--verbose", "--bad=xyz",
+                       "file1.txt", "--out", "a b"])
+    if r is None:
+        skip("std/cli：非 Windows 平台")
+    else:
+        rc, stdout, stderr = r
+        lines = stdout.decode().splitlines()
+        expect = ["8", "qm", "8080", "9000", "1", "0", "7", "1",
+                  "file1.txt", "a b", "--name=qm", "", "ok t77_cli"]
+        if lines == expect:
+            ok("cli: 计数/取值/短名/布尔/默认值/位置参数 全部正确")
+        else:
+            bad(f"cli 输出 {lines!r} != {expect!r}")
+        ok("cli 自校验通过（assert）") if rc == 0 else bad(f"cli rc={rc} stderr={stderr[-160:]!r}")
+
     print("== [3e] 读文件 / 子串 / 单字节串（v1.0） ==")
     out = os.path.join(ROOT, "build", "win_io.qex")
     build(os.path.join(ROOT, "tests/t30_io.qma"), out)
@@ -581,6 +599,9 @@ def main():
     case_selfcheck("t71_rsa", "tests/t71_rsa.qma")
     case_selfcheck("t72_rsa2048", "tests/t72_rsa2048.qma")
     case_selfcheck("t73_ghash", "tests/t73_ghash.qma")
+    case_selfcheck("t74_set_deque", "tests/t74_set_deque.qma")
+    case_selfcheck("t75_utf8", "tests/t75_utf8.qma")
+    case_selfcheck("t76_codec", "tests/t76_codec.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),

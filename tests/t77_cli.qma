@@ -1,0 +1,24 @@
+// t77_cli.qma：std/cli 的 flag 解析（v1.29）
+// 由 run_win_tests.py 以固定参数启动，逐行核对输出：
+//   --name=qm  -p 9000  --verbose  --bad=xyz  file1.txt  --out "a b"
+module t77
+
+import std.core
+import std.cli
+
+fn main() {
+    print(cli_count().to_str())                 // 8
+    print(cli_str("name", "anon"))              // qm      （= 形态）
+    print(cli_int("port", 8080).to_str())       // 8080    （缺省）
+    print(cli_int("p", 0).to_str())             // 9000    （空格形态）
+    print(cli_has("verbose").to_str())          // true
+    print(cli_has("missing").to_str())          // false
+    print(cli_int("bad", 7).to_str())           // 7       （非法值回落默认）
+    let pos = cli_positionals()
+    print(len(pos).to_str())                    // 1
+    print(pos.get(0))                           // file1.txt
+    print(cli_str("out", ""))                   // a b
+    print(cli_at(0))                            // --name=qm
+    print(cli_at(99))                           // 空串
+    print("ok t77_cli")
+}

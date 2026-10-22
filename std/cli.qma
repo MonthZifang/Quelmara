@@ -1,0 +1,179 @@
+// std/cli.qma —— 命令行 flag 解析（v1.29）
+//
+// 为什么需要它：语言层只有 args()，写个工具就得自己在参数数组里
+// 手写 `if a[i] == "--out"` 的 if 链，还要处理 `--out=x` / `--out x`
+// 两种写法、`-o` 短名、缺值时的默认值。
+//
+// 支持的形式（与常见 CLI 一致，不做 GNU 的怪癖）：
+//   --name=value     等号形式
+//   --name value     空格形式（取下一个参数）
+//   -n value         单字母短名（空格形式；-n=value 也认）
+//   --flag           布尔开关（存在即真）
+//
+// 语义纪律：
+//   * 同名 flag 出现多次，取**第一次**（不做"后者覆盖"）；
+//   * cli_str 缺值返回默认值（不 fail-fast：命令行是用户输入，不是编程错误）；
+//   * cli_int 用 to_int 解析，非法输入返回默认值（同上）；
+//   * 位置参数 = 不以 '-' 开头的参数，顺序保持。
+//
+// 本模块不 import 任何 std 模块（保持零依赖，方便单文件工具直接引）。
+
+// _cli_prefixed(a, p) -> bool：a 是否以 p 开头
+fn _cli_prefixed(a: str, p: str) -> bool {
+    let m = len(p)
+    if len(a) < m {
+        return false
+    }
+    let mut i = 0
+    while i < m {
+        if a[i] != p[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// _cli_match(a, name) -> int
+//   0 = 不匹配；1 = 完全等于 name；2 = name 后面紧跟 '='（值在 a 里）
+fn _cli_match(a: str, name: str) -> int {
+    let m = len(name)
+    if len(a) < m {
+        return 0
+    }
+    if !_cli_prefixed(a, name) {
+        return 0
+    }
+    if len(a) == m {
+        return 1
+    }
+    if a[m] == 61 {                 // '='
+        return 2
+    }
+    return 0
+}
+
+fn cli_count() -> int {
+    return len(args())
+}
+
+fn cli_at(i: int) -> str {
+    let a = args()
+    if i < 0 || i >= len(a) {
+        return ""
+    }
+    return a[i]
+}
+
+// cli_has(name) -> bool：flag 是否出现（三种写法都算）
+fn cli_has(name: str) -> bool {
+    let a = args()
+    let n = len(a)
+    let long = "--" + name
+    let short = "-" + name
+    let mut i = 0
+    while i < n {
+        if _cli_match(a[i], long) != 0 || _cli_match(a[i], short) != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// cli_str(name, def) -> str：取字符串值
+fn cli_str(name: str, def: str) -> str {
+    let a = args()
+    let n = len(a)
+    let long = "--" + name
+    let short = "-" + name
+    let mut i = 0
+    while i < n {
+        let ml = _cli_match(a[i], long)
+        if ml == 2 {
+            return substr(a[i], len(long) + 1, len(a[i]) - len(long) - 1)
+        }
+        if ml == 1 {
+            if i + 1 < n {
+                return a[i + 1]
+            }
+            return def
+        }
+        let ms = _cli_match(a[i], short)
+        if ms == 2 {
+            return substr(a[i], len(short) + 1, len(a[i]) - len(short) - 1)
+        }
+        if ms == 1 {
+            if i + 1 < n {
+                return a[i + 1]
+            }
+            return def
+        }
+        i = i + 1
+    }
+    return def
+}
+
+// cli_int(name, def) -> int：取整数值，解析失败回落默认值
+fn cli_int(name: str, def: int) -> int {
+    let s = cli_str(name, "")
+    if len(s) == 0 {
+        return def
+    }
+    let mut i = 0
+    if s[0] == 45 {
+        i = 1
+        if len(s) == 1 {
+            return def
+        }
+    }
+    while i < len(s) {
+        let c = s[i]
+        if c < 48 || c > 57 {
+            return def
+        }
+        i = i + 1
+    }
+    return s.to_int()
+}
+
+// cli_positionals() -> vec[str]：位置参数（保持原顺序）
+// 判定规则：不以 '-' 开头，且**不是前一个 flag 的值**。
+// "前一个 flag 的值"的启发式：上一个参数以 '-' 开头且不含 '='（`--out x` 形态）；
+// 含 '=' 的形态（`--out=x`）自身就带值，不吃下一个参数。
+// 这个启发式覆盖常见 CLI；如果某个 flag 的值恰好以 '-' 开头，请用 --name=value 形态。
+fn cli_positionals() -> vec[str] {
+    let a = args()
+    let n = len(a)
+    let out = vec[str].new(4)
+    let mut i = 0
+    let mut skip_next = 0
+    while i < n {
+        let s = a[i]
+        let is_flag = len(s) > 0 && s[0] == 45
+        if skip_next == 1 {
+            skip_next = 0
+        } else if is_flag {
+            if !_cli_has_eq(s) {
+                skip_next = 1
+            }
+        } else {
+            out.push(s)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// _cli_has_eq(s) -> bool：参数里是否含 '='（判断是不是自带值的形态）
+fn _cli_has_eq(s: str) -> bool {
+    let n = len(s)
+    let mut i = 0
+    while i < n {
+        if s[i] == 61 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}

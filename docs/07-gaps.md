@@ -43,13 +43,13 @@
 | TCP 批量收发 | 只有单次 `tcp_send/recv` | 高吞吐场景 syscall 太多 |
 | 可靠 UDP | UDP 四件之上未做 | 游戏/实时传输 |
 | 日志 | 无 stderr 通道、无轮转、无绝对时间戳（级别过滤 v1.19 已补） | 生产可观测性 |
-| 编码 | 无 UTF-8 解码（一切按字节）、无 base64url（hex v1.19 已补） | 中文长度/截断、JWT |
+| 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠 |
 | 数学 | 有 sqrt/cbrt/powi/取整/gcd；**无 `exp` / `log` / `pow(x,y)` / `sin` / `cos`** | 图形、统计、复利 |
-| 哈希 | 只有 SHA-1 / SHA-256；无 MD5 / FNV | 缓存键、校验 |
-| 数据结构 | 有 RingBuf / MinHeap；无 set / deque / LRU | 去重、任务队列、缓存 |
+| 哈希 | 有 SHA-1 / SHA-256 / **FNV-1a 32/64**（v1.29）；无 MD5 | 缓存键已有 FNV，MD5 只剩兼容旧协议 |
+| 数据结构 | ✅ v1.29：有 RingBuf / MinHeap / **set[int]·set[str]** / **deque**；仍无 LRU | LRU 要「map + 双向链表」双句柄 API，未做（见 §8） |
 | 持久化 | 无 SQLite / KV / 序列化格式（`std/serialize` 只是编码原语） | 任何要存数据的应用 |
 | 正则 | 无 | 文本清洗、路由匹配 |
-| CLI | 有 `args()`，无 flag 解析（`-x` / `--k=v` / 子命令） | 工具类入口 |
+| CLI | ✅ v1.29：`std/cli`（`--k=v` / `--k v` / `-k v` / 布尔 / 位置参数）；无子命令与自动 usage | 子命令要自己 switch |
 | 国际化 | 无 locale、无 Unicode 分类、无大小写折叠 | 多语言输出 |
 
 ## 3. 工具链
@@ -64,7 +64,7 @@
 | 增量 / 并行编译 | ❌ | 每次全量 |
 | 性能回归门禁 | 🟡 | `bench --threshold` 可用，但未进 CI |
 | 覆盖率 / fuzz | ❌ | — |
-| 对拍脚本耗时 | ✅ | `irdiff` 并行后 49 s（原 5 min 41 s）；`emitdiff` 10 s 内 |
+| 对拍脚本耗时 | ✅ | `irdiff` 并行后 60 s（原 5 min 41 s）；`emitdiff` 10 s 内 |
 | `version` 口径 | ✅ | `tools/stage0/qlm_cli.py` 的 `VERSION` 与最新 `docs/versions/vX.Y/` 一致（v1.24 起 1.24.0，由 `check_docs.py` 校验） |
 
 ## 4. 平台
@@ -90,7 +90,7 @@
 | **AES-NI** | AES 数量级（软件 T-table 已把 GCM 拉到 6.1 MB/s） | 需编码器加 aesenc/aesenclast + pclmulqdq + cpuid 降级；与 SHA-NI 同批 |
 | **LICM 根修** | 普适（所有循环） | 根因是 x64 分配器布局敏感段错误；修好前 LICM 只能关 |
 | **loop_sum 三件套** | 循环 10.8 → ~4 cycles/iter | ① phi copy 消除（分配器 coalescing）② do-while 变换（CFG 要容错 jcc 回边）③ cssub 形态 |
-| **JSON memchr 化** | 2 ms → ~1 ms | 需 `memchr` / 找字符内建 |
+| **JSON memchr 化** | 2 ms → ~1 ms | 内建 `mem_chr` **已就绪**（v1.29）；JSON 内部仍逐字节（要同时找 引号 / 反斜杠 / <0x20 三类，需 `mem_lt` 或双 memchr + 控制字符复检） |
 | **gzip lazy matching** | 25 ms → ~15 ms | 匹配器改造，zlib 互操作必须仍全过 |
 | **AVX2 点积** | 新形状 | 需 `vpmullq`（SSE2 64 位乘语义不一致） |
 
@@ -152,20 +152,37 @@
 | 缺陷 | 症状 | 根因 | 回归 |
 |---|---|---|---|
 | 浮点比较整型化 | `if -2.0 > -1.0` 成立、`while x > 0.0` 对负数判反 | `branch()` 对比较表达式直接发 `jcc`，没检查操作数是否浮点；IEEE754 负数的位模式在整数序下相反 | `tests/t64_math.qma` |
+| `to_str(INT64_MIN)` 输出乱码 | `(1<<63).to_str()` 得到 20 个垃圾字符 | `__str_from_i64` 先 `neg v, v`，而 `-(-2^63)` 溢出回自身；随后 `mod/div` 拿到负数，写出的字节不是数字 | `tests/t76_codec.qma`（含 INT64_MIN 断言） |
 
 表达式位置（`let c = a > b`）一直是对的——它走 `arith()` 的 `fcmpset` 分支。
 只有条件位置（`if` / `while`）漏了浮点分流，属于"两条路径实现不一致"的典型。
 
-## 7. 推进顺序（2026-10-22 调整）
+### 7.3 待查：64 位立即数（≥2^63）的 `and`
+
+v1.29 写 `__memchr` 的 SWAR 时踩到：`and rd, imm` 里 imm 取 `-2^63`（即 `0x8000000000000000`），
+实测结果不对；换成 `>>7 & 0x0101…`（同一个掩码效果）就正确。已确认**不是**值语义问题——
+`assert((neg & sh) == sh)` 用寄存器操作数时通过。所以问题在"立即数 > 32 位时走 `fetch(SCRATCH, imm)`
+→ `alu_rr`"这条路径上，怀疑 SCRATCH 与某条活跃 vreg 冲突或 imm64 物化截断。
+
+- 影响面：所有"大常量位运算"（掩码/魔数）都可能静默算错；当前库层已全部避开。
+- 复现骨架：`tests/t76_codec.qma` 之外的独立用例尚未加（需要 IR 级注入）。
+- 下一步：`--dump-ir` 对照 + `QLM_SKIP_PASSES` 二分，定位是发射层还是分配器。
+
+## 8. 推进顺序（2026-10-22 调整）
 
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
 当前顺序：
 
-1. **性能专项（§5）**：GHASH 4-bit 表 → JSON memchr → gzip lazy → loop_sum 三件套 → LICM 根修
+1. **性能专项（§5）**：~~GHASH 4-bit 表~~（v1.28 完成）→ ~~memchr 内建 + str 层接入~~（v1.29 完成，数字见 `06-status.md`）→ **JSON memchr（需 `mem_lt` 或双 memchr 方案）** → gzip lazy matching →
+   loop_sum 三件套 → LICM 根修
 2. **语言层（§1）**：黄标逐项（`map[str]Struct`、`vec[map]`、函数值放宽、`result` struct 载荷、
    命名空间 / `pub`、`defer` …）
-3. **标准库（§2）**：红标补齐（set/deque/LRU、UTF-8、base64url、MD5/FNV、CLI flag、
-   HTTP 客户端封装 …）
+3. **标准库（§2）**：红标剩余项——**LRU**（要双句柄 API）、**MD5**（只差旧协议兼容）、
+   HTTP 客户端封装（重定向/chunked/连接池）、路由/静态文件/MIME/cookie/session/multipart、
+   多 member gzip + zlib 容器、正则、持久化（KV/SQLite）、`exp/log/sin/cos`
 4. **工具链（§3）**：`.qla`、semver/registry、增量编译、覆盖率
+
+> v1.29 已把 §2 的四条红标翻绿（UTF-8 / base64url / set / deque / FNV / CLI flag），
+> 剩下的红标按「撞到的场景有多近」排序，不按条数排序。
 
 > 排序原则：性能是普适杠杆；语言层决定库能不能写；工具链最后。

@@ -9,11 +9,11 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=135 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
+| PE 回归（主回归） | **PASS=140 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
 | 词法器对拍 | **PASS=120 FAIL=0**（120 个源文件） | `python tests/lexdiff.py` |
 | 声明级 AST 对拍 | **PASS=105 FAIL=0**（跳过 3 个：`t52_iface` / `t54_iface_dyn` / `t56_generic`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
 | 函数体 dump 对拍 | **一致 895 / 分叉 755 / SKIP 同步 18 / SKIP 不同步 18** | `python tests/bodydiff.py` |
-| IR 架构无关对拍 | **PASS=56 FAIL=0 SKIP=35**，并行后 **49 s**（原串行 5 min 41 s） | `python tests/irdiff.py` |
+| IR 架构无关对拍 | **PASS=63 FAIL=0 SKIP=42**，并行后 **60 s**（原串行 5 min 41 s；SKIP 全是 arm64 未接的特性） | `python tests/irdiff.py` |
 | 发射层确定性对拍 | **PASS=10 FAIL=0** | `python tests/emitdiff.py` |
 | gzip 解码互操作 | **PASS=63 FAIL=0**（zlib 9 种编码组合 × 7 类输入）+ **损坏输入拒绝 5/5** | `python tests/gzip_inflate_test.py` |
 | ECDSA P-256 验签互操作 | **PASS=32 FAIL=0**（20 正向 + 12 负向，Python bigint 参考实现） | `python tests/ecdsa_p256_test.py` |
@@ -48,6 +48,9 @@
 | **gzip 解码 1 MiB** | **15 ms**（min of 3） | **70 MB/s** |
 | CRC-32 1 MiB | **3–6 ms** | 170–330 MB/s |
 | `str_split` + `join` 1 MiB（65537 段） | **8 ms** | 125 MB/s |
+| `str_find` 1.1 MB 未命中（`bench/find_bench.qma`） | **558 µs**（v1.28 逐字节 2944 µs，**5.2×**） | 1.97 GB/s |
+| 字节计数 1.1 MB（命中密集，20000 处） | **482 µs**（v1.28 逐字节 2543 µs，**5.2×**） | 2.28 GB/s |
+| `str_split` 1.1 MB / 20001 段（含分配） | **2057 µs** | — |
 | URL parse × 100k | **69 ms** | 0.69 µs/次 |
 | JSON parse 92 891 B | **2 ms** | 46 MB/s |
 | JSON 遍历 2000 对象 | **< 1 ms** | — |
@@ -111,6 +114,7 @@ python tools/stage0/qlm_cli.py run bench/p0_bench.qma   --target win
 python tools/stage0/qlm_cli.py run bench/gzip_bench.qma --target win
 python tools/stage0/qlm_cli.py run bench/gbench.qma     --target win
 python tools/stage0/qlm_cli.py run bench/bench_str.qma  --target win
+python tools/stage0/qlm_cli.py run bench/find_bench.qma --target win
 python tools/stage0/qlm_cli.py run bench/simd_bench.qma --target win
 python tools/stage0/qlm_cli.py run bench/sync_bench.qma --target win
 ```
@@ -152,4 +156,5 @@ python tools/stage0/qlm_cli.py run bench/sync_bench.qma --target win
 |---|---|---|
 | LICM 默认关闭 | 循环不变量无法外提，性能损失普遍存在 | x64 分配器布局敏感段错误未根修，`QLM_ENABLE_LICM=1` 可复现 |
 | 接口装箱不释放 | 热点循环频繁装箱会涨堆 | 无 rc/drop 路径 |
+| `and` 用 64 位立即数（≥2^63）曾算错 | SWAR 位运算踩过：改成 `>>7 & 0x0101…` 规避 | v1.29 已规避，根因未定位（见 `07-gaps.md` §7.2） |
 | `f64` 比较曾整型化 | `if a > b` 对负浮点给出相反结果（v1.19 已修） | 根因：`branch()` 直接发 `jcc` 未走 `fcmpset`；回归 `tests/t64_math.qma` |

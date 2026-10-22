@@ -1,0 +1,46 @@
+// std/hash.qma —— FNV-1a 32/64（v1.29）
+//
+// 为什么需要它：SHA-1/SHA-256 是密码学哈希，做缓存键 / 分片 / 布隆过滤器
+// 太重（1 KiB 要几十微秒）。FNV-1a 是 1 字节 1 次乘加的非密码学哈希，
+// 常见用途：缓存键、map 替代品、一致性哈希、日志采样。
+//
+// 语义纪律：
+//   * 全部**按字节**计算（UTF-8 多字节就是多个字节，不做码点归一）；
+//   * 返回 int64 承载的**无符号**值——64 位版本可能为负（高位为 1），
+//     需要打印成十六进制请用 std/hex（hex_encode(mem_str(p, 8))）；
+//   * 32 位版本结果恒在 [0, 2^32) 区间，可直接当数组下标取模。
+//
+// 常量（RFC 由来，别改）：
+//   FNV-1a 32: offset 0x811c9dc5, prime 0x01000193
+//   FNV-1a 64: offset 0xcbf29ce484222325, prime 0x00000100000001b3
+
+fn fnv1a32_bytes(p: int, n: int) -> int {
+    let mut h = 0x811c9dc5
+    let mut i = 0
+    while i < n {
+        h = h ^ mem_load8(p, i)
+        h = (h * 0x01000193) & 0xFFFFFFFF
+        i = i + 1
+    }
+    return h
+}
+
+fn fnv1a64_bytes(p: int, n: int) -> int {
+    // 0xcbf29ce484222325 超出 int64 正区间，按有符号写（同一组位）
+    let mut h = -3750763034362895579
+    let mut i = 0
+    while i < n {
+        h = h ^ mem_load8(p, i)
+        h = h * 1099511628211
+        i = i + 1
+    }
+    return h
+}
+
+fn fnv1a32(s: str) -> int {
+    return fnv1a32_bytes(mem_ptr(s, 0), len(s))
+}
+
+fn fnv1a64(s: str) -> int {
+    return fnv1a64_bytes(mem_ptr(s, 0), len(s))
+}

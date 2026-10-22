@@ -1,0 +1,166 @@
+// std/set.qma —— 集合（v1.29）
+//
+// 为什么需要它：map[K]V 的 V 只允许 int/str，语言层也没有"泛型约束"，
+// 所以写不出 set[T]；但"去重 / 成员判定 / 交并差"是服务端每天都在做的事
+// （路由段去重、Header 名集合、ID 去重计数）。这里给两个**具体**版本：
+//
+//   iset_*  = set[int]  —— ID 集合、位图替代品、去重计数
+//   sset_*  = set[str]  —— 标签集合、Header 名、路由段
+//
+// 语义纪律（写进文档，不做惊喜）：
+//   * add 幂等，返回 1=新增 / 0=已存在（调用方据此算基数，不必先 has）；
+//   * del 返回 1=删掉了 / 0=本来就没有；
+//   * 没有迭代器：map 的遍历顺序由哈希决定，需要有序请 iset_to_vec + 排序；
+//   * 底层就是 map，所以 iset_len 是 O(1)、内存是"每个元素两个 8 字节槽"；
+//   * **没有 clear**：map 的方法只有 set/get/has/del，清空请直接新建一个
+//     （重建比逐个 del 更快，也不会踩"边遍历边删"）。
+//
+// 命名前缀见 docs/00-convention.md §2（import 是扁平合并，前缀是唯一隔离手段）。
+
+// ---------------------------------------------------------------------------
+// set[int]
+// ---------------------------------------------------------------------------
+
+fn iset_new(cap: int) -> map[int]int {
+    return map[int]int.new(cap)
+}
+
+fn iset_add(s: map[int]int, v: int) -> int {
+    if s.has(v) {
+        return 0
+    }
+    s.set(v, 1)
+    return 1
+}
+
+fn iset_has(s: map[int]int, v: int) -> bool {
+    return s.has(v)
+}
+
+fn iset_del(s: map[int]int, v: int) -> int {
+    // map.del 没有返回值（运行时恒返回 0），所以先 has 再 del 才能报"删没删到"
+    if !s.has(v) {
+        return 0
+    }
+    s.del(v)
+    return 1
+}
+
+fn iset_len(s: map[int]int) -> int {
+    return len(s)
+}
+
+// iset_to_vec(s) -> vec[int]：导出成 vec（遍历顺序未定义，需要有序自行排序）
+fn iset_to_vec(s: map[int]int) -> vec[int] {
+    let out = vec[int].new(len(s) + 1)
+    for k in s {
+        out.push(k)
+    }
+    return out
+}
+
+// iset_union_into(dst, src) -> int：把 src 并入 dst，返回新增个数
+fn iset_union_into(dst: map[int]int, src: map[int]int) -> int {
+    let mut added = 0
+    for k in src {
+        added = added + iset_add(dst, k)
+    }
+    return added
+}
+
+// iset_isect(a, b) -> vec[int]：交集（结果无序）
+fn iset_isect(a: map[int]int, b: map[int]int) -> vec[int] {
+    let out = vec[int].new(4)
+    // 遍历较小的那个：命中率决定成本
+    if len(a) <= len(b) {
+        for k in a {
+            if b.has(k) {
+                out.push(k)
+            }
+        }
+    } else {
+        for k in b {
+            if a.has(k) {
+                out.push(k)
+            }
+        }
+    }
+    return out
+}
+
+// iset_diff(a, b) -> vec[int]：差集 a - b（结果无序）
+fn iset_diff(a: map[int]int, b: map[int]int) -> vec[int] {
+    let out = vec[int].new(4)
+    for k in a {
+        if !b.has(k) {
+            out.push(k)
+        }
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// set[str]
+// ---------------------------------------------------------------------------
+
+fn sset_new(cap: int) -> map[str]int {
+    return map[str]int.new(cap)
+}
+
+fn sset_add(s: map[str]int, v: str) -> int {
+    if s.has(v) {
+        return 0
+    }
+    s.set(v, 1)
+    return 1
+}
+
+fn sset_has(s: map[str]int, v: str) -> bool {
+    return s.has(v)
+}
+
+fn sset_del(s: map[str]int, v: str) -> int {
+    if !s.has(v) {
+        return 0
+    }
+    s.del(v)
+    return 1
+}
+
+fn sset_len(s: map[str]int) -> int {
+    return len(s)
+}
+
+fn sset_to_vec(s: map[str]int) -> vec[str] {
+    let out = vec[str].new(len(s) + 1)
+    for k in s {
+        out.push(k)
+    }
+    return out
+}
+
+fn sset_union_into(dst: map[str]int, src: map[str]int) -> int {
+    let mut added = 0
+    for k in src {
+        added = added + sset_add(dst, k)
+    }
+    return added
+}
+
+fn sset_isect(a: map[str]int, b: map[str]int) -> vec[str] {
+    let out = vec[str].new(4)
+    if len(a) <= len(b) {
+        for k in a {
+            if b.has(k) {
+                out.push(k)
+            }
+        }
+    } else {
+        for k in b {
+            if a.has(k) {
+                out.push(k)
+            }
+        }
+    }
+    return out
+}

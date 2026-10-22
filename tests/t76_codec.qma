@@ -1,0 +1,79 @@
+// t76_codec.qma：FNV-1a 32/64 与 Base64url（v1.29）
+// FNV 向量取自 RFC 待定稿/draft-eastlake-fnv 的官方测试集；
+// Base64url 向量取自 RFC 4648 §10（无填充版本）。
+module t76
+
+import std.core
+import std.hash
+import std.b64
+import std.hex
+
+fn main() {
+    // ---- FNV-1a 32 ----
+    assert(fnv1a32("") == 2166136261, "fnv32 empty")
+    assert(fnv1a32("a") == 3826002220, "fnv32 a")
+    assert(fnv1a32("abc") == 440920331, "fnv32 abc")
+    assert(fnv1a32("foobar") == 3214735720, "fnv32 foobar")
+    assert(fnv1a32("abc") != fnv1a32("abd"), "fnv32 avalanche")
+
+    // ---- FNV-1a 64（无符号值按有符号承载）----
+    assert(fnv1a64("") == -3750763034362895579, "fnv64 empty")
+    assert(fnv1a64("a") == -5808556873153909620, "fnv64 a")
+    assert(fnv1a64("abc") == -1792535898324117685, "fnv64 abc")
+    assert(fnv1a64("foobar") == -8821353812377114648, "fnv64 foobar")
+
+    // 按字节入口与按 str 入口必须一致
+    let s = "abc"
+    assert(fnv1a32_bytes(mem_ptr(s, 0), 3) == fnv1a32(s), "bytes == str 32")
+    assert(fnv1a64_bytes(mem_ptr(s, 0), 3) == fnv1a64(s), "bytes == str 64")
+
+    // 32 位版本必须落在 [0, 2^32)：多字节输入下不能溢出到负数
+    let big = "0123456789abcdef0123456789abcdef"
+    let h = fnv1a32(big)
+    assert(h >= 0 && h <= 4294967295, "fnv32 range")
+
+    // ---- Base64url（无填充）----
+    assert(b64url_encode(mem_ptr("", 0), 0) == "", "b64url empty")
+    assert(b64url_encode(mem_ptr("f", 0), 1) == "Zg", "b64url f")
+    assert(b64url_encode(mem_ptr("fo", 0), 2) == "Zm8", "b64url fo")
+    assert(b64url_encode(mem_ptr("foo", 0), 3) == "Zm9v", "b64url foo")
+    assert(b64url_encode(mem_ptr("foob", 0), 4) == "Zm9vYg", "b64url foob")
+    assert(b64url_encode(mem_ptr("fooba", 0), 5) == "Zm9vYmE", "b64url fooba")
+    assert(b64url_encode(mem_ptr("foobar", 0), 6) == "Zm9vYmFy", "b64url foobar")
+
+    // 标准字母表里会出 '+' '/' 的字节：url 版必须换成 '-' '_'
+    let raw = hex_decode("fbff")
+    assert(b64url_encode(mem_ptr(raw, 0), 2) == "-_8", "b64url -_8")
+    assert(b64_encode(mem_ptr(raw, 0), 2) == "+/8=", "std b64 keeps padding")
+
+    // ---- 往返 ----
+    let msg = "Quelmara 自研语言 · JWT 载荷 {id:42}"
+    let enc = b64url_encode(mem_ptr(msg, 0), len(msg))
+    assert(!contains_byte(enc, 61), "no padding")          // 无 '='
+    assert(!contains_byte(enc, 43), "no plus")
+    assert(!contains_byte(enc, 47), "no slash")
+    let buf = mem_alloc(len(msg) + 8)
+    let n = b64url_decode_into(enc, buf)
+    assert(n == len(msg), "roundtrip len")
+    assert(mem_str(buf, n) == msg, "roundtrip bytes")
+    mem_free(buf, len(msg) + 8)
+
+    // 空串与单字节边界
+    let b1 = mem_alloc(8)
+    assert(b64url_decode_into("", b1) == 0, "decode empty")
+    mem_free(b1, 8)
+
+    print("ok t76_codec")
+}
+
+fn contains_byte(s: str, b: int) -> bool {
+    let n = len(s)
+    let mut i = 0
+    while i < n {
+        if s[i] == b {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}

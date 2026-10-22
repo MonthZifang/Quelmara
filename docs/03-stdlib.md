@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-33 个模块，**383 个公开函数**（另有 216 个 `_` 前缀的内部函数）。
+38 个模块，**435 个公开函数**（另有 216 个 `_` 前缀的内部函数）。
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -89,6 +89,23 @@ fn b64_val(b: int) -> int
 fn b64_encode(p: int, n: int) -> str
 fn b64_dec_max(s: str) -> int
 fn b64_decode_into(s: str, out: int) -> int
+fn b64url_char(v: int) -> int
+fn b64url_val(b: int) -> int
+fn b64url_encode(p: int, n: int) -> str
+fn b64url_decode_into(s: str, out: int) -> int
+```
+
+### `std/cli.qma`
+
+命令行 flag 解析（--k=v / --k v / -k v）
+
+```quelmara
+fn cli_count() -> int
+fn cli_at(i: int) -> str
+fn cli_has(name: str) -> bool
+fn cli_str(name: str, def: str) -> str
+fn cli_int(name: str, def: int) -> int
+fn cli_positionals() -> vec[str]
 ```
 
 ### `std/core.qma`
@@ -100,6 +117,26 @@ fn abs(x: int) -> int
 fn max2(a: int, b: int) -> int
 fn min2(a: int, b: int) -> int
 fn pow2k(x: int, k: int) -> int
+```
+
+### `std/deque.qma`
+
+双端队列（两端 O(1) + 自动扩容）
+
+```quelmara
+fn dq_new(cap: int) -> int
+fn dq_len(d: int) -> int
+fn dq_cap(d: int) -> int
+fn dq_push_back(d: int, v: int) -> int
+fn dq_push_front(d: int, v: int) -> int
+fn dq_pop_front(d: int) -> int
+fn dq_pop_back(d: int) -> int
+fn dq_peek_front(d: int) -> int
+fn dq_peek_back(d: int) -> int
+fn dq_get(d: int, i: int) -> int
+fn dq_set(d: int, i: int, v: int) -> int
+fn dq_clear(d: int) -> int
+fn dq_free(d: int) -> int
 ```
 
 ### `std/ds.qma`
@@ -130,6 +167,17 @@ fn gzip_encode(s: str) -> str
 fn gzip_hex(s: str) -> str
 fn inflate_raw(s: str) -> str
 fn gzip_decode(s: str) -> str
+```
+
+### `std/hash.qma`
+
+FNV-1a 32/64 非密码学哈希（缓存键 / 分片）
+
+```quelmara
+fn fnv1a32_bytes(p: int, n: int) -> int
+fn fnv1a64_bytes(p: int, n: int) -> int
+fn fnv1a32(s: str) -> int
+fn fnv1a64(s: str) -> int
 ```
 
 ### `std/hex.qma`
@@ -403,6 +451,30 @@ fn frame_put(payload: str) -> str
 fn frame_get(buf: str, off: int) -> str
 ```
 
+### `std/set.qma`
+
+集合 set[int] / set[str]（map 支撑，含交并差）
+
+```quelmara
+fn iset_new(cap: int) -> map[int]int
+fn iset_add(s: map[int]int, v: int) -> int
+fn iset_has(s: map[int]int, v: int) -> bool
+fn iset_del(s: map[int]int, v: int) -> int
+fn iset_len(s: map[int]int) -> int
+fn iset_to_vec(s: map[int]int) -> vec[int]
+fn iset_union_into(dst: map[int]int, src: map[int]int) -> int
+fn iset_isect(a: map[int]int, b: map[int]int) -> vec[int]
+fn iset_diff(a: map[int]int, b: map[int]int) -> vec[int]
+fn sset_new(cap: int) -> map[str]int
+fn sset_add(s: map[str]int, v: str) -> int
+fn sset_has(s: map[str]int, v: str) -> bool
+fn sset_del(s: map[str]int, v: str) -> int
+fn sset_len(s: map[str]int) -> int
+fn sset_to_vec(s: map[str]int) -> vec[str]
+fn sset_union_into(dst: map[str]int, src: map[str]int) -> int
+fn sset_isect(a: map[str]int, b: map[str]int) -> vec[str]
+```
+
 ### `std/sha1.qma`
 
 SHA-1
@@ -619,6 +691,21 @@ fn url_query_get(u: str, key: str) -> str
 fn url_join_query(base: str, key: str, val: str) -> str
 ```
 
+### `std/utf8.qma`
+
+UTF-8 解码/编码/严格校验（RFC 3629）
+
+```quelmara
+fn utf8_char_len(b: int) -> int
+fn utf8_decode_at(s: str, i: int) -> int
+fn utf8_valid(s: str) -> bool
+fn utf8_encode(cp: int) -> str
+fn utf8_count(s: str) -> int
+fn utf8_byte_of_char(s: str, ci: int) -> int
+fn utf8_slice(s: str, lo: int, hi: int) -> str
+fn utf8_to_chars(s: str) -> vec[int]
+```
+
 ### `std/ws.qma`
 
 WebSocket 服务端（RFC 6455）
@@ -703,7 +790,13 @@ fn x509_rsa_exp(cert: str) -> int
 | `std/net` | 阻塞 TCP 服务端（listen/accept）+ 客户端 `connect`（Windows 走系统 DNS） | Linux 客户端未实现（`tcp_connect` 编译期报错）；IPv6、批量收发 |
 | `std/net/udp` | open/bind/sendto/recvfrom + 地址解析 | 可靠 UDP、批量收发、IPv6 |
 | `std/url` | scheme/host/port/path/query/fragment、query 取值、encode/decode | 规范化、相对路径解析 |
-| `std/str` | find/split/join/trim/replace/大小写/补齐/slice | `str_format`（无可变参数）、UTF-8 语义、正则 |
+| `std/str` | find/split/join/trim/replace/大小写/补齐/slice | `str_format`（无可变参数）、正则；**UTF-8 语义见 `std/utf8`**（`str_*` 一律按字节） |
+| `std/utf8` | 严格解码/编码/校验（RFC 3629）、字符数、按字符切片、码点序列 | 无 Unicode 规范化、无大小写折叠、无字符分类（标点/数字/字母） |
+| `std/set` | `iset_*` / `sset_*`：add/has/del/len + 并/交/差 + to_vec | 无泛型 `set[T]`（map 的 V 只允许 int/str）；遍历顺序由哈希决定；**无 clear**（新建更快） |
+| `std/deque` | 两端 O(1) 进出 + 自动扩容，句柄是不变地址（扩容只换内部块） | 只有 `int` 元素；无迭代器；无 insert/drain |
+| `std/hash` | FNV-1a 32/64（缓存键、分片、采样） | 非密码学（要抗碰撞用 `std/sha256`）；无 MD5/CRC64 |
+| `std/cli` | `--k=v` / `--k v` / `-k v` / 布尔开关 / 位置参数 / 缺值回落默认 | 无子命令、无自动 usage、无环境变量回落；位置参数判定是启发式（见源码注释） |
+| `std/b64` | 标准字母表（带填充）+ **base64url**（无填充，JWT/URL 用） | 无流式编码（整块进内存） |
 | `std/sort` | `sort_int`（Lomuto 快排 + 小段插入）、`is_sorted` | 泛型比较器（函数值 ≤6 参限制） |
 | `std/log` | 级别 + 启动毫秒时间戳 + `log_kv` 结构化字段 | stderr 通道切换、级别过滤、轮转 |
 | `std/rand` | xorshift64*（`now_ns` 混合种子） | CSPRNG |

@@ -1,0 +1,214 @@
+// std/utf8.qma —— UTF-8 解码/编码/校验（v1.29）
+//
+// 为什么需要它：语言层的 `len(s)` / `s[i]` / `substr` 全部按**字节**算
+// （这是自研后端的 ABI 约定，也是 0 拷贝的代价）。中文一个字 3 字节，
+// 于是 `substr(s, 0, 10)` 会把字切开、`len("中文")` 是 6 不是 2。
+// 这一层补的就是"按字符看字符串"的那套 API。
+//
+// 严格性纪律（RFC 3629）：
+//   * 拒绝 overlong 编码（0xC0/0xC1、0xE0 80..9F、0xF0 80..8F）；
+//   * 拒绝代理区 U+D800..U+DFFF（0xED A0..BF）；
+//   * 拒绝 > U+10FFFF（0xF4 90..BF、0xF5..0xFF）；
+//   * 非法字节在 count/slice 里按 **1 个单位** 计（容错，不 fail-fast），
+//     需要严格判定请用 utf8_valid —— 两者用途不同，不要混。
+
+// ---------------------------------------------------------------------------
+// 单字符
+// ---------------------------------------------------------------------------
+
+// utf8_char_len(b) -> int：首字节对应的字节数；非法首字节返回 0
+fn utf8_char_len(b: int) -> int {
+    if b < 0x80 {
+        return 1
+    }
+    if b >= 0xC2 && b <= 0xDF {
+        return 2
+    }
+    if b >= 0xE0 && b <= 0xEF {
+        return 3
+    }
+    if b >= 0xF0 && b <= 0xF4 {
+        return 4
+    }
+    return 0
+}
+
+// utf8_decode_at(s, i) -> int：解出 i 处码点；非法返回 -1
+fn utf8_decode_at(s: str, i: int) -> int {
+    let n = len(s)
+    if i < 0 || i >= n {
+        return -1
+    }
+    let b0 = s[i]
+    if b0 < 0x80 {
+        return b0
+    }
+    let need = utf8_char_len(b0)
+    if need == 0 || i + need > n {
+        return -1
+    }
+    let b1 = s[i + 1]
+    if b1 < 0x80 || b1 > 0xBF {
+        return -1
+    }
+    if need == 2 {
+        return ((b0 & 0x1F) << 6) | (b1 & 0x3F)
+    }
+    let b2 = s[i + 2]
+    if b2 < 0x80 || b2 > 0xBF {
+        return -1
+    }
+    if need == 3 {
+        // overlong 与代理区的两道边界
+        if b0 == 0xE0 && b1 < 0xA0 {
+            return -1
+        }
+        if b0 == 0xED && b1 > 0x9F {
+            return -1
+        }
+        return ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
+    }
+    let b3 = s[i + 3]
+    if b3 < 0x80 || b3 > 0xBF {
+        return -1
+    }
+    if b0 == 0xF0 && b1 < 0x90 {
+        return -1
+    }
+    if b0 == 0xF4 && b1 > 0x8F {
+        return -1
+    }
+    return ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+}
+
+// utf8_valid(s) -> bool：整串严格校验（上面四条全查）
+fn utf8_valid(s: str) -> bool {
+    let n = len(s)
+    let mut i = 0
+    while i < n {
+        let cp = utf8_decode_at(s, i)
+        if cp < 0 {
+            return false
+        }
+        i = i + utf8_char_len(s[i])
+    }
+    return true
+}
+
+// utf8_encode(cp) -> str：码点编码成 UTF-8（非法码点写成 U+FFFD）
+fn utf8_encode(cp: int) -> str {
+    let buf = mem_alloc(5)
+    let mut n = 0
+    if cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) {
+        cp = 0xFFFD
+    }
+    if cp < 0x80 {
+        mem_store8(buf, 0, cp)
+        n = 1
+    } else if cp < 0x800 {
+        mem_store8(buf, 0, 0xC0 | (cp >> 6))
+        mem_store8(buf, 1, 0x80 | (cp & 0x3F))
+        n = 2
+    } else if cp < 0x10000 {
+        mem_store8(buf, 0, 0xE0 | (cp >> 12))
+        mem_store8(buf, 1, 0x80 | ((cp >> 6) & 0x3F))
+        mem_store8(buf, 2, 0x80 | (cp & 0x3F))
+        n = 3
+    } else {
+        mem_store8(buf, 0, 0xF0 | (cp >> 18))
+        mem_store8(buf, 1, 0x80 | ((cp >> 12) & 0x3F))
+        mem_store8(buf, 2, 0x80 | ((cp >> 6) & 0x3F))
+        mem_store8(buf, 3, 0x80 | (cp & 0x3F))
+        n = 4
+    }
+    let out = mem_str(buf, n)
+    mem_free(buf, 5)
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// 整串
+// ---------------------------------------------------------------------------
+
+// utf8_count(s) -> int：字符数（非法字节各算 1）
+fn utf8_count(s: str) -> int {
+    let n = len(s)
+    let mut i = 0
+    let mut c = 0
+    while i < n {
+        let need = utf8_char_len(s[i])
+        if need == 0 {
+            i = i + 1
+        } else {
+            i = i + need
+        }
+        c = c + 1
+    }
+    return c
+}
+
+// utf8_byte_of_char(s, ci) -> int：第 ci 个字符的起始字节偏移；越界返回 -1
+fn utf8_byte_of_char(s: str, ci: int) -> int {
+    let n = len(s)
+    if ci < 0 {
+        return -1
+    }
+    let mut i = 0
+    let mut c = 0
+    while i < n {
+        if c == ci {
+            return i
+        }
+        let need = utf8_char_len(s[i])
+        if need == 0 {
+            i = i + 1
+        } else {
+            i = i + need
+        }
+        c = c + 1
+    }
+    if c == ci {
+        return n
+    }
+    return -1
+}
+
+// utf8_slice(s, lo, hi) -> str：按**字符**下标切片（半开区间，越界自动夹紧）
+fn utf8_slice(s: str, lo: int, hi: int) -> str {
+    let n = len(s)
+    let cnt = utf8_count(s)
+    let mut a = lo
+    let mut b = hi
+    if a < 0 {
+        a = 0
+    }
+    if b > cnt {
+        b = cnt
+    }
+    if a >= b {
+        return ""
+    }
+    let ba = utf8_byte_of_char(s, a)
+    let bb = utf8_byte_of_char(s, b)
+    if ba < 0 || bb < 0 || bb <= ba {
+        return ""
+    }
+    return str_from_mem(mem_ptr(s, ba), bb - ba)
+}
+
+// utf8_to_chars(s) -> vec[int]：码点序列（非法位置填 -1，便于测试定位）
+fn utf8_to_chars(s: str) -> vec[int] {
+    let n = len(s)
+    let out = vec[int].new(utf8_count(s) + 1)
+    let mut i = 0
+    while i < n {
+        let cp = utf8_decode_at(s, i)
+        out.push(cp)
+        if cp < 0 {
+            i = i + 1
+        } else {
+            i = i + utf8_char_len(s[i])
+        }
+    }
+    return out
+}

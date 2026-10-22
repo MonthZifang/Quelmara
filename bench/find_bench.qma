@@ -1,0 +1,157 @@
+// bench/find_bench.qma —— 查找/拆分基准（v1.29 mem_chr 改造的 A/B 对照）
+//
+// 为什么把"旧实现"也留在文件里：性能数字必须能在**同一次运行、同一份数据**
+// 上对照，否则跨进程/跨机器比较没有意义（本机 VBS 让进程级数字抖 ±50%）。
+// 这里 _find_naive / _count_naive 就是 v1.28 的逐字节版本，原样保留作基线。
+//
+// 数据：54 字节/行 × 20000 行 = 1 100 000 字节（全 ASCII，无 UTF-8 干扰）
+// 形状：
+//   1) 找不到（最坏情况，全串扫完）
+//   2) 候选密集（每 54 字节一个 '\n'，扫描 + 计数）
+//   3) 完整拆分（含 65537 段分配，只报绝对值，不与计数混比）
+module find_bench
+
+import std.core
+import std.str
+
+fn _find_naive(s: str, needle: str) -> int {
+    let n = len(s)
+    let m = len(needle)
+    if m == 0 {
+        return 0
+    }
+    let first = needle[0]
+    let mut i = 0
+    while i + m <= n {
+        if s[i] == first {
+            let mut k = 1
+            let mut ok = 1
+            while k < m {
+                if s[i + k] != needle[k] {
+                    ok = 0
+                    k = m
+                } else {
+                    k = k + 1
+                }
+            }
+            if ok == 1 {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// 逐字节计数（v1.28 的扫描形态）
+fn _count_naive(s: str, b: int) -> int {
+    let n = len(s)
+    let mut c = 0
+    let mut i = 0
+    while i < n {
+        if s[i] == b {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// mem_chr 跳扫计数（v1.29 的扫描形态）
+fn _count_memchr(s: str, b: int) -> int {
+    let n = len(s)
+    let mut c = 0
+    let mut i = 0
+    while i < n {
+        let hit = mem_chr(mem_ptr(s, i), n - i, b)
+        if hit < 0 {
+            return c
+        }
+        c = c + 1
+        i = i + hit + 1
+    }
+    return c
+}
+
+fn main() {
+    let line = "the quick brown fox jumps over the lazy dog 0123456789\n"
+    let text = str_repeat(line, 20000)
+    let n = len(text)
+    print("input bytes=" + n.to_str())
+
+    // ---- A/B 1：找不到（最坏情况，全串扫完，纯扫描成本）----
+    let mut a1 = 0
+    let mut b1 = 0
+    let mut r = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let p = _find_naive(text, "zzzzzz")
+        let t1 = now_ns()
+        let q = str_find(text, "zzzzzz")
+        let t2 = now_ns()
+        assert(p == -1 && q == -1, "both must miss")
+        if a1 == 0 || t1 - t0 < a1 {
+            a1 = t1 - t0
+        }
+        if b1 == 0 || t2 - t1 < b1 {
+            b1 = t2 - t1
+        }
+        r = r + 1
+    }
+    print("miss6      naive_us=" + (a1 / 1000).to_str() +
+          "  memchr_us=" + (b1 / 1000).to_str() +
+          "  speedup_x10=" + ((a1 * 10) / b1).to_str())
+
+    // ---- A/B 2：候选密集（每 54 字节一个命中，全串计数）----
+    let mut a2 = 0
+    let mut b2 = 0
+    let mut r2 = 0
+    let mut c1 = 0
+    let mut c2 = 0
+    while r2 < 3 {
+        let t0 = now_ns()
+        c1 = _count_naive(text, 10)
+        let t1 = now_ns()
+        c2 = _count_memchr(text, 10)
+        let t2 = now_ns()
+        assert(c1 == c2, "same count")
+        if a2 == 0 || t1 - t0 < a2 {
+            a2 = t1 - t0
+        }
+        if b2 == 0 || t2 - t1 < b2 {
+            b2 = t2 - t1
+        }
+        r2 = r2 + 1
+    }
+    print("count_dense naive_us=" + (a2 / 1000).to_str() +
+          "  memchr_us=" + (b2 / 1000).to_str() +
+          "  speedup_x10=" + ((a2 * 10) / b2).to_str() +
+          "  hits=" + c1.to_str())
+
+    // ---- 3：完整拆分（含每段分配，绝对值）----
+    let mut b3 = 0
+    let mut r3 = 0
+    let mut parts_n = 0
+    while r3 < 3 {
+        let t0 = now_ns()
+        let parts = str_split(text, "\n")
+        let t1 = now_ns()
+        parts_n = len(parts)
+        if b3 == 0 || t1 - t0 < b3 {
+            b3 = t1 - t0
+        }
+        r3 = r3 + 1
+    }
+    print("split_full us=" + (b3 / 1000).to_str() + "  parts=" + parts_n.to_str())
+
+    // ---- 正确性哨兵 ----
+    let ps = str_split("a\nbb\nccc", "\n")
+    assert(len(ps) == 3, "3 parts")
+    assert(ps.get(0) == "a" && ps.get(1) == "bb" && ps.get(2) == "ccc", "part content")
+    let ls = str_lines("a\r\nb\r\nc")
+    assert(len(ls) == 3 && ls.get(1) == "b", "lines crlf")
+    assert(str_find("abcabc", "bc") == 1, "find mid")
+    assert(str_find_from("abcabc", 2, "bc") == 4, "find from")
+    assert(str_find("abc", "abcd") == -1, "needle longer")
+    print("ok find_bench")
+}

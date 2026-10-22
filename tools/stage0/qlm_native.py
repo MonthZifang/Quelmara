@@ -628,6 +628,7 @@ class Lower:
         # v1.5 内存/时间内建：按需发射（未用到的程序体积零变化）
         self.uses_memset = False
         self.uses_memcmp = False
+        self.uses_memchr = False
         self.uses_mem_to_str = False
         self.uses_realloc = False
         self.uses_free = False
@@ -2411,6 +2412,18 @@ class Lower:
             self.uses_memcmp = True
             d = fn.new_v()
             fn.emit("call", d, "__memcmp", vals)
+            return d
+        if name == "mem_chr" and name not in self.fns_ast:
+            # mem_chr(p, n, byte) -> int：在 p 起 n 字节内找第一个等于 byte 的
+            # 字节，返回下标；找不到 -1（v1.29）。
+            # 这是"找字符内建"——str_find / str_split / str_lines / HTTP 头
+            # 解析的共同热点。实现见运行时 __memchr（8 字节 SWAR）。
+            if len(e[2]) != 3:
+                raise SyntaxError("mem_chr(p, n, byte) 需要三个实参")
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            self.uses_memchr = True
+            d = fn.new_v()
+            fn.emit("call", d, "__memchr", vals)
             return d
         if name == "mem_str" and name not in self.fns_ast:
             # mem_str(p, n) -> str：拷 n 字节并补 NUL（缓冲区 -> 不可变串）
@@ -6715,6 +6728,76 @@ class Lower:
         if self.uses_memcmp:
             self.out.append(f)
 
+        # __memchr(p, n, c) -> int：首个等于 c 的字节下标，找不到 -1（v1.29）
+        # 8 字节 SWAR：c 广播成 64 位字 rep，x = word ^ rep；
+        # 零字节检测 haszero(x) = (x - 0x01…) & ~x & 0x80…
+        # ⚠ SWAR 只回答"这个字里有 c"，不回答"是第几个字节"——命中后必须
+        # 逐字节确认，否则返回的是字内任意一个匹配（首匹配语义就丢了）。
+        # 高位掩码不用 0x8080808080808080（= 2^63，超出 int64 正区间，
+        # 走有符号立即数容易踩坑）：改成 >>7 再 & 0x0101…，效果等价。
+        f = Fn("__memchr")
+        p, n, c = f.new_v(), f.new_v(), f.new_v()
+        f.emit("args", [p, n, c])
+        cb = f.new_v()
+        f.emit("bin", "and", cb, c, ("imm", 0xFF))
+        rep = f.new_v()
+        f.emit("bin", "mul", rep, cb, ("imm", 0x0101010101010101))
+        nw = f.new_v()
+        f.emit("bin", "shr", nw, n, ("imm", 3))          # 整字数
+        k = f.new_v()
+        f.emit("mov", k, ("imm", 0))
+        l_wt, l_we = f.label("mchwt"), f.label("mchwe")
+        l_bt, l_bf, l_bn = f.label("mchbt"), f.label("mchbf"), f.label("mchbn")
+        f.emit("label", l_wt)
+        f.emit("jcc", "ge", k, nw, l_we)
+        w = f.new_v()
+        f.emit("load", w, p, k)
+        x = f.new_v()
+        f.emit("bin", "xor", x, w, rep)
+        t1 = f.new_v()
+        f.emit("bin", "sub", t1, x, ("imm", 0x0101010101010101))
+        t2 = f.new_v()
+        f.emit("not", t2, x)
+        t3 = f.new_v()
+        f.emit("bin", "and", t3, t1, t2)
+        t4 = f.new_v()
+        f.emit("bin", "shr", t4, t3, ("imm", 7))          # 每字节的 bit7 -> bit0
+        t5 = f.new_v()
+        f.emit("bin", "and", t5, t4, ("imm", 0x0101010101010101))
+        f.emit("jz", t5, l_bn)                            # 该字无 c -> 下一个字
+        i = f.new_v()
+        f.emit("bin", "shl", i, k, ("imm", 3))
+        f.emit("label", l_bt)                             # 字内逐字节确认
+        f.emit("jcc", "ge", i, n, l_bn)
+        b = f.new_v()
+        f.emit("load8", b, p, i)
+        f.emit("jcc", "e", b, cb, l_bf)
+        f.emit("bin", "add", i, i, ("imm", 1))
+        f.emit("jmp", l_bt)
+        f.emit("label", l_bf)
+        f.emit("ret", i)
+        f.emit("label", l_bn)
+        f.emit("bin", "add", k, k, ("imm", 1))
+        f.emit("jmp", l_wt)
+        # 尾字节（n % 8）
+        f.emit("label", l_we)
+        i2 = f.new_v()
+        f.emit("bin", "shl", i2, nw, ("imm", 3))
+        l_tt, l_tf, l_tn = f.label("mchtt"), f.label("mchtf"), f.label("mchtn")
+        f.emit("label", l_tt)
+        f.emit("jcc", "ge", i2, n, l_tn)
+        b2 = f.new_v()
+        f.emit("load8", b2, p, i2)
+        f.emit("jcc", "e", b2, cb, l_tf)
+        f.emit("bin", "add", i2, i2, ("imm", 1))
+        f.emit("jmp", l_tt)
+        f.emit("label", l_tf)
+        f.emit("ret", i2)
+        f.emit("label", l_tn)
+        f.emit("ret", ("imm", -1))
+        if self.uses_memchr:
+            self.out.append(f)
+
         # __mem_to_str(p, n) -> str：拷 n 字节并补 NUL（缓冲区 -> 不可变串）
         # v1.5.1 长度前缀：[n][n 字节][NUL]，返回 +8
         f = Fn("__mem_to_str")
@@ -7110,6 +7193,20 @@ class Lower:
         f.emit("label", l_pos)
         buf = f.new_v()
         f.emit("call", buf, "__alloc", [("imm", 41)])
+        # INT64_MIN 的取负会溢出回自身（-(-2^63) == -2^63），digit 循环里
+        # mod/div 拿到负数，写出的是一串乱码字节（实测 20 个垃圾字符）。
+        # 这是 int64 里唯一的溢出值，直接写定值走人（v1.29 修）。
+        l_notmin = f.label("inotmin")
+        f.emit("jcc", "ge", v, ("imm", 0), l_notmin)
+        _min_str = "-9223372036854775808"
+        for _i, _ch in enumerate(_min_str):
+            f.emit("store8", buf, ("imm", 8 + _i), ("imm", ord(_ch)))
+        f.emit("store", buf, ("imm", 0), ("imm", len(_min_str)))   # 长度前缀
+        f.emit("store8", buf, ("imm", 8 + len(_min_str)), ("imm", 0))
+        _rm = f.new_v()
+        f.emit("bin", "add", _rm, buf, ("imm", 8))
+        f.emit("ret", _rm)
+        f.emit("label", l_notmin)
         pos = f.new_v()
         f.emit("mov", pos, ("imm", 39))
         l_d, l_de = f.label("idig"), f.label("idige")

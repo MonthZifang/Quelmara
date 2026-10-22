@@ -107,3 +107,93 @@ fn b64_decode_into(s: str, out: int) -> int {
     }
     return o
 }
+
+// ---------------------------------------------------------------------------
+// Base64url（RFC 4648 §5）：字母表 -_ 替代 +/，**无填充**（JWT / URL 参数用）
+// 与 b64_* 共用同一套位运算，只换字母表与填充策略。
+// ---------------------------------------------------------------------------
+
+fn b64url_char(v: int) -> int {
+    if v == 62 {
+        return 45                  // '-'
+    }
+    if v == 63 {
+        return 95                  // '_'
+    }
+    return b64_char(v)
+}
+
+fn b64url_val(b: int) -> int {
+    if b == 45 {
+        return 62
+    }
+    if b == 95 {
+        return 63
+    }
+    return b64_val(b)
+}
+
+// b64url_encode(p, n) -> str：无填充编码
+fn b64url_encode(p: int, n: int) -> str {
+    let full = n / 3
+    let rem = n - full * 3
+    let mut outn = full * 4
+    if rem == 1 {
+        outn = outn + 2
+    } else if rem == 2 {
+        outn = outn + 3
+    }
+    let out = mem_alloc(outn + 1)
+    let mut i = 0
+    let mut o = 0
+    while i + 3 <= n {
+        let a = mem_load8(p, i)
+        let b = mem_load8(p, i + 1)
+        let c = mem_load8(p, i + 2)
+        let v = (a << 16) | (b << 8) | c
+        mem_store8(out, o, b64url_char((v >> 18) & 63))
+        mem_store8(out, o + 1, b64url_char((v >> 12) & 63))
+        mem_store8(out, o + 2, b64url_char((v >> 6) & 63))
+        mem_store8(out, o + 3, b64url_char(v & 63))
+        i = i + 3
+        o = o + 4
+    }
+    if rem == 1 {
+        let v = mem_load8(p, i) << 16
+        mem_store8(out, o, b64url_char((v >> 18) & 63))
+        mem_store8(out, o + 1, b64url_char((v >> 12) & 63))
+    } else if rem == 2 {
+        let v = (mem_load8(p, i) << 16) | (mem_load8(p, i + 1) << 8)
+        mem_store8(out, o, b64url_char((v >> 18) & 63))
+        mem_store8(out, o + 1, b64url_char((v >> 12) & 63))
+        mem_store8(out, o + 2, b64url_char((v >> 6) & 63))
+    }
+    mem_store8(out, outn, 0)
+    let r = mem_str(out, outn)
+    mem_free(out, outn + 1)
+    return r
+}
+
+// b64url_decode_into(s, out) -> int：解码进调用方缓冲，返回字节数
+// 无填充、'=' 忽略、非法字符跳过（与 b64_decode_into 同一容错口径）
+fn b64url_decode_into(s: str, out: int) -> int {
+    let n = len(s)
+    let mut i = 0
+    let mut o = 0
+    let mut acc = 0
+    let mut bits = 0
+    while i < n {
+        let v = b64url_val(s[i])
+        if v >= 0 {
+            acc = (acc << 6) | v
+            bits = bits + 6
+            if bits >= 8 {
+                bits = bits - 8
+                mem_store8(out, o, (acc >> bits) & 0xFF)
+                o = o + 1
+            }
+        }
+        i = i + 1
+    }
+    return o
+}

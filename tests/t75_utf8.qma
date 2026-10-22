@@ -1,0 +1,68 @@
+// t75_utf8.qma：UTF-8 解码/编码/校验（v1.29）
+// 严格性用 RFC 3629 的四类非法序列逐一验证（overlong / 代理 / 超界 / 截断）
+module t75
+
+import std.core
+import std.hex
+import std.utf8
+
+fn main() {
+    let zhong = hex_decode("e4b8ad")        // 中 U+4E2D
+    let wen = hex_decode("e69687")          // 文 U+6587
+    let zh = zhong + wen                    // 中文
+
+    assert(len(zh) == 6, "bytes 6")
+    assert(utf8_count(zh) == 2, "chars 2")
+    assert(utf8_valid(zh), "valid")
+    assert(utf8_decode_at(zh, 0) == 20013, "decode 中")
+    assert(utf8_decode_at(zh, 3) == 25991, "decode 文")
+    assert(utf8_decode_at(zh, 1) == -1, "mid-byte is not a start")
+    assert(utf8_slice(zh, 0, 1) == zhong, "slice 0..1")
+    assert(utf8_slice(zh, 1, 2) == wen, "slice 1..2")
+    assert(utf8_slice(zh, 0, 99) == zh, "slice clamp hi")
+    assert(utf8_slice(zh, 2, 1) == "", "slice empty")
+    assert(utf8_encode(20013) == zhong, "encode 中")
+    assert(utf8_encode(25991) == wen, "encode 文")
+
+    let cs = utf8_to_chars(zh)
+    assert(len(cs) == 2, "chars vec 2")
+    assert(cs.get(0) == 20013 && cs.get(1) == 25991, "chars values")
+
+    // 混合 ASCII 与多字节：切片必须落在字符边界
+    let mix = "a" + zh + "b"
+    assert(utf8_count(mix) == 4, "mix count 4")
+    assert(utf8_slice(mix, 1, 3) == zh, "mix slice")
+    assert(utf8_byte_of_char(mix, 1) == 1, "byte of char 1")
+    assert(utf8_byte_of_char(mix, 3) == 7, "byte of char 3")
+    assert(utf8_byte_of_char(mix, 4) == 8, "byte of char end")
+    assert(utf8_byte_of_char(mix, 5) == -1, "byte of char oob")
+
+    // 四字节：😀 U+1F600
+    let emoji = hex_decode("f09f9880")
+    assert(utf8_valid(emoji), "4-byte valid")
+    assert(utf8_decode_at(emoji, 0) == 128512, "4-byte decode")
+    assert(utf8_encode(128512) == emoji, "4-byte encode")
+
+    // ---- 非法序列：全部必须拒绝 ----
+    assert(!utf8_valid(hex_decode("e4b8")), "truncated")
+    assert(!utf8_valid(hex_decode("c080")), "overlong 2-byte")
+    assert(!utf8_valid(hex_decode("e08080")), "overlong 3-byte")
+    assert(!utf8_valid(hex_decode("f0808080")), "overlong 4-byte")
+    assert(!utf8_valid(hex_decode("eda080")), "surrogate D800")
+    assert(!utf8_valid(hex_decode("f4908080")), "above U+10FFFF")
+    assert(!utf8_valid(hex_decode("c2")), "missing continuation")
+    assert(!utf8_valid(hex_decode("80")), "lone continuation")
+    assert(utf8_decode_at(hex_decode("c080"), 0) == -1, "decode overlong")
+    assert(utf8_decode_at(hex_decode("eda080"), 0) == -1, "decode surrogate")
+
+    // 容错计数：非法字节各算 1 个单位（与 valid 用途不同）
+    assert(utf8_count(hex_decode("c080")) == 2, "tolerant count")
+    assert(utf8_count("") == 0, "empty count")
+    assert(utf8_valid(""), "empty valid")
+
+    // 非法码点编码成 U+FFFD
+    assert(utf8_encode(0xD800) == hex_decode("efbfbd"), "surrogate -> U+FFFD")
+    assert(utf8_encode(0x110000) == hex_decode("efbfbd"), "out of range -> U+FFFD")
+
+    print("ok t75_utf8")
+}

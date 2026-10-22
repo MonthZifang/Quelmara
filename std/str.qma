@@ -39,32 +39,41 @@ fn str_find_from(s: str, from: int, needle: str) -> int {
     if m == 0 {
         return 0
     }
-    if from < 0 {
+    if from < 0 || from >= n {
         return -1
     }
-    // v1.14 两阶段：首字节预筛（1 次下标出局大多数 miss），m==1 直接扫
+    let last = n - m                 // 最后一个可能的起点
+    if last < from {
+        return -1
+    }
+    // v1.29：首字节用 mem_chr（8 字节 SWAR）跳着找，只有候选点才逐字节比对。
+    // 旧实现是"每字节一次下标 + 一次比较"，长文本上等于逐字节扫；
+    // 新实现把扫描步长从 1 字节提到 8 字节（尾字节仍逐字节）。
     let first = needle[0]
     let mut i = from
-    while i + m <= n {
-        if s[i] == first {
-            if m == 1 {
-                return i
-            }
-            let mut k = 1
-            let mut ok = 1
-            while k < m {
-                if s[i + k] != needle[k] {
-                    ok = 0
-                    k = m
-                } else {
-                    k = k + 1
-                }
-            }
-            if ok == 1 {
-                return i
+    while i <= last {
+        let hit = mem_chr(mem_ptr(s, i), last - i + 1, first)
+        if hit < 0 {
+            return -1
+        }
+        let cand = i + hit
+        if m == 1 {
+            return cand
+        }
+        let mut k = 1
+        let mut ok = 1
+        while k < m {
+            if s[cand + k] != needle[k] {
+                ok = 0
+                k = m
+            } else {
+                k = k + 1
             }
         }
-        i = i + 1
+        if ok == 1 {
+            return cand
+        }
+        i = cand + 1
     }
     return -1
 }
@@ -340,10 +349,28 @@ fn str_split(s: str, sep: str) -> vec[str] {
         return out
     }
     let n = len(s)
+    let first = sep[0]
+    // v1.29：单字节分隔符（'\n' / ',' / '/' 这些最常见的）走 mem_chr 跳扫，
+    // 段边界一次定位，不再逐字节看。多字节分隔符仍走 _match_at。
+    if m == 1 {
+        let mut start = 0
+        let mut i = 0
+        while i < n {
+            let hit = mem_chr(mem_ptr(s, i), n - i, first)
+            if hit < 0 {
+                break
+            }
+            let pos = i + hit
+            out.push(str_from_mem(mem_ptr(s, start), pos - start))
+            start = pos + 1
+            i = pos + 1
+        }
+        out.push(str_from_mem(mem_ptr(s, start), n - start))
+        return out
+    }
     // v1.14：每段用 str_from_mem 批量构造（替代逐字节 vec 累积 +
     // str_from_bytes——1MiB 的 split 从每字节 1 次 push call 变成
     // 每段 1 次 alloc + 1 次 memcpy）
-    let first = sep[0]
     let mut start = 0
     let mut i = 0
     while i + m <= n {
@@ -390,22 +417,25 @@ fn str_split_n(s: str, sep: str, max_parts: int) -> vec[str] {
 fn str_lines(s: str) -> vec[str] {
     let out = vec[str].new(8)
     let n = len(s)
-    let cur = vec[int].new(64)
+    // v1.29：mem_chr 直接定位 '\n'（8 字节/步），不再逐字节 push 进缓冲
+    let mut start = 0
     let mut i = 0
     while i < n {
-        let c = s[i]
-        if c == 10 {
-            out.push(str_from_bytes(cur))
-            cur.clear()
-        } else if c == 13 && i + 1 < n && s[i + 1] == 10 {
-            // CRLF：\r 交给下一轮的 \n 处理，不进入行内容
-        } else {
-            cur.push(c)
+        let hit = mem_chr(mem_ptr(s, i), n - i, 10)
+        if hit < 0 {
+            break
         }
-        i = i + 1
+        let pos = i + hit
+        let mut end = pos
+        if end > start && s[end - 1] == 13 {
+            end = end - 1
+        }
+        out.push(str_from_mem(mem_ptr(s, start), end - start))
+        start = pos + 1
+        i = pos + 1
     }
-    if len(cur) > 0 {
-        out.push(str_from_bytes(cur))
+    if start < n {
+        out.push(str_from_mem(mem_ptr(s, start), n - start))
     }
     return out
 }
