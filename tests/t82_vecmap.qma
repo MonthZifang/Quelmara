@@ -1,0 +1,89 @@
+// t82_vecmap.qma：vec[map[K]V]——map 句柄作 vec 元素（v1.37）
+// 覆盖：
+//   1) vec[map[str]int].new + push（句柄 1 字标量拷贝语义）
+//   2) get(i) 链式：.get/.set/.has 直接挂在取回结果上
+//   3) 先落变量再操作（与链式等价——重挂 map 标记两条路都通）
+//   4) foreach 遍历 vec[map]
+//   5) set(i, m) 替换元素 / pop 取回
+//   6) vec[map] 作函数形参（函数内 foreach + has）
+//   7) map[str]str 值类型同路
+//   8) 驱动修复：vec[vec[int]] 的 foreach 循环变量重挂（v1.12 漏的标记）
+// 语义纪律：vec 只存 map 句柄——不持有 map 本身的所有权；
+// vec.clear/扩容/析构都不释放 map（语言无 Drop，与 vec[vec] 一致）。
+module t82
+
+fn table_has(t: vec[map[str]int], k: str) -> bool {
+    for m in t {
+        if m.has(k) {
+            return true
+        }
+    }
+    return false
+}
+
+fn main() {
+    // 1) 构造 + push
+    let rows = vec[map[str]int].new(2)
+    let a = map[str]int.new(4)
+    a.set("x", 1)
+    a.set("y", 2)
+    let b = map[str]int.new(4)
+    b.set("x", 10)
+    rows.push(a)
+    rows.push(b)
+    assert(rows.len() == 2, "len 2")
+
+    // 2) get(i) 链式
+    assert(rows.get(0).get("x") == 1, "get0 x")
+    assert(rows.get(1).get("x") == 10, "get1 x")
+    rows.get(0).set("z", 99)
+    assert(rows.get(0).get("z") == 99, "set via get")
+    assert(rows.get(0).has("y"), "has y")
+    assert(!rows.get(1).has("y"), "no y in 1")
+
+    // 3) 先落变量
+    let m0 = rows.get(0)
+    m0.set("w", 7)
+    assert(rows.get(0).get("w") == 7, "set via var")
+
+    // 4) foreach
+    let mut total = 0
+    for m in rows {
+        total = total + m.get("x")
+    }
+    assert(total == 11, "foreach sum")
+
+    // 5) set 替换 + pop
+    let c = map[str]int.new(4)
+    c.set("x", 100)
+    rows.set(1, c)
+    assert(rows.get(1).get("x") == 100, "set replace")
+    let last = rows.pop()
+    assert(last.get("x") == 100, "pop value")
+    assert(rows.len() == 1, "len after pop")
+
+    // 6) 形参 + 函数内遍历
+    assert(table_has(rows, "z"), "param has z")
+    assert(!table_has(rows, "nope"), "param no nope")
+
+    // 7) map[str]str
+    let ss = vec[map[str]str].new(2)
+    let m1 = map[str]str.new(4)
+    m1.set("name", "qm")
+    ss.push(m1)
+    assert(ss.get(0).get("name") == "qm", "str value")
+
+    // 8) vec[vec[int]] foreach（驱动修复）
+    let grid = vec[vec[int]].new(2)
+    let r1 = vec[int].new(2)
+    r1.push(1)
+    r1.push(2)
+    grid.push(r1)
+    let mut gsum = 0
+    for row in grid {
+        gsum = gsum + row.get(0) + row.get(1)
+    }
+    assert(gsum == 3, "vecvec foreach")
+
+    print("vecmap ok")
+}

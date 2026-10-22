@@ -2305,7 +2305,8 @@ VEC_SCALARS = ("int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8",
 
 def vec_elem_tag(t, line=None):
     """vec 元素类型标签：标量原样返回，具名聚合返回 ('agg', Name)，
-    嵌套 vec 返回 ('vecinner', 内层标签)（v1.12：句柄 1 字标量语义）。
+    嵌套 vec 返回 ('vecinner', 内层标签)（v1.12：句柄 1 字标量语义），
+    map 返回 ('mapinner', 键标签, 值标签)（v1.37：句柄 1 字标量语义）。
     只在解析期做语法级校验；是不是真的 struct/enum 由后端查符号表。"""
     if t[0] == "named" and t[1] in VEC_SCALARS:
         return t[1]
@@ -2315,13 +2316,28 @@ def vec_elem_tag(t, line=None):
         # vec[vec[T]]：元素 = 内层 vec 的句柄（1 字，标量拷贝语义）。
         # 内层标签供 get 取回时重新 mark（row.push 才认类型）。
         return ("vecinner", vec_elem_tag(t[1]))
-    raise SyntaxError(f"vec 元素类型只支持标量、具名类型与嵌套 vec，得到 {t!r}")
+    if t[0] == "map":
+        # vec[map[K]V]（v1.37）：元素 = map 句柄（1 字，与 vecinner 同构）。
+        # K/V 标签供 get 取回时重新 mark 成 map（m.set/m.get 才认类型）。
+        # map 句柄不持有元素所有权——vec 清空/扩容不释放 map 本身。
+        return ("mapinner", _map_kv_label(t[1]), _map_kv_label(t[2]))
+    raise SyntaxError(f"vec 元素类型只支持标量、具名类型、嵌套 vec 与 map，得到 {t!r}")
+
+
+def _map_kv_label(t):
+    """map K/V 类型 -> 短标签（int/str/bool；vec_elem_tag 的 mapinner 用）"""
+    return t[1] if (isinstance(t, tuple) and t[0] == "named") else "int"
 
 
 def _vec_tag_str(t):
-    """vec 元素标签串：标量原样，聚合 -> "agg:Name"，嵌套 -> "vecinner:..."（env 里用字符串传）"""
+    """vec 元素标签串：标量原样，聚合 -> "agg:Name"，嵌套 -> "vecinner:..."，
+    map -> "mapinner:K:V"（env 里用字符串传）"""
     tag = vec_elem_tag(t)
-    return tag if isinstance(tag, str) else ":".join(map(str, tag))
+    if isinstance(tag, str):
+        return tag
+    if tag[0] == "mapinner":
+        return "mapinner:" + tag[1] + ":" + tag[2]
+    return ":".join(map(str, tag))
 
 
 def _vec_ewords(cg, t):
@@ -2331,8 +2347,8 @@ def _vec_ewords(cg, t):
     tag = vec_elem_tag(t)
     if isinstance(tag, str):
         return 1
-    if tag[0] == "vecinner":
-        return 1
+    if tag[0] in ("vecinner", "mapinner"):
+        return 1          # 句柄 1 字（v1.37：map 同 vecinner）
     name = tag[1]
     if name in cg.structs:
         return max(1, len(cg.structs[name]))
@@ -2554,6 +2570,10 @@ class Infer:
                         return "const char *"
                     if elem.startswith("agg:"):
                         return "struct:" + elem[4:]
+                    if elem.startswith("mapinner:"):
+                        # vec[map]（v1.37）：取回的是 map 句柄，重挂 map 类型
+                        # （否则 .set/.get 链式调用认不出来）
+                        return "map:" + elem[len("mapinner:"):]
                     return "int64_t"
                 if m == "len":
                     return "int64_t"
@@ -3837,6 +3857,8 @@ class Codegen:
                         return (f"({{ {tn} _vt; qlm_vec_pop_n({ocode}, (void *)&_vt); _vt; }})",
                                 "struct:" + tn)
                     base = f"qlm_vec_pop({ocode})"
+                    if elem.startswith("mapinner:"):
+                        return base, "map:" + elem[len("mapinner:"):]
                     return (f"((const char *)(intptr_t){base})", "const char *") \
                         if elem == "str" else (base, "int64_t")
                 if m == "get":
@@ -3849,6 +3871,8 @@ class Codegen:
                                 f"qlm_vec_get_n({ocode}, (int64_t)({icode}), (void *)&_vt); _vt; }})",
                                 "struct:" + tn)
                     base = f"qlm_vec_get({ocode}, (int64_t)({icode}))"
+                    if elem.startswith("mapinner:"):
+                        return base, "map:" + elem[len("mapinner:"):]
                     return (f"((const char *)(intptr_t){base})", "const char *") \
                         if elem == "str" else (base, "int64_t")
                 if m == "set":
@@ -4339,6 +4363,12 @@ class Codegen:
                 elem = vec_env_elem(ctype)
                 if elem == "str":
                     e2[var] = "const char *"
+                if elem.startswith("mapinner:"):
+                    # vec[map]（v1.37）：循环变量是 map 句柄，重挂 map 类型
+                    e2[var] = "map:" + elem[len("mapinner:"):]
+                if elem.startswith("vecinner:"):
+                    # vec[vec[T]]（v1.37 补漏）：循环变量是内层 vec 句柄
+                    e2[var] = "vec:" + elem[len("vecinner:"):]
                 if elem.startswith("agg:"):
                     # 聚合元素：每轮把元素 memcpy 进一个局部变量
                     tn = elem[4:]
