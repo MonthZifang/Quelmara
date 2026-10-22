@@ -186,3 +186,22 @@
 3. **JSON 解析器重写**（4ms → ~1ms）：查表 dispatch + 批量构造。
 4. **gzip lazy matching**（59ms → ~35ms）：zlib 同款延迟匹配。
 5. **AVX2 点积/宽归约**（@simd 泛化）：需 vpmullq（SSE2 语义不让渡）。
+
+### v1.17 实验记录（两项尝试，均如实记录）
+
+1. **do-while 尾测试变换**（opt pass，回滚）：
+   while 头测试 → 尾测试（每 iter 省 1 条无条件跳转，loop_sum 预期
+   -1 条/iter）。单循环形态正确，但**内联 + 嵌套 + 多轮收敛**交互下
+   CFG 构建断链（label 引用 vs 定义失配，KeyError）。降序处理（内层
+   先变）修了嵌套顺序，多轮收敛（opt_all 的 `while len != before: break`
+   会让全部 pass 重跑）仍爆。**专项前提**：CFG 构建（succs/label_pos）
+   要容错 do-while 的 jcc 回边形态，或变换后跑一遍 CFG 自检。
+   已登记，方案与踩坑全部在案。
+
+2. **crc32 slice-by-4**（回滚到单表）：
+   4 表 8KB、每迭代 4 字节（zlib crc32.c 同款）。**在我们环境反而慢**
+   （单测 2ms → 4ms）：zlib 的收益来自 `*(uint32_t*)buf` 一次 32 位读，
+   我们只有 mem_load8（4 次读 + 3 移位 + 3 异或 = 10 条，抵消表查收益）。
+   **前置条件：mem_load32(p, off) 内建**（非对齐 32 位读）——加上后
+   slice-by-4 即可重新启用。表生成公式/配对（最低字节配 T3）已验证
+   正确（CRC("123456789") = 0xCBF43926 ✓）。
