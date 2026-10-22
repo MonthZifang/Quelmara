@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from qlm import (tokenize, Parser, load_config, walk_stmts,  # noqa: E402
                     parse_source, with_test_runner, validate_match,
                     resolve_option_patterns, require_source, load_program,
-                    global_dce)
+                    global_dce, SCALAR_ELEMS)
 
 # ---------------------------------------------------------------------------
 # x86-64 寄存器编号
@@ -996,6 +996,12 @@ class Lower:
                 fn.emit("bin", "add", sub, addr, ("imm", off * 8))
                 self._mark_struct(fn, sub, ftype[1])
                 self.struct_copy(fn, sub, val, ftype[1])
+            elif ftype and ftype[0] == "slice":
+                # 切片字段（v1.39）：2 字 {ptr,len} 整体拷。
+                # 早期走 else 的 1 字 store——ptr 存了、len 丢了，静默错编。
+                sub = fn.new_v()
+                fn.emit("bin", "add", sub, addr, ("imm", off * 8))
+                self.words_copy(fn, sub, val, SLICE_WORDS)
             else:
                 val = self.conv_to(fn, val, self._float_of(fn, val), self._ty_float_w(ftype))
                 fn.emit("store", addr, ("imm", off), val)
@@ -1583,6 +1589,27 @@ class Lower:
             return self._mark_struct(fn, d, ftype[1])
         d = fn.new_v()
         fn.emit("load", d, obj, ("imm", off))
+        # 嵌套容器字段（v1.39）：句柄 1 字存字段里，读出必须重挂类型标记，
+        # 否则 r.cells.push(...) / r.m.set(...) 认不出类型（"方法未定义"）。
+        # chan 同批补上（send/recv 派发依赖 _is_chan）。
+        if ftype and ftype[0] == "vec":
+            return self._mark_vec(fn, d, self._vec_tag_of(ftype[1]))
+        if ftype and ftype[0] == "map":
+            return self._mark_map(fn, d,
+                                  ftype[1][1] if ftype[1][0] == "named" else "int",
+                                  ftype[2][1] if ftype[2][0] == "named" else "int")
+        if ftype and ftype[0] == "chan":
+            return self._mark_chan(fn, d)
+        if ftype and ftype[0] == "slice":
+            # 切片字段（v1.39）：2 字 {ptr,len} 拷进新帧槽并重挂 slice 标记，
+            # 否则 x.s[0] 认不出是切片（"下标只能用于定长数组、切片或 str"）。
+            dst = self.alloc_slice(fn)
+            src = fn.new_v()
+            fn.emit("bin", "add", src, obj, ("imm", off * 8))
+            self.words_copy(fn, dst, src, SLICE_WORDS)
+            elem = ftype[1][1] if (ftype[1][0] == "named"
+                                   and ftype[1][1] in SCALAR_ELEMS) else None
+            return self._mark_slice(fn, dst, elem)
         # 字段的类型标签必须跟着值走：早期漏了 str，导致 print(p.name) 打印指针
         if ftype == ("named", "str"):
             self._mark_str(fn, d)
@@ -3785,6 +3812,17 @@ class Lower:
             fn.emit("bin", "add", sub, addr, ("imm", off * 8))
             self._mark_struct(fn, sub, ftype[1])
             self.struct_copy(fn, sub, spec, ftype[1])
+            return
+        if ftype and ftype[0] == "slice":
+            # 切片字段赋值（v1.39）：2 字整体拷；复合赋值（+= 等）无意义，拒绝
+            if op != "=":
+                raise SyntaxError("切片字段只支持 = 整体赋值")
+            spec = self.eval(s[3], fn, env)
+            if not self._is_slice(fn, spec):
+                raise SyntaxError("切片字段赋值两侧类型不一致")
+            sub = fn.new_v()
+            fn.emit("bin", "add", sub, addr, ("imm", off * 8))
+            self.words_copy(fn, sub, spec, SLICE_WORDS)
             return
         spec = self.eval(s[3], fn, env)
         if op == "=":
