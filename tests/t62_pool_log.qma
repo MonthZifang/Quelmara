@@ -1,0 +1,33 @@
+module t62
+import std.mem
+import std.log
+fn main() {
+    let p = pool_new(4, 100)
+    let a = pool_alloc(p)
+    let b = pool_alloc(p)
+    assert(a != 0 && b != 0 && a != b, "two blocks")
+    mem_store64(a, 1, 42)
+    mem_store64(b, 2, 99)
+    assert(mem_load64(a, 1) == 42 && mem_load64(b, 2) == 99, "store")
+    pool_free(p, a)
+    let c = pool_alloc(p)
+    assert(c == a, "freelist LIFO")
+    let mut i = 0
+    while i < 98 {
+        assert(pool_alloc(p) != 0, "drain")
+        i = i + 1
+    }
+    assert(pool_alloc(p) == 0, "exhausted")
+    assert(pool_empty(p), "empty")
+    pool_free(p, b)
+    pool_free(p, c)
+    assert(pool_empty(p) == false, "one back")
+    let kv = vec[str].new(4)
+    kv.push("id")
+    kv.push("7")
+    kv.push("user")
+    kv.push("rosoto")
+    log_kv("NET", "conn accepted", kv)
+    log_info("plain line still works")
+    print("ok t62_pool_log")
+}

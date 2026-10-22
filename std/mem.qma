@@ -364,3 +364,53 @@ fn buf_find_ci(h: int, from: int, needle: str) -> int {
     }
     return -1
 }
+
+// ---------------------------------------------------------------------------
+// 指针式对象池（v1.17g）：slab_* 的指针风格封装——分配直接返回块指针，
+// 释放直接收指针（块内嵌 next 头插回 freelist）。适用：高频 alloc/free
+// 的同尺寸对象（连接对象、粒子、消息帧）。O(1) 两端，零系统调用。
+// ---------------------------------------------------------------------------
+
+fn pool_new(block_words: int, capacity: int) -> int {
+    // 句柄 3 槽：0=freelist 头，1=block_words，2=块区基址
+    let h = mem_alloc(3 * 8)
+    let region = mem_alloc(capacity * block_words * 8)
+    // 全部块串成 freelist：块首 8 字节存 next（下标 0 表示尾）
+    let mut i = 0
+    while i < capacity {
+        let blk = region + i * block_words * 8
+        if i + 1 < capacity {
+            mem_store64(blk, 0, blk + block_words * 8)
+        } else {
+            mem_store64(blk, 0, 0)
+        }
+        i = i + 1
+    }
+    mem_store64(h, 0, region)
+    mem_store64(h, 1, block_words)
+    mem_store64(h, 2, region)
+    return h
+}
+
+fn pool_alloc(h: int) -> int {
+    let head = mem_load64(h, 0)
+    if head == 0 {
+        return 0                     // 池空：调用方扩容或降级
+    }
+    let next = mem_load64(head, 0)
+    mem_store64(h, 0, next)
+    return head
+}
+
+fn pool_free(h: int, p: int) -> int {
+    // 头插回 freelist（p 必须来自本池；double-free 会成环——调试期
+    // 可用 pool owns 校验，v0 不查）
+    let head = mem_load64(h, 0)
+    mem_store64(p, 0, head)
+    mem_store64(h, 0, p)
+    return 0
+}
+
+fn pool_empty(h: int) -> bool {
+    return mem_load64(h, 0) == 0
+}

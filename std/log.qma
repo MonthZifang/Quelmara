@@ -49,3 +49,61 @@ fn log_warn(msg: str) {
 fn log_error(msg: str) {
     _log_line("[ERROR]", msg)
 }
+
+// log_kv(tag, msg, kv)：结构化字段（v1.17g）。
+// kv 是**交替**的 key/value 串（k1,v1,k2,v2,...），行格式：
+//   [INFO][启动ms] msg k1=v1 k2=v2
+// 值非 str 时调用方先 to_str()（与 log_info 同约定）。
+fn log_kv(tag: str, msg: str, kv: vec[str]) -> int {
+    let n = len(kv)
+    let tn = len(tag)
+    let mn = len(msg)
+    let mut kvs = 0
+    let mut i = 0
+    while i < n {
+        kvs = kvs + len(kv.get(i)) + 1   // +1 等号或空格
+        i = i + 1
+    }
+    // [tag][ms] msg + 字段（t0 惰性基准与 _log_line 同款 static_word）
+    let st = static_word(_T0_W)
+    let mut t0 = mem_load64(st, 0)
+    if t0 == 0 {
+        t0 = now_ns()
+        mem_store64(st, 0, t0)
+    }
+    let ms = (now_ns() - t0) / 1000000
+    let msn = len(ms.to_str())
+    let line = str_alloc(tn + 7 + msn + 1 + mn + kvs)
+    let w = mem_ptr(line, 0)
+    mem_copy(w, "[", 1)
+    w = mem_ptr(w, 1)
+    mem_copy(w, tag, tn)
+    w = mem_ptr(w, tn)
+    mem_copy(w, "][", 2)
+    w = mem_ptr(w, 2)
+    let mstr = ms.to_str()
+    mem_copy(w, mstr, msn)
+    w = mem_ptr(w, msn)
+    mem_copy(w, "] ", 2)
+    w = mem_ptr(w, 2)
+    mem_copy(w, msg, mn)
+    w = mem_ptr(w, mn)
+    let mut i = 0
+    while i < n {
+        if i % 2 == 0 {
+            mem_copy(w, " ", 1)
+            w = mem_ptr(w, 1)
+        } else {
+            mem_copy(w, "=", 1)
+            w = mem_ptr(w, 1)
+        }
+        let item = kv.get(i)
+        let ln = len(item)
+        mem_copy(w, item, ln)
+        w = mem_ptr(w, ln)
+        i = i + 1
+    }
+    mem_copy(w, "\n", 1)
+    print(line)
+    return 0
+}
