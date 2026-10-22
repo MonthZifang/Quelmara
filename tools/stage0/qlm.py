@@ -989,11 +989,14 @@ class Parser:
         return ("enumlit", path, out)
 
     def ensure_option_enum(self, tt, line):
-        """option[T] 受控单态化：按标量 T 现场合成具名枚举 __opt_<T>{Some(value:T),None}。
-        类型元组直接坍缩为 ("named","__opt_<T>")，下游 enum 布局/match/聚合返回 ABI 全部复用。"""
-        if not (tt and tt[0] == "named" and tt[1] in ("int", "i64", "i32", "i16", "i8",
-                                                      "u64", "u32", "u16", "u8", "bool", "str")):
-            raise SyntaxError(f"line {line}: option[T] 的 T 暂只支持整数/bool/str 标量")
+        """option[T] 受控单态化：按 T 现场合成具名枚举 __opt_<T>{Some(value:T),None}。
+        类型元组直接坍缩为 ("named","__opt_<T>")，下游 enum 布局/match/聚合返回 ABI 全部复用。
+        v1.38：T 放宽到具名 struct/enum（多字载荷——enum 布局本就是 1+最大载荷字）。"""
+        if not (tt and tt[0] == "named" and (
+                tt[1] in ("int", "i64", "i32", "i16", "i8",
+                          "u64", "u32", "u16", "u8", "bool", "str")
+                or tt[1] in self.structs or tt[1] in self.enums)):
+            raise SyntaxError(f"line {line}: option[T] 的 T 暂只支持整数/bool/str 标量与具名 struct/enum")
         name = "__opt_" + tt[1]
         if name not in self.enums:
             self.enums[name] = [("Some", [("value", tt)]), ("None", [])]
@@ -1003,15 +1006,25 @@ class Parser:
     def ensure_result_enum(self, tt, et, line):
         """result[T,E] 受控单态化：按 (T,E) 现场合成具名枚举 __res_<T>_<E>
         {Ok(value:T), Err(error:E)}（Ok 固定在前）。
-        类型元组直接坍缩为 ("named","__res_<T>_<E>")，下游 enum 布局/match/聚合返回 ABI 全部复用。"""
+        类型元组直接坍缩为 ("named","__res_<T>_<E>")，下游 enum 布局/match/聚合返回 ABI 全部复用。
+        v1.38：T/E 放宽到具名 struct/enum（多字载荷——库层终于能把 errno+上下文
+        装进 Err）；类型名含下划线时 (A_B,C) 与 (A,B_C) 会撞同一名字，撞且语义
+        不同直接报错（fail-fast，不静默用错枚举）。"""
         for t in (tt, et):
-            if not (t and t[0] == "named" and t[1] in ("int", "i64", "i32", "i16", "i8",
-                                                       "u64", "u32", "u16", "u8", "bool", "str")):
-                raise SyntaxError(f"line {line}: result[T,E] 的 T/E 暂只支持整数/bool/str 标量")
+            if not (t and t[0] == "named" and (
+                    t[1] in ("int", "i64", "i32", "i16", "i8",
+                             "u64", "u32", "u16", "u8", "bool", "str")
+                    or t[1] in self.structs or t[1] in self.enums)):
+                raise SyntaxError(f"line {line}: result[T,E] 的 T/E 暂只支持整数/bool/str 标量与具名 struct/enum")
         name = "__res_" + tt[1] + "_" + et[1]
+        want = [("Ok", [("value", tt)]), ("Err", [("error", et)])]
         if name not in self.enums:
-            self.enums[name] = [("Ok", [("value", tt)]), ("Err", [("error", et)])]
+            self.enums[name] = want
             self.decl_order.append(("enum", name))
+        elif self.enums[name] != want:
+            raise SyntaxError(
+                f"line {line}: result 枚举名 {name} 冲突——类型名含下划线时"
+                "（如 result[A_B, C] 与 result[A, B_C]）会相撞，请给类型改名")
         return name
 
     def parse_if(self):
@@ -3977,9 +3990,13 @@ class Codegen:
                     or not ok_fields or not err_fields or len(ok_fields) != 1 or len(err_fields) != 1:
                 raise SyntaxError("结果枚举必须只有 Ok(value) 和 Err(error) 两个单载荷变体")
             okt = ok_fields[0][1]
-            if okt[0] != "named" or okt[1] not in (
-                    "int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8", "bool", "str"):
-                raise SyntaxError("? 的 Ok 载荷暂只支持整数/bool/str 标量")
+            if okt[0] != "named" or not (
+                    okt[1] in ("int", "i64", "i32", "i16", "i8",
+                               "u64", "u32", "u16", "u8", "bool", "str")
+                    or okt[1] in self.structs or okt[1] in self.enums):
+                # v1.38：Ok 载荷放宽到具名 struct/enum——C 联合体成员访问
+                # （{tmp}.u.Ok.value）对 struct 值天然成立，无需特判
+                raise SyntaxError("? 的 Ok 载荷暂只支持整数/bool/str 标量与具名 struct/enum")
             if getattr(self, "current_ret_t", None) is None or self.ctype(self.current_ret_t) != ename:
                 raise SyntaxError("? 所在函数必须返回相同的结果枚举")
             self.tmp_id += 1

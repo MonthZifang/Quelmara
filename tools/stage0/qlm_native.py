@@ -1508,9 +1508,12 @@ class Lower:
                     or len(ok) != 1 or len(err) != 1:
                 raise SyntaxError("结果枚举必须只有 Ok(value) 和 Err(error) 两个单载荷变体")
             okt = ok[0][1]
-            if okt[0] != "named" or okt[1] not in (
-                    "int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8", "bool", "str"):
-                raise SyntaxError("? 的 Ok 载荷暂只支持整数/bool/str 标量")
+            if okt[0] != "named" or not (
+                    okt[1] in ("int", "i64", "i32", "i16", "i8",
+                               "u64", "u32", "u16", "u8", "bool", "str")
+                    or self.is_agg(okt[1])):
+                # v1.38：Ok 载荷放宽到具名 struct/enum（多字）
+                raise SyntaxError("? 的 Ok 载荷暂只支持整数/bool/str 标量与具名 struct/enum")
             if self.fn_ret_agg != sname:
                 raise SyntaxError("? 所在函数必须返回相同的结果枚举")
             tag = fn.new_v()
@@ -1522,6 +1525,14 @@ class Lower:
             self.struct_copy(fn, self.fn_ret_target, spec, sname)
             fn.emit("ret", ("imm", 0))
             fn.emit("label", l_ok)
+            if self.is_agg(okt[1]):
+                # v1.38：多字载荷——把 Ok 载荷拷进新帧槽按值返回
+                # （struct 值 = 槽地址，与字段访问/vec.get 聚合元素同构）
+                slot = self.alloc_struct(fn, okt[1])
+                src = fn.new_v()
+                fn.emit("bin", "add", src, spec, ("imm", 8))   # 载荷在 tag 之后（字偏移 1）
+                self.struct_copy(fn, slot, src, okt[1])
+                return slot
             value = fn.new_v()
             fn.emit("load", value, spec, ("imm", 1))
             if ok[0][1] == ("named", "str"):
