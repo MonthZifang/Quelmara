@@ -6733,10 +6733,20 @@ class Lower:
             gid_sa = self.intern_array(2)
 
             def udp_sin(f, ip_v, port_v):
-                """构造 sockaddr_in，返回堆指针 vreg"""
+                """构造 sockaddr_in（16B），返回堆指针 vreg。
+
+                真实字节布局：family@0-1、port(网络序)@2-3、addr@4-7、
+                zero@8-15——**字节紧排**，不是一个字段一个 8B 槽！
+                slot0（字节 0-7）= 2 | (htons(port)<<16) | (ip<<32)：
+                  - ip 已是内存序（udp_parse_ip 约定 127.0.0.1 ->
+                    0x0100007F），LE 写入后字节 4-7 = [a,b,c,d] 恰为
+                    网络序地址字节；
+                  - htons(port) 寄存器值 = (port&0xFF)<<8 | (port>>8)&0xFF，
+                    LE 写入字节 2-3 即还原成大端端口字节。
+                slot1（字节 8-15）= 0（sin_zero）。"""
                 sinb = f.new_v()
                 f.emit("call", sinb, "__alloc", [("imm", 16)])
-                f.emit("store", sinb, ("imm", 0), ("imm", 2))   # family = AF_INET
+                f.emit("store", sinb, ("imm", 0), ("imm", 2))   # family
                 pb = f.new_v()
                 f.emit("bin", "and", pb, port_v, ("imm", 0xFF))
                 pb2 = f.new_v()
@@ -6747,8 +6757,16 @@ class Lower:
                 f.emit("bin", "and", ph2, ph, ("imm", 0xFF))
                 pw = f.new_v()
                 f.emit("bin", "or", pw, pb2, ph2)              # htons(port)
-                f.emit("store", sinb, ("imm", 1), pw)          # 槽1 低16 = port
-                f.emit("store", sinb, ("imm", 2), ip_v)        # 槽2 = ip 网络序
+                pw2 = f.new_v()
+                f.emit("bin", "shl", pw2, pw, ("imm", 16))
+                w0 = f.new_v()
+                f.emit("bin", "or", w0, pw2, ("imm", 2))
+                w1 = f.new_v()
+                f.emit("bin", "shl", w1, ip_v, ("imm", 32))
+                w2 = f.new_v()
+                f.emit("bin", "or", w2, w0, w1)
+                f.emit("store", sinb, ("imm", 0), w2)          # family|port|addr
+                f.emit("store", sinb, ("imm", 1), ("imm", 0))  # sin_zero
                 return sinb
 
             # __udp_open
@@ -6756,7 +6774,16 @@ class Lower:
             if self.platform == "windows":
                 wsa = f.new_v()
                 f.emit("movaddr", wsa, gid_wsa_udp)
-                f.emit("winapi", None, "WSAStartup", [("imm", 0x202), wsa])
+                sw = f.new_v()
+                f.emit("winapi", sw, "WSAStartup", [("imm", 0x202), wsa])
+                # WSAStartup：0 = 成功，非 0 = 错误码。结果必须被消费——
+                # 否则优化器把"结果未使用"的调用当死代码删除（v1.17b 的
+                # 隐蔽坑：UDP 全链路代码正确，WSAStartup 却被 DCE 掉，
+                # socket 恒返回 SOCKET_ERROR）。
+                b = f.new_v()
+                f.emit("cmpset", "ne", b, sw, ("imm", 0))
+                lf = f.label("uof")
+                f.emit("jnz", b, lf)
                 s = f.new_v()
                 f.emit("winapi", s, "socket", [("imm", 2), ("imm", 2), ("imm", 0)])
                 b = f.new_v()
@@ -6765,8 +6792,11 @@ class Lower:
                 r322 = f.new_v()
                 f.emit("bin", "sar", r322, r32, ("imm", 32))
                 f.emit("cmpset", "e", b, r322, ("imm", -1))
-                lf = f.label("uof")
                 f.emit("jnz", b, lf)
+                # 成功先 ret；失败标签必须在 ret 之后（fall-through 语义：
+                # jnz 不跳 = 成功，紧跟 ret——fail 块放 ret 后才不会把
+                # 成功路径吞进失败处理器，v1.17b 的 PE 即崩/恒 fail 皆此因）
+                f.emit("ret", s)
                 net_fail(f, lf, "udpsocket")
             else:
                 s = f.new_v()
@@ -6774,7 +6804,7 @@ class Lower:
                        [("imm", 2), ("imm", 2), ("imm", 0), ("imm", 0), ("imm", 0), ("imm", 0)])
                 f.emit("ret", s)
             if self.platform == "windows":
-                f.emit("ret", s)
+                pass  # ret 已在失败标签前发射
             self.out.append(f)
 
             # __udp_bind(fd, port)
@@ -6823,8 +6853,8 @@ class Lower:
                 f.emit("cmpset", "l", b, r322, ("imm", 0))
                 lf = f.label("usf")
                 f.emit("jnz", b, lf)
-                net_fail(f, lf, "udpsendto")
                 f.emit("ret", r)
+                net_fail(f, lf, "udpsendto")   # fail 块在 ret 之后（fall-through 语义）
             else:
                 f.emit("syscall", r, self.sc["sendto"],
                        [fdu, du, dn, ("imm", 0), sinb, ("imm", 16)])
@@ -6832,8 +6862,8 @@ class Lower:
                 f.emit("cmpset", "l", b, r, ("imm", 0))
                 lf = f.label("usf")
                 f.emit("jnz", b, lf)
-                net_fail(f, lf, "udpsendto")
                 f.emit("ret", r)
+                net_fail(f, lf, "udpsendto")
             self.out.append(f)
 
             # __udp_recvfrom(fd, cap) -> str（单 datagram，src 丢弃）
@@ -6863,7 +6893,6 @@ class Lower:
                 f.emit("cmpset", "l", b, r322, ("imm", 0))
                 lf = f.label("urf")
                 f.emit("jnz", b, lf)
-                net_fail(f, lf, "udprecvfrom")
             else:
                 r = f.new_v()
                 f.emit("syscall", r, self.sc["recvfrom"],
@@ -6872,12 +6901,16 @@ class Lower:
                 f.emit("cmpset", "l", b, r, ("imm", 0))
                 lf = f.label("urf")
                 f.emit("jnz", b, lf)
-                net_fail(f, lf, "udprecvfrom")
             f.emit("store", buf, ("imm", 0), r)       # 长度头 = 实收字节数
-            f.emit("store8", buf, 8 + 0, ("imm", 0))
+            # NUL 终止符在数据**末尾**（offset = r+8）——写在 8 会清掉
+            # 第一个数据字节（v1.17b 踩坑：echo 内容断言挂的根因）
+            noff = f.new_v()
+            f.emit("bin", "add", noff, r, ("imm", 8))
+            f.emit("store8", buf, noff, ("imm", 0))
             rbuf = f.new_v()
             f.emit("bin", "add", rbuf, buf, ("imm", 8))
             f.emit("ret", rbuf)
+            net_fail(f, lf, "udprecvfrom")             # fail 块在 ret 之后
             self.out.append(f)
 
         if self.uses_wall:

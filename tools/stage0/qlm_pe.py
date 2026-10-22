@@ -148,7 +148,8 @@ class WinCodegen(Codegen):
 
 # ws2_32.dll 白名单：命中走 ws2_32，其余一律 kernel32
 WS2_32_FUNCS = {"WSAStartup", "WSACleanup", "socket", "bind", "listen",
-                "accept", "recv", "send", "closesocket", "inet_addr",
+                "accept", "recv", "send", "sendto", "recvfrom",
+                "closesocket", "inet_addr",
                 "htons", "ntohs", "setsockopt", "ioctlsocket"}
 
 

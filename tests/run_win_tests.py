@@ -568,9 +568,7 @@ def main():
     case_selfcheck("t58_stdmin", "tests/t58_stdmin.qma")
     case_selfcheck("t59_simdf64", "tests/t59_simdf64.qma")
     case_selfcheck("t60_srclayout", "fixtures/srcproj/main.qma")
-    # t61_udp 暂摘（UDP 内建完成但 PE 加载异常待调——exe 12800B 加载即崩，
-    # 疑 ws2_32 import 表或 gen 层；native 路径未测。登记 GAPS。）
-    # case_selfcheck("t61_udp", "tests/t61_udp.qma")
+    case_selfcheck("t61_udp", "tests/t61_udp.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),
