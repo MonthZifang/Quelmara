@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-39 个模块，**445 个公开函数**（另有 216 个 `_` 前缀的内部函数）。
+39 个模块，**447 个公开函数**（另有 216 个 `_` 前缀的内部函数）。
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -167,6 +167,8 @@ fn gzip_encode(s: str) -> str
 fn gzip_hex(s: str) -> str
 fn inflate_raw(s: str) -> str
 fn gzip_decode(s: str) -> str
+fn adler32(s: str) -> int
+fn zlib_decode(s: str) -> str
 ```
 
 ### `std/hash.qma`
@@ -792,7 +794,7 @@ fn x509_rsa_exp(cert: str) -> int
 | `std/http` | 服务端、keep-alive、流水线、`Content-Encoding: gzip` 协商、JSON/text/html 响应 | 客户端、路由/中间件、静态文件服务、MIME、cookie/session、multipart；`Transfer-Encoding: chunked` 请求体回 501 |
 | `std/ws` | 服务端握手、帧收发、ping/close | 客户端、permessage-deflate |
 | `std/json` | DOM 解析、builder、转义、代理对 | `to_json<T>`（无泛型/反射）；数字统一按原文保留 |
-| `std/gzip` | 编码（DEFLATE + 固定 Huffman）、**解码（存储块 / 固定 / 动态 Huffman）**、CRC-32、gzip 头尾校验 | 多 member 流（一次只解第一个）；解码失败 fail-fast |
+| `std/gzip` | 编码（DEFLATE + 固定 Huffman）、**解码（存储块 / 固定 / 动态 Huffman）**、CRC-32、gzip 头尾校验、**多 member 拼接流**（v1.32）、**zlib 容器 + adler32**（v1.32） | 无 zlib 预置字典（FDICT）；解码失败 fail-fast |
 | `std/hex` | `hex_encode` / `hex_encode_upper` / `hex_decode` / `hex_decode_ok` / `hex_val` | 无 base32/base64url（base64url 用 `std/b64` 自行替换字符） |
 | `std/math` | `sqrt`（牛顿，相对误差 <1e-15）、`cbrt`、`floor/ceil/round/trunc_f`、`powi`、`gcd/lcm/isqrt`、NaN/inf 判定 | 无 `exp/log/pow(x,y)/sin/cos`（需要超越函数库）；`floor` 等受 int64 范围限制 |
 | `std/aes` | AES-128-GCM 加解密（FIPS/NIST 向量通过） | AES-256、AES-NI 加速 |

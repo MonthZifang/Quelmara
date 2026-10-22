@@ -15,7 +15,7 @@
 | 函数体 dump 对拍 | **一致 895 / 分叉 755 / SKIP 同步 18 / SKIP 不同步 18** | `python tests/bodydiff.py` |
 | IR 架构无关对拍 | **PASS=63 FAIL=0 SKIP=42**，并行后 **60 s**（原串行 5 min 41 s；SKIP 全是 arm64 未接的特性） | `python tests/irdiff.py` |
 | 发射层确定性对拍 | **PASS=10 FAIL=0** | `python tests/emitdiff.py` |
-| gzip 解码互操作 | **PASS=63 FAIL=0**（zlib 9 种编码组合 × 7 类输入）+ **损坏输入拒绝 5/5** | `python tests/gzip_inflate_test.py` |
+| gzip 解码互操作 | **PASS=86 FAIL=0**（12 种编码组合 × 7 类输入 + 多 member 拼接）+ **损坏输入拒绝 5/5** | `python tests/gzip_inflate_test.py` |
 | ECDSA P-256 验签互操作 | **PASS=32 FAIL=0**（20 正向 + 12 负向，Python bigint 参考实现） | `python tests/ecdsa_p256_test.py` |
 | 自研 HTTPS GET（示例，手动） | **handshake ok cv=1；cert chain=2 host_ok=1 time_ok=1；HTTP/1.1 200 OK**（example.com，2026-10-22） | `python tools/stage0/qlm_cli.py run examples/https_get.qma --target win` |
 | TLS 1.3 真实握手（手动探针） | **ok=1 cv=1**（cloudflare.com / www.cloudflare.com / example.com，2026-10-22） | `python tools/dev/tls_probe.py <host>` |
@@ -42,9 +42,9 @@
 
 | 负载 | 耗时 | 吞吐 |
 |---|---|---|
-| AES-128-GCM 1 MiB | **125 ms**（v1.30 前 171 ms；v1.28 前 1369 ms） | 8.4 MB/s |
+| AES-128-GCM 1 MiB | **36 ms**（v1.31 125 ms；v1.30 171 ms；v1.28 前 1369 ms） | 29 MB/s |
 | └ CTR 段 1 MiB（AES 核心） | **2 ms**（软件 T-table 63 ms，**31×**，AES-NI） | 500 MB/s |
-| └ GHASH 段 1 MiB | **123 ms**（**当前瓶颈，占 GCM 98%**） | 8.5 MB/s |
+| └ GHASH 段 1 MiB | **34 ms**（v1.31 123 ms，**3.6×**，4-bit 表改字级） | 31 MB/s |
 | SHA-256 1 MiB | **70 ms** | 15.0 MB/s |
 | gzip 编码 1 MiB（重复文本，输出 7658 B） | **16 ms**（v1.29 前 25–27 ms，**1.6×**，输出字节不变） | 65 MB/s |
 | **gzip 解码 1 MiB** | **15 ms**（min of 3） | **70 MB/s** |

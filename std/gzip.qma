@@ -780,8 +780,10 @@ fn _dyn_tables(src: str, st: int, counts: vec[int], symbols: vec[int]) -> int {
     return _build(counts, symbols, distlens, hdist, GZ_DIST_OFF)
 }
 
-// 从 start 开始解 raw deflate 流（无 gzip 头）
-fn _inflate_at(s: str, start: int) -> str {
+// 从 start 开始解 raw deflate 流（无 gzip 头），并把**结束字节偏移**
+// 写进 endbox（v1.32，多 member / zlib 容器需要知道流边界）。
+// 结束位置 = 读指针 - 位缓冲里还没消费的整字节数。
+fn _inflate_core(s: str, start: int, endbox: int) -> str {
     let out = vec[int].new(len(s) * 4 + 64)
     let st = _br_new(start)
     let counts = _zeros(32)
@@ -830,7 +832,18 @@ fn _inflate_at(s: str, start: int) -> str {
             assert(false, "inflate: 非法块类型（BTYPE=3）")
         }
     }
+    let end = mem_load64(st, 2) - mem_load64(st, 1) / 8
+    mem_store64(endbox, 0, end)
+    mem_free(st, 24)
     return str_from_bytes(out)
+}
+
+// 从 start 开始解 raw deflate 流（只要结果，不管边界）
+fn _inflate_at(s: str, start: int) -> str {
+    let box = mem_alloc(8)
+    let r = _inflate_core(s, start, box)
+    mem_free(box, 8)
+    return r
 }
 
 // raw deflate（RFC 1951，无外层封装）
@@ -838,20 +851,25 @@ fn inflate_raw(s: str) -> str {
     return _inflate_at(s, 0)
 }
 
-// gzip（RFC 1952）：解析头 → inflate → 校验 CRC32 与 ISIZE
-fn gzip_decode(s: str) -> str {
+// ---------------------------------------------------------------------------
+// gzip 解码（v1.32：支持**多 member 拼接流**）
+// RFC 1952 §2.2：一个 .gz 文件可以是多个 member 首尾相接，每个 member 有
+// 自己的头 + deflate 流 + CRC32/ISIZE。旧实现假设"整段就是一个 member、
+// 尾部 8 字节是 CRC"，遇到拼接流只能解出第一段。
+// ---------------------------------------------------------------------------
+
+// _gzip_body_start(s, p0) -> int：解析 p0 处的头，返回 deflate 体起点
+fn _gzip_body_start(s: str, p0: int) -> int {
     let n = len(s)
-    if n < 18 {
-        assert(false, "gzip_decode: 数据过短")
+    let mut p = p0
+    if s[p] != 31 || s[p + 1] != 139 {
+        assert(false, "gzip_decode: 魔数不是 1f 8b")
     }
-    if s[0] != 0x1F || s[1] != 0x8B {
-        assert(false, "gzip_decode: 魔数不是 1F 8B")
-    }
-    if s[2] != 8 {
+    if s[p + 2] != 8 {
         assert(false, "gzip_decode: 压缩方法不是 deflate")
     }
-    let flg = s[3]
-    let mut p = 10
+    let flg = s[p + 3]
+    p = p + 10
     if (flg & 4) != 0 {                 // FEXTRA
         if p + 2 > n {
             assert(false, "gzip_decode: FEXTRA 越界")
@@ -883,15 +901,103 @@ fn gzip_decode(s: str) -> str {
     if p + 8 > n {
         assert(false, "gzip_decode: 头部越界")
     }
-    let body = _inflate_at(s, p)
-    let ti = n - 8
-    let want_crc = s[ti] | (s[ti + 1] << 8) | (s[ti + 2] << 16) | (s[ti + 3] << 24)
-    let want_len = s[ti + 4] | (s[ti + 5] << 8) | (s[ti + 6] << 16) | (s[ti + 7] << 24)
-    if crc32(body) != want_crc {
-        assert(false, "gzip_decode: CRC32 校验失败")
+    return p
+}
+
+// gzip_decode(s) -> str：逐 member 解，结果按顺序拼接
+fn gzip_decode(s: str) -> str {
+    let n = len(s)
+    if n < 18 {
+        assert(false, "gzip_decode: 数据过短")
     }
-    if (len(body) & 0xFFFFFFFF) != want_len {
-        assert(false, "gzip_decode: ISIZE 校验失败")
+    let acc = vec[int].new(n + 64)
+    let mut p = 0
+    let mut members = 0
+    while p + 18 <= n {
+        if s[p] != 31 || s[p + 1] != 139 {
+            break                        // 不是 member 头：多余尾部，忽略
+        }
+        let bs = _gzip_body_start(s, p)
+        let box = mem_alloc(8)
+        let body = _inflate_core(s, bs, box)
+        let end = mem_load64(box, 0)
+        mem_free(box, 8)
+        if end + 8 > n {
+            assert(false, "gzip_decode: 尾部截断")
+        }
+        let want_crc = s[end] | (s[end + 1] << 8) | (s[end + 2] << 16) | (s[end + 3] << 24)
+        let want_len = s[end + 4] | (s[end + 5] << 8) | (s[end + 6] << 16) | (s[end + 7] << 24)
+        if crc32(body) != want_crc {
+            assert(false, "gzip_decode: CRC32 校验失败")
+        }
+        if (len(body) & 0xFFFFFFFF) != want_len {
+            assert(false, "gzip_decode: ISIZE 校验失败")
+        }
+        let m = len(body)
+        let mut i = 0
+        while i < m {
+            acc.push(body[i])
+            i = i + 1
+        }
+        members = members + 1
+        p = end + 8
+    }
+    if members == 0 {
+        assert(false, "gzip_decode: 没有合法的 gzip 成员")
+    }
+    return str_from_bytes(acc)
+}
+
+// ---------------------------------------------------------------------------
+// zlib 容器（RFC 1950，wbits=15）：2 字节头 + deflate + 4 字节 adler32（大端）
+// 用途：HTTP `Content-Encoding: deflate` 实际发的是 zlib 容器，PNG 的 IDAT 也是。
+// ---------------------------------------------------------------------------
+
+fn adler32(s: str) -> int {
+    let n = len(s)
+    let mut a = 1
+    let mut b = 0
+    let mut i = 0
+    while i < n {
+        a = a + s[i]
+        b = b + a
+        if (i & 4095) == 4095 {          // 每 4 KiB 取模一次，避免逐字节除法
+            a = a % 65521
+            b = b % 65521
+        }
+        i = i + 1
+    }
+    a = a % 65521
+    b = b % 65521
+    return (b << 16) | a
+}
+
+fn zlib_decode(s: str) -> str {
+    let n = len(s)
+    if n < 8 {
+        assert(false, "zlib_decode: 数据过短")
+    }
+    let cmf = s[0]
+    let flg = s[1]
+    if (cmf & 0x0F) != 8 {
+        assert(false, "zlib_decode: 不是 deflate")
+    }
+    if ((cmf * 256 + flg) % 31) != 0 {
+        assert(false, "zlib_decode: 头校验失败")
+    }
+    if (flg & 0x20) != 0 {
+        assert(false, "zlib_decode: 不支持预置字典")
+    }
+    let box = mem_alloc(8)
+    let body = _inflate_core(s, 2, box)
+    let end = mem_load64(box, 0)
+    mem_free(box, 8)
+    if end + 4 > n {
+        assert(false, "zlib_decode: 尾部截断")
+    }
+    let want = (s[end] << 24) | (s[end + 1] << 16) | (s[end + 2] << 8) | s[end + 3]
+    if adler32(body) != want {
+        assert(false, "zlib_decode: adler32 校验失败")
     }
     return body
 }

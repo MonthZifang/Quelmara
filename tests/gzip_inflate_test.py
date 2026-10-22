@@ -39,6 +39,8 @@ fn main() {
     let mut out = ""
     if a[1] == "raw" {
         out = inflate_raw(g)
+    } else if a[1] == "zlib" {
+        out = zlib_decode(g)
     } else {
         out = gzip_decode(g)
     }
@@ -140,6 +142,9 @@ def main():
         ("gzip", 31, dict(level=6, strategy=zlib.Z_RLE)),
         ("raw", -15, dict(level=6)),                                  # 裸 deflate
         ("raw", -15, dict(level=9)),
+        ("zlib", 15, dict(level=1)),                                  # zlib 容器（v1.32）
+        ("zlib", 15, dict(level=6)),
+        ("zlib", 15, dict(level=9)),
     ]
     for name, data in cases():
         for mode, wbits, kw in combos:
@@ -156,6 +161,26 @@ def main():
                 bad += 1
                 detail = err if got is None else f"长度 {len(got or '')//2} vs {len(data)}"
                 print(f"  [FAIL] {label}: {detail}")
+    # 多 member 拼接流（v1.32）：gzip 允许把多个 member 首尾相接，
+    # 解码必须按顺序拼起来，而不是只解第一段。
+    multi = [b"alpha-" * 100, b"beta-" * 100, b"gamma-" * 100]
+    for parts in (multi[:2], multi):
+        blob = b""
+        for part in parts:
+            co = zlib.compressobj(6, zlib.DEFLATED, 31)
+            blob += co.compress(part) + co.flush()
+        got, err = run_probe(blob, "gzip")
+        want = b"".join(parts).hex()
+        label = f"multi-member x{len(parts)}"
+        if got == want:
+            ok += 1
+            if args.verbose:
+                print(f"  [ok]   {label} ({len(blob)} B)")
+        else:
+            bad += 1
+            detail = err if got is None else f"长度 {len(got or '')//2} vs {len(want)//2}"
+            print(f"  [FAIL] {label}: {detail}")
+
     print("-" * 56)
     cok, cbad = check_corrupt(args.verbose)
     print(f"PASS={ok} FAIL={bad}；损坏输入拒绝 {cok}/{cok + cbad}")

@@ -589,27 +589,31 @@ fn _ghash_table(h: int, t: int) -> int {
     return 0
 }
 
+// 4-bit 表乘法：Y = X · H。
+// v1.32：改成**按 64 位字**累加，并且累加器留在两个局部变量里。
+// 旧实现每个 nibble 做 16 次 mem_load8 + 16 次 mem_store8（一块 1024 次
+// 字节操作），是 GCM 在 AES-NI 之后唯一的瓶颈；字级之后每 nibble 只剩
+// 2 次读 + 2 次异或，且 32 个 nibble 期间不碰内存。
+// 字节序不用管：表行就是 16 字节原样，字级异或 + 字级写回与字节级等价。
 fn _gf_mul_t(x: int, t: int, out: int) -> int {
-    let mut i = 0
-    while i < 16 {
-        mem_store8(out, i, 0)
-        i = i + 1
-    }
+    let mut lo = 0
+    let mut hi = 0
+    let mut b = 0
     let mut n = 0
-    while n < 32 {
-        let byte = mem_load8(x, n / 2)
-        let mut nib = byte & 0xF
-        if (n & 1) == 0 {
-            nib = (byte >> 4) & 0xF
-        }
-        let e = t + n * 256 + nib * 16
-        let mut k = 0
-        while k < 16 {
-            mem_store8(out, k, mem_load8(out, k) ^ mem_load8(e, k))
-            k = k + 1
-        }
+    while b < 16 {
+        let byte = mem_load8(x, b)
+        let e0 = t + n * 256 + ((byte >> 4) & 0xF) * 16
+        lo = lo ^ mem_load64(e0, 0)
+        hi = hi ^ mem_load64(e0, 1)
         n = n + 1
+        let e1 = t + n * 256 + (byte & 0xF) * 16
+        lo = lo ^ mem_load64(e1, 0)
+        hi = hi ^ mem_load64(e1, 1)
+        n = n + 1
+        b = b + 1
     }
+    mem_store64(out, 0, lo)
+    mem_store64(out, 1, hi)
     return 0
 }
 
@@ -626,11 +630,9 @@ fn ghash(h: int, data: int, n: int, out: int) -> int {
     }
     let mut p = 0
     while p < n {
-        let mut i = 0
-        while i < 16 {
-            mem_store8(tmp, i, mem_load8(y, i) ^ mem_load8(data, p + i))
-            i = i + 1
-        }
+        // v1.32：Y ^= 块 用两个字，不再逐字节（每块省 28 次内存操作）
+        mem_store64(tmp, 0, mem_load64(y, 0) ^ mem_load64(data, p / 8))
+        mem_store64(tmp, 1, mem_load64(y, 1) ^ mem_load64(data, p / 8 + 1))
         if tbl != 0 {
             _gf_mul_t(tmp, tbl, y)
         } else {

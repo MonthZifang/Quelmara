@@ -32,7 +32,7 @@
 
 | 类别 | 缺什么 | 撞到什么场景 |
 |---|---|---|
-| 压缩 | 多 member gzip 流（一次只解第一个）；zlib 容器（`wbits=15`）需先用 `inflate_raw` | 拼接过的 gzip 文件 |
+| 压缩 | ✅ v1.32：多 member gzip 拼接流 + **zlib 容器**（RFC 1950，含 adler32 校验）；`adler32` 也可单独用 | 仍无 zlib 预置字典（FDICT）与 raw inflate 的窗口复用 |
 | TLS | **根证书库**（信任锚管理）、**P-384 / SHA-384**；RSA（PKCS#1 + PSS）与链校验 v1.27 已实现 | 无法自动信任公网证书；部分站点链验不过 |
 | HTTP 客户端 | TLS 通道已通（v1.25，Windows），缺 HTTP 封装（重定向/chunked/连接池） | 调用第三方 API |
 | 路由 / 中间件 | `std/http` 只有单回调，path 匹配要自己写 if 链 | 稍大的服务都要手写路由表 |
@@ -88,7 +88,8 @@
 | **SHA-NI 64 轮序列** | SHA-256 65 ms → ~3 ms（20×） | 基础设施已就绪（`cpuid_sha` + 4 条 SHA 指令 + xmm 槽）；**本机 CPU 无该扩展**，必须先写 Python mini-emulator 验证 8 条 xmm 指令语义，否则错 hash 比慢更糟 |
 | ~~GHASH 4-bit nibble 表~~ | ✅ v1.28 已做：GHASH 段 1.44×，配合 AES T-table 后 GCM 整体 **8.0×**（1369 → 171 ms/MiB） | — |
 | ~~AES-NI~~ | ✅ v1.31 已做：CTR 段 63 → **2 ms**/MiB（**31×**），GCM 端到端 171 → 125 ms | 编码器新增 6 条 AES 指令 + `cpu_aes()` 降级；解密方向未接 |
-| **GHASH PCLMULQDQ** | 现在 GHASH 占 GCM 的 **98%**（123 ms/MiB）；PCLMUL 版预期 → 1–3 ms，GCM 端到端 → ~5 ms | 需要 `pclmulqdq` 编码 + GCM 位反射约定（乘前左移 1 位、0xC2 归约）+ 与现有 4-bit 表结果逐字节对拍；**这是当前性价比最高的一项** |
+| ~~GHASH 字级化~~ | ✅ v1.32 已做：4-bit 表乘法从逐字节改成 64 位字（一块 1024 次字节操作 → 64 次字操作），GHASH 123 → **34 ms**，GCM 端到端 125 → 36 ms | — |
+| **GHASH PCLMULQDQ** | 仍是 GCM 的大头（34 ms 里几乎全是它）；PCLMUL 版预期 → 1–3 ms，GCM 端到端 → ~5 ms | 需要 `pclmulqdq` 编码 + GCM 位反射约定（乘前左移 1 位、0xC2 归约）+ 与 4-bit 表逐字节对拍；**这是当前性价比最高的一项** |
 | **LICM 根修** | 普适（所有循环） | 根因是 x64 分配器布局敏感段错误；修好前 LICM 只能关 |
 | **loop_sum 三件套** | 循环 10.8 → ~4 cycles/iter | ① phi copy 消除（分配器 coalescing）② do-while 变换（CFG 要容错 jcc 回边）③ cssub 形态 |
 | **JSON memchr 化** | 2 ms → ~1 ms | 内建 `mem_chr` **已就绪**（v1.29）；JSON 内部仍逐字节（要同时找 引号 / 反斜杠 / <0x20 三类，需 `mem_lt` 或双 memchr + 控制字符复检） |
@@ -200,8 +201,8 @@ print(hex_encode(mem_str(out1, 16)))
 当前顺序：
 
 1. **性能专项（§5）**：~~GHASH 4-bit 表~~（v1.28）→ ~~memchr~~（v1.29）→ ~~mem_diff + gzip 编码 1.6×~~（v1.30）
-   → ~~AES-NI~~（v1.31，CTR 31×）→ **GHASH PCLMUL（GCM 最后一块，预期端到端 125 → ~5 ms）** →
-   JSON memchr → loop_sum 三件套 → LICM 根修
+   → ~~AES-NI~~（v1.31，CTR 31×）→ ~~GHASH 字级化~~（v1.32，GCM 端到端 36 ms）→
+   **GHASH PCLMUL（预期端到端 → ~5 ms）** → JSON memchr → loop_sum 三件套 → LICM 根修
 2. **语言层（§1）**：黄标逐项（`map[str]Struct`、`vec[map]`、函数值放宽、`result` struct 载荷、
    命名空间 / `pub`、`defer` …）
 3. **标准库（§2）**：红标剩余项——**MD5**（只差旧协议兼容）、HTTP 客户端封装
