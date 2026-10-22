@@ -28,7 +28,7 @@
 |---|---|
 | `tests/t63_inflate.qma` | 新增：空串 / 短文本 / 2000B 重复 / UTF-8 / raw deflate / hex 往返 |
 | `tests/t64_math.qma` | 新增：取整四方向、sqrt/cbrt/powi、isqrt/gcd/lcm、特殊值、日志级别过滤 |
-| `tests/gzip_inflate_test.py` | 新增：zlib 互操作矩阵（level 0/1/6/9 × 默认/FIXED/HUFFMAN_ONLY/RLE × gzip/raw × 7 类输入） |
+| `tests/gzip_inflate_test.py` | 新增：zlib 互操作矩阵（level 0/1/6/9 × 默认/FIXED/HUFFMAN_ONLY/RLE × gzip/raw × 7 类输入）+ **5 类损坏输入必须被拒绝且不挂死** |
 | `tests/run_win_tests.py` | 注册 t63 / t64 |
 | `tests/irdiff.py` | **并行化**（`-j`，默认按核数）+ 每文件独立 `-o` 路径避免竞争；5 min 41 s → 49 s |
 | `bench/gzip_bench.qma` | 增加解码计时（预热一次后计时） |
@@ -49,7 +49,7 @@
 | 命令 | 结果 |
 |---|---|
 | `python tests/run_win_tests.py` | **PASS=126 FAIL=0 SKIP=1**（124 + t63 + t64） |
-| `python tests/gzip_inflate_test.py` | **PASS=63 FAIL=0** |
+| `python tests/gzip_inflate_test.py` | **PASS=63 FAIL=0**；损坏输入拒绝 **5/5** |
 | `python tests/lexdiff.py` | PASS=111 FAIL=0 |
 | `python tests/parsediff.py` | PASS=96 FAIL=0 |
 | `python tests/bodydiff.py` | 一致 766 / 分叉 680 / SKIP 不同步 18 |

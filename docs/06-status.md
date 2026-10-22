@@ -15,7 +15,7 @@
 | 函数体 dump 对拍 | **一致 766 / 分叉 680 / SKIP 同步 18 / SKIP 不同步 18** | `python tests/bodydiff.py` |
 | IR 架构无关对拍 | **PASS=56 FAIL=0 SKIP=35**，并行后 **49 s**（原串行 5 min 41 s） | `python tests/irdiff.py` |
 | 发射层确定性对拍 | **PASS=10 FAIL=0** | `python tests/emitdiff.py` |
-| gzip 解码互操作 | **PASS=63 FAIL=0**（zlib 9 种编码组合 × 7 类输入） | `python tests/gzip_inflate_test.py` |
+| gzip 解码互操作 | **PASS=63 FAIL=0**（zlib 9 种编码组合 × 7 类输入）+ **损坏输入拒绝 5/5** | `python tests/gzip_inflate_test.py` |
 | 三道门禁 | check_names / check_origin / check_docs 全 PASS | `python tools/dev/check_*.py` |
 
 `run_win_tests.py` 的 7 组覆盖：PE 结构（MZ/PE32+/AMD64/无 CRT 符号）、基础语义、

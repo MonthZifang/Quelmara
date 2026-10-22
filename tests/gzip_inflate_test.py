@@ -84,6 +84,44 @@ def cases():
     yield "longdist41k", longdist
 
 
+def corrupt_cases():
+    """损坏输入必须快速失败（非 0 退出），不能挂死或越界。"""
+    rnd = random.Random(7)
+    yield "random64", bytes(rnd.getrandbits(8) for _ in range(64))
+    yield "badbody", (b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03"
+                      + bytes(rnd.getrandbits(8) for _ in range(200)))
+    co = zlib.compressobj(6, zlib.DEFLATED, 31)
+    blob = co.compress(b"hello world" * 100) + co.flush()
+    yield "truncated", blob[:len(blob) // 2]
+    bad = bytearray(blob)
+    bad[-8] ^= 0xFF
+    yield "badcrc", bytes(bad)
+    yield "empty", b""
+
+
+def check_corrupt(verbose):
+    ok = bad = 0
+    for name, data in corrupt_cases():
+        with open(HEX_FILE, "w", encoding="ascii") as f:
+            f.write(data.hex())
+        try:
+            r = subprocess.run([PROBE_EXE, HEX_FILE, "gzip"], cwd=ROOT,
+                               capture_output=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            bad += 1
+            print(f"  [FAIL] 损坏输入 {name}: 超时（疑似挂死）")
+            continue
+        if r.returncode != 0:
+            ok += 1
+            if verbose:
+                msg = r.stderr.decode("utf-8", "replace").strip().splitlines()
+                print(f"  [ok]   损坏输入 {name}: 拒绝（{msg[-1] if msg else 'rc!=0'}）")
+        else:
+            bad += 1
+            print(f"  [FAIL] 损坏输入 {name}: 竟然解码成功")
+    return ok, bad
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -119,8 +157,9 @@ def main():
                 detail = err if got is None else f"长度 {len(got or '')//2} vs {len(data)}"
                 print(f"  [FAIL] {label}: {detail}")
     print("-" * 56)
-    print(f"PASS={ok} FAIL={bad}")
-    return 1 if bad else 0
+    cok, cbad = check_corrupt(args.verbose)
+    print(f"PASS={ok} FAIL={bad}；损坏输入拒绝 {cok}/{cok + cbad}")
+    return 1 if (bad or cbad) else 0
 
 
 if __name__ == "__main__":
