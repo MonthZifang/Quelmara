@@ -1958,6 +1958,9 @@ class Lower:
             if isinstance(elem, tuple) and elem[0] == "vecinner":
                 # 嵌套 vec：弹出的是内层句柄，重挂内层标签（v1.12）
                 self._mark_vec(fn, d, elem[1])
+            if isinstance(elem, tuple) and elem[0] == "mapinner":
+                # vec[map]（v1.37）：弹出的是 map 句柄，重挂 map 标记
+                self._mark_map(fn, d, elem[1], elem[2])
             return d
         if m == "get":
             i = one_arg()
@@ -1973,6 +1976,10 @@ class Lower:
                 # 嵌套 vec：get 返回内层句柄，重挂内层标签——
                 # row.push / row.get 从此认领类型（v1.12 vec[vec[T]] 解锁）
                 self._mark_vec(fn, d, elem[1])
+            if isinstance(elem, tuple) and elem[0] == "mapinner":
+                # vec[map]（v1.37）：get 返回 map 句柄，重挂 map 标记——
+                # m.set / m.get 链式调用从此认领类型
+                self._mark_map(fn, d, elem[1], elem[2])
             return d
         if m == "set":
             if len(args) != 2:
@@ -3876,6 +3883,12 @@ class Lower:
             slot = self.alloc_struct(fn, elem[1])
             fn.emit("call", None, "__vec_get_n", [coll, idx, slot])
             item = self._mark_struct(fn, slot, elem[1])
+        elif isinstance(elem, tuple) and elem[0] == "vecinner":
+            # 嵌套 vec（v1.37 补漏）：循环变量是内层 vec 句柄，重挂标签
+            self._mark_vec(fn, item, elem[1])
+        elif isinstance(elem, tuple) and elem[0] == "mapinner":
+            # vec[map]（v1.37）：循环变量是 map 句柄，重挂 map 标记
+            self._mark_map(fn, item, elem[1], elem[2])
         inner = dict(env)
         inner[var] = item
         self.loop_stack.append((l_skip, l_end))
@@ -7829,15 +7842,21 @@ class Lower:
         return getattr(fn, "vecelem", {}).get(v) if isinstance(v, int) else None
 
     def _vec_tag_of(self, et):
-        """vec 元素标签（v1.12 统一入口）：str / ("agg", name) /
-        ("vecinner", 内层标签) / None（标量）。形参、返回值、vecnew 三处
-        共用——此前各自硬编码，嵌套 vec 拿不到标签导致 row.push 被拒。"""
+        """vec 元素标签（v1.12 统一入口；v1.37 加 mapinner）：str / ("agg", name) /
+        ("vecinner", 内层标签) / ("mapinner", K, V) / None（标量）。形参、返回值、
+        vecnew 三处共用——此前各自硬编码，嵌套 vec 拿不到标签导致 row.push 被拒。"""
         if et == ("named", "str"):
             return "str"
         if et and et[0] == "named" and self.is_agg(et[1]):
             return ("agg", et[1])
         if et and et[0] == "vec":
             return ("vecinner", self._vec_tag_of(et[1]))
+        if et and et[0] == "map":
+            # vec[map[K]V]（v1.37）：句柄 1 字，与 vecinner 同构；
+            # K/V 短标签供 get/pop 取回时重挂 map 标记
+            return ("mapinner",
+                    et[1][1] if et[1][0] == "named" else "int",
+                    et[2][1] if et[2][0] == "named" else "int")
         return None
 
     @staticmethod

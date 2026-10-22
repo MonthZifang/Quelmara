@@ -13,7 +13,8 @@
 | 泛型 struct / 泛型方法 | ❌ | — | 容器类只能手写或扁平化 |
 | 类型约束（trait bound） | ❌ | — | “T 须支持 <”是文档性的，违反它在 Lower 报类型错 |
 | `map[K]V` | 🟡 | V 仅 int/str，不能 `map[str]Struct` | 配置表/符号表要拆成平行 map |
-| `vec[T]` | 🟡 | `vec[map]` 不支持；struct 内嵌套聚合按 1 槽占位 | 复杂 AST 仍需扁平化 |
+| `vec[T]` | ✅ v1.37 | 标量/str/具名聚合/嵌套 vec（任意深度）/map 句柄全支持 | 元素即用即取，无扁平化成本 |
+| struct 内嵌套聚合 | 🟡 | struct 字段里的 vec/map 按 1 槽占位（句柄语义），不是内联布局 | 复杂 AST 仍需注意拷贝语义 |
 | 函数值 | 🟡 | `callr` ≤6 参、实参不能是 struct/slice、**无捕获**（无闭包） | 回调只能固定签名 |
 | 所有权检查 | 🟡 | **只查 `rc[T]` 句柄**；struct/数组/str 的别名与生命周期不查，并发竞争不查 | 不能对外宣称"Rust 那套借用检查" |
 | `interface` | 🟡 | 装箱不释放；同类型跨接口同名方法报错；接口与 impl 必须同源文件；AArch64 未接 vtable | 热点循环装箱会涨堆 |
@@ -123,7 +124,7 @@
 
 1. ~~泛型推导 + 多类型参数（`f[int]` → 能推就推）~~ ✅ v1.36：多参 + 调用点推导
 2. 命名空间 / `pub` 可见性（止住 `http_` / `ws_` 前缀膨胀）
-3. `map[str]Struct`、`vec[map]`
+3. `map[str]Struct`（~~`vec[map]`~~ ✅ v1.37）
 4. 函数值放宽：8 参、允许 struct 实参
 5. `defer`（接口装箱生命周期的前置）
 6. IPv6、TCP 批量收发
@@ -224,7 +225,8 @@ CSE 的 `_cse_key` 对 xmm 族返回 `None`（不参与）。
 1. **性能专项（§5）**：~~GHASH 4-bit 表~~（v1.28）→ ~~memchr~~（v1.29）→ ~~mem_diff + gzip 编码 1.6×~~（v1.30）
    → ~~AES-NI~~（v1.31，CTR 31×）→ ~~GHASH 字级化~~（v1.32）→ ~~GHASH PCLMUL~~（v1.33，GCM 19 ms）→
    **JSON memchr** → loop_sum 三件套 → LICM 根修 → §7.4/§7.5 两个误编译
-2. **语言层（§1）**：~~泛型多参 + 调用点推导~~（v1.36）→ 黄标逐项（`map[str]Struct`、`vec[map]`、
+2. **语言层（§1）**：~~泛型多参 + 调用点推导~~（v1.36）→ ~~`vec[map]`~~（v1.37）→
+   黄标逐项（`map[str]Struct`、
    函数值放宽、`result` struct 载荷、命名空间 / `pub`、`defer` …）→ 红标逐项 红→黄→绿
    （泛型 struct / 泛型方法 / 类型约束）
 3. **标准库（§2）**：红标剩余项——**MD5**（只差旧协议兼容）、HTTP 客户端封装

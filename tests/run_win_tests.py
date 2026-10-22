@@ -606,6 +606,7 @@ def main():
     case_selfcheck("t79_sse", "tests/t79_sse.qma")
     case_selfcheck("t80_md5", "tests/t80_md5.qma")
     case_selfcheck("t81_generic_infer", "tests/t81_generic_infer.qma")
+    case_selfcheck("t82_vecmap", "tests/t82_vecmap.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),
