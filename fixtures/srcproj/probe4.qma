@@ -1,0 +1,14 @@
+module srcproj
+fn main() {
+    let p = read_asset("greeting.txt")
+    let mut i = 0
+    while i < 40 {
+        let c = mem_load8(p, i)
+        if c == 0 {
+            print(0 - 100 - i)
+        } else {
+            print(c)
+        }
+        i = i + 1
+    }
+}

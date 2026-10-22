@@ -32,6 +32,7 @@ import tomllib
 
 DEFAULT_CONFIG = {
     "core": {"multicore": True, "threads": 0, "affinity": "none", "preempt": True},
+    "src": {"lib": "src/lib", "ref": "src/ref", "asset": "src/asset"},
     "net": {"backend": "auto", "io_threads": 0, "max_conns": 1000000,
             "recv_buffer": 4096, "send_buffer": 4096, "tcp_nodelay": True,
             "reuse_port": True, "backpressure": "drop"},
@@ -1534,17 +1535,25 @@ def expand_generics(fns, generic_fns, structs, enums):
     return out
 
 
-def load_program(src_path):
-    """带 import 的程序加载：递归解析被导入模块，**扁平合并**进主 AST。
+def load_program(src_path, cfg=None):
+    """带 import 的程序加载（v1.17：支持 [src] 三类资源布局）。
+
+    - 库（lib）：`[src].lib`（默认 src/lib）下**按名称建文件夹**，
+      `import ws.core` 解析为 src/lib/ws/core.qma——目录即清单，
+      扫描后按前缀引用，不需要逐库声明（import 什么解析什么，惰性）。
+    - 引用（ref）：`[src].ref` 下放置跨项目引用说明/锚点（qpm install
+      的 .qpm/deps 优先于它）。
+    - 资源（asset）：`[src].asset`（默认 src/asset）为 read_asset()
+      的运行期基准路径（编译期嵌入）。
 
     - 合并范围：顶层 fn / struct / enum / test。const 在各文件解析期内联，
       天然可用，无需导出；module 声明只作文档。
-    - 查找顺序：`import std.io` -> 主文件目录 `std/io.qma`，其次仓库根 `std/io.qma`
-      （标准库随编译器分发）。
+    - 查找顺序：主文件目录 -> 仓库根 std/ -> [src].lib 库扫描 ->
+      [src].ref 引用 -> .qpm/deps（qpm 依赖）。
     - 名字冲突（fn/struct/enum 与主文件或导入彼此重名）报错；
       被导入文件定义 main 报错（入口只在主文件）；
       循环 import 报错；找不到模块报错并列出全部查找路径。
-    - 后端零改动：合并后的 AST 按单文件流程照常编译（C / native / a64 通用）。
+      后端零改动：合并后的 AST 按单文件流程照常编译。
     """
     src_dir = os.path.dirname(os.path.abspath(src_path))
     seen, order, stack = {}, [], []
@@ -1554,11 +1563,27 @@ def load_program(src_path):
             return Parser(tokenize(f.read()), consts=consts,
                           generic_fns=generic_fns).parse_program()
 
+    main_dir = os.path.dirname(os.path.abspath(src_path))
+    src_cfg = (cfg or {}).get("src", {}) if isinstance(cfg, dict) else {}
+    lib_dir = os.path.normpath(os.path.join(
+        main_dir, src_cfg.get("lib", "src/lib")))
+    ref_dir = os.path.normpath(os.path.join(
+        main_dir, src_cfg.get("ref", "src/ref")))
+
     def resolve_or_raise(imp, from_path):
         cands = _import_candidates(imp, os.path.dirname(os.path.abspath(from_path)))
+        # [src].lib 库扫描：import ws.core -> lib/ws/core.qma（目录即库，
+        # 按前缀引用）；单文件库 lib/ws.qma 同样支持
+        parts = imp.split(".")
+        rel = os.sep.join(parts) + SRC_EXT
+        cands.append(os.path.join(lib_dir, rel))
+        if len(parts) > 1:
+            cands.append(os.path.join(lib_dir, os.sep.join(parts[:-1]),
+                                      parts[-1] + SRC_EXT))
+        cands.append(os.path.join(ref_dir, rel))
         # qpm 依赖目录始终按**主文件**的 .qpm/deps 解析（依赖包内部的
         # 递归 import 也要能在主项目的依赖集合里找到彼此）
-        cands += _qpm_candidates(imp, os.path.dirname(os.path.abspath(src_path)))
+        cands += _qpm_candidates(imp, main_dir)
         for cand in cands:
             if os.path.isfile(cand):
                 return cand
@@ -4373,7 +4398,7 @@ def transpile(src_path):
     global PROGRAM
     require_source(src_path)
     cfg = load_config(src_path)
-    mod, imports, fns_ast, tests, structs, enums, decl_order = load_program(src_path)
+    mod, imports, fns_ast, tests, structs, enums, decl_order = load_program(src_path, cfg)
     PROGRAM = (mod, imports, fns_ast, tests)
     fns_ast = with_test_runner(fns_ast, tests)
     # 用户 main 与 C main 区分：编译为 qlm_main

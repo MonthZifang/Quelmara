@@ -1,0 +1,16 @@
+// fixtures/srcproj/main.qma —— [src] 三类资源布局的端到端验收
+module srcproj
+
+import ws.ws_core
+
+fn main() {
+    // 库：src/lib/ws/ 按名称扫描，import ws.ws_core 前缀引用
+    let g = ws_greet("src")
+    assert(g == "ws:src", "lib greet")
+    // 资源：src/asset/greeting.txt 经 read_asset 读取
+    let a = read_asset("greeting.txt")
+    assert(len(a) >= 15 && len(a) <= 17, "asset len")   // 文件含换行（CRLF 容差）
+    print(g)
+    print(a)
+    print("ok t60_srclayout")
+}

@@ -1,0 +1,5 @@
+module srcproj
+fn main() {
+    let p = read_asset("greeting.txt")
+    print(p)
+}

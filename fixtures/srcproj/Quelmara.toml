@@ -1,0 +1,4 @@
+[src]
+lib = "src/lib"
+ref = "src/ref"
+asset = "src/asset"

@@ -583,7 +583,7 @@ _XMM_BUILTINS = ("cpu_sha", "xmm_load", "xmm_store", "sha_nexte", "sha_rnds2",
 
 class Lower:
     def __init__(self, fns_ast, cfg, arch="x86_64", structs=None, enums=None,
-                 platform="linux"):
+                 platform="linux", asset_root=None):
         self.fns_ast = {f["name"]: f for f in fns_ast}
         self.cfg = cfg
         self.arch = arch
@@ -597,6 +597,7 @@ class Lower:
         self.gid_of_str = {}
         self.spawn_id = 0
         self.uses_chan = False
+        self.asset_root = asset_root  # [src].asset（read_asset 基准，编译期嵌入）
         self.arr_elem = {}         # base vreg -> 元素类型（"f64"）；f64 数组的
                                    # index/arith 位模式链路依赖此标记
         self.uses_map = False
@@ -2502,6 +2503,35 @@ class Lower:
             fn.emit("syscall", None, self.sc["close"], [fd])
             fn.emit("label", l_end)
             return cur
+        if name == "read_asset" and name not in self.fns_ast:
+            # read_asset(name) -> str：从 [src].asset 基准路径读资源文件
+            # （v1.17）。asset 根编译期嵌入为 global 字符串，运行期与
+            # name 拼接后走 read_text——资源路径不散落代码里。
+            if len(e[2]) != 1:
+                raise SyntaxError("read_asset(name) 需要一个实参")
+            if not self.asset_root:
+                raise SyntaxError(
+                    "read_asset 需要项目 Quelmara.toml 的 [src] asset 配置")
+            root = self.asset_root.replace("\\", "/").rstrip("/")
+            # 语言层布局（[len][bytes][NUL]）——read_asset 的路径要参与
+            # str 拼接，必须走 intern_str_lit（intern_str 是给 winapi 的
+            # 无 len 头 C 串，用它 concat 会把路径字节当 len 巨量分配）
+            gid = self.intern_str_lit(root + "/")
+            # global 字符串的 ga 指向 [len][bytes] 的 **len 头**——
+            # 传给 str 函数前必须 +8 变成数据指针（str 值约定）；
+            # 直接 ("ga", gid) 传参会让 concat 读到垃圾 len（v1.17 修）
+            rp = fn.new_v()
+            fn.emit("movaddr", rp, gid)
+            fn.emit("bin", "add", rp, rp, ("imm", 8))
+            na = self.eval(e[2][0], fn, env)
+            full = fn.new_v()
+            fn.emit("call", full, "__str_concat", [rp, na])
+            self.uses_io = True
+            if os.environ.get("QLM_ASSET_DEBUG"):
+                return full        # 调试：只返回拼接后的完整路径（跳过读取）
+            d = fn.new_v()
+            fn.emit("call", d, "__read_text", [full])
+            return self._mark_str(fn, d)
         if name == "read_text" and name not in self.fns_ast:
             # read_text(path) -> str：整文件读入（NUL 结尾）。失败 fail-fast。
             if len(e[2]) != 1:
@@ -8337,6 +8367,7 @@ def write_elf(path, blob):
 
 
 def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
+                  asset_root=None,
                        platform="linux"):
     """前端共享层：解析 + 降级 + 优化（x86_64 / aarch64 发射层共用）"""
     require_source(src_path)
@@ -8344,6 +8375,7 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
     mod, _imports, fns_ast, tests, structs, enums, _order = load_program(src_path)
     fns_ast = with_test_runner(fns_ast, tests)   # test "name" { } -> 测试入口
     low = Lower(fns_ast, cfg, arch=arch, structs=structs, enums=enums,
+                asset_root=asset_root,
                 platform=platform)
     fns = low.run(fns_ast)
     if optimize:
@@ -8366,8 +8398,9 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
     return fns, low, cfg
 
 
-def transpile_native(src_path, dump_ir=False, optimize=True, arch="x86_64"):
-    fns, low, cfg = lower_and_optimize(src_path, arch=arch, optimize=optimize, dump_ir=dump_ir)
+def transpile_native(src_path, dump_ir=False, optimize=True, arch="x86_64", asset_root=None):
+    fns, low, cfg = lower_and_optimize(src_path, arch=arch, optimize=optimize, dump_ir=dump_ir,
+                                       asset_root=asset_root)
     cg = Codegen(fns, low.globals, low=low)
     blob = cg.gen_all()
     return blob, cfg

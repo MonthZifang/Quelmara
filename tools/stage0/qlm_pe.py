@@ -337,8 +337,14 @@ def build_pe(code, data, reloc_offsets, imports, api_fixups):
 
 
 def transpile_win(src_path, dump_ir=False, optimize=True):
+    from qlm import load_config
+    cfg = load_config(src_path)
+    main_dir = os.path.dirname(os.path.abspath(src_path))
+    asset_root = os.path.normpath(os.path.join(
+        main_dir, cfg.get("src", {}).get("asset", "src/asset")))
     fns, low, cfg = lower_and_optimize(src_path, optimize=optimize,
-                                       dump_ir=dump_ir, platform="windows")
+                                       dump_ir=dump_ir, platform="windows",
+                                       asset_root=asset_root)
     cg = WinCodegen(fns, low.globals, low=low)   # vtable 需要 low.vtables
     code, data, relocs, imports, api_fixups = cg.gen_all_pe()
     pe = build_pe(code, data, relocs, imports, api_fixups)

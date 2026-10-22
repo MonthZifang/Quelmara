@@ -567,6 +567,7 @@ def main():
     case_selfcheck("t57_vecnest", "tests/t57_vecnest.qma")
     case_selfcheck("t58_stdmin", "tests/t58_stdmin.qma")
     case_selfcheck("t59_simdf64", "tests/t59_simdf64.qma")
+    case_selfcheck("t60_srclayout", "fixtures/srcproj/main.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),
