@@ -1,6 +1,0 @@
-module srcproj
-fn main() {
-    let p = read_asset("greeting.txt")
-    print(file_size(p))
-    print(file_exists(p))
-}

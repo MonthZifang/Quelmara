@@ -1,6 +1,0 @@
-module srcproj
-import ws.ws_core
-fn main() {
-    let a = read_asset("greeting.txt")
-    print(len(a))
-}
