@@ -70,6 +70,9 @@ jobs:
       - name: gzip 解码互操作（zlib 9 种编码组合 → Quelmara 解压）
         run: python tests/gzip_inflate_test.py
 
+      - name: ECDSA P-256 验签互操作（Python bigint 参考实现）
+        run: python tests/ecdsa_p256_test.py
+
       - name: 自举对拍（词法 / 声明级 AST）
         run: |
           python tests/lexdiff.py

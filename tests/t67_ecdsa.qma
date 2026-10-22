@@ -1,0 +1,63 @@
+// t67_ecdsa.qma：ECDSA P-256 验签 —— v1.22
+// 内嵌向量由 tests/ecdsa_p256_test.py 的 Python bigint 参考实现生成
+// （密钥与消息是随机种子 20261022 下的固定样本）。
+// 完整的 32 组互操作测试见那个脚本（含无效曲线点、r/s 越界等负向）。
+module t67
+
+import std.hex
+import std.p256
+
+fn v(px: str, py: str, h: str, r: str, s: str) -> int {
+    return ecdsa_p256_verify(hex_decode(px), hex_decode(py),
+                             hex_decode(h), hex_decode(r), hex_decode(s))
+}
+
+fn main() {
+    // ---- 正向：两条独立密钥的合法签名 ----
+    assert(v("09d070a93fc1f4168ba5a9014cd3e7cd13b2dcfc9f8ac9dbaf0418e15d6589a0",
+             "e9a8d34df28aea2d6b44ce36e4e4ab0ebc88b43c4efb40b35a068a5104a2915f",
+             "9caf713d5ce42511678bbcbe92c7b60b6ae2c2e342b957c4eaaf4c0d65dae2a5",
+             "d9ef23d664c36ab64c0afbd2799a2bcb01aead7791391266f23e84f50ec15156",
+             "d5c41b92dfe517e34408bbb7da406594ed21bd5677c655a071f42c2dbabe5507") == 1,
+           "valid #1")
+    assert(v("c3e41c8cafeebdc5ae5b64232e175e3eaeba69f0d3a4ec658fb2b8c654630cfa",
+             "b87cec4360b0848ca49414d742454d1cc62bccc4cbcde1651d5d3797ed7535d6",
+             "2c929e70fc6a73080eb9b59b092dc14f09c87b29e0d282d9edd8986df5183947",
+             "2af0fa95fbfe649c1f40239315dabd8c944304f06a8280bac84a2dc109bf7791",
+             "fa208c0077af3bd763614e44aac1d8398fecee54661ade700c58a15d8c6d805a") == 1,
+           "valid #2")
+
+    // ---- 负向：改 hash ----
+    assert(v("09d070a93fc1f4168ba5a9014cd3e7cd13b2dcfc9f8ac9dbaf0418e15d6589a0",
+             "e9a8d34df28aea2d6b44ce36e4e4ab0ebc88b43c4efb40b35a068a5104a2915f",
+             "9caf713d5ce42511678bbcbe92c7b60b6ae2c2e342b957c4eaaf4c0d65dae2a6",
+             "d9ef23d664c36ab64c0afbd2799a2bcb01aead7791391266f23e84f50ec15156",
+             "d5c41b92dfe517e34408bbb7da406594ed21bd5677c655a071f42c2dbabe5507") == 0,
+           "tampered hash")
+
+    // ---- 负向：r = n-1（越界前一位，但仍合法范围，签名对不上） ----
+    assert(v("92391d7f63d836e60e872e2ddc3283a35bda357aa7c246039f9411c03c02d002",
+             "8e23411f67de4a679305c20b43600179fc4cb81b4c6e3cd29c0ae6e306848fd0",
+             "931534c0c145d0a99631a32025f23f88c67fc6b34a608a73d0410bc04cf7bdce",
+             "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550",
+             "e5037b74a1d30d0dfa3fe0c5260c254bb5f8b078182b7c57e01247af72c3e8c8") == 0,
+           "r = n-1")
+
+    // ---- 负向：公钥不在曲线上（无效曲线攻击） ----
+    assert(v("92391d7f63d836e60e872e2ddc3283a35bda357aa7c246039f9411c03c02d002",
+             "8e23411f67de4a679305c20b43600179fc4cb81b4c6e3cd29c0ae6e306848fd1",
+             "931534c0c145d0a99631a32025f23f88c67fc6b34a608a73d0410bc04cf7bdce",
+             "917639c13ba4b7f6b4492342cf2a029f172def532183ba9f9705c9683c34f5cb",
+             "e5037b74a1d30d0dfa3fe0c5260c254bb5f8b078182b7c57e01247af72c3e8c8") == 0,
+           "pubkey not on curve")
+
+    // ---- 曲线自检：G 在曲线上，b 正确 ----
+    assert(p256_on_curve(hex_decode("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"),
+                         hex_decode("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5")) == 1,
+           "G on curve")
+    assert(p256_on_curve(hex_decode("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"),
+                         hex_decode("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f6")) == 0,
+           "G+1 not on curve")
+
+    print("ok t67_ecdsa")
+}

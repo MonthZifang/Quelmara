@@ -45,6 +45,7 @@ DESC = {
     "std/ws.qma": "WebSocket 服务端（RFC 6455）",
     "std/x25519.qma": "Curve25519 上的 X25519 密钥交换（RFC 7748，TLS ECDHE 地基）",
     "std/tls13.qma": "TLS 1.3 密钥调度（HKDF-Expand-Label）+ AEAD 记录层",
+    "std/p256.qma": "NIST P-256 域运算 + ECDSA 验签（TLS 证书签名）",
     "std/net/core.qma": "连接槽位层（IOCP reactor 的底座）",
     "std/net/udp.qma": "UDP 封装与地址解析",
 }
