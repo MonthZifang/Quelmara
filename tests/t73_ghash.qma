@@ -1,0 +1,32 @@
+// t73_ghash.qma：GHASH 4-bit 表与逐位算法一致性（v1.28）
+// 向量取自 NIST GCM 规范示例：H = AES_K(0^128)，X = 单块，X·H = 5e2e…
+module t73
+
+import std.aes
+import std.hex
+import std.str
+
+fn main() {
+    let h = hex_decode("66e94bd4ef8a2c3b884cfa59ca342b2e")
+    let x = hex_decode("0388dace60b6a392f328c2b971b2fe78")
+    let o1 = mem_alloc(16)
+    let o2 = mem_alloc(16)
+    _gf_mul(x, h, o1)
+    let t = mem_alloc(8192)
+    _ghash_table(h, t)
+    _gf_mul_t(x, t, o2)
+    assert(hex_encode(mem_str(o1, 16)) == "5e2ec746917062882c85b0685353deb7", "bit path vector")
+    assert(hex_encode(mem_str(o2, 16)) == "5e2ec746917062882c85b0685353deb7", "table vector")
+
+    // 表路径的大输入加解密（>16 块才建表）
+    let key = hex_decode("000102030405060708090a0b0c0d0e0f")
+    let iv = hex_decode("000000000000000000000000")
+    let big = str_repeat("0123456789abcdef", 256)      // 4 KiB
+    let c = gcm_encrypt(key, iv, "aad", big)
+    assert(len(c) == len(big) + 16, "tag len")
+    let p = gcm_decrypt(key, iv, "aad", c)
+    assert(p == big, "roundtrip")
+    let bad = hex_decode(hex_encode(c))
+    assert(len(bad) == len(c), "bad len")
+    print("ok t73_ghash")
+}

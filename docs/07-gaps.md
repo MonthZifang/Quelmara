@@ -86,8 +86,8 @@
 | 专项 | 预期收益 | 前置 / 风险 |
 |---|---|---|
 | **SHA-NI 64 轮序列** | SHA-256 65 ms → ~3 ms（20×） | 基础设施已就绪（`cpuid_sha` + 4 条 SHA 指令 + xmm 槽）；**本机 CPU 无该扩展**，必须先写 Python mini-emulator 验证 8 条 xmm 指令语义，否则错 hash 比慢更糟 |
-| **GHASH 4-bit nibble 表** | AES-GCM 15–20× | H 固定，会话级惰性生成 16×16×16B 表；FIPS 向量必须仍全过 |
-| **AES-NI** | AES 数量级 | 与 SHA-NI 同批进编码器，保留标量降级 |
+| ~~GHASH 4-bit nibble 表~~ | ✅ v1.28 已做：GHASH 段 1.44×，配合 AES T-table 后 GCM 整体 **8.0×**（1369 → 171 ms/MiB） | — |
+| **AES-NI** | AES 数量级（软件 T-table 已把 GCM 拉到 6.1 MB/s） | 需编码器加 aesenc/aesenclast + pclmulqdq + cpuid 降级；与 SHA-NI 同批 |
 | **LICM 根修** | 普适（所有循环） | 根因是 x64 分配器布局敏感段错误；修好前 LICM 只能关 |
 | **loop_sum 三件套** | 循环 10.8 → ~4 cycles/iter | ① phi copy 消除（分配器 coalescing）② do-while 变换（CFG 要容错 jcc 回边）③ cssub 形态 |
 | **JSON memchr 化** | 2 ms → ~1 ms | 需 `memchr` / 找字符内建 |
@@ -155,3 +155,17 @@
 
 表达式位置（`let c = a > b`）一直是对的——它走 `arith()` 的 `fcmpset` 分支。
 只有条件位置（`if` / `while`）漏了浮点分流，属于"两条路径实现不一致"的典型。
+
+## 7. 推进顺序（2026-10-22 调整）
+
+平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
+当前顺序：
+
+1. **性能专项（§5）**：GHASH 4-bit 表 → JSON memchr → gzip lazy → loop_sum 三件套 → LICM 根修
+2. **语言层（§1）**：黄标逐项（`map[str]Struct`、`vec[map]`、函数值放宽、`result` struct 载荷、
+   命名空间 / `pub`、`defer` …）
+3. **标准库（§2）**：红标补齐（set/deque/LRU、UTF-8、base64url、MD5/FNV、CLI flag、
+   HTTP 客户端封装 …）
+4. **工具链（§3）**：`.qla`、semver/registry、增量编译、覆盖率
+
+> 排序原则：性能是普适杠杆；语言层决定库能不能写；工具链最后。

@@ -580,6 +580,7 @@ def main():
     case_selfcheck("t70_times", "tests/t70_times.qma")
     case_selfcheck("t71_rsa", "tests/t71_rsa.qma")
     case_selfcheck("t72_rsa2048", "tests/t72_rsa2048.qma")
+    case_selfcheck("t73_ghash", "tests/t73_ghash.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),

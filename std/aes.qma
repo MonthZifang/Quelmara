@@ -30,9 +30,10 @@ fn _rotl8(x: int, n: int) -> int {
     return ((x << n) | (x >> (8 - n))) & 0xFF
 }
 
-// 建表：base[0..256) = sbox，base[256..512) = inv_sbox
+// 建表：base[0..256) = sbox，base[256..512) = inv_sbox，
+// base[512..4608) = Te0..Te3（4 × 256 × 4B，T-table 加密用）
 fn _build_tables() -> int {
-    let base = mem_alloc(512)
+    let base = mem_alloc(4608)
     let exp = mem_alloc(256)
     let log = mem_alloc(256)
     mem_zero(log, 256)
@@ -64,7 +65,40 @@ fn _build_tables() -> int {
     }
     mem_free(exp, 256)
     mem_free(log, 256)
+    // Te0[x] = [2s, s, s, 3s]（大端语义）；Te1..3 是 Te0 的字节旋转
+    a = 0
+    while a < 256 {
+        let sb = mem_load8(base, a)
+        let s2 = _xtime(sb)
+        let s3 = s2 ^ sb
+        let w = (s2 << 24) | (sb << 16) | (sb << 8) | s3
+        let w1 = _ror32(w, 8)
+        let w2 = _ror32(w, 16)
+        let w3 = _ror32(w, 24)
+        _put32(base, 512 + a * 4, w)
+        _put32(base, 512 + 1024 + a * 4, w1)
+        _put32(base, 512 + 2048 + a * 4, w2)
+        _put32(base, 512 + 3072 + a * 4, w3)
+        a = a + 1
+    }
     return base
+}
+
+fn _ror32(v: int, n: int) -> int {
+    return ((v >>> n) | (v << (32 - n))) & 0xFFFFFFFF
+}
+
+fn _put32(p: int, off: int, v: int) -> int {
+    mem_store8(p, off, v & 0xFF)
+    mem_store8(p, off + 1, (v >>> 8) & 0xFF)
+    mem_store8(p, off + 2, (v >>> 16) & 0xFF)
+    mem_store8(p, off + 3, (v >>> 24) & 0xFF)
+    return 0
+}
+
+fn _bswap32(v: int) -> int {
+    return ((v & 0xFF) << 24) | ((v & 0xFF00) << 8) |
+           ((v >>> 8) & 0xFF00) | ((v >>> 24) & 0xFF)
 }
 
 fn _tables() -> int {
@@ -285,6 +319,64 @@ fn aes128_encrypt_block(inp: int, out: int, rk: int) -> int {
     return 0
 }
 
+// T-table 加密（v1.28）：每轮 16 次 32 位查表 + 异或，替代逐字节 SubBytes/MixColumns。
+// 只用于 GCM 的 CTR 路径；解密仍走逐字节实现（GCM 不需要 AES 解密）。
+fn _aes128_encrypt_block_fast(inp: int, out: int, rk: int) -> int {
+    let t = _tables()
+    let mut s0 = _bswap32(mem_load32(inp, 0)) ^ _bswap32(mem_load32(rk, 0))
+    let mut s1 = _bswap32(mem_load32(inp, 4)) ^ _bswap32(mem_load32(rk, 4))
+    let mut s2 = _bswap32(mem_load32(inp, 8)) ^ _bswap32(mem_load32(rk, 8))
+    let mut s3 = _bswap32(mem_load32(inp, 12)) ^ _bswap32(mem_load32(rk, 12))
+    let mut r = 1
+    while r < 10 {
+        let k = r * 16
+        let t0 = mem_load32(t, 512 + ((s0 >>> 24) & 0xFF) * 4) ^
+                 mem_load32(t, 1536 + ((s1 >>> 16) & 0xFF) * 4) ^
+                 mem_load32(t, 2560 + ((s2 >>> 8) & 0xFF) * 4) ^
+                 mem_load32(t, 3584 + (s3 & 0xFF) * 4) ^
+                 _bswap32(mem_load32(rk, k))
+        let t1 = mem_load32(t, 512 + ((s1 >>> 24) & 0xFF) * 4) ^
+                 mem_load32(t, 1536 + ((s2 >>> 16) & 0xFF) * 4) ^
+                 mem_load32(t, 2560 + ((s3 >>> 8) & 0xFF) * 4) ^
+                 mem_load32(t, 3584 + (s0 & 0xFF) * 4) ^
+                 _bswap32(mem_load32(rk, k + 4))
+        let t2 = mem_load32(t, 512 + ((s2 >>> 24) & 0xFF) * 4) ^
+                 mem_load32(t, 1536 + ((s3 >>> 16) & 0xFF) * 4) ^
+                 mem_load32(t, 2560 + ((s0 >>> 8) & 0xFF) * 4) ^
+                 mem_load32(t, 3584 + (s1 & 0xFF) * 4) ^
+                 _bswap32(mem_load32(rk, k + 8))
+        let t3 = mem_load32(t, 512 + ((s3 >>> 24) & 0xFF) * 4) ^
+                 mem_load32(t, 1536 + ((s0 >>> 16) & 0xFF) * 4) ^
+                 mem_load32(t, 2560 + ((s1 >>> 8) & 0xFF) * 4) ^
+                 mem_load32(t, 3584 + (s2 & 0xFF) * 4) ^
+                 _bswap32(mem_load32(rk, k + 12))
+        s0 = t0
+        s1 = t1
+        s2 = t2
+        s3 = t3
+        r = r + 1
+    }
+    // 最后一轮：SubBytes + ShiftRows + AddRoundKey（无 MixColumns）
+    let u0 = (_sbox((s0 >>> 24) & 0xFF) << 24) | (_sbox((s1 >>> 16) & 0xFF) << 16) |
+             (_sbox((s2 >>> 8) & 0xFF) << 8) | _sbox(s3 & 0xFF)
+    let u1 = (_sbox((s1 >>> 24) & 0xFF) << 24) | (_sbox((s2 >>> 16) & 0xFF) << 16) |
+             (_sbox((s3 >>> 8) & 0xFF) << 8) | _sbox(s0 & 0xFF)
+    let u2 = (_sbox((s2 >>> 24) & 0xFF) << 24) | (_sbox((s3 >>> 16) & 0xFF) << 16) |
+             (_sbox((s0 >>> 8) & 0xFF) << 8) | _sbox(s1 & 0xFF)
+    let u3 = (_sbox((s3 >>> 24) & 0xFF) << 24) | (_sbox((s0 >>> 16) & 0xFF) << 16) |
+             (_sbox((s1 >>> 8) & 0xFF) << 8) | _sbox(s2 & 0xFF)
+    let v0 = u0 ^ _bswap32(mem_load32(rk, 160))
+    let v1 = u1 ^ _bswap32(mem_load32(rk, 164))
+    let v2 = u2 ^ _bswap32(mem_load32(rk, 168))
+    let v3 = u3 ^ _bswap32(mem_load32(rk, 172))
+    // 状态字是大端语义；_put32 写小端，故先 bswap 再落字节
+    _put32(out, 0, _bswap32(v0))
+    _put32(out, 4, _bswap32(v1))
+    _put32(out, 8, _bswap32(v2))
+    _put32(out, 12, _bswap32(v3))
+    return 0
+}
+
 fn aes128_decrypt_block(inp: int, out: int, rk: int) -> int {
     let st = mem_alloc(16)
     let mut i = 0
@@ -375,11 +467,119 @@ fn _gf_mul(x: int, h: int, out: int) -> int {
     return 0
 }
 
+// ---------------------------------------------------------------------------
+// GHASH 4-bit 表（v1.28）：32 个 nibble × 16 项 × 16 字节 = 8 KiB
+// T[i][j] = (j·H)·x^(4*(31-i))；X 的 32 个 nibble 直接查表异或。
+// ---------------------------------------------------------------------------
+
+// GCM 的 GF(2^128) 以最高位为 x^0：乘 x = 右移一位，最低位为 1 时异或 0xE1
+fn _gf_xtime(src: int, dst: int) -> int {
+    let lsb = mem_load8(src, 15) & 1
+    let mut carry = 0
+    let mut i = 0
+    while i < 16 {
+        let b = mem_load8(src, i)
+        mem_store8(dst, i, (b >> 1) | (carry << 7))
+        carry = b & 1
+        i = i + 1
+    }
+    if lsb != 0 {
+        mem_store8(dst, 0, mem_load8(dst, 0) ^ 0xE1)
+    }
+    return 0
+}
+
+fn _ghash_table(h: int, t: int) -> int {
+    let hx = mem_alloc(64)
+    let mut i = 0
+    while i < 16 {
+        mem_store8(hx, i, mem_load8(h, i))
+        i = i + 1
+    }
+    _gf_xtime(hx, hx + 16)
+    _gf_xtime(hx + 16, hx + 32)
+    _gf_xtime(hx + 32, hx + 48)
+    // 第 0 列（最高 nibble）：j·H = Σ_{bit b of j} H·x^b
+    let mut j = 0
+    while j < 16 {
+        let e = t + j * 16
+        let mut k = 0
+        while k < 16 {
+            mem_store8(e, k, 0)
+            k = k + 1
+        }
+        // nibble 的位序是大端：j 的 MSB 对应 x^0，需先反转 4 位
+        let rj = ((j & 1) << 3) | ((j & 2) << 1) | ((j & 4) >> 1) | ((j & 8) >> 3)
+        let mut b = 0
+        while b < 4 {
+            if ((rj >> b) & 1) != 0 {
+                let src = hx + b * 16
+                k = 0
+                while k < 16 {
+                    mem_store8(e, k, mem_load8(e, k) ^ mem_load8(src, k))
+                    k = k + 1
+                }
+            }
+            b = b + 1
+        }
+        j = j + 1
+    }
+    // 其余列：T[i] = x^4 · T[i-1]
+    let tmp = mem_alloc(16)
+    let mut col = 1
+    while col < 32 {
+        j = 0
+        while j < 16 {
+            let src = t + (col - 1) * 256 + j * 16
+            let dst = t + col * 256 + j * 16
+            _gf_xtime(src, tmp)
+            _gf_xtime(tmp, dst)
+            _gf_xtime(dst, tmp)
+            _gf_xtime(tmp, dst)
+            j = j + 1
+        }
+        col = col + 1
+    }
+    mem_free(tmp, 16)
+    mem_free(hx, 64)
+    return 0
+}
+
+fn _gf_mul_t(x: int, t: int, out: int) -> int {
+    let mut i = 0
+    while i < 16 {
+        mem_store8(out, i, 0)
+        i = i + 1
+    }
+    let mut n = 0
+    while n < 32 {
+        let byte = mem_load8(x, n / 2)
+        let mut nib = byte & 0xF
+        if (n & 1) == 0 {
+            nib = (byte >> 4) & 0xF
+        }
+        let e = t + n * 256 + nib * 16
+        let mut k = 0
+        while k < 16 {
+            mem_store8(out, k, mem_load8(out, k) ^ mem_load8(e, k))
+            k = k + 1
+        }
+        n = n + 1
+    }
+    return 0
+}
+
 // GHASH(Y, H, data)：data 是 16 字节块序列，len 必须是 16 的倍数
 fn ghash(h: int, data: int, n: int, out: int) -> int {
     let y = mem_alloc(16)
     mem_zero(y, 16)
     let tmp = mem_alloc(16)
+    // 小输入用逐位算法（省 8 KiB 建表）；≥16 块走 4-bit 表
+    let mut tbl = 0
+    if n >= 256 {
+        tbl = mem_alloc(8192)
+        _ghash_table(h, tbl)
+    }
     let mut p = 0
     while p < n {
         let mut i = 0
@@ -387,7 +587,11 @@ fn ghash(h: int, data: int, n: int, out: int) -> int {
             mem_store8(tmp, i, mem_load8(y, i) ^ mem_load8(data, p + i))
             i = i + 1
         }
-        _gf_mul(tmp, h, y)
+        if tbl != 0 {
+            _gf_mul_t(tmp, tbl, y)
+        } else {
+            _gf_mul(tmp, h, y)
+        }
         p = p + 16
     }
     let mut k = 0
@@ -397,6 +601,9 @@ fn ghash(h: int, data: int, n: int, out: int) -> int {
     }
     mem_free(y, 16)
     mem_free(tmp, 16)
+    if tbl != 0 {
+        mem_free(tbl, 8192)
+    }
     return 0
 }
 
@@ -422,7 +629,7 @@ fn _ctr_xor(inp: int, n: int, out: int, ctr: int, rk: int) -> int {
     let blk = mem_alloc(16)
     let mut p = 0
     while p < n {
-        aes128_encrypt_block(ctr, blk, rk)
+        _aes128_encrypt_block_fast(ctr, blk, rk)
         let mut i = 0
         while i < 16 && p + i < n {
             mem_store8(out, p + i, mem_load8(inp, p + i) ^ mem_load8(blk, i))

@@ -9,7 +9,7 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=134 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
+| PE 回归（主回归） | **PASS=135 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
 | 词法器对拍 | **PASS=120 FAIL=0**（120 个源文件） | `python tests/lexdiff.py` |
 | 声明级 AST 对拍 | **PASS=105 FAIL=0**（跳过 3 个：`t52_iface` / `t54_iface_dyn` / `t56_generic`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
 | 函数体 dump 对拍 | **一致 895 / 分叉 755 / SKIP 同步 18 / SKIP 不同步 18** | `python tests/bodydiff.py` |
@@ -42,6 +42,7 @@
 
 | 负载 | 耗时 | 吞吐 |
 |---|---|---|
+| AES-128-GCM 1 MiB | **171 ms**（v1.28 前 1369 ms） | 6.1 MB/s |
 | SHA-256 1 MiB | **70 ms** | 15.0 MB/s |
 | gzip 编码 1 MiB（重复文本，输出 7658 B） | **25–27 ms** | 39 MB/s |
 | **gzip 解码 1 MiB** | **15 ms**（min of 3） | **70 MB/s** |

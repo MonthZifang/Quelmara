@@ -1,0 +1,28 @@
+// bench/aes_bench.qma —— AES-128-GCM 吞吐（1 MiB，min of 3）
+module aes_bench
+
+import std.aes
+import std.hex
+import std.str
+
+fn main() {
+    let key = hex_decode("000102030405060708090a0b0c0d0e0f")
+    let iv = hex_decode("000000000000000000000000")
+    let unit = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    let big = str_repeat(unit, 16384)          // 1 MiB
+    assert(len(big) == 1048576, "big size")
+    let mut best = 0 - 1
+    let mut r = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let c = gcm_encrypt(key, iv, "", big)
+        let t1 = now_ns()
+        assert(len(c) == len(big) + 16, "tag")
+        let ms = (t1 - t0) / 1000000
+        if best < 0 || ms < best {
+            best = ms
+        }
+        r = r + 1
+    }
+    print("gcm 1MiB: " + best.to_str() + " ms (min of 3)")
+}
