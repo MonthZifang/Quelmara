@@ -1,5 +1,11 @@
 # Quelmara 编译产物（测试脚本会重新生成）
 build/
+*.exe
+*.qex
+
+# 夹具目录里的本地产物（fixtures 只提交源码与配置）
+fixtures/**/*.exe
+fixtures/**/*.qex
 
 # Python
 __pycache__/

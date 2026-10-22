@@ -5,9 +5,12 @@
 //
 // 实现范围（明确写死）：
 //   * 编码：LZ77（3 字节哈希链，窗口 32KB，链长 8）+ **固定 Huffman**（BTYPE=01）；
-//   * 解码：**未实现**（HTTP 服务端只需要编码；客户端解码等 TLS/HTTP 客户端一起做）；
+//   * 解码（v1.19）：**固定 + 动态 Huffman + 存储块**（BTYPE 00/01/10），
+//     gzip 头/尾解析与 CRC32/ISIZE 校验；与 zlib 双向互操作（tests/t63_inflate.qma）；
 //   * 不追求压缩率：固定 Huffman 对文本通常 2–3×，对已压缩数据会略微膨胀；
 //   * 大文件分块：一次输出一个 block（不限制大小，但调用方注意内存）。
+//
+// 解码错误一律 fail-fast（assert + 退出码 1），不返回半截数据。
 //
 // deflate 位序：Huffman 码 MSB-first，但字节流 LSB-first —— 所以每个码先逆序再写。
 
@@ -487,4 +490,406 @@ fn gzip_hex(s: str) -> str {
         i = i + 1
     }
     return str_from_bytes(out)
+}
+
+// ---------------------------------------------------------------------------
+// 解码（inflate，RFC 1951）—— v1.19
+//
+// 采用 puff 风格的规范 Huffman 解码：只存 counts[] 与按码长排序的 symbols[]，
+// 逐位下降，不需要构造大查找表。
+//
+// 参数上限 6 个（寄存器传参 ARG_REGS），所以 literal 与 distance 两套码表
+// 合并进同一对 vec，用偏移区分：counts[0..15]=literal、counts[16..31]=distance；
+// symbols[0..287]=literal、symbols[288..319]=distance。
+//
+// 位读状态放在 mem_alloc(24)：[0]=bitbuf [1]=bitcnt [2]=pos（绝对字节下标）。
+// 解码错误一律 fail-fast。
+// ---------------------------------------------------------------------------
+
+const GZ_LIT_OFF = 0
+const GZ_DIST_OFF = 16
+const GZ_LIT_SYM = 0
+const GZ_DIST_SYM = 288
+
+// 生成 n 个 0 的 vec[int]（vec.new(n) 只给容量，长度要靠 push 长出来）
+fn _zeros(n: int) -> vec[int] {
+    let v = vec[int].new(n)
+    let mut i = 0
+    while i < n {
+        v.push(0)
+        i = i + 1
+    }
+    return v
+}
+
+fn _br_new(pos: int) -> int {
+    let st = mem_alloc(24)
+    mem_store64(st, 0, 0)
+    mem_store64(st, 1, 0)
+    mem_store64(st, 2, pos)
+    return st
+}
+
+// 读 n 位（LSB-first）。越界按 0 补齐——数据损坏由尾部 CRC 兜住。
+fn _gb(src: str, st: int, n: int) -> int {
+    if n == 0 {
+        return 0
+    }
+    let mut buf = mem_load64(st, 0)
+    let mut cnt = mem_load64(st, 1)
+    let mut pos = mem_load64(st, 2)
+    let total = len(src)
+    while cnt < n {
+        let mut b = 0
+        if pos < total {
+            b = src[pos]
+        }
+        pos = pos + 1
+        buf = buf | (b << cnt)
+        cnt = cnt + 8
+    }
+    let v = buf & ((1 << n) - 1)
+    buf = buf >> n
+    cnt = cnt - n
+    mem_store64(st, 0, buf)
+    mem_store64(st, 1, cnt)
+    mem_store64(st, 2, pos)
+    return v
+}
+
+// 规范 Huffman 建表：counts[coff+l] = 码长为 l 的符号数；symbols 按 (len, sym) 排序
+fn _build(counts: vec[int], symbols: vec[int], lens: vec[int], n: int, coff: int) -> int {
+    let soff = coff * 18
+    let mut i = 0
+    while i < 16 {
+        counts.set(coff + i, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        let l = lens.get(i)
+        if l < 0 || l > 15 {
+            return -1
+        }
+        counts.set(coff + l, counts.get(coff + l) + 1)
+        i = i + 1
+    }
+    counts.set(coff, 0)       // 码长 0 = 未使用，不参与排序
+    let offs = _zeros(16)
+    let mut s = 0
+    i = 1
+    while i < 16 {
+        offs.set(i, s)
+        s = s + counts.get(coff + i)
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        let l = lens.get(i)
+        if l != 0 {
+            symbols.set(soff + offs.get(l), i)
+            offs.set(l, offs.get(l) + 1)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// 解一个符号；-1 = 码表非法/数据截断
+fn _huff(src: str, st: int, counts: vec[int], symbols: vec[int], coff: int) -> int {
+    let soff = coff * 18
+    let mut code = 0
+    let mut first = 0
+    let mut index = 0
+    let mut l = 1
+    while l < 16 {
+        code = code | _gb(src, st, 1)
+        let cnt = counts.get(coff + l)
+        if code - first < cnt {
+            return symbols.get(soff + index + (code - first))
+        }
+        index = index + cnt
+        first = (first + cnt) << 1
+        code = code << 1
+        l = l + 1
+    }
+    return -1
+}
+
+// RFC 1951 §3.2.6 固定 Huffman 表
+fn _fixed_tables(counts: vec[int], symbols: vec[int]) -> int {
+    let litlens = _zeros(288)
+    let mut i = 0
+    while i < 288 {
+        let mut l = 8
+        if i >= 144 && i <= 255 {
+            l = 9
+        }
+        if i >= 256 && i <= 279 {
+            l = 7
+        }
+        litlens.set(i, l)
+        i = i + 1
+    }
+    if _build(counts, symbols, litlens, 288, GZ_LIT_OFF) != 0 {
+        return -1
+    }
+    let distlens = _zeros(32)
+    i = 0
+    while i < 32 {
+        distlens.set(i, 5)
+        i = i + 1
+    }
+    return _build(counts, symbols, distlens, 32, GZ_DIST_OFF)
+}
+
+// 解一段 Huffman 编码的数据，直到块结束符 256
+fn _codes(src: str, st: int, out: vec[int], counts: vec[int], symbols: vec[int]) -> int {
+    let lb = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35,
+              43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+    let le = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3,
+              4, 4, 4, 4, 5, 5, 5, 5, 0]
+    let db = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257,
+              385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+    let de = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8,
+              9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+    // 死循环兜底：每轮至少消耗 1 位，符号数不会超过输入位数
+    let mut guard = 0
+    let limit = len(src) * 16 + 1024
+    while guard < limit {
+        guard = guard + 1
+        let sym = _huff(src, st, counts, symbols, GZ_LIT_OFF)
+        if sym < 0 {
+            return -1
+        }
+        if sym < 256 {
+            out.push(sym)
+        } else if sym == 256 {
+            return 0
+        } else {
+            let k = sym - 257
+            if k > 28 {
+                return -1
+            }
+            let ln = lb[k] + _gb(src, st, le[k])
+            let ds = _huff(src, st, counts, symbols, GZ_DIST_OFF)
+            if ds < 0 || ds > 29 {
+                return -1
+            }
+            let dist = db[ds] + _gb(src, st, de[ds])
+            if dist <= 0 || dist > out.len() {
+                return -1
+            }
+            let mut c = 0
+            while c < ln {
+                out.push(out.get(out.len() - dist))
+                c = c + 1
+            }
+        }
+    }
+    return -1
+}
+
+// 动态 Huffman：读码长码表 → 解出 literal/distance 码长 → 建表
+fn _dyn_tables(src: str, st: int, counts: vec[int], symbols: vec[int]) -> int {
+    let hlit = _gb(src, st, 5) + 257
+    let hdist = _gb(src, st, 5) + 1
+    let hclen = _gb(src, st, 4) + 4
+    if hlit > 286 || hdist > 30 {
+        return -1
+    }
+    let order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+    let cl = _zeros(19)
+    let mut i = 0
+    while i < hclen {
+        cl.set(order[i], _gb(src, st, 3))
+        i = i + 1
+    }
+    let clc = _zeros(16)
+    let cls = _zeros(32)
+    if _build(clc, cls, cl, 19, 0) != 0 {
+        return -1
+    }
+    let total = hlit + hdist
+    let lens = _zeros(total)
+    let mut n = 0
+    while n < total {
+        let sym = _huff(src, st, clc, cls, 0)
+        if sym < 0 {
+            return -1
+        }
+        if sym < 16 {
+            lens.set(n, sym)
+            n = n + 1
+        } else if sym == 16 {
+            if n == 0 {
+                return -1
+            }
+            let prev = lens.get(n - 1)
+            let rep = 3 + _gb(src, st, 2)
+            if n + rep > total {
+                return -1
+            }
+            let mut c = 0
+            while c < rep {
+                lens.set(n, prev)
+                n = n + 1
+                c = c + 1
+            }
+        } else if sym == 17 {
+            let rep = 3 + _gb(src, st, 3)
+            if n + rep > total {
+                return -1
+            }
+            let mut c = 0
+            while c < rep {
+                lens.set(n, 0)
+                n = n + 1
+                c = c + 1
+            }
+        } else {
+            let rep = 11 + _gb(src, st, 7)
+            if n + rep > total {
+                return -1
+            }
+            let mut c = 0
+            while c < rep {
+                lens.set(n, 0)
+                n = n + 1
+                c = c + 1
+            }
+        }
+    }
+    let litlens = _zeros(hlit)
+    i = 0
+    while i < hlit {
+        litlens.set(i, lens.get(i))
+        i = i + 1
+    }
+    let distlens = _zeros(hdist)
+    i = 0
+    while i < hdist {
+        distlens.set(i, lens.get(hlit + i))
+        i = i + 1
+    }
+    if _build(counts, symbols, litlens, hlit, GZ_LIT_OFF) != 0 {
+        return -1
+    }
+    return _build(counts, symbols, distlens, hdist, GZ_DIST_OFF)
+}
+
+// 从 start 开始解 raw deflate 流（无 gzip 头）
+fn _inflate_at(s: str, start: int) -> str {
+    let out = vec[int].new(len(s) * 4 + 64)
+    let st = _br_new(start)
+    let counts = _zeros(32)
+    let symbols = _zeros(320)
+    let mut last = 0
+    while last == 0 {
+        last = _gb(s, st, 1)
+        let bt = _gb(s, st, 2)
+        if bt == 0 {
+            // 存储块：丢掉当前字节剩余位，按字节读 LEN/NLEN
+            mem_store64(st, 0, 0)
+            mem_store64(st, 1, 0)
+            let pos = mem_load64(st, 2)
+            if pos + 4 > len(s) {
+                assert(false, "inflate: 存储块头越界")
+            }
+            let ln = s[pos] | (s[pos + 1] << 8)
+            let nln = s[pos + 2] | (s[pos + 3] << 8)
+            if (ln ^ 0xFFFF) != nln {
+                assert(false, "inflate: LEN/NLEN 不匹配")
+            }
+            if pos + 4 + ln > len(s) {
+                assert(false, "inflate: 存储块数据越界")
+            }
+            let mut c = 0
+            while c < ln {
+                out.push(s[pos + 4 + c])
+                c = c + 1
+            }
+            mem_store64(st, 2, pos + 4 + ln)
+        } else if bt == 1 {
+            if _fixed_tables(counts, symbols) != 0 {
+                assert(false, "inflate: 固定码表构建失败")
+            }
+            if _codes(s, st, out, counts, symbols) != 0 {
+                assert(false, "inflate: 固定 Huffman 块解码失败")
+            }
+        } else if bt == 2 {
+            if _dyn_tables(s, st, counts, symbols) != 0 {
+                assert(false, "inflate: 动态码表非法")
+            }
+            if _codes(s, st, out, counts, symbols) != 0 {
+                assert(false, "inflate: 动态 Huffman 块解码失败")
+            }
+        } else {
+            assert(false, "inflate: 非法块类型（BTYPE=3）")
+        }
+    }
+    return str_from_bytes(out)
+}
+
+// raw deflate（RFC 1951，无外层封装）
+fn inflate_raw(s: str) -> str {
+    return _inflate_at(s, 0)
+}
+
+// gzip（RFC 1952）：解析头 → inflate → 校验 CRC32 与 ISIZE
+fn gzip_decode(s: str) -> str {
+    let n = len(s)
+    if n < 18 {
+        assert(false, "gzip_decode: 数据过短")
+    }
+    if s[0] != 0x1F || s[1] != 0x8B {
+        assert(false, "gzip_decode: 魔数不是 1F 8B")
+    }
+    if s[2] != 8 {
+        assert(false, "gzip_decode: 压缩方法不是 deflate")
+    }
+    let flg = s[3]
+    let mut p = 10
+    if (flg & 4) != 0 {                 // FEXTRA
+        if p + 2 > n {
+            assert(false, "gzip_decode: FEXTRA 越界")
+        }
+        let xlen = s[p] | (s[p + 1] << 8)
+        p = p + 2 + xlen
+    }
+    if (flg & 8) != 0 {                 // FNAME
+        while p < n {
+            if s[p] == 0 {
+                break
+            }
+            p = p + 1
+        }
+        p = p + 1
+    }
+    if (flg & 16) != 0 {                // FCOMMENT
+        while p < n {
+            if s[p] == 0 {
+                break
+            }
+            p = p + 1
+        }
+        p = p + 1
+    }
+    if (flg & 2) != 0 {                 // FHCRC
+        p = p + 2
+    }
+    if p + 8 > n {
+        assert(false, "gzip_decode: 头部越界")
+    }
+    let body = _inflate_at(s, p)
+    let ti = n - 8
+    let want_crc = s[ti] | (s[ti + 1] << 8) | (s[ti + 2] << 16) | (s[ti + 3] << 24)
+    let want_len = s[ti + 4] | (s[ti + 5] << 8) | (s[ti + 6] << 16) | (s[ti + 7] << 24)
+    if crc32(body) != want_crc {
+        assert(false, "gzip_decode: CRC32 校验失败")
+    }
+    if (len(body) & 0xFFFFFFFF) != want_len {
+        assert(false, "gzip_decode: ISIZE 校验失败")
+    }
+    return body
 }

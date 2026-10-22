@@ -1,0 +1,270 @@
+// std/math.qma —— 浮点与整数数学工具（v1.19）
+//
+// 为什么需要：`f64` 只有四则/比较，没有 sqrt/floor/ceil/pow，几何与统计代码
+// 只能各自手写牛顿迭代。这里给一套最小可用的纯库实现。
+//
+// 设计约束：
+//   * **不新增指令**：sqrt 用牛顿迭代 + 4 的幂缩放（不依赖 sqrtsd 编码器改动）；
+//   * 精度：sqrt 相对误差 < 1e-15（8 轮牛顿，初值 (y+1)/2，y 已归一到 [1,4)）；
+//   * 边界：floor/ceil/round 通过 to_int 转换，超出 int64 范围的值未定义；
+//   * 没有 exp/log/pow(x,y)：需要自然对数，登记在 docs/07-gaps.md。
+
+// ---------------------------------------------------------------------------
+// 基础
+// ---------------------------------------------------------------------------
+
+fn fabs(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x
+    }
+    return x
+}
+
+fn fsign(x: f64) -> int {
+    if x > 0.0 {
+        return 1
+    }
+    if x < 0.0 {
+        return -1
+    }
+    return 0
+}
+
+fn fmin(a: f64, b: f64) -> f64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn fmax(a: f64, b: f64) -> f64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn is_nan(x: f64) -> int {
+    if x != x {
+        return 1
+    }
+    return 0
+}
+
+// inf 的特征：x-x 不是 0（NaN 也满足），但 x==x 排除 NaN
+fn is_inf(x: f64) -> int {
+    if (x - x) != 0.0 && x == x {
+        return 1
+    }
+    return 0
+}
+
+fn is_finite(x: f64) -> int {
+    if is_nan(x) == 1 || is_inf(x) == 1 {
+        return 0
+    }
+    return 1
+}
+
+// ---------------------------------------------------------------------------
+// 取整（朝零截断由 to_int 提供，这里补齐四个方向）
+// ---------------------------------------------------------------------------
+
+fn trunc_f(x: f64) -> f64 {
+    return to_float(to_int(x))
+}
+
+fn floor(x: f64) -> f64 {
+    let i = to_int(x)
+    let f = to_float(i)
+    if f > x {
+        return to_float(i - 1)
+    }
+    return f
+}
+
+fn ceil(x: f64) -> f64 {
+    let i = to_int(x)
+    let f = to_float(i)
+    if f < x {
+        return to_float(i + 1)
+    }
+    return f
+}
+
+// 四舍五入（.5 向上）
+fn round(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - floor(0.0 - x + 0.5)
+    }
+    return floor(x + 0.5)
+}
+
+// ---------------------------------------------------------------------------
+// 幂与根
+// ---------------------------------------------------------------------------
+
+// 整数幂（快速幂）；n 可为负
+fn powi(x: f64, n: int) -> f64 {
+    if n == 0 {
+        return 1.0
+    }
+    let mut e = n
+    if e < 0 {
+        e = 0 - e
+    }
+    let mut base = x
+    let mut r = 1.0
+    while e > 0 {
+        if (e & 1) == 1 {
+            r = r * base
+        }
+        base = base * base
+        e = e >> 1
+    }
+    if n < 0 {
+        return 1.0 / r
+    }
+    return r
+}
+
+// 平方根：先把 y 缩放到 [1,4)，牛顿迭代 8 轮，再乘回 2^k
+fn sqrt(x: f64) -> f64 {
+    if x < 0.0 {
+        assert(false, "sqrt: 负数没有实数平方根")
+    }
+    if x == 0.0 {
+        return 0.0
+    }
+    let mut y = x
+    let mut scale = 1.0
+    while y > 4.0 {
+        y = y / 4.0
+        scale = scale * 2.0
+    }
+    while y < 1.0 {
+        y = y * 4.0
+        scale = scale / 2.0
+    }
+    let mut r = (y + 1.0) / 2.0
+    let mut k = 0
+    while k < 8 {
+        r = (r + y / r) / 2.0
+        k = k + 1
+    }
+    return r * scale
+}
+
+// 立方根（牛顿：r = (2r + x/r²)/3）
+fn cbrt(x: f64) -> f64 {
+    if x == 0.0 {
+        return 0.0
+    }
+    let neg = x < 0.0
+    let mut v = x
+    if neg {
+        v = 0.0 - x
+    }
+    let mut r = v
+    if r > 1.0 {
+        r = 1.0
+    }
+    let mut k = 0
+    while k < 24 {
+        r = (2.0 * r + v / (r * r)) / 3.0
+        k = k + 1
+    }
+    if neg {
+        return 0.0 - r
+    }
+    return r
+}
+
+// ---------------------------------------------------------------------------
+// 整数
+// ---------------------------------------------------------------------------
+
+fn imin(a: int, b: int) -> int {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn imax(a: int, b: int) -> int {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn clamp_int(x: int, lo: int, hi: int) -> int {
+    if x < lo {
+        return lo
+    }
+    if x > hi {
+        return hi
+    }
+    return x
+}
+
+fn clamp_f(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo {
+        return lo
+    }
+    if x > hi {
+        return hi
+    }
+    return x
+}
+
+// 整数平方根（牛顿，向下取整）
+fn isqrt(n: int) -> int {
+    if n < 0 {
+        assert(false, "isqrt: 负数")
+    }
+    if n < 2 {
+        return n
+    }
+    let mut x = n
+    let mut y = (x + 1) / 2
+    while y < x {
+        x = y
+        y = (x + n / x) / 2
+    }
+    return x
+}
+
+// 最大公约数 / 最小公倍数
+fn gcd(a: int, b: int) -> int {
+    let mut x = a
+    let mut y = b
+    if x < 0 {
+        x = 0 - x
+    }
+    if y < 0 {
+        y = 0 - y
+    }
+    while y != 0 {
+        let t = x % y
+        x = y
+        y = t
+    }
+    return x
+}
+
+fn lcm(a: int, b: int) -> int {
+    if a == 0 || b == 0 {
+        return 0
+    }
+    let g = gcd(a, b)
+    let mut x = a / g
+    if x < 0 {
+        x = 0 - x
+    }
+    let mut y = b
+    if y < 0 {
+        y = 0 - y
+    }
+    return x * y
+}

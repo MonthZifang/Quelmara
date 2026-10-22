@@ -67,6 +67,9 @@ jobs:
       - name: Windows PE 回归（无 CRT / 多核 / chan / vec / fail-fast）
         run: python tests/run_win_tests.py
 
+      - name: gzip 解码互操作（zlib 9 种编码组合 → Quelmara 解压）
+        run: python tests/gzip_inflate_test.py
+
       - name: 自举对拍（词法 / 声明级 AST）
         run: |
           python tests/lexdiff.py

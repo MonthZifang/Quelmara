@@ -3268,6 +3268,19 @@ class Lower:
                 fn.emit("jmp", l_false)
                 return
             cc = {"==": "e", "!=": "ne", "<": "l", "<=": "le", ">": "g", ">=": "ge"}[e[1]]
+            # 浮点比较必须走 fcmpset（comisd + setcc），不能直接 jcc：
+            # IEEE754 负数的位模式在整数序下是反的，直接 jcc 会让
+            # `if -2.0 > -1.0` 成立（v1.19 修复）。
+            wa, wb = self._float_of(fn, a), self._float_of(fn, b)
+            if wa or wb:
+                w = "f64" if "f64" in (wa, wb) else "f32"
+                a = self.conv_to(fn, a, wa, w)
+                b = self.conv_to(fn, b, wb, w)
+                d = fn.new_v()
+                fn.emit("fcmpset", w, cc, d, a, b)
+                fn.emit("jnz", d, l_true)
+                fn.emit("jmp", l_false)
+                return
             fn.emit("jcc", cc, a, b, l_true)
             fn.emit("jmp", l_false)
             return

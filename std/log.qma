@@ -1,13 +1,24 @@
-// std/log.qma —— 极简日志（v1.16）
+// std/log.qma —— 极简日志（v1.16，v1.19 补级别过滤）
 // 每行：[级别][启动以来毫秒] 消息。输出到 stdout（print 通道，行缓冲）。
-// stderr 通道、时间戳绝对时间、日志级别过滤——登记 GAPS（需 stderr
-// 写内建 + 本地时间获取）。
+// 级别过滤（v1.19）：log_set_level(0..3) 控制输出量，默认 0（全开）。
+// stderr 通道、绝对时间戳、轮转——登记 docs/07-gaps.md。
 // ---------------------------------------------------------------------------
 
 import std.core
 import std.str
 
 const _T0_W = 9          // static_word(9) = 首条日志的 now_ns（相对时间基准）
+const _LVL_W = 10        // static_word(10) = 当前级别阈值
+
+// 级别：0=全部  1=只 warn/error  2=只 error  3=静默
+fn log_set_level(lv: int) -> int {
+    mem_store64(static_word(_LVL_W), 0, lv)
+    return lv
+}
+
+fn log_level() -> int {
+    return mem_load64(static_word(_LVL_W), 0)
+}
 
 fn _log_line(tag: str, msg: str) {
     let st = static_word(_T0_W)
@@ -39,14 +50,23 @@ fn _log_line(tag: str, msg: str) {
 }
 
 fn log_info(msg: str) {
+    if log_level() >= 1 {
+        return
+    }
     _log_line("[INFO]", msg)
 }
 
 fn log_warn(msg: str) {
+    if log_level() >= 2 {
+        return
+    }
     _log_line("[WARN]", msg)
 }
 
 fn log_error(msg: str) {
+    if log_level() >= 3 {
+        return
+    }
     _log_line("[ERROR]", msg)
 }
 

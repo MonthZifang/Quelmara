@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-24 个模块，**279 个公开函数**（另有 178 个 `_` 前缀的内部函数）。
+26 个模块，**309 个公开函数**（另有 123 个 `_` 前缀的内部函数）。
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -17,7 +17,9 @@
 | `std/str` | 查找/切分/拼接/大小写/补齐 | 26 / 30 |
 | `std/url` | URL 解析、query 取值、编码解码 | 12 / 18 |
 | `std/json` | DOM 解析 + builder | 39 / 84 |
-| `std/gzip` | DEFLATE + gzip + crc32 | 4 / 18 |
+| `std/gzip` | DEFLATE 编码 + **inflate 解码** + crc32 | 6 / 29 |
+| `std/hex` | 十六进制编解码（v1.19） | 5 / 5 |
+| `std/math` | sqrt/cbrt/取整/powi/gcd（v1.19） | 21 / 21 |
 | `std/sha1` | SHA-1（WS 握手用） | 5 / 5 |
 | `std/sha256` | SHA-256 + HMAC-SHA256 | 11 / 11 |
 | `std/aes` | AES-128-GCM | 6 / 26 |
@@ -33,7 +35,7 @@
 | `std/sync` | 自旋锁 / Treiber 栈 / WaitGroup | 10 / 10 |
 | `std/rand` | xorshift64* | 4 / 5 |
 | `std/sort` | 快排 + 有序性检查 | 2 / 5 |
-| `std/log` | 分级日志 + 结构化字段 | 4 / 5 |
+| `std/log` | 分级日志 + 结构化字段 + 级别过滤 | 6 / 7 |
 | `std/time` | `now_ms` / `sleep_ms` 便捷层 | 2 / 2 |
 | `std/timer` | 轮询式定时器 | 4 / 4 |
 
@@ -112,13 +114,27 @@ fn heap_pop(h: vec[int]) -> int
 
 ### `std/gzip.qma`
 
-DEFLATE 编码 + gzip 包装 + CRC-32
+DEFLATE 编码 + gzip 包装 + CRC-32；v1.19 起含 inflate 解码
 
 ```quelmara
 fn crc32(s: str) -> int
 fn deflate_raw(s: str) -> str
 fn gzip_encode(s: str) -> str
 fn gzip_hex(s: str) -> str
+fn inflate_raw(s: str) -> str
+fn gzip_decode(s: str) -> str
+```
+
+### `std/hex.qma`
+
+十六进制编解码
+
+```quelmara
+fn hex_val(c: int) -> int
+fn hex_encode(s: str) -> str
+fn hex_encode_upper(s: str) -> str
+fn hex_decode_ok(s: str) -> int
+fn hex_decode(s: str) -> str
 ```
 
 ### `std/http.qma`
@@ -209,13 +225,43 @@ fn json_done(h: int) -> str
 
 ### `std/log.qma`
 
-分级日志（stderr）+ 结构化字段
+分级日志（stdout）+ 结构化字段 + 级别过滤
 
 ```quelmara
+fn log_set_level(lv: int) -> int
+fn log_level() -> int
 fn log_info(msg: str)
 fn log_warn(msg: str)
 fn log_error(msg: str)
 fn log_kv(tag: str, msg: str, kv: vec[str]) -> int
+```
+
+### `std/math.qma`
+
+浮点与整数数学（sqrt/cbrt/floor/ceil/round/powi/gcd）
+
+```quelmara
+fn fabs(x: f64) -> f64
+fn fsign(x: f64) -> int
+fn fmin(a: f64, b: f64) -> f64
+fn fmax(a: f64, b: f64) -> f64
+fn is_nan(x: f64) -> int
+fn is_inf(x: f64) -> int
+fn is_finite(x: f64) -> int
+fn trunc_f(x: f64) -> f64
+fn floor(x: f64) -> f64
+fn ceil(x: f64) -> f64
+fn round(x: f64) -> f64
+fn powi(x: f64, n: int) -> f64
+fn sqrt(x: f64) -> f64
+fn cbrt(x: f64) -> f64
+fn imin(a: int, b: int) -> int
+fn imax(a: int, b: int) -> int
+fn clamp_int(x: int, lo: int, hi: int) -> int
+fn clamp_f(x: f64, lo: f64, hi: f64) -> f64
+fn isqrt(n: int) -> int
+fn gcd(a: int, b: int) -> int
+fn lcm(a: int, b: int) -> int
 ```
 
 ### `std/mem.qma`
@@ -512,7 +558,9 @@ fn ws_close(fd: int, code: int) -> int
 | `std/http` | 服务端、keep-alive、流水线、`Content-Encoding: gzip` 协商、JSON/text/html 响应 | 客户端、路由/中间件、静态文件服务、MIME、cookie/session、multipart；`Transfer-Encoding: chunked` 请求体回 501 |
 | `std/ws` | 服务端握手、帧收发、ping/close | 客户端、permessage-deflate |
 | `std/json` | DOM 解析、builder、转义、代理对 | `to_json<T>`（无泛型/反射）；数字统一按原文保留 |
-| `std/gzip` | 编码（DEFLATE + 固定 Huffman）、CRC-32、gzip 包装 | **解码（inflate）未做** |
+| `std/gzip` | 编码（DEFLATE + 固定 Huffman）、**解码（存储块 / 固定 / 动态 Huffman）**、CRC-32、gzip 头尾校验 | 多 member 流（一次只解第一个）；解码失败 fail-fast |
+| `std/hex` | `hex_encode` / `hex_encode_upper` / `hex_decode` / `hex_decode_ok` / `hex_val` | 无 base32/base64url（base64url 用 `std/b64` 自行替换字符） |
+| `std/math` | `sqrt`（牛顿，相对误差 <1e-15）、`cbrt`、`floor/ceil/round/trunc_f`、`powi`、`gcd/lcm/isqrt`、NaN/inf 判定 | 无 `exp/log/pow(x,y)/sin/cos`（需要超越函数库）；`floor` 等受 int64 范围限制 |
 | `std/aes` | AES-128-GCM 加解密（FIPS/NIST 向量通过） | AES-256、AES-NI 加速 |
 | `std/sha256` | SHA-256、HMAC-SHA256 | SHA-NI 硬件加速（基础设施已就绪，本机 CPU 无该扩展） |
 | `std/net` | 阻塞 TCP（IPv4 字面量） | 域名解析、IPv6、批量收发 |

@@ -11,6 +11,7 @@
     python tests/irdiff.py -v
 """
 import argparse
+import concurrent.futures
 import glob
 import os
 import re
@@ -32,9 +33,10 @@ def normalize(text):
     return SYSCALL_RE.sub(lambda m: f"('syscall', {m.group(1)}, N,", "\n".join(lines)) + "\n"
 
 
-def dump_ir(src, backend):
+def dump_ir(src, backend, tag=""):
+    out = os.path.join(ROOT, "build", f"_irdiff{tag}.out")
     cmd = [sys.executable, os.path.join(STAGE0, backend), "build", src,
-           "-o", os.path.join(ROOT, "build", "_irdiff.out"), "--dump-ir"]
+           "-o", out, "--dump-ir"]
     r = subprocess.run(cmd, capture_output=True, cwd=ROOT)
     # --dump-ir 打到 stdout；编译日志在 stderr
     return r.returncode, r.stdout.decode("utf-8", errors="replace"), \
@@ -48,36 +50,56 @@ def collect():
     return sorted(files)
 
 
+def check_one(path):
+    """跑一个文件的两个后端，返回 (rel, 状态, 详情, IR 行数)。
+
+    每个文件用独立的 -o 路径，避免并行时互相覆盖。
+    """
+    rel = os.path.relpath(path, ROOT).replace("\\", "/")
+    tag = "_" + os.path.basename(path).replace(".qma", "")
+    rc1, out1, err1 = dump_ir(path, "qlm_native.py", tag + "_x")
+    rc2, out2, err2 = dump_ir(path, "qlm_arm64.py", tag + "_a")
+    if rc1 != 0 or rc2 != 0:
+        first = (err1 or err2).strip().splitlines()
+        return rel, "skip", first[-1] if first else "build failed", 0
+    a, b = normalize(out1), normalize(out2)
+    if a == b:
+        return rel, "ok", "", a.count("\n")
+    al, bl = a.splitlines(), b.splitlines()
+    detail = f"x86 {len(al)} 行 / a64 {len(bl)} 行"
+    for i in range(max(len(al), len(bl))):
+        x = al[i] if i < len(al) else "<缺行>"
+        y = bl[i] if i < len(bl) else "<缺行>"
+        if x != y:
+            detail += f"\n         第 {i + 1} 行：x86 {x!r}  a64 {y!r}"
+            break
+    return rel, "bad", detail, len(al)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("-j", "--jobs", type=int, default=0,
+                    help="并行度（默认 = CPU 核数；0 = 自动）")
     args = ap.parse_args()
 
+    files = collect()
+    jobs = args.jobs or min(16, (os.cpu_count() or 4))
     ok = bad = skip = 0
-    for path in collect():
-        rel = os.path.relpath(path, ROOT).replace("\\", "/")
-        rc1, out1, err1 = dump_ir(path, "qlm_native.py")
-        rc2, out2, err2 = dump_ir(path, "qlm_arm64.py")
-        if rc1 != 0 or rc2 != 0:
-            skip += 1
-            first = (err1 or err2).strip().splitlines()
-            print(f"  [SKIP] {rel}: {first[-1] if first else 'build failed'}")
-            continue
-        a, b = normalize(out1), normalize(out2)
-        if a == b:
+    # 每个文件两次独立编译进程，纯 I/O 等待 —— 用线程池并行（约 4-6× 提速）
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+        results = list(ex.map(check_one, files))
+    for rel, state, detail, nlines in results:
+        if state == "ok":
             ok += 1
             if args.verbose:
-                print(f"  [ok] {rel} ({a.count(chr(10))} IR lines)")
+                print(f"  [ok] {rel} ({nlines} IR lines)")
+        elif state == "skip":
+            skip += 1
+            print(f"  [SKIP] {rel}: {detail}")
         else:
             bad += 1
-            al, bl = a.splitlines(), b.splitlines()
-            print(f"  [FAIL] {rel}: x86 {len(al)} 行 / a64 {len(bl)} 行")
-            for i in range(max(len(al), len(bl))):
-                x = al[i] if i < len(al) else "<缺行>"
-                y = bl[i] if i < len(bl) else "<缺行>"
-                if x != y:
-                    print(f"         第 {i + 1} 行：x86 {x!r}  a64 {y!r}")
-                    break
+            print(f"  [FAIL] {rel}: {detail}")
     print("-" * 56)
     print(f"PASS={ok} FAIL={bad} SKIP={skip}")
     return 1 if bad else 0

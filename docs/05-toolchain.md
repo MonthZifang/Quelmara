@@ -134,12 +134,13 @@ other = "git:https://github.com/u/r#v1"  # git + 可选 rev
 | `tests/test_uring.sh` | io_uring 网络回归 | Linux 5.1+ |
 | `tests/lexdiff.py` | 词法器对拍（stage-0 vs 自举） | 全平台 |
 | `tests/parsediff.py` | 声明级 AST 对拍 | 全平台 |
-| `tests/irdiff.py` | QuIR 架构无关性对拍 | 全平台 |
+| `tests/irdiff.py` | QuIR 架构无关性对拍（`-j` 并行，默认按核数） | 全平台 |
 | `tests/emitdiff.py` | 发射层确定性对拍 | 全平台 |
 | `tests/bodydiff.py` | 函数体 dump 对拍（自举进度主线） | 全平台 |
 | `tests/bodydig.py` | 函数级并排定位（bodydiff 的定位工具） | 全平台 |
 | `tests/bodymatrix.py` | 语句形态支持矩阵（批处理） | 全平台 |
-| `tests/gzip_interop.py` | gzip 与 zlib 逐字节互操作 | 全平台 |
+| `tests/gzip_interop.py` | gzip 与 zlib 逐字节互操作（编码方向） | 全平台 |
+| `tests/gzip_inflate_test.py` | gzip/deflate 解码互操作（9 种编码组合 × 7 类输入） | 全平台 |
 | `tests/gzip_http_test.py` | HTTP 压缩协商端到端 | 全平台 |
 | `tests/a64_emu.py` | AArch64 指令模拟器 | 全平台 |
 

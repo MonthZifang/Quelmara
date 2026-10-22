@@ -9,12 +9,13 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=124 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
-| 词法器对拍 | **PASS=109 FAIL=0**（109 个源文件） | `python tests/lexdiff.py` |
-| 声明级 AST 对拍 | **PASS=94 FAIL=0**（跳过 3 个：`t52_iface` / `t54_iface_dyn` / `t56_generic`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
-| 函数体 dump 对拍 | **一致 740 / 分叉 625 / SKIP 同步 18 / SKIP 不同步 18** | `python tests/bodydiff.py` |
-| IR 架构无关对拍 | 本机**超时未跑通**（>120 s 挂住），口径以 CI 为准 | `python tests/irdiff.py` |
-| 发射层确定性对拍 | 同上，本机未跑通 | `python tests/emitdiff.py` |
+| PE 回归（主回归） | **PASS=126 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
+| 词法器对拍 | **PASS=111 FAIL=0**（111 个源文件） | `python tests/lexdiff.py` |
+| 声明级 AST 对拍 | **PASS=96 FAIL=0**（跳过 3 个：`t52_iface` / `t54_iface_dyn` / `t56_generic`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
+| 函数体 dump 对拍 | **一致 766 / 分叉 680 / SKIP 同步 18 / SKIP 不同步 18** | `python tests/bodydiff.py` |
+| IR 架构无关对拍 | **PASS=56 FAIL=0 SKIP=35**，并行后 **49 s**（原串行 5 min 41 s） | `python tests/irdiff.py` |
+| 发射层确定性对拍 | **PASS=10 FAIL=0** | `python tests/emitdiff.py` |
+| gzip 解码互操作 | **PASS=63 FAIL=0**（zlib 9 种编码组合 × 7 类输入） | `python tests/gzip_inflate_test.py` |
 | 三道门禁 | check_names / check_origin / check_docs 全 PASS | `python tools/dev/check_*.py` |
 
 `run_win_tests.py` 的 7 组覆盖：PE 结构（MZ/PE32+/AMD64/无 CRT 符号）、基础语义、
@@ -34,11 +35,12 @@
 
 | 负载 | 耗时 | 吞吐 |
 |---|---|---|
-| SHA-256 1 MiB | **69 ms** | 15.2 MB/s |
-| gzip 1 MiB（重复文本，输出 7658 B） | **25 ms** | 40 MB/s |
-| CRC-32 1 MiB | **3 ms** | 333 MB/s |
+| SHA-256 1 MiB | **70 ms** | 15.0 MB/s |
+| gzip 编码 1 MiB（重复文本，输出 7658 B） | **25–27 ms** | 39 MB/s |
+| **gzip 解码 1 MiB** | **15 ms**（min of 3） | **70 MB/s** |
+| CRC-32 1 MiB | **3–6 ms** | 170–330 MB/s |
 | `str_split` + `join` 1 MiB（65537 段） | **8 ms** | 125 MB/s |
-| URL parse × 100k | **70 ms** | 0.7 µs/次 |
+| URL parse × 100k | **69 ms** | 0.69 µs/次 |
 | JSON parse 92 891 B | **2 ms** | 46 MB/s |
 | JSON 遍历 2000 对象 | **< 1 ms** | — |
 
@@ -140,5 +142,4 @@ python tools/stage0/qlm_cli.py run bench/sync_bench.qma --target win
 |---|---|---|
 | LICM 默认关闭 | 循环不变量无法外提，性能损失普遍存在 | x64 分配器布局敏感段错误未根修，`QLM_ENABLE_LICM=1` 可复现 |
 | 接口装箱不释放 | 热点循环频繁装箱会涨堆 | 无 rc/drop 路径 |
-| `irdiff` / `emitdiff` 本机挂住 | 本机无法验证 IR/发射层一致性 | 只在 CI 上跑 |
-| `qlm_cli.py version` 打印 `1.0.0` | 版本口径与文档不一致 | 未修，见 `07-gaps.md` |
+| `f64` 比较曾整型化 | `if a > b` 对负浮点给出相反结果（v1.19 已修） | 根因：`branch()` 直接发 `jcc` 未走 `fcmpset`；回归 `tests/t64_math.qma` |

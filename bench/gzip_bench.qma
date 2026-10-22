@@ -19,5 +19,13 @@ fn main() {
     let c = crc32(big)
     let t3 = now_ns()
     print("crc32 1MiB: " + ((t3 - t2) / 1000000).to_str() + " ms")
+    // 解码（v1.19 inflate）：先预热一次，再计时
+    let warm2 = gzip_decode(g)
+    assert(warm2 == big, "decode warm")
+    let t4 = now_ns()
+    let back = gzip_decode(g)
+    let t5 = now_ns()
+    assert(back == big, "decode round-trip")
+    print("gzip 解码 1MiB: " + ((t5 - t4) / 1000000).to_str() + " ms")
     print("gzip_bench ok")
 }

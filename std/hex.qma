@@ -1,0 +1,105 @@
+// std/hex.qma —— 十六进制编解码（v1.19）
+//
+// 为什么需要：哈希输出、JWT、调试转储、二进制协议日志都要 hex。
+// 之前全仓只有 gzip_hex 一个特例（且它直接对 gzip 结果编码），没有通用工具。
+//
+// 语义：
+//   * hex_encode / hex_encode_upper：按字节编码，输入任意二进制 str；
+//   * hex_decode：接受大小写混合，长度为奇数或含非法字符 → fail-fast；
+//   * hex_decode_ok：只判断合法性，不分配。
+//
+// 性能：单遍扫描 + vec[int] 批量构造（str_from_bytes 一次分配），
+// 不做逐字符 str 拼接。
+
+fn hex_val(c: int) -> int {
+    if c >= 48 && c <= 57 {          // '0'..'9'
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {         // 'a'..'f'
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {          // 'A'..'F'
+        return c - 55
+    }
+    return -1
+}
+
+fn hex_encode(s: str) -> str {
+    let n = len(s)
+    let out = vec[int].new(n * 2 + 1)
+    let mut i = 0
+    while i < n {
+        let b = s[i]
+        let hi = b >> 4
+        let lo = b & 15
+        if hi < 10 {
+            out.push(48 + hi)
+        } else {
+            out.push(87 + hi)
+        }
+        if lo < 10 {
+            out.push(48 + lo)
+        } else {
+            out.push(87 + lo)
+        }
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+fn hex_encode_upper(s: str) -> str {
+    let n = len(s)
+    let out = vec[int].new(n * 2 + 1)
+    let mut i = 0
+    while i < n {
+        let b = s[i]
+        let hi = b >> 4
+        let lo = b & 15
+        if hi < 10 {
+            out.push(48 + hi)
+        } else {
+            out.push(55 + hi)
+        }
+        if lo < 10 {
+            out.push(48 + lo)
+        } else {
+            out.push(55 + lo)
+        }
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+fn hex_decode_ok(s: str) -> int {
+    let n = len(s)
+    if (n & 1) != 0 {
+        return 0
+    }
+    let mut i = 0
+    while i < n {
+        if hex_val(s[i]) < 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn hex_decode(s: str) -> str {
+    let n = len(s)
+    if (n & 1) != 0 {
+        assert(false, "hex_decode: 长度为奇数")
+    }
+    let out = vec[int].new(n / 2 + 1)
+    let mut i = 0
+    while i < n {
+        let hi = hex_val(s[i])
+        let lo = hex_val(s[i + 1])
+        if hi < 0 || lo < 0 {
+            assert(false, "hex_decode: 含非法十六进制字符")
+        }
+        out.push((hi << 4) | lo)
+        i = i + 2
+    }
+    return str_from_bytes(out)
+}

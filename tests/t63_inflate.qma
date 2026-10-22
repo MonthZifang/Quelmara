@@ -1,0 +1,52 @@
+// t63_inflate.qma：gzip 解码（inflate）—— v1.19
+// 覆盖：自编码→自解码往返（固定 Huffman）、空串、长重复文本（LZ77 回溯）、
+//       多字节 UTF-8、raw deflate、hex 编解码。
+// 与 zlib 的互操作由 tests/gzip_inflate_test.py 覆盖（动态 Huffman）。
+module t63
+
+import std.gzip
+import std.hex
+
+fn main() {
+    // 1) 空串
+    let e = gzip_encode("")
+    assert(len(e) > 0, "gzip 空串仍有头尾")
+    assert(gzip_decode(e) == "", "round-trip empty")
+
+    // 2) 短文本（固定 Huffman 字面量路径）
+    let s = "hello hello hello hello world"
+    assert(gzip_decode(gzip_encode(s)) == s, "round-trip short")
+
+    // 3) 长重复文本：2000 字节，触发距离/长度码
+    let mut big = ""
+    let mut i = 0
+    while i < 200 {
+        big = big + "abcdefghij"
+        i = i + 1
+    }
+    assert(len(big) == 2000, "big len")
+    assert(gzip_decode(gzip_encode(big)) == big, "round-trip 2000B")
+
+    // 4) 多字节 UTF-8
+    let cn = "你好，Quelmara！压缩与解压必须逐字节一致。"
+    assert(gzip_decode(gzip_encode(cn)) == cn, "round-trip utf8")
+
+    // 5) raw deflate（无 gzip 封装）
+    assert(inflate_raw(deflate_raw(s)) == s, "raw deflate round-trip")
+
+    // 6) hex 编解码
+    assert(hex_encode("AB") == "4142", "hex encode")
+    assert(hex_encode_upper("AB") == "4142", "hex upper")
+    assert(hex_decode("4142") == "AB", "hex decode")
+    assert(hex_decode("4a4B") == "JK", "hex mixed case")
+    assert(hex_encode(hex_decode("00ff10")) == "00ff10", "hex binary round-trip")
+    assert(hex_decode_ok("4142") == 1, "hex ok")
+    assert(hex_decode_ok("414") == 0, "hex odd len")
+    assert(hex_decode_ok("41zz") == 0, "hex bad char")
+
+    // 7) 空 hex
+    assert(hex_encode("") == "", "hex empty")
+    assert(hex_decode("") == "", "hex decode empty")
+
+    print("ok t63_inflate")
+}
