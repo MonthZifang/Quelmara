@@ -339,6 +339,45 @@ class Enc:
         self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x3a\xdf",
                   modrm_reg(xd, xs), bytes([imm & 0xFF]))
 
+    # -- SSE2 / SSSE3 / PCLMULQDQ（v1.33，GHASH 用）--
+    def movdqa_rr(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x6f", modrm_reg(xd, xs))
+
+    def pand(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\xdb", modrm_reg(xd, xs))
+
+    def por(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\xeb", modrm_reg(xd, xs))
+
+    def pshufb(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x38\x00", modrm_reg(xd, xs))
+
+    def pclmulqdq(self, xd, xs, imm):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x3a\x44",
+                  modrm_reg(xd, xs), bytes([imm & 0xFF]))
+
+    # 立即数形式：66 0F 71/72/73 + modrm(/group) + imm8（组号决定具体指令）
+    def _sse_shift_imm(self, group, opcode, xd, imm):
+        self.emit(b"\x66", rex(b=xd), opcode, modrm_reg(group, xd), bytes([imm & 0xFF]))
+
+    def psrlw_i(self, xd, imm):
+        self._sse_shift_imm(2, b"\x0f\x71", xd, imm)
+
+    def psllw_i(self, xd, imm):
+        self._sse_shift_imm(6, b"\x0f\x71", xd, imm)
+
+    def psrlq_i(self, xd, imm):
+        self._sse_shift_imm(2, b"\x0f\x73", xd, imm)
+
+    def psllq_i(self, xd, imm):
+        self._sse_shift_imm(6, b"\x0f\x73", xd, imm)
+
+    def pslldq_i(self, xd, imm):
+        self._sse_shift_imm(7, b"\x0f\x73", xd, imm)
+
+    def psrldq_i(self, xd, imm):
+        self._sse_shift_imm(3, b"\x0f\x73", xd, imm)
+
     def paddd(self, xd, xs):
         self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\xfe", modrm_reg(xd, xs))
 
@@ -602,6 +641,10 @@ class Fn:
 # 因此作函数参数/返回值零改动复用。
 SLICE_WORDS = 2
 
+
+# v1.33：GHASH 用的 SSE 族（xmm 槽 + 立即数），与 AES 族分开登记便于排查
+_SSE_BUILTINS = ("cpu_pclmul", "xmm_mov", "pand", "por", "pshufb", "pclmulqdq",
+                 "psrlw", "psllw", "psrlq", "psllq", "pslldq", "psrldq")
 
 _XMM_BUILTINS = ("cpu_sha", "cpu_aes", "xmm_load", "xmm_store",
                   "sha_nexte", "sha_rnds2",
@@ -2434,6 +2477,55 @@ class Lower:
                 if vi[0] != "imm":
                     raise SyntaxError(f"{name} 的立即数必须是编译期常量")
                 fn.emit(name, xn(vals[0]), xn(vals[1]), vi[1] & 0xFF)
+            return ("imm", 0)
+        if name == "cpu_pclmul" and name not in self.fns_ast:
+            # cpu_pclmul() -> int：PCLMULQDQ 特征位（CPUID.1:ECX[1]，v1.33）。
+            if len(e[2]) != 0:
+                raise SyntaxError("cpu_pclmul() 不接受实参")
+            if self.arch not in ("x86_64",):
+                raise SyntaxError("cpu_pclmul 目前只在 x86_64 后端实现")
+            d = fn.new_v()
+            fn.emit("cpuid_pclmul", d)
+            return d
+        if name in _SSE_BUILTINS and name not in self.fns_ast:
+            # SSE 族（v1.33）：与 AES 族同一套"xmm 槽 = 编译期常量 0-7"协议。
+            #   双槽：xmm_mov / pand / por / psphufb
+            #   双槽+imm：pclmulqdq(d, s, imm8)
+            #   单槽+imm：psrlw/psllw/psrlq/psllq/pslldq/psrldq(d, imm8)
+            if self.arch != "x86_64":
+                raise SyntaxError(f"{name} 目前只在 x86_64 后端实现")
+
+            def slot_of(a):
+                v = self.eval(a, fn, env)
+                if not isinstance(v, tuple) or v[0] != "imm" or not (0 <= v[1] <= 7):
+                    raise SyntaxError(f"{name} 的 xmm 槽参数必须是 0-7 的编译期常量")
+                return -(int(v[1]) + 1)          # 负数编码 -(x+1)
+
+            def imm_of(a):
+                v = self.eval(a, fn, env)
+                if not isinstance(v, tuple) or v[0] != "imm":
+                    raise SyntaxError(f"{name} 的立即数必须是编译期常量")
+                return v[1] & 0xFF
+
+            if name in ("psrlw", "psllw", "psrlq", "psllq", "pslldq", "psrldq"):
+                if len(e[2]) != 2:
+                    raise SyntaxError(f"{name}(slot, imm8) 需要两个实参")
+                x = slot_of(e[2][0])
+                fn.emit(name + "_i", x, imm_of(e[2][1]))
+                return ("imm", 0)
+            if name == "pclmulqdq":
+                if len(e[2]) != 3:
+                    raise SyntaxError("pclmulqdq(d, s, imm8) 需要三个实参")
+                d = slot_of(e[2][0])
+                b = slot_of(e[2][1])
+                fn.emit("pclmul_x", d, b, imm_of(e[2][2]))
+                return ("imm", 0)
+            if len(e[2]) != 2:
+                raise SyntaxError(f"{name}(d, s) 需要两个实参")
+            d = slot_of(e[2][0])
+            b = slot_of(e[2][1])
+            fn.emit({"xmm_mov": "xmm_mov", "pand": "pand_x",
+                     "por": "por_x", "pshufb": "pshufb_x"}[name], d, b)
             return ("imm", 0)
         if name == "mem_copy" and name not in self.fns_ast:
             if len(e[2]) != 3:
@@ -7845,6 +7937,11 @@ def _map_ins(ins, f):
         return ("cpuid_sha", V(ins[1]))
     if op == "cpuid_aes":
         return ("cpuid_aes", V(ins[1]))
+    if op == "cpuid_pclmul":
+        return ("cpuid_pclmul", V(ins[1]))
+    if op in ("xmm_mov", "pand_x", "por_x", "pshufb_x", "pclmul_x",
+              "psrlw_i", "psllw_i", "psrlq_i", "psllq_i", "pslldq_i", "psrldq_i"):
+        return ins                       # 槽号是负编码、立即数是常量：不需要重命名
     if op in ("xmm_ld", "xmm_st", "sha_nexte", "sha_rnds2", "sha_msg1",
               "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd", "xmm_palignr",
               "aesenc", "aesenclast", "aesdec", "aesdeclast", "aesimc",
@@ -8287,6 +8384,26 @@ class Codegen:
     def gen_instr(self, ins):
         enc = self.enc
         op = ins[0]
+        if op == "cpuid_pclmul":
+            # PCLMULQDQ 特征探测：CPUID leaf 1（ECX=0）ECX[1]。
+            _, dst = ins
+            R11 = 11
+            enc.push(RAX)
+            enc.push(RBX)
+            enc.push(RCX)
+            enc.push(RDX)
+            enc.mov_ri(RAX, 1)
+            enc.mov_ri(RCX, 0)
+            enc.cpuid()
+            enc.mov_rr(R11, RCX)
+            enc.shr_i(R11, 1)
+            enc.alu_ri("and", R11, 1)
+            enc.pop(RDX)
+            enc.pop(RCX)
+            enc.pop(RBX)
+            enc.pop(RAX)
+            self.commit(dst, R11)
+            return
         if op == "cpuid_aes":
             # AES-NI 特征探测：CPUID leaf 1（ECX=0）ECX[25]。
             # 与 cpuid_sha 同一套纪律：全寄存器保护，结果经 R11 中转。
@@ -8370,6 +8487,25 @@ class Codegen:
             enc.jmp(Ls)
             enc.labels[Ld] = enc.pos()
             self.commit(dst, ACC)
+            return
+        if op in ("psrlw_i", "psllw_i", "psrlq_i", "psllq_i", "pslldq_i", "psrldq_i"):
+            # 单槽 + imm8：xmm 槽是负数编码，立即数原样
+            _, x, imm = ins
+            getattr(enc, op)(-int(x) - 1, imm)
+            return
+        if op in ("xmm_mov", "pand_x", "por_x", "pshufb_x", "pclmul_x"):
+            _, d, s = ins[:3]
+            d, s = -int(d) - 1, -int(s) - 1
+            if op == "xmm_mov":
+                enc.movdqa_rr(d, s)
+            elif op == "pand_x":
+                enc.pand(d, s)
+            elif op == "por_x":
+                enc.por(d, s)
+            elif op == "pshufb_x":
+                enc.pshufb(d, s)
+            else:
+                enc.pclmulqdq(d, s, ins[3])
             return
         if op in ("xmm_ld", "xmm_st", "sha_nexte", "sha_rnds2", "sha_msg1",
                   "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd",

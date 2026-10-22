@@ -118,6 +118,14 @@ def vreg_mentions(ins):
         return [ins[1]], []
     if op == "cpuid_aes":
         return [ins[1]], []
+    if op == "cpuid_pclmul":
+        return [ins[1]], []
+    if op in ("xmm_mov", "pand_x", "por_x", "pshufb_x", "pclmul_x",
+              "psrlw_i", "psllw_i", "psrlq_i", "psllq_i", "pslldq_i", "psrldq_i"):
+        # v1.33：SSE 族——操作数全是 xmm 槽（负编码）与编译期立即数，
+        # **没有任何 vreg**。注意不能沿用 xmm_* 那条"把正整数当 vreg"的
+        # 规则：这些指令的立即数是 0-255，会被误当成 vreg 号。
+        return [], []
     if op in ("xmm_ld", "xmm_st", "sha_nexte", "sha_rnds2", "sha_msg1",
               "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd", "xmm_palignr",
               "aesenc", "aesenclast", "aesdec", "aesdeclast", "aesimc",
@@ -789,10 +797,12 @@ _EFF = ("call", "callr", "syscall", "winapi", "spawn_child", "xchg", "ret",
         "atomic", "mfence", "rdtsc",
         # SHA-NI / XMM 族（v1.15）：xmm_ld/st 读内存，sha_* 有外部语义
         # （xmm 固定槽协议）——调度器一律不跨越、不重排
-        "cpuid_sha", "cpuid_aes", "xmm_ld", "xmm_st", "sha_nexte",
-        "sha_rnds2", "sha_msg1", "sha_msg2", "xmm_paddd", "xmm_pxor",
-        "xmm_pshufd", "xmm_palignr", "aesenc", "aesenclast", "aesdec",
-        "aesdeclast", "aesimc", "aeskeygenassist")
+        "cpuid_sha", "cpuid_aes", "cpuid_pclmul", "xmm_ld", "xmm_st",
+        "sha_nexte", "sha_rnds2", "sha_msg1", "sha_msg2", "xmm_paddd",
+        "xmm_pxor", "xmm_pshufd", "xmm_palignr", "aesenc", "aesenclast",
+        "aesdec", "aesdeclast", "aesimc", "aeskeygenassist",
+        "xmm_mov", "pand_x", "por_x", "pshufb_x", "pclmul_x",
+        "psrlw_i", "psllw_i", "psrlq_i", "psllq_i", "pslldq_i", "psrldq_i")
 # 基本块终止符。注意 args 必须独占一块：它从硬件参数寄存器（rdi/rsi/rdx/
 # rcx/r8/r9）搬值进 vreg，而变量移位量会用掉 rcx——一旦被调度到它后面
 # 就会拿到被污染的参数。因此 args 只能永远排在函数最前面。
@@ -1574,6 +1584,11 @@ def _subst_vregs(ins, sub):
         return ("cpuid_sha", sub(ins[1]))
     if op == "cpuid_aes":
         return ("cpuid_aes", sub(ins[1]))
+    if op == "cpuid_pclmul":
+        return ("cpuid_pclmul", sub(ins[1]))
+    if op in ("xmm_mov", "pand_x", "por_x", "pshufb_x", "pclmul_x",
+              "psrlw_i", "psllw_i", "psrlq_i", "psllq_i", "pslldq_i", "psrldq_i"):
+        return ins                       # 全是槽号与立即数，不含 vreg
     if op in ("xmm_ld", "xmm_st", "sha_nexte", "sha_rnds2", "sha_msg1",
               "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd", "xmm_palignr",
               "aesenc", "aesenclast", "aesdec", "aesdeclast", "aesimc",

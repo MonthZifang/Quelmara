@@ -307,6 +307,10 @@ fn add_one(n: int) -> result[int, str] {
 | `aesenc` / `aesenclast`(d, s) | AES 轮（AES-NI），操作数是 xmm 槽号 |
 | `aesdec` / `aesdeclast`(d, s) / `aesimc`(d, s) | AES 逆轮（解密方向，库层暂未使用） |
 | `aeskeygenassist(d, s, imm)` | 轮密钥辅助（库层目前用软件扩展，未使用此指令） |
+| `cpu_pclmul()` | PCLMULQDQ 特征位（CPUID.1:ECX[1]，v1.33） |
+| `xmm_mov` / `pand` / `por` / `pshufb`(d, s) | xmm 槽间搬运与位运算（v1.33，GHASH 用） |
+| `pclmulqdq(d, s, imm8)` | 64×64 进位无乘法（GCM 的 GF(2^128) 乘法核心） |
+| `psrlw/psllw/psrlq/psllq/pslldq/psrldq`(d, imm8) | 字/双字/整寄存器移位 |
 | `mem_str(p, n)` | 内存转 str |
 | `mem_load8/32/64(p)`、`mem_store8/64(p, v)` | 裸读写（8/32 是字节偏移，64 是槽索引 ×8） |
 | `mem_alloc(n)` / `mem_free(p)` | 裸分配/释放 |

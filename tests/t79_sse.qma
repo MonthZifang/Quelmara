@@ -1,0 +1,141 @@
+// t79_sse.qma：SSE / PCLMUL 指令语义自检（v1.33）
+// 这些指令是给 GHASH 用的，编码错一个字节就是"静默算错"，所以逐条对拍。
+module t79
+
+import std.core
+import std.hex
+
+// 把 16 字节（32 个 hex 字符）写进缓冲
+fn fill(b: int, h: str) -> int {
+    let s = hex_decode(h)
+    mem_copy(b, mem_ptr(s, 0), 16)
+    return b
+}
+
+fn hx(p: int) -> str {
+    return hex_encode(mem_str(p, 16))
+}
+
+fn main() {
+    assert(cpu_pclmul() == 1, "本机应有 PCLMULQDQ")
+
+    let v = mem_alloc(16)
+    let m0f = mem_alloc(16)
+    let out = mem_alloc(16)
+    let nib = mem_alloc(16)
+    let i = 0
+    while i < 16 {
+        mem_store8(m0f, i, 0x0F)
+        // 半字节位反序表：0->0, 1->8, 2->4, 3->C, …
+        mem_store8(nib, i, 0)
+        i = i + 1
+    }
+    // nib 表按 v1.33 的写法显式填（0,8,4,C,2,A,6,E,1,9,5,D,3,B,7,F）
+    mem_store8(nib, 0, 0)
+    mem_store8(nib, 1, 8)
+    mem_store8(nib, 2, 4)
+    mem_store8(nib, 3, 12)
+    mem_store8(nib, 4, 2)
+    mem_store8(nib, 5, 10)
+    mem_store8(nib, 6, 6)
+    mem_store8(nib, 7, 14)
+    mem_store8(nib, 8, 1)
+    mem_store8(nib, 9, 9)
+    mem_store8(nib, 10, 5)
+    mem_store8(nib, 11, 13)
+    mem_store8(nib, 12, 3)
+    mem_store8(nib, 13, 11)
+    mem_store8(nib, 14, 7)
+    mem_store8(nib, 15, 15)
+
+    // ---- pand ----
+    fill(v, "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+    xmm_load(0, v)
+    xmm_load(1, m0f)
+    pand(0, 1)
+    xmm_store(out, 0)
+    assert(hx(out) == "000102030405060708090a0b0c0d0e0f", "pand 0x0F")
+
+    // ---- psrlw 4 + pand 0x0F = 每字节高半字节 ----
+    fill(v, "123456789abcdef01122334455667788")
+    xmm_load(0, v)
+    psrlw(0, 4)
+    pand(0, 1)
+    xmm_store(out, 0)
+    assert(hx(out) == "01030507090b0d0f0102030405060708", "psrlw4 + pand")
+
+    // ---- pshufb：字节反序 ----
+    fill(v, "000102030405060708090a0b0c0d0e0f")
+    fill(m0f, "0f0e0d0c0b0a09080706050403020100")
+    xmm_load(0, v)
+    xmm_load(1, m0f)
+    pshufb(0, 1)
+    xmm_store(out, 0)
+    assert(hx(out) == "0f0e0d0c0b0a09080706050403020100", "pshufb reverse")
+
+    // ---- psllw 4 + por：半字节左移后合并 ----
+    fill(v, "0102030405060708090a0b0c0d0e0f00")
+    fill(m0f, "08090a0b0c0d0e0f0001020304050607")
+    xmm_load(0, v)
+    psllw(0, 4)
+    xmm_load(1, m0f)
+    por(0, 1)
+    xmm_store(out, 0)
+    assert(hx(out) == "18293a4b5c6d7e8f90a1b2c3d4e5f607", "psllw4 + por")
+
+    // ---- psllq / psrlq：按 64 位 lane 移位 ----
+    fill(v, "01000000000000000200000000000000")
+    xmm_load(0, v)
+    psllq(0, 1)
+    xmm_store(out, 0)
+    assert(hx(out) == "02000000000000000400000000000000", "psllq 1")
+    xmm_load(0, v)
+    psrlq(0, 1)
+    xmm_store(out, 0)
+    assert(hx(out) == "00000000000000000100000000000000", "psrlq 1")
+
+    // ---- pslldq / psrldq：整寄存器按字节移位 ----
+    fill(v, "000102030405060708090a0b0c0d0e0f")
+    xmm_load(0, v)
+    pslldq(0, 8)
+    xmm_store(out, 0)
+    assert(hx(out) == "00000000000000000001020304050607", "pslldq 8")
+    xmm_load(0, v)
+    psrldq(0, 8)
+    xmm_store(out, 0)
+    assert(hx(out) == "08090a0b0c0d0e0f0000000000000000", "psrldq 8")
+
+    // ---- xmm_mov ----
+    xmm_load(0, v)
+    xmm_mov(1, 0)
+    xmm_store(out, 1)
+    assert(hx(out) == "000102030405060708090a0b0c0d0e0f", "xmm_mov")
+
+    // ---- pclmulqdq：0x00 = lane0 × lane0 ----
+    // lane0 = 0x3（字节 03 00 …），乘 0x5 => 0xF（异或相加，无进位）
+    fill(v, "03000000000000000000000000000000")
+    fill(m0f, "05000000000000000000000000000000")
+    xmm_load(0, v)
+    xmm_load(1, m0f)
+    pclmulqdq(0, 1, 0x00)
+    xmm_store(out, 0)
+    assert(hx(out) == "0f000000000000000000000000000000", "pclmul 3*5")
+    // 0x11 = lane1 × lane1：同样的值放在 lane1
+    fill(v, "00000000000000000300000000000000")
+    fill(m0f, "00000000000000000500000000000000")
+    xmm_load(0, v)
+    xmm_load(1, m0f)
+    pclmulqdq(0, 1, 0x11)
+    xmm_store(out, 0)
+    assert(hx(out) == "0f000000000000000000000000000000", "pclmul 0x11")
+    // 交叉：lane0 × lane1
+    fill(v, "03000000000000000000000000000000")
+    fill(m0f, "00000000000000000500000000000000")
+    xmm_load(0, v)
+    xmm_load(1, m0f)
+    pclmulqdq(0, 1, 0x10)
+    xmm_store(out, 0)
+    assert(hx(out) == "0f000000000000000000000000000000", "pclmul 0x10")
+
+    print("ok t79_sse")
+}

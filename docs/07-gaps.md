@@ -89,7 +89,8 @@
 | ~~GHASH 4-bit nibble 表~~ | ✅ v1.28 已做：GHASH 段 1.44×，配合 AES T-table 后 GCM 整体 **8.0×**（1369 → 171 ms/MiB） | — |
 | ~~AES-NI~~ | ✅ v1.31 已做：CTR 段 63 → **2 ms**/MiB（**31×**），GCM 端到端 171 → 125 ms | 编码器新增 6 条 AES 指令 + `cpu_aes()` 降级；解密方向未接 |
 | ~~GHASH 字级化~~ | ✅ v1.32 已做：4-bit 表乘法从逐字节改成 64 位字（一块 1024 次字节操作 → 64 次字操作），GHASH 123 → **34 ms**，GCM 端到端 125 → 36 ms | — |
-| **GHASH PCLMULQDQ** | 仍是 GCM 的大头（34 ms 里几乎全是它）；PCLMUL 版预期 → 1–3 ms，GCM 端到端 → ~5 ms | 需要 `pclmulqdq` 编码 + GCM 位反射约定（乘前左移 1 位、0xC2 归约）+ 与 4-bit 表逐字节对拍；**这是当前性价比最高的一项** |
+| ~~GHASH PCLMULQDQ~~ | ✅ v1.33 已做：4 次 `pclmulqdq` + 显式归约，GHASH 34 → **17 ms**，GCM 端到端 36 → 19 ms（相对 v1.28 的 1369 ms 是 **72×**） | 归约用移位折叠（不是 0xC2 常数版），比教科书实现多几条指令；AAD 与非整块尾仍走软件路径 |
+| **GHASH 4 路并行** | 现在是串行依赖（每块依赖上一块结果）；4 路聚合可再快 2–3× | 需要重排 CTR/GHASH 交织，收益已不大 |
 | **LICM 根修** | 普适（所有循环） | 根因是 x64 分配器布局敏感段错误；修好前 LICM 只能关 |
 | **loop_sum 三件套** | 循环 10.8 → ~4 cycles/iter | ① phi copy 消除（分配器 coalescing）② do-while 变换（CFG 要容错 jcc 回边）③ cssub 形态 |
 | **JSON memchr 化** | 2 ms → ~1 ms | 内建 `mem_chr` **已就绪**（v1.29）；JSON 内部仍逐字节（要同时找 引号 / 反斜杠 / <0x20 三类，需 `mem_lt` 或双 memchr + 控制字符复检） |
@@ -195,14 +196,27 @@ print(hex_encode(mem_str(out1, 16)))
 - 下一步：`QLM_SKIP_PASSES` 二分（先排 inline，再排 copy_prop），对照 `--no-opt` 的
   寄存器分配差异。**这类"少写一个字节"的 bug 比崩溃危险**，值得单独一轮。
 
+### 7.5 待查：`xmm_pxor(x, x)` 在 `_gmul_ni` 里会被优化器当死代码删掉
+
+v1.33 写 GHASH 时想用 `pxor xmm7, xmm7` 清零溢出累加器（省掉一次 `mem_zero` +
+一次 `xmm_load`），单独写一个探针是对的（`build/_pxor_probe.qma` 全 0），
+但放进 `_gmul_ni` 之后 GHASH 结果全错；换回"内存零块 + load"就正确。
+
+- 症状：**没有 vreg 结果**的 xmm 指令（`xmm_pxor` 全是负槽号）在某个 pass 里
+  被当成无用指令删掉了。`xmm_load/store` 侥幸逃过是因为它们读写内存。
+- 影响面：所有"纯寄存器副作用"的 xmm 指令（AES 族、SSE 族）都有这个风险，
+  目前只有清零这一处踩到，其它指令都连带内存操作或 vreg 依赖。
+- 下一步：查 `qlm_opt.py` 的 DCE / CSE 对"零结果指令"的判定，给带固定槽副作用的
+  指令加白名单（和 `_NO_REORDER` 同一类处理）。
+
 ## 8. 推进顺序（2026-10-22 调整）
 
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
 当前顺序：
 
 1. **性能专项（§5）**：~~GHASH 4-bit 表~~（v1.28）→ ~~memchr~~（v1.29）→ ~~mem_diff + gzip 编码 1.6×~~（v1.30）
-   → ~~AES-NI~~（v1.31，CTR 31×）→ ~~GHASH 字级化~~（v1.32，GCM 端到端 36 ms）→
-   **GHASH PCLMUL（预期端到端 → ~5 ms）** → JSON memchr → loop_sum 三件套 → LICM 根修
+   → ~~AES-NI~~（v1.31，CTR 31×）→ ~~GHASH 字级化~~（v1.32）→ ~~GHASH PCLMUL~~（v1.33，GCM 19 ms）→
+   **JSON memchr** → loop_sum 三件套 → LICM 根修 → §7.4/§7.5 两个误编译
 2. **语言层（§1）**：黄标逐项（`map[str]Struct`、`vec[map]`、函数值放宽、`result` struct 载荷、
    命名空间 / `pub`、`defer` …）
 3. **标准库（§2）**：红标剩余项——**MD5**（只差旧协议兼容）、HTTP 客户端封装

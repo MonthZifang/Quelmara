@@ -617,12 +617,178 @@ fn _gf_mul_t(x: int, t: int, out: int) -> int {
     return 0
 }
 
+// ---------------------------------------------------------------------------
+// GHASH 硬件路径（v1.33，PCLMULQDQ）
+//
+// 数学：GCM 的 128 位乘法在"位反射"表示下定义（bit0 = byte0 的 MSB = x^0）。
+// 把 xmm 里的 16 字节看成小端整数 V，则多项式系数整数 = bitrev8each(V)
+// ——只需**每字节内位反序**，不需要整段字节反序（这一步很关键，省掉一半工作）。
+//
+// 序列（与 build/_pclmul_proto.py 的原型逐字节对拍过，NIST 向量 + 200 组随机全一致）：
+//   1) A' = bitrev8each(A)；H' 每次调用只算一次，常驻 xmm 槽 3
+//   2) 4 × pclmulqdq（0x00/0x11/0x10/0x01）+ 交叉项拼成 256 位 (hi:lo)
+//   3) 归约：R = lo ^ hi ^ hi·x ^ hi·x² ^ hi·x⁷，溢出位（≤7 位）再折叠一次
+//   4) bitrev8each(R) 写回
+//
+// xmm 槽协议：0 = 累加器/状态，1 = hi/临时，2/6/7 = 临时，3 = H'，4 = 0x0F 掩码，5 = 半字节反序表
+// ---------------------------------------------------------------------------
+
+// _rev0()：槽 0 原地每字节位反序（用 4=0x0F、5=NIB、6=临时）
+// 槽号必须是编译期常量（xmm 是固定槽协议，分配器不参与），所以这里写死 0，
+// 需要别的槽时由调用方 xmm_mov 进出。
+fn _rev0() -> int {
+    xmm_mov(6, 0)
+    pand(6, 4)                 // 6 = 低半字节（作为 pshufb 的**控制**）
+    psrlw(0, 4)
+    pand(0, 4)                 // 0 = 高半字节（控制）
+    // ⚠ PSHUFB 的语义是 dest[i] = dest[ctrl[i]]：表必须在**目标槽**、
+    // 待反转的半字节在**源槽**。所以每次把 NIB 表复制进目标槽再用。
+    // （第一版把两个操作数写反了，结果全错——t79 只测了指令本身，没测用法。）
+    xmm_mov(2, 5)
+    pshufb(2, 6)               // 2 = NIB[低]
+    xmm_mov(6, 5)
+    pshufb(6, 0)               // 6 = NIB[高]
+    psllw(2, 4)
+    por(2, 6)
+    xmm_mov(0, 2)
+    return 0
+}
+
+// _gmul_ni(scratch)：槽 0 = 槽 0 × 槽 3（都在反射表示下），结果回槽 0
+// scratch 是调用方给的 16 字节暂存（清零溢出累加器用）
+fn _gmul_ni(scratch: int) -> int {
+    _rev0()
+    xmm_mov(1, 0)
+    xmm_mov(2, 0)
+    xmm_mov(6, 0)
+    pclmulqdq(0, 3, 0x00)      // lo = A0·H0
+    pclmulqdq(1, 3, 0x11)      // hi = A1·H1
+    pclmulqdq(2, 3, 0x10)      // 交叉 1
+    pclmulqdq(6, 3, 0x01)      // 交叉 2
+    xmm_pxor(2, 6)             // 2 = 交叉项之和
+    xmm_mov(6, 2)
+    pslldq(6, 8)
+    xmm_pxor(0, 6)             // 0 = lo
+    psrldq(2, 8)
+    xmm_pxor(1, 2)             // 1 = hi
+    // ---- 归约 ----
+    // 清零用"内存零块 + load"：写成 xmm_pxor(7,7) 会被优化器当死代码删掉
+    //（它没有任何 vreg 结果），实测导致 GHASH 全错。见 07-gaps §7.5。
+    mem_zero(scratch, 16)
+    xmm_load(7, scratch)                  // 7 = 溢出累加器 = 0
+    xmm_pxor(0, 1)                        // acc = lo ^ hi
+    // hi·x
+    xmm_mov(2, 1)
+    psllq(2, 1)
+    xmm_mov(6, 1)
+    psrlq(6, 63)
+    xmm_mov(7, 6)          // 暂存：下面要拿它取溢出位
+    pslldq(6, 8)
+    por(2, 6)
+    xmm_pxor(0, 2)
+    psrldq(7, 8)           // 7 = 溢出位（k=1）
+    // hi·x²
+    xmm_mov(2, 1)
+    psllq(2, 2)
+    xmm_mov(6, 1)
+    psrlq(6, 62)
+    pslldq(6, 8)
+    por(2, 6)
+    xmm_pxor(0, 2)
+    xmm_mov(6, 1)
+    psrlq(6, 62)
+    psrldq(6, 8)
+    xmm_pxor(7, 6)
+    // hi·x⁷
+    xmm_mov(2, 1)
+    psllq(2, 7)
+    xmm_mov(6, 1)
+    psrlq(6, 57)
+    pslldq(6, 8)
+    por(2, 6)
+    xmm_pxor(0, 2)
+    xmm_mov(6, 1)
+    psrlq(6, 57)
+    psrldq(6, 8)
+    xmm_pxor(7, 6)
+    // 溢出位（≤7 位，在 byte0）再乘 x⁷+x²+x+1：不会溢出 128 位
+    xmm_mov(2, 7)
+    psllq(2, 1)
+    xmm_pxor(0, 2)
+    xmm_mov(2, 7)
+    psllq(2, 2)
+    xmm_pxor(0, 2)
+    xmm_mov(2, 7)
+    psllq(2, 7)
+    xmm_pxor(0, 2)
+    xmm_pxor(0, 7)
+    _rev0()
+    return 0
+}
+
+// _ghash_ni(h, data, n, out)：硬件 GHASH
+fn _ghash_ni(h: int, data: int, n: int, out: int) -> int {
+    let c0f = mem_alloc(16)
+    let nib = mem_alloc(16)
+    let mut i = 0
+    while i < 16 {
+        mem_store8(c0f, i, 0x0F)
+        i = i + 1
+    }
+    // 半字节位反序表：NIB[i] = bitrev4(i)
+    mem_store8(nib, 0, 0)
+    mem_store8(nib, 1, 8)
+    mem_store8(nib, 2, 4)
+    mem_store8(nib, 3, 12)
+    mem_store8(nib, 4, 2)
+    mem_store8(nib, 5, 10)
+    mem_store8(nib, 6, 6)
+    mem_store8(nib, 7, 14)
+    mem_store8(nib, 8, 1)
+    mem_store8(nib, 9, 9)
+    mem_store8(nib, 10, 5)
+    mem_store8(nib, 11, 13)
+    mem_store8(nib, 12, 3)
+    mem_store8(nib, 13, 11)
+    mem_store8(nib, 14, 7)
+    mem_store8(nib, 15, 15)
+    xmm_load(4, c0f)
+    xmm_load(5, nib)
+    // H' = bitrev8each(H)，只算一次（槽 0 中转）
+    xmm_load(0, h)
+    _rev0()
+    xmm_mov(3, 0)
+    // Y = 0
+    mem_zero(out, 16)
+    xmm_load(0, out)
+    let scratch = mem_alloc(16)
+    let mut p = 0
+    while p < n {
+        xmm_load(1, mem_ptr(data, p))
+        xmm_pxor(0, 1)          // Y ^= block
+        _gmul_ni(scratch)       // Y *= H'
+        p = p + 16
+    }
+    xmm_store(out, 0)
+    mem_free(scratch, 16)
+    mem_free(c0f, 16)
+    mem_free(nib, 16)
+    return 0
+}
+
 // GHASH(Y, H, data)：data 是 16 字节块序列，len 必须是 16 的倍数
 fn ghash(h: int, data: int, n: int, out: int) -> int {
     let y = mem_alloc(16)
     mem_zero(y, 16)
     let tmp = mem_alloc(16)
-    // 小输入用逐位算法（省 8 KiB 建表）；≥16 块走 4-bit 表
+    // v1.33：有 PCLMULQDQ 就走硬件路径（无查表、无侧信道、块内 4 次进位无乘法）
+    if cpu_pclmul() == 1 {
+        _ghash_ni(h, data, n, out)
+        mem_free(y, 16)
+        mem_free(tmp, 16)
+        return 0
+    }
+    // 降级：小输入用逐位算法（省 8 KiB 建表）；≥16 块走 4-bit 表
     let mut tbl = 0
     if n >= 256 {
         tbl = mem_alloc(8192)
