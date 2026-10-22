@@ -69,6 +69,8 @@ def vreg_mentions(ins):
         return [ins[2]], ints([ins[3], ins[4]])
     if op == "trunc":
         return [ins[1]], ints([ins[2]])
+    if op == "vsumd":
+        return [ins[1]], ints([ins[2], ins[3]])
     if op == "vsum":
         return [ins[1]], ints([ins[2], ins[3]])
     if op == "atomic":
@@ -737,11 +739,45 @@ _BIN_LAT = {"add": 1, "sub": 1, "and": 1, "or": 1, "xor": 1,
 # 有副作用/访存的指令：必须保持原有相对顺序
 # （winapi 是系统调用：CreateThread/WaitForSingleObject 与访存绝不能重排；
 #   callr 是间接调用——调用前后重排会改变观测顺序，同理保序）
+def check_suspicious_loops(fns):
+    """编译期死循环体检（v1.16）：循环的 guard 变量若在循环体（回边前）
+    从未被赋值，大概率是真死循环（如 while i < n 忘了 i += 1）——
+    编译警告（不 fail：guard 可能依赖指针写/外部状态，存在合法误报）。
+    位置：函数名 + 循环序号（IR 层无源码行号——行号传播登记 GAPS）。
+    注意：**不能**走 _loop_shape——它要求循环尾部有归纳步进，
+    而死循环恰恰没有步进（v1.16 首版的设计缺陷）。直接用 loop_regions：
+    header label 的下一条 jcc 是 guard，回边 jmp 之前是循环体。"""
+    warns = 0
+    for fn in fns:
+        seq = 0
+        for h, b, lab in loop_regions(fn):
+            seq += 1
+            ins = fn.instrs
+            if ins[h][0] != "label" or h + 1 >= len(ins):
+                continue
+            guard = ins[h + 1]
+            if guard[0] != "jcc" or not isinstance(guard[2], int):
+                continue
+            if not _is_imm(guard[3]):
+                continue                  # hi 非常量：跳过（误报率高）
+            ivar = guard[2]
+            # guard 变量在 [h+2, b)（循环体，回边前）全程无 def → 疑似死循环
+            body = ins[h + 2:b]
+            if any(ivar in vreg_mentions(p)[0] for p in body):
+                continue
+            print(f"warning: possible infinite loop in '{fn.name}' "
+                  f"(loop #{seq}): guard variable never updated in body")
+            warns += 1
+    return warns
+
+
+
+
 _EFF = ("call", "callr", "syscall", "winapi", "spawn_child", "xchg", "ret",
         "store", "store8", "load", "load8",
         # vsum 读一整段内存（最多 count*8 字节）：必须与访存保持原序，
         # 否则调度器会把它挪到数组初始化之前（v1.8 实测：归约少一个元素）。
-        "vsum",
+        "vsum", "vsumd",
         # atomic 是读改写，mfence 是全屏障：都不可被调度器跨越或重排
         # （v1.10 实测纪律：atomic 忘登记 _EFF 会造成计数静默丢失）。
         # rdtsc 同理——它虽无副作用，但被挪过 call 会让测量差值变成

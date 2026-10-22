@@ -323,6 +323,22 @@ class Enc:
         self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x3a\x0f", modrm_reg(xd, xs),
                   bytes([imm & 0xFF]))
 
+    # ---- f64 packed（v1.16 @simd f64 归约）----
+    def movupd_rm(self, x, base, index, scale, disp):
+        """movupd xmm, [base + index*2^scale + disp]（非对齐读）"""
+        self.emit(b"\x66", rex(r=x, x=index, b=base), b"\x0f\x10",
+                  modrm_mem(x, base, index, scale, disp))
+
+    def addpd(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x58", modrm_reg(xd, xs))
+
+    def movhlps(self, xd, xs):
+        """xd[63:0] = xs[127:64]（无前缀 0F 12 /r）"""
+        self.emit(rex(r=xd, b=xs), b"\x0f\x12", modrm_reg(xd, xs))
+
+    def addsd(self, xd, xs):
+        self.emit(b"\xf2", rex(r=xd, b=xs), b"\x0f\x58", modrm_reg(xd, xs))
+
     def movdqu_mr(self, base, index, scale, disp, x):
         """movdqu [base + index*2^scale + disp], xmm（非对齐存储）"""
         self.emit(b"\x66", rex(r=x, x=index, b=base), b"\x0f\x7f",
@@ -581,6 +597,8 @@ class Lower:
         self.gid_of_str = {}
         self.spawn_id = 0
         self.uses_chan = False
+        self.arr_elem = {}         # base vreg -> 元素类型（"f64"）；f64 数组的
+                                   # index/arith 位模式链路依赖此标记
         self.uses_map = False
         self.uses_arena = False
         self.uses_join = False
@@ -1173,8 +1191,14 @@ class Lower:
                 if self._struct_of(fn, v) is not None or self._is_str(fn, v):
                     raise SyntaxError("数组元素暂只支持数值（v0.6 边界）")
                 if self._float_of(fn, v):
-                    raise SyntaxError("数组元素暂不支持浮点（v1 边界）")
+                    # v1.16：f64 元素放开（位模式 1 槽，与 [N]f64 配套）；
+                    # f32 仍禁（槽宽不同）
+                    if self._float_of(fn, v) != "f64":
+                        raise SyntaxError("数组元素暂不支持 f32（槽宽边界）")
                 fn.emit("store", addr, ("imm", i), v)
+            if all(self._float_of(fn, self.eval(el, fn, env)) == "f64"
+                   for el in e[1]) and e[1]:
+                self.arr_elem[addr] = "f64"
             return addr
         if k == "index":
             obj = self.eval(e[1], fn, env)
@@ -1184,6 +1208,8 @@ class Lower:
                 self.emit_bounds(fn, idx, n)
                 d = fn.new_v()
                 fn.emit("load", d, obj, idx)
+                if self.arr_elem.get(obj) == "f64":
+                    self._mark_float(fn, d, "f64")
                 return d
             if self._is_slice(fn, obj):
                 # 切片：ptr = s.word0，长度是运行期值（动态越界检查）
@@ -3643,9 +3669,16 @@ class Lower:
         ptr = fn.new_v()
         fn.emit("bin", "shl", ptr, lo, ("imm", 3))
         fn.emit("bin", "add", ptr, ptr, base)
-        part = fn.new_v()
-        fn.emit("vsum", part, ptr, cnt)
         cur = env[acc]
+        if self.arr_elem.get(base) == "f64" and self._float_of(fn, cur) == "f64":
+            # f64 归约（v1.16）：acc += a[i]，a 是 [N]f64（acc 的 float
+            # 标记即契约——调用方保证数组元素类型一致）。
+            part = fn.new_v()
+            fn.emit("vsumd", part, ptr, cnt)
+            self._mark_float(fn, part, "f64")
+        else:
+            part = fn.new_v()
+            fn.emit("vsum", part, ptr, cnt)
         tot = self.arith("+", cur, part, fn, env)
         fn.emit("mov", cur, tot)
         # 循环变量在 @simd 后不可见（与 for 的作用域一致：块内绑定）
@@ -3923,6 +3956,8 @@ class Lower:
                 dst = self.alloc_array(fn, ty[1])
                 self.array_copy(fn, dst, params[i], ty[1])
                 env[name] = dst
+                if len(ty) > 2 and "f64" in str(ty[2]):
+                    self.arr_elem[dst] = "f64"
             elif ty[0] == "array":
                 self._mark_arr(fn, params[i], ty[1])
             elif ty[0] == "named" and self.is_agg(ty[1]):
@@ -7182,6 +7217,8 @@ def _map_ins(ins, f):
         return ("trunc", V(ins[1]), S(ins[2]), ins[3], ins[4])
     if op == "vsum":
         return ("vsum", V(ins[1]), S(ins[2]), S(ins[3]))
+    if op == "vsumd":
+        return ("vsumd", V(ins[1]), S(ins[2]), S(ins[3]))
     if op == "atomic":
         # ('atomic', sub, dst, addr, a[, b])：变长，cas 多一个操作数
         return tuple(["atomic", ins[1], V(ins[2]), S(ins[3]), S(ins[4])]
@@ -7629,6 +7666,46 @@ class Codegen:
             enc.pop(RBX)
             enc.pop(RAX)
             self.commit(dst, R11)
+            return
+        if op == "vsumd":
+            # f64 归约（v1.16）：movupd 非对齐读 + addpd 两路累加 + 标量尾。
+            # 结构与 vsum 完全同构：RCX 是元素下标（步 2）、lea(RDX, RCX, 2)
+            # 是"下一对下标"边界检查（RDX = RCX + 2 > cnt 则退出向量段）。
+            # bug 史：v1.16 首版把 lea 的第三参写成 3（把"字节 scale"与
+            # "元素步进"混淆——lea(dst, base, disp) 的 disp 是**简单加法**，
+            # 不是乘法），导致每 8 元素漏 2 个（s=255 → s!=255）。
+            _, dst, base, count = ins
+            seq = getattr(self, "_vsumd_seq", 0)
+            self._vsumd_seq = seq + 1
+            Lv, Lt, Ls, Ld = (f"__vsumd.v{seq}", f"__vsumd.t{seq}",
+                              f"__vsumd.s{seq}", f"__vsumd.d{seq}")
+            bp = self.mat(SCRATCH, base)
+            cnt = self.mat(SCRATCH2, count)
+            enc.mov_ri(RCX, 0)
+            enc.pxor_x(0, 0)
+            enc.labels[Lv] = enc.pos()
+            enc.lea(RDX, RCX, 2)                 # 下一对下标（元素计数）
+            enc.alu_rr("cmp", RDX, cnt)
+            enc.jcc("g", Lt)
+            enc.movupd_rm(1, bp, RCX, 3, 0)      # [bp + RCX*8]（字节偏移）
+            enc.addpd(0, 1)
+            enc.alu_ri("add", RCX, 2)
+            enc.jmp(Lv)
+            enc.labels[Lt] = enc.pos()
+            enc.movhlps(1, 0)                    # xmm1 低 = xmm0 高
+            enc.addsd(0, 1)
+            enc.movq_rx(ACC, 0)
+            enc.labels[Ls] = enc.pos()
+            enc.alu_rr("cmp", RCX, cnt)
+            enc.jcc("ge", Ld)
+            enc.mov_rm(RDX, bp, RCX, 3, 0)       # [bp + RCX*8]
+            enc.movq_xr(1, RDX)
+            enc.addsd(0, 1)
+            enc.movq_rx(ACC, 0)
+            enc.alu_ri("add", RCX, 1)
+            enc.jmp(Ls)
+            enc.labels[Ld] = enc.pos()
+            self.commit(dst, ACC)
             return
         if op in ("xmm_ld", "xmm_st", "sha_nexte", "sha_rnds2", "sha_msg1",
                   "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd",
@@ -8278,6 +8355,9 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
             opt_inline(fns)
         for fn in fns:
             opt_all(fn, unroll=True)
+    # 编译期死循环体检（v1.16）：guard 变量不更新 → 警告 + 位置
+    import qlm_opt as _qopt
+    _qopt.check_suspicious_loops(fns)
     if dump_ir:
         for fn in fns:
             print(f"== {fn.name} (vregs={fn.nv}) ==")
