@@ -377,6 +377,50 @@ fn _aes128_encrypt_block_fast(inp: int, out: int, rk: int) -> int {
     return 0
 }
 
+// v1.31：AES-NI 单块加密（cpu_aes() == 1 时启用）。
+// 10 轮全是硬件指令（AESENC ×9 + AESENCLAST），没有查表——
+// 既快（一个块 ~10 个周期级操作）也没有 T-table 的缓存侧信道问题。
+// rk 是 aes128_expand 产出的 176 字节标准轮密钥表，AESENC 直接吃这个字节序
+// （软件路径要 _bswap32 是因为它按大端字读，硬件按字节读，不需要转换）。
+// xmm 槽 0/1 是固定协议：0 = 状态，1 = 轮密钥。
+fn _aes128_encrypt_block_ni(inp: int, out: int, rk: int) -> int {
+    xmm_load(0, inp)
+    xmm_load(1, rk)
+    xmm_pxor(0, 1)
+    let mut r = 1
+    while r < 10 {
+        xmm_load(1, mem_ptr(rk, r * 16))
+        aesenc(0, 1)
+        r = r + 1
+    }
+    xmm_load(1, mem_ptr(rk, 160))
+    aesenclast(0, 1)
+    xmm_store(out, 0)
+    return 0
+}
+
+// v1.31：GCM 的 CTR 单块（加密 + 异或 + 落盘，全在 xmm 里）。
+// 为什么把异或也放进来：旧 _ctr_xor 每块要做 16 次 mem_load8 + 16 次
+// mem_store8 做异或，硬件加密之后这一圈字节操作反而成了瓶颈。
+// xmm 槽协议：0 = 计数器/状态，1 = 轮密钥，2 = 明文块。
+fn _gcm_ctr_block_ni(inp: int, out: int, ctr: int, rk: int) -> int {
+    xmm_load(0, ctr)
+    xmm_load(1, rk)
+    xmm_pxor(0, 1)
+    let mut r = 1
+    while r < 10 {
+        xmm_load(1, mem_ptr(rk, r * 16))
+        aesenc(0, 1)
+        r = r + 1
+    }
+    xmm_load(1, mem_ptr(rk, 160))
+    aesenclast(0, 1)
+    xmm_load(2, inp)
+    xmm_pxor(0, 2)
+    xmm_store(out, 0)
+    return 0
+}
+
 fn aes128_decrypt_block(inp: int, out: int, rk: int) -> int {
     let st = mem_alloc(16)
     let mut i = 0
@@ -627,13 +671,24 @@ fn _inc32(ctr: int) -> int {
 // CTR 加解密（对称）：in/out 可同缓冲；n 不要求 16 对齐（尾部按流截断）
 fn _ctr_xor(inp: int, n: int, out: int, ctr: int, rk: int) -> int {
     let blk = mem_alloc(16)
+    // v1.31：硬件能力探测提到循环外（每个 GCM 操作一次，不是每块一次）
+    let ni = cpu_aes()
     let mut p = 0
     while p < n {
-        _aes128_encrypt_block_fast(ctr, blk, rk)
-        let mut i = 0
-        while i < 16 && p + i < n {
-            mem_store8(out, p + i, mem_load8(inp, p + i) ^ mem_load8(blk, i))
-            i = i + 1
+        if ni == 1 && p + 16 <= n {
+            // 整块：加密 + 异或 + 落盘都在 xmm 里，零逐字节操作
+            _gcm_ctr_block_ni(mem_ptr(inp, p), mem_ptr(out, p), ctr, rk)
+        } else {
+            if ni == 1 {
+                _aes128_encrypt_block_ni(ctr, blk, rk)
+            } else {
+                _aes128_encrypt_block_fast(ctr, blk, rk)
+            }
+            let mut i = 0
+            while i < 16 && p + i < n {
+                mem_store8(out, p + i, mem_load8(inp, p + i) ^ mem_load8(blk, i))
+                i = i + 1
+            }
         }
         _inc32(ctr)
         p = p + 16

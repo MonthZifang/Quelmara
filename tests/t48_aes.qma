@@ -48,6 +48,22 @@ fn zeros(n: int) -> str {
     return str_from_bytes(out)
 }
 
+fn enc_via_sw(pt: str, rk: int) -> str {
+    let o = mem_alloc(16)
+    _aes128_encrypt_block_fast(mem_ptr(pt, 0), o, rk)
+    let r = mem_str(o, 16)
+    mem_free(o, 16)
+    return r
+}
+
+fn enc_via_ni(pt: str, rk: int) -> str {
+    let o = mem_alloc(16)
+    _aes128_encrypt_block_ni(mem_ptr(pt, 0), o, rk)
+    let r = mem_str(o, 16)
+    mem_free(o, 16)
+    return r
+}
+
 fn main() {
     // ---------- FIPS-197 C.1：单块 ----------
     let key = hb("000102030405060708090a0b0c0d0e0f")
@@ -60,6 +76,18 @@ fn main() {
     assert(s2hex(mem_str(ct, 16)) == "69c4e0d86a7b0430d8cdb78070b4c55a", "fips197 enc")
     aes128_decrypt_block(ct, back, rk)
     assert(s2hex(mem_str(back, 16)) == "00112233445566778899aabbccddeeff", "fips197 dec")
+
+    // v1.31：两条加密路径都必须对得上 FIPS-197 C.1
+    //   _fast = T-table 软件路径（无 AES-NI 时的产品路径）
+    //   _ni   = AES-NI 硬件路径（cpu_aes() == 1 时走）
+    // 包一层调用：直接写在 main 里会被优化器内联成一个已知误编译形状
+    //（见 07-gaps §7.4），这里要测的是密码学正确性，不是内联行为。
+    let sw = enc_via_sw(pt, rk)
+    assert(s2hex(sw) == "69c4e0d86a7b0430d8cdb78070b4c55a", "ttable block")
+    if cpu_aes() == 1 {
+        let hw = enc_via_ni(pt, rk)
+        assert(s2hex(hw) == "69c4e0d86a7b0430d8cdb78070b4c55a", "aesni block")
+    }
 
     // ---------- GCM test case 2：K=0, P=0(128bit), IV=0 ----------
     let k0 = zeros(16)

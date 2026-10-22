@@ -68,7 +68,7 @@ import std.http
 
 ### `std/aes.qma`
 
-AES-128-GCM：分组加密 + GHASH + CTR
+AES-128-GCM：分组加密（AES-NI 快路径 + T-table 降级）+ GHASH + CTR
 
 ```quelmara
 fn aes128_expand(key: str, rk: int) -> int

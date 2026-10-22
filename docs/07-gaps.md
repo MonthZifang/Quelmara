@@ -87,7 +87,8 @@
 |---|---|---|
 | **SHA-NI 64 轮序列** | SHA-256 65 ms → ~3 ms（20×） | 基础设施已就绪（`cpuid_sha` + 4 条 SHA 指令 + xmm 槽）；**本机 CPU 无该扩展**，必须先写 Python mini-emulator 验证 8 条 xmm 指令语义，否则错 hash 比慢更糟 |
 | ~~GHASH 4-bit nibble 表~~ | ✅ v1.28 已做：GHASH 段 1.44×，配合 AES T-table 后 GCM 整体 **8.0×**（1369 → 171 ms/MiB） | — |
-| **AES-NI** | AES 数量级（软件 T-table 已把 GCM 拉到 6.1 MB/s） | 需编码器加 aesenc/aesenclast + pclmulqdq + cpuid 降级；与 SHA-NI 同批 |
+| ~~AES-NI~~ | ✅ v1.31 已做：CTR 段 63 → **2 ms**/MiB（**31×**），GCM 端到端 171 → 125 ms | 编码器新增 6 条 AES 指令 + `cpu_aes()` 降级；解密方向未接 |
+| **GHASH PCLMULQDQ** | 现在 GHASH 占 GCM 的 **98%**（123 ms/MiB）；PCLMUL 版预期 → 1–3 ms，GCM 端到端 → ~5 ms | 需要 `pclmulqdq` 编码 + GCM 位反射约定（乘前左移 1 位、0xC2 归约）+ 与现有 4-bit 表结果逐字节对拍；**这是当前性价比最高的一项** |
 | **LICM 根修** | 普适（所有循环） | 根因是 x64 分配器布局敏感段错误；修好前 LICM 只能关 |
 | **loop_sum 三件套** | 循环 10.8 → ~4 cycles/iter | ① phi copy 消除（分配器 coalescing）② do-while 变换（CFG 要容错 jcc 回边）③ cssub 形态 |
 | **JSON memchr 化** | 2 ms → ~1 ms | 内建 `mem_chr` **已就绪**（v1.29）；JSON 内部仍逐字节（要同时找 引号 / 反斜杠 / <0x20 三类，需 `mem_lt` 或双 memchr + 控制字符复检） |
@@ -169,13 +170,38 @@ v1.29 写 `__memchr` 的 SWAR 时踩到：`and rd, imm` 里 imm 取 `-2^63`（�
 - 复现骨架：`tests/t76_codec.qma` 之外的独立用例尚未加（需要 IR 级注入）。
 - 下一步：`--dump-ir` 对照 + `QLM_SKIP_PASSES` 二分，定位是发射层还是分配器。
 
+### 7.4 待查：`_aes128_encrypt_block_fast` 直接写在 main 里会被误编译
+
+v1.31 写 AES-NI 时顺手发现的**既有**误编译（与 AES-NI 无关，v1.30 及以前同样存在）：
+
+```quelmara
+// build/_aes_sw.qma：FIPS-197 C.1 向量
+let rk = mem_alloc(176)
+aes128_expand(key, rk)
+let out1 = mem_alloc(16)
+_aes128_encrypt_block_fast(pt, out1, rk)     // 直接调用
+print(hex_encode(mem_str(out1, 16)))
+// 期望 69c4e0d86a7b0430d8cdb78070b4c55a
+// 实测 69c4e0d86a7b0430d8cdb78070b4c500   ← 最后一个字节丢了
+```
+
+- **不是值语义问题**：同一个函数包一层包装函数调用就完全正确；`--no-opt` 也正确。
+  所以是优化后（内联 / 分配器）在特定寄存器压力下的误编译，症状是**最后一个
+  `mem_store8` 丢失**。
+- **产品路径未受影响**：`_ctr_xor` 里的调用形状是对的，RFC 8448 逐字节、GCM
+  NIST 向量、真实 TLS 全过（`tests/t48_aes.qma` 现在把两条路径都包一层调用纳入回归）。
+- 复现件：`build/_aes_sw.qma`（未入库，因为它是"必失败"件；要入库得做成负向夹具）。
+- 下一步：`QLM_SKIP_PASSES` 二分（先排 inline，再排 copy_prop），对照 `--no-opt` 的
+  寄存器分配差异。**这类"少写一个字节"的 bug 比崩溃危险**，值得单独一轮。
+
 ## 8. 推进顺序（2026-10-22 调整）
 
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
 当前顺序：
 
-1. **性能专项（§5）**：~~GHASH 4-bit 表~~（v1.28 完成）→ ~~memchr 内建 + str 层接入~~（v1.29 完成，数字见 `06-status.md`）→ **JSON memchr（需 `mem_lt` 或双 memchr 方案）** → gzip lazy matching →
-   loop_sum 三件套 → LICM 根修
+1. **性能专项（§5）**：~~GHASH 4-bit 表~~（v1.28）→ ~~memchr~~（v1.29）→ ~~mem_diff + gzip 编码 1.6×~~（v1.30）
+   → ~~AES-NI~~（v1.31，CTR 31×）→ **GHASH PCLMUL（GCM 最后一块，预期端到端 125 → ~5 ms）** →
+   JSON memchr → loop_sum 三件套 → LICM 根修
 2. **语言层（§1）**：黄标逐项（`map[str]Struct`、`vec[map]`、函数值放宽、`result` struct 载荷、
    命名空间 / `pub`、`defer` …）
 3. **标准库（§2）**：红标剩余项——**MD5**（只差旧协议兼容）、HTTP 客户端封装

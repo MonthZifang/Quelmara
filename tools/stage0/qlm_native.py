@@ -319,6 +319,26 @@ class Enc:
     def sha256nexte(self, xd, xs):
         self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x38\xce", modrm_reg(xd, xs))
 
+    # -- AES-NI（AESENC 族，66 0F 38 DC..DF /r；AESIMC DB；AESKEYGENASSIST 66 0F 3A DF /r ib）--
+    def aesenc(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x38\xdc", modrm_reg(xd, xs))
+
+    def aesenclast(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x38\xdd", modrm_reg(xd, xs))
+
+    def aesdec(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x38\xde", modrm_reg(xd, xs))
+
+    def aesdeclast(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x38\xdf", modrm_reg(xd, xs))
+
+    def aesimc(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x38\xdb", modrm_reg(xd, xs))
+
+    def aeskeygenassist(self, xd, xs, imm):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x3a\xdf",
+                  modrm_reg(xd, xs), bytes([imm & 0xFF]))
+
     def paddd(self, xd, xs):
         self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\xfe", modrm_reg(xd, xs))
 
@@ -583,7 +603,10 @@ class Fn:
 SLICE_WORDS = 2
 
 
-_XMM_BUILTINS = ("cpu_sha", "xmm_load", "xmm_store", "sha_nexte", "sha_rnds2",
+_XMM_BUILTINS = ("cpu_sha", "cpu_aes", "xmm_load", "xmm_store",
+                  "sha_nexte", "sha_rnds2",
+                  "aesenc", "aesenclast", "aesdec", "aesdeclast", "aesimc",
+                  "aeskeygenassist",
                  "sha_msg1", "sha_msg2", "xmm_paddd", "xmm_pxor",
                  "xmm_pshufd", "xmm_palignr")
 
@@ -2349,6 +2372,16 @@ class Lower:
             d = fn.new_v()
             fn.emit("cpuid_sha", d)
             return d
+        if name == "cpu_aes" and name not in self.fns_ast:
+            # cpu_aes() -> int：AES-NI 特征位（CPUID leaf 1 ECX[25]，v1.31）。
+            # 1 = 支持（走 aesenc 快路径），0 = 降级 T-table 软件实现。
+            if len(e[2]) != 0:
+                raise SyntaxError("cpu_aes() 不接受实参")
+            if self.arch not in ("x86_64",):
+                raise SyntaxError("cpu_aes 目前只在 x86_64 后端实现")
+            d = fn.new_v()
+            fn.emit("cpuid_aes", d)
+            return d
         if name in _XMM_BUILTINS and name not in self.fns_ast:
             # XMM / SHA-NI 操作族（v1.15）：操作数是 xmm 槽号（0-7 的编译期
             # 常量）——固定槽协议由库层维护（寄存器分配器不参与 xmm 管理）。
@@ -2358,33 +2391,42 @@ class Lower:
             #   xmm_pshufd(d_x, s_x, imm8)  xmm_palignr(d_x, s_x, imm8)
             if self.arch != "x86_64":
                 raise SyntaxError(f"{name} 目前只在 x86_64 后端实现")
-            arity = {"xmm_pshufd": 3, "xmm_palignr": 3}.get(name, 2)
+            arity = {"xmm_pshufd": 3, "xmm_palignr": 3,
+                     "aeskeygenassist": 3}.get(name, 2)
             if len(e[2]) != arity:
                 raise SyntaxError(f"{name} 需要 {arity} 个实参")
             if name == "cpu_sha":
                 d = fn.new_v()
                 fn.emit("cpuid_sha", d)
                 return d
-            vals = []
-            for a in e[2][:2]:
-                v = self.eval(a, fn, env)
-                if v[0] != "imm" or not (0 <= v[1] <= 7):
-                    raise SyntaxError(
-                        f"{name} 的 xmm 槽参数必须是 0-7 的编译期常量")
-                vals.append(v[1])
             # xmm 槽在 IR 里用**负数编码** -(x+1)：vreg 是非负 int，
             # 负数天然不冲突（mentions/subst 过滤负 int 即"非 vreg"）
             def xn(x):
                 return -(int(x) + 1)
 
+            # ⚠ 槽参数的位置按指令而异：xmm_load 的槽在**第 0 位**（第 1 位
+            # 是地址 vreg），xmm_store 的槽在**第 1 位**（第 0 位是地址）。
+            # v1.15 那版把前两个实参都当槽校验，只要地址是变量就
+            # `v[0]` 取下标炸掉（vreg 是裸 int，不是 tuple）——因为当时
+            # 没有任何 .qma 真的调用过 xmm_*，这个 bug 一直没暴露（v1.31 修）。
+            def slot_of(a):
+                v = self.eval(a, fn, env)
+                if not isinstance(v, tuple) or v[0] != "imm" or not (0 <= v[1] <= 7):
+                    raise SyntaxError(
+                        f"{name} 的 xmm 槽参数必须是 0-7 的编译期常量")
+                return v[1]
+
             if name == "xmm_load":
+                x = slot_of(e[2][0])
                 av = self.eval(e[2][1], fn, env)
-                fn.emit("xmm_ld", xn(vals[0]), av)
+                fn.emit("xmm_ld", xn(x), av)
                 return ("imm", 0)
             if name == "xmm_store":
                 av = self.eval(e[2][0], fn, env)
-                fn.emit("xmm_st", av, xn(vals[1]))
+                x = slot_of(e[2][1])
+                fn.emit("xmm_st", av, xn(x))
                 return ("imm", 0)
+            vals = [slot_of(e[2][0]), slot_of(e[2][1])]
             if arity == 2:
                 fn.emit(name, xn(vals[0]), xn(vals[1]))
             else:
@@ -7801,8 +7843,12 @@ def _map_ins(ins, f):
         return ("winapi", V(ins[1]) if ins[1] is not None else None, ins[2], L(ins[3]))
     if op == "cpuid_sha":
         return ("cpuid_sha", V(ins[1]))
+    if op == "cpuid_aes":
+        return ("cpuid_aes", V(ins[1]))
     if op in ("xmm_ld", "xmm_st", "sha_nexte", "sha_rnds2", "sha_msg1",
-              "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd", "xmm_palignr"):
+              "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd", "xmm_palignr",
+              "aesenc", "aesenclast", "aesdec", "aesdeclast", "aesimc",
+              "aeskeygenassist"):
         # xmm 槽负数编码保留，地址实参（正 int）重命名
         return tuple(v if isinstance(v, int) and v < 0 else
                      (f(v) if isinstance(v, int) else v) for v in ins)
@@ -8241,6 +8287,27 @@ class Codegen:
     def gen_instr(self, ins):
         enc = self.enc
         op = ins[0]
+        if op == "cpuid_aes":
+            # AES-NI 特征探测：CPUID leaf 1（ECX=0）ECX[25]。
+            # 与 cpuid_sha 同一套纪律：全寄存器保护，结果经 R11 中转。
+            _, dst = ins
+            R11 = 11
+            enc.push(RAX)
+            enc.push(RBX)
+            enc.push(RCX)
+            enc.push(RDX)
+            enc.mov_ri(RAX, 1)
+            enc.mov_ri(RCX, 0)
+            enc.cpuid()
+            enc.mov_rr(R11, RCX)
+            enc.shr_i(R11, 25)
+            enc.alu_ri("and", R11, 1)
+            enc.pop(RDX)
+            enc.pop(RCX)
+            enc.pop(RBX)
+            enc.pop(RAX)
+            self.commit(dst, R11)
+            return
         if op == "cpuid_sha":
             # SHA-NI 特征探测：CPUID leaf 7（ECX=0）EBX[29]。
             # cpuid 破坏 RAX/RBX/RCX/RDX（RAX 是 ACC、RBX 在池）——push/pop
@@ -8306,17 +8373,21 @@ class Codegen:
             return
         if op in ("xmm_ld", "xmm_st", "sha_nexte", "sha_rnds2", "sha_msg1",
                   "sha_msg2", "xmm_paddd", "xmm_pxor", "xmm_pshufd",
-                  "xmm_palignr"):
+                  "xmm_palignr", "aesenc", "aesenclast", "aesdec",
+                  "aesdeclast", "aesimc", "aeskeygenassist"):
             # SHA-NI / XMM 族（v1.15）：操作数是 xmm 槽号 imm（0-7），
             # 地址实参是 vreg（经 mat 映射）。固定槽协议（STATE0=XMM0 等）
             # 由库层维护——寄存器分配器完全不参与 xmm 的管理。
             if op == "xmm_ld":
+                # ⚠ 第 3 个参数是 SIB 的 index：**必须传 4（RSP）** 表示"无索引"。
+                # 传 0 会被编码成 [base + RAX*1]——v1.15 写的 xmm_* 从来没有
+                # .qma 调用过，这个错编码一直没暴露（v1.31 用 AES-NI 时才炸）。
                 _, x, addr = ins
-                enc.movdqu_rm(-int(x) - 1, self.mat(SCRATCH, addr), 0, 0, 0)
+                enc.movdqu_rm(-int(x) - 1, self.mat(SCRATCH, addr), 4, 0, 0)
                 return
             if op == "xmm_st":
                 _, addr, x = ins
-                enc.movdqu_mr(self.mat(SCRATCH, addr), 0, 0, 0, -int(x) - 1)
+                enc.movdqu_mr(self.mat(SCRATCH, addr), 4, 0, 0, -int(x) - 1)
                 return
             _, d, s = ins[:3]
             d, s = -int(d) - 1, -int(s) - 1   # 负数编码 -(x+1) -> 槽号 x
@@ -8336,6 +8407,18 @@ class Codegen:
                 enc.pshufd(d, s, ins[3])
             elif op == "xmm_palignr":
                 enc.palignr(d, s, ins[3])
+            elif op == "aesenc":
+                enc.aesenc(d, s)
+            elif op == "aesenclast":
+                enc.aesenclast(d, s)
+            elif op == "aesdec":
+                enc.aesdec(d, s)
+            elif op == "aesdeclast":
+                enc.aesdeclast(d, s)
+            elif op == "aesimc":
+                enc.aesimc(d, s)
+            elif op == "aeskeygenassist":
+                enc.aeskeygenassist(d, s, ins[3])
             return
         if op == "vsum":
             # SSE2 两路（paddq）+ 标量尾。4 路要 AVX2，见 docs/PERF.md。

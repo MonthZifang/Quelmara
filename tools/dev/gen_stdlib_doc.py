@@ -19,7 +19,7 @@ BEGIN = "<!-- api:begin -->"
 END = "<!-- api:end -->"
 
 DESC = {
-    "std/aes.qma": "AES-128-GCM：分组加密 + GHASH + CTR",
+    "std/aes.qma": "AES-128-GCM：分组加密（AES-NI 快路径 + T-table 降级）+ GHASH + CTR",
     "std/b64.qma": "base64 编解码",
     "std/core.qma": "标量小工具",
     "std/cli.qma": "命令行 flag 解析（--k=v / --k v / -k v）",

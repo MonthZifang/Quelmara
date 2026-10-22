@@ -42,7 +42,9 @@
 
 | 负载 | 耗时 | 吞吐 |
 |---|---|---|
-| AES-128-GCM 1 MiB | **171 ms**（v1.28 前 1369 ms） | 6.1 MB/s |
+| AES-128-GCM 1 MiB | **125 ms**（v1.30 前 171 ms；v1.28 前 1369 ms） | 8.4 MB/s |
+| └ CTR 段 1 MiB（AES 核心） | **2 ms**（软件 T-table 63 ms，**31×**，AES-NI） | 500 MB/s |
+| └ GHASH 段 1 MiB | **123 ms**（**当前瓶颈，占 GCM 98%**） | 8.5 MB/s |
 | SHA-256 1 MiB | **70 ms** | 15.0 MB/s |
 | gzip 编码 1 MiB（重复文本，输出 7658 B） | **16 ms**（v1.29 前 25–27 ms，**1.6×**，输出字节不变） | 65 MB/s |
 | **gzip 解码 1 MiB** | **15 ms**（min of 3） | **70 MB/s** |

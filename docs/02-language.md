@@ -302,6 +302,11 @@ fn add_one(n: int) -> result[int, str] {
 | `mem_copy(dst, src, n)` / `mem_zero(p, n)` / `mem_cmp(a, b, n)` | 内存操作 |
 | `mem_chr(p, n, byte)` | 在 n 字节内找首个等于 byte 的字节，返回下标或 -1（v1.29，8 字节 SWAR） |
 | `mem_diff(p1, p2, n)` | 两段 n 字节的**首个不同字节下标**，全等返回 n（v1.30，8 字节字比较；即公共前缀长度） |
+| `cpu_aes()` | AES-NI 特征位（CPUID.1:ECX[25]，v1.31）；1 = 走硬件快路径 |
+| `xmm_load(slot, addr)` / `xmm_store(addr, slot)` | 16 字节搬进/搬出 xmm 固定槽（slot 0-7 编译期常量） |
+| `aesenc` / `aesenclast`(d, s) | AES 轮（AES-NI），操作数是 xmm 槽号 |
+| `aesdec` / `aesdeclast`(d, s) / `aesimc`(d, s) | AES 逆轮（解密方向，库层暂未使用） |
+| `aeskeygenassist(d, s, imm)` | 轮密钥辅助（库层目前用软件扩展，未使用此指令） |
 | `mem_str(p, n)` | 内存转 str |
 | `mem_load8/32/64(p)`、`mem_store8/64(p, v)` | 裸读写（8/32 是字节偏移，64 是槽索引 ×8） |
 | `mem_alloc(n)` / `mem_free(p)` | 裸分配/释放 |
