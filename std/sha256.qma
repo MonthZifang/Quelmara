@@ -96,10 +96,11 @@ fn sha256_load_block(block: int, w: int) -> int {
     while j < 64 {
         let x = mem_load64(w, j - 15)
         let y = mem_load64(w, j - 2)
+        // v1.34：同样内联成常量位移（原来每轮 4 次调用）
         // s0 = rotr(x,7) ^ rotr(x,18) ^ (x >> 3)
-        let s0 = (sha256_rotr(x, 7) ^ sha256_rotr(x, 18) ^ (x >> 3)) & 0xFFFFFFFF
+        let s0 = (((x >> 7) | (x << 25)) ^ ((x >> 18) | (x << 14)) ^ (x >> 3)) & 0xFFFFFFFF
         // s1 = rotr(y,17) ^ rotr(y,19) ^ (y >> 10)
-        let s1 = (sha256_rotr(y, 17) ^ sha256_rotr(y, 19) ^ (y >> 10)) & 0xFFFFFFFF
+        let s1 = (((y >> 17) | (y << 15)) ^ ((y >> 19) | (y << 13)) ^ (y >> 10)) & 0xFFFFFFFF
         let v = (mem_load64(w, j - 16) + s0 + mem_load64(w, j - 7) + s1) & 0xFFFFFFFF
         mem_store64(w, j, v)
         j = j + 1
@@ -107,7 +108,78 @@ fn sha256_load_block(block: int, w: int) -> int {
     return 0
 }
 
+// v1.34：把 64 个 K 常量摊到内存表里。每次哈希建一次，之后每轮一次
+// mem_load64，替代 sha256_k(i) 的"调用 + 6 层判定树"（每块 64 次）。
+fn _sha256_ktab(t: int) -> int {
+    mem_store64(t, 0, K0)
+    mem_store64(t, 1, K1)
+    mem_store64(t, 2, K2)
+    mem_store64(t, 3, K3)
+    mem_store64(t, 4, K4)
+    mem_store64(t, 5, K5)
+    mem_store64(t, 6, K6)
+    mem_store64(t, 7, K7)
+    mem_store64(t, 8, K8)
+    mem_store64(t, 9, K9)
+    mem_store64(t, 10, K10)
+    mem_store64(t, 11, K11)
+    mem_store64(t, 12, K12)
+    mem_store64(t, 13, K13)
+    mem_store64(t, 14, K14)
+    mem_store64(t, 15, K15)
+    mem_store64(t, 16, K16)
+    mem_store64(t, 17, K17)
+    mem_store64(t, 18, K18)
+    mem_store64(t, 19, K19)
+    mem_store64(t, 20, K20)
+    mem_store64(t, 21, K21)
+    mem_store64(t, 22, K22)
+    mem_store64(t, 23, K23)
+    mem_store64(t, 24, K24)
+    mem_store64(t, 25, K25)
+    mem_store64(t, 26, K26)
+    mem_store64(t, 27, K27)
+    mem_store64(t, 28, K28)
+    mem_store64(t, 29, K29)
+    mem_store64(t, 30, K30)
+    mem_store64(t, 31, K31)
+    mem_store64(t, 32, K32)
+    mem_store64(t, 33, K33)
+    mem_store64(t, 34, K34)
+    mem_store64(t, 35, K35)
+    mem_store64(t, 36, K36)
+    mem_store64(t, 37, K37)
+    mem_store64(t, 38, K38)
+    mem_store64(t, 39, K39)
+    mem_store64(t, 40, K40)
+    mem_store64(t, 41, K41)
+    mem_store64(t, 42, K42)
+    mem_store64(t, 43, K43)
+    mem_store64(t, 44, K44)
+    mem_store64(t, 45, K45)
+    mem_store64(t, 46, K46)
+    mem_store64(t, 47, K47)
+    mem_store64(t, 48, K48)
+    mem_store64(t, 49, K49)
+    mem_store64(t, 50, K50)
+    mem_store64(t, 51, K51)
+    mem_store64(t, 52, K52)
+    mem_store64(t, 53, K53)
+    mem_store64(t, 54, K54)
+    mem_store64(t, 55, K55)
+    mem_store64(t, 56, K56)
+    mem_store64(t, 57, K57)
+    mem_store64(t, 58, K58)
+    mem_store64(t, 59, K59)
+    mem_store64(t, 60, K60)
+    mem_store64(t, 61, K61)
+    mem_store64(t, 62, K62)
+    mem_store64(t, 63, K63)
+    return 0
+}
+
 // 常量查表：6 层判定树（线性 64 个 if 会让每块多 4000 次比较）
+// v1.34 起热路径不再走它（改用 _sha256_ktab + mem_load64），保留作公开 API。
 fn sha256_k(i: int) -> int {
     if i < 32 {
         if i < 16 {
@@ -365,6 +437,14 @@ fn sha256_k(i: int) -> int {
 }
 
 fn sha256_block(state: int, block: int, w: int) -> int {
+    let kt = mem_alloc(64 * 8)
+    _sha256_ktab(kt)
+    _sha256_block_kt(state, block, w, kt)
+    mem_free(kt, 64 * 8)
+    return 0
+}
+
+fn _sha256_block_kt(state: int, block: int, w: int, kt: int) -> int {
     sha256_load_block(block, w)
     let mut a = mem_load64(state, 0)
     let mut b = mem_load64(state, 1)
@@ -376,12 +456,17 @@ fn sha256_block(state: int, block: int, w: int) -> int {
     let mut h = mem_load64(state, 7)
     let mut i = 0
     while i < 64 {
+        // v1.34：旋转改成**按常量位移内联**，不再每轮调 6 次 sha256_rotr。
+        // 旧实现一块 64 轮 × 7 次函数调用 ≈ 450 次调用，调用开销就是全部成本
+        // （1 MiB 要 737 万次调用）；内联后位移量变成立即数，乘加也能少几次搬运。
         // S1 = rotr(e,6) ^ rotr(e,11) ^ rotr(e,25)
-        let s1 = (sha256_rotr(e, 6) ^ sha256_rotr(e, 11) ^ sha256_rotr(e, 25)) & 0xFFFFFFFF
+        let s1 = (((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^
+                  ((e >> 25) | (e << 7))) & 0xFFFFFFFF
         let ch = ((e & f) ^ ((e ^ 0xFFFFFFFF) & g)) & 0xFFFFFFFF
-        let t1 = (h + s1 + ch + sha256_k(i) + mem_load64(w, i)) & 0xFFFFFFFF
+        let t1 = (h + s1 + ch + mem_load64(kt, i) + mem_load64(w, i)) & 0xFFFFFFFF
         // S0 = rotr(a,2) ^ rotr(a,13) ^ rotr(a,22)
-        let s0 = (sha256_rotr(a, 2) ^ sha256_rotr(a, 13) ^ sha256_rotr(a, 22)) & 0xFFFFFFFF
+        let s0 = (((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^
+                  ((a >> 22) | (a << 10))) & 0xFFFFFFFF
         let maj = ((a & b) ^ (a & c) ^ (b & c)) & 0xFFFFFFFF
         let t2 = (s0 + maj) & 0xFFFFFFFF
         h = g
@@ -435,11 +520,14 @@ fn sha256_pad_and_hash(s: str) -> int {
     let state = mem_alloc(64)
     sha256_init(state)
     let w = mem_alloc(64 * 8)
+    let kt = mem_alloc(64 * 8)
+    _sha256_ktab(kt)                 // v1.34：整个消息只建一次
     let mut off = 0
     while off < total {
-        sha256_block(state, buf + off, w)
+        _sha256_block_kt(state, buf + off, w, kt)
         off = off + 64
     }
+    mem_free(kt, 64 * 8)
     let out = mem_alloc(32)
     let mut k = 0
     while k < 8 {
