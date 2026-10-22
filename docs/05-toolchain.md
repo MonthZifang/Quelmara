@@ -142,6 +142,8 @@ other = "git:https://github.com/u/r#v1"  # git + 可选 rev
 | `tests/gzip_interop.py` | gzip 与 zlib 逐字节互操作（编码方向） | 全平台 |
 | `tests/gzip_inflate_test.py` | gzip/deflate 解码互操作（9 种编码组合 × 7 类输入） | 全平台 |
 | `tests/gzip_http_test.py` | HTTP 压缩协商端到端 | 全平台 |
+| `tests/ecdsa_p256_test.py` | ECDSA P-256 验签互操作（Python bigint 参考实现） | 全平台 |
+| `tests/x509_test.py` | X.509 解析 + 自签验签互操作（手工 DER + bigint 签名） | 全平台 |
 | `tests/a64_emu.py` | AArch64 指令模拟器 | 全平台 |
 
 ### 5.3 门禁（CI 双平台都跑）
@@ -150,7 +152,7 @@ other = "git:https://github.com/u/r#v1"  # git + 可选 rev
 |---|---|
 | `tools/dev/check_names.py` | 旧项目名残留、`.ros` 扩展名残留、C 运行时符号自洽 |  <!-- legacy-ok -->
 | `tools/dev/check_origin.py` | 只用标准库、无异语言运行时特征、无第三方目录 |
-| `tools/dev/check_docs.py` | 过期断言黑名单、文档索引完整性、版本目录完整性、数字单一来源 |
+| `tools/dev/check_docs.py` | 过期断言黑名单、文档索引完整性、版本目录完整性、数字单一来源、`VERSION` 与版本目录同源 |
 
 ```bash
 python tools/dev/check_names.py
@@ -165,7 +167,7 @@ python tools/dev/check_docs.py
 | job | 步骤 |
 |---|---|
 | `linux`（ubuntu） | 三道门禁 → 四套对拍（lex/parse/IR/emit）→ C 后端回归 → 自研 ELF 回归（含 A64 模拟器）→ 运行时回归（corelib + io_uring） |
-| `windows` | 三道门禁 → PE 回归 → 词法/声明级对拍 → `test --targets all` 多后端矩阵 |
+| `windows` | 三道门禁 → PE 回归 → gzip 解码 / ECDSA / X.509 互操作 → 词法/声明级对拍 → `test --targets all` 多后端矩阵 |
 
 超时 30 分钟。本机没有 gcc/WSL，Linux 侧只能在 CI 上验证。
 

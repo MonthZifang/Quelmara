@@ -1,0 +1,53 @@
+// t68_x509.qma：X.509 证书解析 + 自签验证 —— v1.23
+// 证书由 tests/x509_test.py 用 Python 手工构造 DER 并签名（v3、CN="Quelmara Test CA"）。
+// 完整矩阵（v1 无 version / 长 CN / 大序列号 / 篡改 TBS / 篡改签名 / 截断）见该脚本。
+module t68
+
+import std.hex
+import std.x509
+
+fn main() {
+    let cert = hex_decode("" +
+               "308201243081caa00302010202021234300a06082a8648ce3d040302301b3119301706035504030c105175656c6d6172" +
+               "612054657374204341301e170d3235303130313030303030305a170d3335303130313030303030305a301b3119301706" +
+               "035504030c105175656c6d61726120546573742043413059301306072a8648ce3d020106082a8648ce3d030107034200" +
+               "0409d070a93fc1f4168ba5a9014cd3e7cd13b2dcfc9f8ac9dbaf0418e15d6589a0e9a8d34df28aea2d6b44ce36e4e4ab" +
+               "0ebc88b43c4efb40b35a068a5104a2915f300a06082a8648ce3d0403020349003046022100d9ef23d664c36ab64c0afb" +
+               "d2799a2bcb01aead7791391266f23e84f50ec15156022100b14b807d31c6a025491d6f29bb6e21f9ed8963438bb3e8fd" +
+               "5f5e5c9a44bf571e")
+
+    // 结构：v3 证书，CN = "Quelmara Test CA"
+    assert(len(cert) == 296, "cert len")
+
+    // 公钥：64 字节未压缩点
+    let pub = x509_pubkey(cert)
+    assert(len(pub) == 64, "pubkey len")
+
+    // 签名：64 字节 r||s
+    let sig = x509_sig(cert)
+    assert(len(sig) == 64, "sig len")
+
+    // 算法 OID：ecdsa-with-SHA256 与 prime256v1
+    assert(hex_encode(x509_sig_alg_oid(cert)) == "2a8648ce3d040302", "sig alg oid")
+    assert(hex_encode(x509_curve_oid(cert)) == "2a8648ce3d030107", "curve oid")
+
+    // TBS 非空，且自签验证通过
+    assert(len(x509_tbs(cert)) > 100, "tbs len")
+    assert(x509_verify_self_p256(cert) == 1, "self-signed verify")
+
+    // 篡改 TBS 里的一个字节（CN 首字母）→ 必须失败
+    let bad = vec[int].new(len(cert) + 1)
+    let mut i = 0
+    while i < len(cert) {
+        bad.push(cert[i])
+        i = i + 1
+    }
+    let at = 34                       // CN 值在证书里的偏移（"Q"）
+    bad.set(at, bad.get(at) ^ 0x01)
+    assert(x509_verify_self_p256(str_from_bytes(bad)) == 0, "tampered TBS rejected")
+
+    // 截断 → 解析失败，验签返回 0
+    assert(x509_verify_self_p256(substr(cert, 0, 100)) == 0, "truncated rejected")
+
+    print("ok t68_x509")
+}

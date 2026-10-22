@@ -73,6 +73,9 @@ jobs:
       - name: ECDSA P-256 验签互操作（Python bigint 参考实现）
         run: python tests/ecdsa_p256_test.py
 
+      - name: X.509 解析 + 自签验签互操作（Python 手工 DER + bigint 签名）
+        run: python tests/x509_test.py
+
       - name: 自举对拍（词法 / 声明级 AST）
         run: |
           python tests/lexdiff.py

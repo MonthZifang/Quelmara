@@ -8,13 +8,15 @@
 2. 2026-10-22：同一指标在四份文档里分别是 96 / 113 / 116 / 124，而旧门禁只查短语
    不查数字，全部放行；`docs/STATUS.md` 整篇停在 v1.10。
 
-因此本脚本做五件事：
+因此本脚本做六件事：
 1. **过期断言黑名单**：已被证伪的说法不得出现（`docs/00-convention.md` 与
    `versions/archive/` 允许引用作反例/历史）。
 2. **索引完整性**：`docs/` 下每份 `.md` 都必须在 `docs/README.md` 里被列出。
 3. **版本目录完整性**：`docs/versions/v*/` 必须含 `CHANGELOG.md`。
 4. **数字单一来源**：实测数字只允许出现在 `docs/06-status.md` 与 `versions/`。
 5. **标题存在**：每份文档以 `# ` 开头（避免空文件/半成品）。
+6. **版本号同源**：`qlm_cli.py` 的 `VERSION` 必须与最新 `docs/versions/vX.Y/` 一致
+   （2026-10-22 事故：VERSION 停在 1.19.0，仓库已到 v1.22，门禁全绿）。
 
 用法：
     python tools/dev/check_docs.py
@@ -153,6 +155,24 @@ def main():
                 bad.append((rel, 0, "版本目录缺少 CHANGELOG.md",
                             "每个 vX.Y 目录必须有 CHANGELOG.md", "—"))
 
+    # 6) 版本号同源（VERSION ↔ 最新版本目录）
+    cli = read("tools/stage0/qlm_cli.py")
+    m = re.search(r'^VERSION\s*=\s*"(\d+)\.(\d+)', cli, re.M)
+    vers = []
+    if os.path.isdir(vdir):
+        for name in os.listdir(vdir):
+            mm = re.match(r"v(\d+)\.(\d+)", name)
+            if mm and os.path.isdir(os.path.join(vdir, name)):
+                vers.append((int(mm.group(1)), int(mm.group(2)), name))
+    if m and vers:
+        cur = (int(m.group(1)), int(m.group(2)))
+        latest = max(vers)
+        if cur != latest[:2]:
+            bad.append(("tools/stage0/qlm_cli.py", 0,
+                        f'VERSION = "{m.group(1)}.{m.group(2)}"',
+                        f"与最新版本目录 {latest[2]} 对齐（版本号同源）",
+                        "docs/00-convention.md §5.1"))
+
     # 4) 数字单一来源
     for rel in files:
         if rel in ALLOW_NUM or rel.startswith(NUM_EXEMPT_PREFIX):
@@ -177,7 +197,7 @@ def main():
         print(f"\nFAIL：{len(bad)} 处文档问题")
         return 1
 
-    print("PASS：无过期断言、索引完整、版本目录完整、数字单一来源")
+    print("PASS：无过期断言、索引完整、版本目录完整、数字单一来源、版本号同源")
     return 0
 
 

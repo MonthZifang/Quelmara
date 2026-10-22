@@ -46,6 +46,7 @@ DESC = {
     "std/x25519.qma": "Curve25519 上的 X25519 密钥交换（RFC 7748，TLS ECDHE 地基）",
     "std/tls13.qma": "TLS 1.3 密钥调度（HKDF-Expand-Label）+ AEAD 记录层",
     "std/p256.qma": "NIST P-256 域运算 + ECDSA 验签（TLS 证书签名）",
+    "std/x509.qma": "X.509 证书解析（DER/ASN.1）+ P-256 自签/签发者验签（TLS 证书层）",
     "std/net/core.qma": "连接槽位层（IOCP reactor 的底座）",
     "std/net/udp.qma": "UDP 封装与地址解析",
 }
@@ -69,6 +70,20 @@ def public_fns(path):
     return fns
 
 
+def undocumented():
+    """std/ 下存在、但 DESC 没登记的模块——它们会被静默漏出文档。"""
+    out = []
+    base = os.path.join(ROOT, "std")
+    for dp, _dn, fns in os.walk(base):
+        for fn in fns:
+            if not fn.endswith(".qma"):
+                continue
+            rel = os.path.relpath(os.path.join(dp, fn), ROOT).replace(os.sep, "/")
+            if rel not in DESC:
+                out.append(rel)
+    return sorted(out)
+
+
 def render():
     parts = []
     total = 0
@@ -88,6 +103,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="只检查，不写回")
     args = ap.parse_args()
+
+    missing = undocumented()
+    if missing:
+        print("FAIL：以下 std 模块未在 DESC 登记，会被漏出文档：" + "、".join(missing))
+        return 1
 
     text = open(DOC, encoding="utf-8").read()
     if BEGIN not in text or END not in text:

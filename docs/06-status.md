@@ -9,13 +9,15 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=129 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
-| 词法器对拍 | **PASS=114 FAIL=0**（114 个源文件） | `python tests/lexdiff.py` |
-| 声明级 AST 对拍 | **PASS=99 FAIL=0**（跳过 3 个：`t52_iface` / `t54_iface_dyn` / `t56_generic`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
-| 函数体 dump 对拍 | **一致 806 / 分叉 744 / SKIP 同步 18 / SKIP 不同步 18** | `python tests/bodydiff.py` |
+| PE 回归（主回归） | **PASS=130 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
+| 词法器对拍 | **PASS=115 FAIL=0**（115 个源文件） | `python tests/lexdiff.py` |
+| 声明级 AST 对拍 | **PASS=100 FAIL=0**（跳过 3 个：`t52_iface` / `t54_iface_dyn` / `t56_generic`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
+| 函数体 dump 对拍 | **一致 818 / 分叉 750 / SKIP 同步 18 / SKIP 不同步 18** | `python tests/bodydiff.py` |
 | IR 架构无关对拍 | **PASS=56 FAIL=0 SKIP=35**，并行后 **49 s**（原串行 5 min 41 s） | `python tests/irdiff.py` |
 | 发射层确定性对拍 | **PASS=10 FAIL=0** | `python tests/emitdiff.py` |
 | gzip 解码互操作 | **PASS=63 FAIL=0**（zlib 9 种编码组合 × 7 类输入）+ **损坏输入拒绝 5/5** | `python tests/gzip_inflate_test.py` |
+| ECDSA P-256 验签互操作 | **PASS=32 FAIL=0**（20 正向 + 12 负向，Python bigint 参考实现） | `python tests/ecdsa_p256_test.py` |
+| X.509 解析 + 自签验签互操作 | **PASS=7 FAIL=0**（4 正向：v3/v1/长 CN/大序列号；3 负向：篡改 TBS/篡改签名/截断） | `python tests/x509_test.py` |
 | 三道门禁 | check_names / check_origin / check_docs 全 PASS | `python tools/dev/check_*.py` |
 
 `run_win_tests.py` 的 7 组覆盖：PE 结构（MZ/PE32+/AMD64/无 CRT 符号）、基础语义、
@@ -124,7 +126,7 @@ python tools/stage0/qlm_cli.py run bench/sync_bench.qma --target win
 | AArch64 | stage-0 | ❌ 缺失（有 IR 对拍） |
 | C99 后端 | — | 不移植（仅交叉验证） |
 
-**组件自举 2/9；代码行数 自举 1846 / stage-0 21114 = 8.0%**（`python tools/dev/selfhost_status.py`）。
+**组件自举 2/9；代码行数 自举 1846 / stage-0 21128 = 8.7%**（`python tools/dev/selfhost_status.py`）。
 
 ## 5. 平台
 
@@ -136,7 +138,7 @@ python tools/stage0/qlm_cli.py run bench/sync_bench.qma --target win
 | AArch64（ELF64） | 🟡 | `tests/a64_emu.py` 执行级 | 无 chan/map/spawn/vtable/atomic/SHA；遇不支持形态编译期报错 |
 | macOS（Mach-O） | ❌ | — | 无 |
 | wasm32/64 | ❌ | — | 无 |
-| TLS（https/wss） | 🟡 密码学齐备 | `std/sha256`+`std/aes`+`std/x25519`+`std/tls13`+**`std/p256`（ECDSA 验签）** | 缺握手状态机、X.509 解析 |
+| TLS（https/wss） | 🟡 密码学 + 证书解析齐备 | `std/sha256`+`std/aes`+`std/x25519`+`std/tls13`+`std/p256`+**`std/x509`（DER 解析 + 验签）** | 缺握手状态机；证书链/有效期/域名策略未做 |
 
 ## 6. 已知风险
 

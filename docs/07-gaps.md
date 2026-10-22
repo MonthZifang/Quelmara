@@ -33,7 +33,7 @@
 | 类别 | 缺什么 | 撞到什么场景 |
 |---|---|---|
 | 压缩 | 多 member gzip 流（一次只解第一个）；zlib 容器（`wbits=15`）需先用 `inflate_raw` | 拼接过的 gzip 文件 |
-| TLS | **握手状态机 / X.509 解析**（密钥调度+记录层 v1.21、ECDSA-P256 验签 v1.22 已就绪；RSA 验签仍缺） | https / wss 无法提供 |
+| TLS | **握手状态机**（密钥调度+记录层 v1.21、ECDSA-P256 验签 v1.22、X.509 解析 v1.23 已就绪；RSA 验签与链/有效期/域名策略仍缺） | https / wss 无法提供 |
 | HTTP 客户端 | 出站请求（含 TLS 时才能 https） | 调用第三方 API |
 | 路由 / 中间件 | `std/http` 只有单回调，path 匹配要自己写 if 链 | 稍大的服务都要手写路由表 |
 | 静态文件 / MIME / cookie / session / multipart | 全缺 | 文件上传、登录态 |
@@ -65,7 +65,7 @@
 | 性能回归门禁 | 🟡 | `bench --threshold` 可用，但未进 CI |
 | 覆盖率 / fuzz | ❌ | — |
 | 对拍脚本耗时 | ✅ | `irdiff` 并行后 49 s（原 5 min 41 s）；`emitdiff` 10 s 内 |
-| `version` 口径 | ✅ | v1.19 起 `VERSION = "1.19.0"`，与 `docs/versions/` 对齐 |
+| `version` 口径 | ✅ | `tools/stage0/qlm_cli.py` 的 `VERSION` 与最新 `docs/versions/vX.Y/` 一致（v1.23 起 1.23.0，由 `check_docs.py` 校验） |
 
 ## 4. 平台
 
@@ -102,7 +102,8 @@
 
 ### P0 —— 让"一个真实服务能上线"
 
-1. TLS：握手状态机 → X.509 最小子集（**X25519 v1.20、密钥调度+记录层 v1.21、ECDSA-P256 验签 v1.22 已完成**）
+1. TLS：握手状态机（**X25519 v1.20、密钥调度+记录层 v1.21、ECDSA-P256 验签 v1.22、X.509 解析 v1.23 已完成**）；
+   X.509 策略层（链构建 / 有效期 / 域名）随后
 2. HTTP 客户端 + DNS（DNS 需要 UDP，已有）
 3. 路由 / 静态文件 / MIME 最小层
 4. `result` 允许 struct 载荷 + 库层错误对象（停止"库函数只能退出进程"）

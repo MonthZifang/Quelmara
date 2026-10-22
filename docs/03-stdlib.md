@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-29 个模块，**339 个公开函数**（另有 184 个 `_` 前缀的内部函数）。
+30 个模块，**350 个公开函数**（另有 185 个 `_` 前缀的内部函数）。
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -26,6 +26,7 @@
 | `std/x25519` | X25519 密钥交换（RFC 7748，TLS ECDHE 地基） | 3 / 21 |
 | `std/tls13` | TLS 1.3 密钥调度 + AEAD 记录层（v1.21） | 25 / 25 |
 | `std/p256` | NIST P-256 域运算 + ECDSA 验签（v1.22） | 2 / 45 |
+| `std/x509` | X.509 DER 解析 + P-256 自签/签发者验签（v1.23） | 11 / 12 |
 | `std/b64` | base64 编解码 | 5 / 5 |
 | `std/http` | HTTP/1.1 服务端 | 33 / 40 |
 | `std/ws` | WebSocket 服务端（RFC 6455） | 14 / 24 |
@@ -603,6 +604,24 @@ fn x25519_clamp(k: str) -> str
 fn x25519(k: str, u: str) -> str
 fn x25519_base(k: str) -> str
 ```
+
+### `std/x509.qma`
+
+X.509 证书解析（DER/ASN.1）+ P-256 自签/签发者验签（TLS 证书层）
+
+```quelmara
+fn x509_tlv(s: str, pos: int) -> vec[int]
+fn x509_ok(t: vec[int]) -> int
+fn x509_root(cert: str) -> vec[int]
+fn x509_tbs(cert: str) -> str
+fn x509_sig_alg_oid(cert: str) -> str
+fn x509_curve_oid(cert: str) -> str
+fn x509_spki_tlv(cert: str) -> vec[int]
+fn x509_pubkey(cert: str) -> str
+fn x509_sig(cert: str) -> str
+fn x509_verify_self_p256(cert: str) -> int
+fn x509_verify_with_p256(cert: str, issuer_pub: str) -> int
+```
 <!-- api:end -->
 
 ## 4. 关键库的边界
@@ -617,8 +636,9 @@ fn x25519_base(k: str) -> str
 | `std/math` | `sqrt`（牛顿，相对误差 <1e-15）、`cbrt`、`floor/ceil/round/trunc_f`、`powi`、`gcd/lcm/isqrt`、NaN/inf 判定 | 无 `exp/log/pow(x,y)/sin/cos`（需要超越函数库）；`floor` 等受 int64 范围限制 |
 | `std/aes` | AES-128-GCM 加解密（FIPS/NIST 向量通过） | AES-256、AES-NI 加速 |
 | `std/x25519` | X25519 标量乘 / 公钥生成 / 共享密钥（RFC 7748 向量全过） | 单次约 7 ms（约 100× 于优化过的 C）；无 X448、无 Ed25519 |
-| `std/tls13` | HKDF（RFC 5869）、Expand-Label、key schedule、AEAD 记录封装、Finished 派生 | **无握手状态机、无 X.509**——还不能独立完成真实握手 |
+| `std/tls13` | HKDF（RFC 5869）、Expand-Label、key schedule、AEAD 记录封装、Finished 派生 | **无握手状态机**——还不能独立完成真实握手（证书解析见 `std/x509`） |
 | `std/p256` | ECDSA-P256 验签（含无效曲线点防护）、曲线上点判定 | 只验签不签名；只支持 SHA-256 摘要与未压缩点；单次约 25 ms |
+| `std/x509` | DER TLV（≤3 字节长度）、TBSCertificate / SPKI / signatureValue 提取、`x509_verify_self_p256` 与 `x509_verify_with_p256` | 只认 ECDSA-P256 未压缩点；**不校验**有效期/域名/用途/链/CRL/OCSP；无 RSA、Ed25519、压缩点 |
 | `std/sha256` | SHA-256、HMAC-SHA256 | SHA-NI 硬件加速（基础设施已就绪，本机 CPU 无该扩展） |
 | `std/net` | 阻塞 TCP（IPv4 字面量） | 域名解析、IPv6、批量收发 |
 | `std/net/udp` | open/bind/sendto/recvfrom + 地址解析 | 可靠 UDP、批量收发、IPv6 |
