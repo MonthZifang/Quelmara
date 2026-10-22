@@ -1777,6 +1777,103 @@ def with_test_runner(fns_ast, tests):
 # 3. 类型推断（原型子集）
 # ---------------------------------------------------------------------------
 
+def global_dce(fns_ast):
+    """全局死代码消除（v1.17d）：从 main 的调用图可达性分析，删除不可达
+    的用户函数——import 大库只链接用到的（库生态"不拉进无用代码"的核心）。
+
+    保守规则（宁可少删，不可错删）：
+    - 根 = main（测试模式下 with_test_runner 已把测试合成进 main，
+      所以测试模式自动保留被测函数；普通构建自动剔除 test 块——
+      发布二进制不带测试代码，这是 DCE 的副产品而非缺陷）；
+    - 引用收集：("call", [path...], args) 取 path[-1]（lower_call 同款
+      解析）；("gcall", name, ...) 取 name；("name", x) 叶子也记——
+      函数值/回调经裸名传递（net.serve 的 cbconn 等），局部变量与
+      函数重名时会多保留（保守方向正确）；
+    - ("method", obj, m, args)：静态不知 obj 类型——出现方法名 m 就
+      保留全部以 "__m" 结尾的 fn（impl Type : Interface 落成的
+      Type__method 命名约定）；
+    - 不动点迭代（递归可达）。
+    - QLM_NO_DCE=1 环境变量关闭（诊断用）。
+    运行库（__ 前缀内建）不在 fns_ast 里，天然不受影响。"""
+    import os as _os
+    import sys as _sys
+    if _os.environ.get("QLM_NO_DCE"):
+        return fns_ast
+    # @extern 前置检查：语言级错误与可达性无关——声明了自研后端无法
+    # 兑现的链接语义就必须报错，哪怕这个 fn 随后会被 DCE 删除
+    # （否则"不可达 extern"静默编译通过，违反 fail-fast 契约）
+    for f in fns_ast:
+        if f.get("extern"):
+            raise SyntaxError(
+                f'函数 {f["name"]} 声明为 @extern("C")：自研后端不支持'
+                f'外部符号链接（原型无函数体无法发射）。'
+                f'请在 C 后端使用，或删除 @extern 改为本体实现')
+    by_name = {}
+    for f in fns_ast:
+        by_name[f["name"]] = f
+    if "main" not in by_name:
+        return fns_ast                     # 无 main（病态）：全保留
+
+    def walk(e, refs, methods):
+        if isinstance(e, tuple):
+            if e and e[0] == "call" and isinstance(e[1], list) and e[1]:
+                refs.add(e[1][-1])
+            elif e and e[0] == "gcall" and isinstance(e[1], str):
+                refs.add(e[1])
+            elif e and e[0] == "method" and len(e) > 2 and isinstance(e[2], str):
+                methods.add(e[2])
+            elif e and e[0] == "name" and isinstance(e[1], str):
+                refs.add(e[1])
+            for x in e:
+                walk(x, refs, methods)
+        elif isinstance(e, list):
+            for x in e:
+                walk(x, refs, methods)
+
+    # impl 家族：接口装箱的 vtable 覆盖同 (iface, type) 的**全部**方法
+    # 槽——任一成员可达则全族保留，否则 build_iface_meta 的
+    # table[m] KeyError（v1.17d 首版踩坑：只调用接口的一个方法，
+    # 其余方法被 DCE，vtable 建不出来）
+    family = {}
+    for f in fns_ast:
+        ii = f.get("impl_iface")
+        if ii:
+            family.setdefault((ii, f.get("self_type")), []).append(f["name"])
+
+    reach = {"main"}
+    seen = set()
+    methods = set()
+    while True:
+        before = len(reach)
+        for name in list(reach):
+            if name in seen or name not in by_name:
+                continue
+            seen.add(name)
+            refs, ms = set(), set()
+            walk(by_name[name]["body"], refs, ms)
+            methods |= ms
+            for r in refs:
+                if r in by_name:
+                    reach.add(r)
+            fobj = by_name[name]
+            if fobj.get("impl_iface"):
+                for sib in family.get((fobj["impl_iface"], fobj.get("self_type")), []):
+                    reach.add(sib)
+        for m in methods:
+            suf = "__" + m
+            for f in fns_ast:
+                if f["name"].endswith(suf):
+                    reach.add(f["name"])
+        if len(reach) == before:
+            break
+    kept = [f for f in fns_ast if f["name"] in reach]
+    dropped = len(fns_ast) - len(kept)
+    if dropped and _os.environ.get("QLM_DCE_VERBOSE"):
+        print(f"[dce] dropped {dropped} unreachable fns "
+              f"({len(fns_ast)} -> {len(kept)})", file=_sys.stderr)
+    return kept
+
+
 BUILTIN_RETS = {"print": "void", "cores": "int", "assert": "void",
                 "join": "int64_t", "len": "int64_t",
                 "to_float": "double", "to_f32": "float", "to_int": "int64_t"}
@@ -4401,6 +4498,7 @@ def transpile(src_path):
     mod, imports, fns_ast, tests, structs, enums, decl_order = load_program(src_path, cfg)
     PROGRAM = (mod, imports, fns_ast, tests)
     fns_ast = with_test_runner(fns_ast, tests)
+    fns_ast = global_dce(fns_ast)          # 全局 DCE（v1.17d）
     # 用户 main 与 C main 区分：编译为 qlm_main
     for f in fns_ast:
         if f["name"] == "main":

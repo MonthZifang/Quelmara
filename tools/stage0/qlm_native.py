@@ -28,7 +28,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from qlm import (tokenize, Parser, load_config, walk_stmts,  # noqa: E402
                     parse_source, with_test_runner, validate_match,
-                    resolve_option_patterns, require_source, load_program)
+                    resolve_option_patterns, require_source, load_program,
+                    global_dce)
 
 # ---------------------------------------------------------------------------
 # x86-64 寄存器编号
@@ -8654,6 +8655,9 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
     cfg = load_config(src_path)
     mod, _imports, fns_ast, tests, structs, enums, _order = load_program(src_path)
     fns_ast = with_test_runner(fns_ast, tests)   # test "name" { } -> 测试入口
+    # 全局 DCE（v1.17d）：main 调用图可达性——import 大库只链接用到的。
+    # 在测试合成之后（根含测试入口）、Lower 之前（AST 级，一次到位）
+    fns_ast = global_dce(fns_ast)
     low = Lower(fns_ast, cfg, arch=arch, structs=structs, enums=enums,
                 asset_root=asset_root,
                 platform=platform)
