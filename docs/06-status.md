@@ -9,17 +9,18 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=131 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
-| 词法器对拍 | **PASS=116 FAIL=0**（116 个源文件） | `python tests/lexdiff.py` |
-| 声明级 AST 对拍 | **PASS=101 FAIL=0**（跳过 3 个：`t52_iface` / `t54_iface_dyn` / `t56_generic`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
-| 函数体 dump 对拍 | **一致 848 / 分叉 755 / SKIP 同步 18 / SKIP 不同步 18** | `python tests/bodydiff.py` |
+| PE 回归（主回归） | **PASS=132 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
+| 词法器对拍 | **PASS=118 FAIL=0**（118 个源文件） | `python tests/lexdiff.py` |
+| 声明级 AST 对拍 | **PASS=103 FAIL=0**（跳过 3 个：`t52_iface` / `t54_iface_dyn` / `t56_generic`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
+| 函数体 dump 对拍 | **一致 873 / 分叉 755 / SKIP 同步 18 / SKIP 不同步 18** | `python tests/bodydiff.py` |
 | IR 架构无关对拍 | **PASS=56 FAIL=0 SKIP=35**，并行后 **49 s**（原串行 5 min 41 s） | `python tests/irdiff.py` |
 | 发射层确定性对拍 | **PASS=10 FAIL=0** | `python tests/emitdiff.py` |
 | gzip 解码互操作 | **PASS=63 FAIL=0**（zlib 9 种编码组合 × 7 类输入）+ **损坏输入拒绝 5/5** | `python tests/gzip_inflate_test.py` |
 | ECDSA P-256 验签互操作 | **PASS=32 FAIL=0**（20 正向 + 12 负向，Python bigint 参考实现） | `python tests/ecdsa_p256_test.py` |
-| 自研 HTTPS GET（示例，手动） | **handshake ok cv=1；HTTP/1.1 200 OK**（example.com，2026-10-22） | `python tools/stage0/qlm_cli.py run examples/https_get.qma --target win` |
+| 自研 HTTPS GET（示例，手动） | **handshake ok cv=1；cert chain=2 host_ok=1 time_ok=1；HTTP/1.1 200 OK**（example.com，2026-10-22） | `python tools/stage0/qlm_cli.py run examples/https_get.qma --target win` |
 | TLS 1.3 真实握手（手动探针） | **ok=1 cv=1**（cloudflare.com / www.cloudflare.com / example.com，2026-10-22） | `python tools/dev/tls_probe.py <host>` |
 | TLS 1.3 握手核心（RFC 8448 §3） | **PASS**（共享密钥 / hs+ap secrets / key,iv / 服务器 Finished / 客户端 Finished 记录 58 B 逐字节一致） | `python tools/stage0/qlm_cli.py run tests/t69_tls_client.qma --target win` |
+| X.509 证书链 / 有效期 / 域名 | **PASS=10 FAIL=0**（三级链 + 通配符一级 + 过期/篡改/缺中间证书拒绝） | `python tests/x509_chain_test.py` |
 | X.509 解析 + 自签验签互操作 | **PASS=7 FAIL=0**（4 正向：v3/v1/长 CN/大序列号；3 负向：篡改 TBS/篡改签名/截断） | `python tests/x509_test.py` |
 | 三道门禁 | check_names / check_origin / check_docs 全 PASS | `python tools/dev/check_*.py` |
 
@@ -141,7 +142,7 @@ python tools/stage0/qlm_cli.py run bench/sync_bench.qma --target win
 | AArch64（ELF64） | 🟡 | `tests/a64_emu.py` 执行级 | 无 chan/map/spawn/vtable/atomic/SHA；遇不支持形态编译期报错 |
 | macOS（Mach-O） | ❌ | — | 无 |
 | wasm32/64 | ❌ | — | 无 |
-| TLS（https/wss） | 🟡 客户端可用（Windows） | `std/tls_net` + `examples/https_get.qma`（自研 TCP + 握手 + HTTPS GET 实测 200） | Linux 无 `tcp_connect`/DNS；证书链/有效期/域名策略未做；RSA 验签缺 |
+| TLS（https/wss） | 🟡 客户端可用（Windows） | `std/tls_net` + `std/x509`（链/有效期/域名校验）+ `examples/https_get.qma`（实测 200） | **无内置根证书库**（链校验需调用方给锚证书）；Linux 无 `tcp_connect`/DNS；RSA 验签缺 |
 
 ## 6. 已知风险
 

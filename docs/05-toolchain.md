@@ -144,6 +144,7 @@ other = "git:https://github.com/u/r#v1"  # git + 可选 rev
 | `tests/gzip_http_test.py` | HTTP 压缩协商端到端 | 全平台 |
 | `tests/ecdsa_p256_test.py` | ECDSA P-256 验签互操作（Python bigint 参考实现） | 全平台 |
 | `tests/x509_test.py` | X.509 解析 + 自签验签互操作（手工 DER + bigint 签名） | 全平台 |
+| `tests/x509_chain_test.py` | 证书链 + 有效期 + 域名（含通配符）验证，Python 手工三级链 | 全平台 |
 | `tools/dev/tls_probe.py` | 真实服务器 TLS 1.3 握手探针（Python 提供 socket，手动运行） | 全平台（需网络） |
 | `tests/a64_emu.py` | AArch64 指令模拟器 | 全平台 |
 

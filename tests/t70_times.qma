@@ -1,0 +1,19 @@
+// t70_times.qma：now_ns + wall_ms + rand 同时使用（v1.26 回归）
+// 背景：__now_ns 的运行时块曾被 wall 块复用 `f` 覆盖，导致两者同时使用时
+// 只发出 __wall_ms、__now_ns 缺失（KeyError '__now_ns'）。
+module t70
+
+import std.rand
+import std.time
+
+fn main() {
+    let a = now_ns()
+    let b = wall_ms()
+    assert(b > 1600000000000, "wall clock is unix epoch ms")
+    assert(a > 0, "monotonic clock")
+    rand_seed(a ^ b)
+    let r1 = rand_next()
+    let r2 = rand_next()
+    assert(r1 != r2, "rand advances")
+    print("ok t70_times")
+}

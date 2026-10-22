@@ -7,6 +7,7 @@ import std.net
 import std.tls13
 import std.tls_client
 import std.tls_net
+import std.x509
 
 fn main() {
     let host = "example.com"
@@ -16,6 +17,13 @@ fn main() {
         return
     }
     print("handshake ok (cv=" + r.cv.to_str() + ")")
+    let n = tls_cert_count(r)
+    if n > 0 {
+        let leaf = tls_cert(r, 0)
+        print("cert chain=" + n.to_str() +
+              " host_ok=" + x509_host_ok(leaf, host).to_str() +
+              " time_ok=" + x509_time_valid(leaf, wall_ms() / 1000).to_str())
+    }
 
     let req = "GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n"
     let n = tls_send_app(r, 0, req)

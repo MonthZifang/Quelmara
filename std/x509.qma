@@ -333,3 +333,361 @@ fn x509_verify_with_p256(cert: str, issuer_pub: str) -> int {
     return ecdsa_p256_verify(substr(issuer_pub, 0, 32), substr(issuer_pub, 32, 32), h,
                              substr(sig, 0, 32), substr(sig, 32, 32))
 }
+
+// ---------------------------------------------------------------------------
+// 链验证（v1.26）：字段提取 + 有效期 + SAN + 签名链
+// ---------------------------------------------------------------------------
+
+// TBS 里 serial 之后的起始偏移（0 = 解析失败）
+fn _x509_fields_start(cert: str) -> int {
+    let root = x509_root(cert)
+    if len(root) == 0 {
+        return 0
+    }
+    let tbs = x509_tlv(cert, root.get(2))
+    if x509_ok(tbs) == 0 {
+        return 0
+    }
+    let mut p = tbs.get(2)
+    let first = x509_tlv(cert, p)
+    if x509_ok(first) == 0 {
+        return 0
+    }
+    if first.get(0) == X509_TAG_CTX0 {
+        p = first.get(4)
+    }
+    let serial = x509_tlv(cert, p)
+    if x509_ok(serial) == 0 {
+        return 0
+    }
+    return serial.get(4)
+}
+
+// 从 serial 之后跳过 n 个字段，返回第 n 个 TLV（空 = 失败）
+fn _x509_skip(cert: str, n: int) -> vec[int] {
+    let mut p = _x509_fields_start(cert)
+    if p == 0 {
+        return vec[int].new(0)
+    }
+    let mut k = 0
+    while k < n {
+        let t = x509_tlv(cert, p)
+        if x509_ok(t) == 0 {
+            return vec[int].new(0)
+        }
+        p = t.get(4)
+        k = k + 1
+    }
+    return x509_tlv(cert, p)
+}
+
+// 取 TLV 的完整 DER（含 tag/len）
+fn _x509_der(cert: str, t: vec[int]) -> str {
+    if x509_ok(t) == 0 {
+        return ""
+    }
+    let start = t.get(2) - t.get(1)
+    return substr(cert, start, t.get(4) - start)
+}
+
+fn x509_issuer(cert: str) -> str {
+    return _x509_der(cert, _x509_skip(cert, 1))
+}
+
+fn x509_subject(cert: str) -> str {
+    return _x509_der(cert, _x509_skip(cert, 3))
+}
+
+fn x509_validity_raw(cert: str) -> str {
+    return _x509_der(cert, _x509_skip(cert, 2))
+}
+
+// 十进制数字串 → 整数
+fn _x509_num(s: str, off: int, n: int) -> int {
+    let mut v = 0
+    let mut i = 0
+    while i < n {
+        v = v * 10 + (s[off + i] - 48)
+        i = i + 1
+    }
+    return v
+}
+
+// 公历日期 → Unix 天数（Howard Hinnant 算法）
+fn _x509_days(y: int, m: int, d: int) -> int {
+    let mut yy = y
+    if m <= 2 {
+        yy = y - 1
+    }
+    let era = yy / 400
+    let yoe = yy - era * 400
+    let mut mp = m + 9
+    if m > 2 {
+        mp = m - 3
+    }
+    let doy = (153 * mp + 2) / 5 + d - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+}
+
+// 证书有效期：[not_before, not_after]（Unix 秒）；失败返回空 vec
+fn x509_validity(cert: str) -> vec[int] {
+    let out = vec[int].new(3)
+    let v = _x509_skip(cert, 2)
+    if x509_ok(v) == 0 || v.get(0) != X509_TAG_SEQUENCE {
+        return out
+    }
+    let a = x509_tlv(cert, v.get(2))
+    if x509_ok(a) == 0 {
+        return out
+    }
+    let b = x509_tlv(cert, a.get(4))
+    if x509_ok(b) == 0 {
+        return out
+    }
+    out.push(_x509_parse_time(cert, a))
+    out.push(_x509_parse_time(cert, b))
+    return out
+}
+
+fn _x509_parse_time(cert: str, t: vec[int]) -> int {
+    let off = t.get(2)
+    let n = t.get(3)
+    let mut y = 0
+    let mut mo = 0
+    let mut d = 0
+    let mut hh = 0
+    let mut mm = 0
+    let mut ss = 0
+    if t.get(0) == 0x17 && n >= 13 {
+        let yy = _x509_num(cert, off, 2)
+        if yy < 50 {
+            y = 2000 + yy
+        } else {
+            y = 1900 + yy
+        }
+        mo = _x509_num(cert, off + 2, 2)
+        d = _x509_num(cert, off + 4, 2)
+        hh = _x509_num(cert, off + 6, 2)
+        mm = _x509_num(cert, off + 8, 2)
+        ss = _x509_num(cert, off + 10, 2)
+    } else if t.get(0) == 0x18 && n >= 15 {
+        y = _x509_num(cert, off, 4)
+        mo = _x509_num(cert, off + 4, 2)
+        d = _x509_num(cert, off + 6, 2)
+        hh = _x509_num(cert, off + 8, 2)
+        mm = _x509_num(cert, off + 10, 2)
+        ss = _x509_num(cert, off + 12, 2)
+    } else {
+        return 0
+    }
+    return _x509_days(y, mo, d) * 86400 + hh * 3600 + mm * 60 + ss
+}
+
+// 在 [not_before, not_after] 内返回 1
+fn x509_time_valid(cert: str, now: int) -> int {
+    let v = x509_validity(cert)
+    if len(v) != 2 {
+        return 0
+    }
+    if now < v.get(0) || now > v.get(1) {
+        return 0
+    }
+    return 1
+}
+
+// 取扩展值（OID 匹配，返回 OCTET STRING 的内容）；没有返回 ""
+fn _x509_ext_value(cert: str, oid: str) -> str {
+    let e = _x509_skip(cert, 5)
+    if x509_ok(e) == 0 || e.get(0) != 0xA3 {
+        return ""
+    }
+    let seq = x509_tlv(cert, e.get(2))
+    if x509_ok(seq) == 0 || seq.get(0) != X509_TAG_SEQUENCE {
+        return ""
+    }
+    let mut p = seq.get(2)
+    let end = seq.get(4)
+    while p < end {
+        let ex = x509_tlv(cert, p)
+        if x509_ok(ex) == 0 || ex.get(0) != X509_TAG_SEQUENCE {
+            return ""
+        }
+        let o = x509_tlv(cert, ex.get(2))
+        if x509_ok(o) == 0 || o.get(0) != X509_TAG_OID {
+            return ""
+        }
+        let oidv = substr(cert, o.get(2), o.get(3))
+        let mut q = o.get(4)
+        let nx = x509_tlv(cert, q)
+        if x509_ok(nx) == 0 {
+            return ""
+        }
+        if nx.get(0) == 0x01 {
+            q = nx.get(4)
+        }
+        let val = x509_tlv(cert, q)
+        if x509_ok(val) == 0 || val.get(0) != 0x04 {
+            return ""
+        }
+        if oidv == oid {
+            return substr(cert, val.get(2), val.get(3))
+        }
+        p = ex.get(4)
+    }
+    return ""
+}
+
+// basicConstraints（2.5.29.19）→ CA 位
+fn x509_is_ca(cert: str) -> int {
+    let v = _x509_ext_value(cert, "\x55\x1d\x13")
+    if len(v) == 0 {
+        return 0
+    }
+    let seq = x509_tlv(v, 0)
+    if x509_ok(seq) == 0 || seq.get(0) != X509_TAG_SEQUENCE {
+        return 0
+    }
+    let b = x509_tlv(v, seq.get(2))
+    if x509_ok(b) == 0 || b.get(0) != 0x01 {
+        return 0
+    }
+    if v[b.get(2)] != 0 {
+        return 1
+    }
+    return 0
+}
+
+// subjectAltName（2.5.29.17）→ DNS 名列表
+fn x509_san(cert: str) -> vec[str] {
+    let out = vec[str].new(4)
+    let v = _x509_ext_value(cert, "\x55\x1d\x11")
+    if len(v) == 0 {
+        return out
+    }
+    let seq = x509_tlv(v, 0)
+    if x509_ok(seq) == 0 || seq.get(0) != X509_TAG_SEQUENCE {
+        return out
+    }
+    let mut p = seq.get(2)
+    let end = seq.get(4)
+    while p < end {
+        let g = x509_tlv(v, p)
+        if x509_ok(g) == 0 {
+            break
+        }
+        if g.get(0) == 0x82 {
+            out.push(substr(v, g.get(2), g.get(3)))
+        }
+        p = g.get(4)
+    }
+    return out
+}
+
+// ASCII 小写
+fn _x509_lower(s: str) -> str {
+    let v = vec[int].new(len(s) + 1)
+    let mut i = 0
+    while i < len(s) {
+        let c = s[i]
+        if c >= 65 && c <= 90 {
+            v.push(c + 32)
+        } else {
+            v.push(c)
+        }
+        i = i + 1
+    }
+    return str_from_bytes(v)
+}
+
+// 通配符只匹配一级标签
+fn _x509_host_match(pat: str, host: str) -> int {
+    let p = _x509_lower(pat)
+    let h = _x509_lower(host)
+    if len(p) == 0 || len(h) == 0 {
+        return 0
+    }
+    if p[0] != 42 {
+        if p == h {
+            return 1
+        }
+        return 0
+    }
+    if len(p) < 3 || p[1] != 46 {
+        return 0
+    }
+    let suffix = substr(p, 1, len(p) - 1)          // ".example.com"
+    if len(h) <= len(suffix) {
+        return 0
+    }
+    if substr(h, len(h) - len(suffix), len(suffix)) != suffix {
+        return 0
+    }
+    let label = substr(h, 0, len(h) - len(suffix))
+    let mut i = 0
+    while i < len(label) {
+        if label[i] == 46 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn x509_host_ok(cert: str, host: str) -> int {
+    let names = x509_san(cert)
+    let mut i = 0
+    while i < len(names) {
+        if _x509_host_match(names.get(i), host) == 1 {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// 一条链节：child 由 issuer 签发
+fn _x509_link(child: str, issuer: str, now: int) -> int {
+    if x509_is_ca(issuer) != 1 {
+        return 0
+    }
+    if x509_issuer(child) != x509_subject(issuer) {
+        return 0
+    }
+    if x509_time_valid(child, now) == 0 {
+        return 0
+    }
+    let pub = x509_pubkey(issuer)
+    if len(pub) != 64 {
+        return 0
+    }
+    return x509_verify_with_p256(child, pub)
+}
+
+// 验证 leaf（可选 intermediates，按 leaf→root 顺序）到 anchor。
+// host 非空时额外校验 SAN；now 是 Unix 秒。
+// 返回 1 = 通过，0 = 失败。
+fn x509_verify_chain(leaf: str, inter: vec[str], anchor: str, host: str, now: int) -> int {
+    if x509_is_ca(anchor) != 1 {
+        return 0
+    }
+    let mut cur = leaf
+    let mut i = len(inter) - 1
+    while i >= 0 {
+        let up = inter.get(i)
+        if _x509_link(cur, up, now) == 0 {
+            return 0
+        }
+        cur = up
+        i = i - 1
+    }
+    if _x509_link(cur, anchor, now) == 0 {
+        return 0
+    }
+    if len(host) > 0 {
+        if x509_host_ok(leaf, host) == 0 {
+            return 0
+        }
+    }
+    return 1
+}

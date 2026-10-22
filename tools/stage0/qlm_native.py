@@ -6796,9 +6796,19 @@ class Lower:
             f.emit("load", cnt, ("ga", gid_cnt), ("imm", 0))
             fq2 = f.new_v()
             f.emit("load", fq2, ("ga", gid_fq), ("imm", 0))
+            # cnt * 1e9 会溢出 int64（QPC 计数 ~1e10）——先拆成秒 + 余数
+            sec = f.new_v()
+            f.emit("bin", "div", sec, cnt, fq2)
+            whole = f.new_v()
+            f.emit("bin", "mul", whole, sec, fq2)
+            rem = f.new_v()
+            f.emit("bin", "sub", rem, cnt, whole)
             ns = f.new_v()
-            f.emit("bin", "mul", ns, cnt, ("imm", 1000000000))
-            f.emit("bin", "div", ns, ns, fq2)
+            f.emit("bin", "mul", ns, sec, ("imm", 1000000000))
+            rn = f.new_v()
+            f.emit("bin", "mul", rn, rem, ("imm", 1000000000))
+            f.emit("bin", "div", rn, rn, fq2)
+            f.emit("bin", "add", ns, ns, rn)
             f.emit("ret", ns)
         else:
             gid_ts = self.intern_array(2)
@@ -6812,6 +6822,9 @@ class Lower:
             f.emit("bin", "mul", ns, sec, ("imm", 1000000000))
             f.emit("bin", "add", ns, ns, nsec)
             f.emit("ret", ns)
+        if self.uses_now:
+            self.out.append(f)          # 必须在这里 append：后面的 wall 块会复用 f
+
         if self.uses_udp:
             # ---- UDP（v1.17）：数据报套接字四件 ----
             # 块内自带 net_fail（TCP gate 未触发时外层的 def 不存在）
@@ -7053,9 +7066,6 @@ class Lower:
                 ms3 = f.new_v()
                 f.emit("bin", "div", ms3, ms2, ("imm", 1000000))
                 f.emit("ret", ms3)
-            self.out.append(f)
-
-        if self.uses_now:
             self.out.append(f)
 
         # __str_concat(a, b) -> ptr（v1.5.1 长度前缀 ABI）：

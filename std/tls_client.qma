@@ -41,7 +41,8 @@ struct TlsClientResult {
     c_ap_key: str,
     c_ap_iv: str,
     s_ap_key: str,
-    s_ap_iv: str
+    s_ap_iv: str,
+    cert_msg: str          // Certificate 消息体（用 tls_cert_count / tls_cert 取证书）
 }
 
 fn tls_client_err(code: str) -> TlsClientResult {
@@ -51,7 +52,8 @@ fn tls_client_err(code: str) -> TlsClientResult {
         c_hs_key: "", c_hs_iv: "", s_hs_key: "", s_hs_iv: "",
         c_ap_secret: "", s_ap_secret: "", cert_pub: "", cv: 0,
         server_finished_ok: 0, client_finished: "", transcript_hash: "",
-        fd: -1, c_ap_key: "", c_ap_iv: "", s_ap_key: "", s_ap_iv: ""
+        fd: -1, c_ap_key: "", c_ap_iv: "", s_ap_key: "", s_ap_iv: "",
+        cert_msg: ""
     }
 }
 
@@ -155,6 +157,32 @@ fn tls_verify_cert_verify(cert_der: str, alg: int, sig: str, transcript_hash: st
     return ecdsa_p256_verify(substr(pub, 0, 32), substr(pub, 32, 32),
                              tls_cert_verify_hash(transcript_hash),
                              substr(raw, 0, 32), substr(raw, 32, 32))
+}
+
+// Certificate 消息体 → 所有证书 DER（leaf 在前）
+fn _tls_cert_list(body: str) -> vec[str] {
+    let out = vec[str].new(4)
+    if len(body) < 8 {
+        return out
+    }
+    let ctx = body[0]
+    let p = 1 + ctx
+    if p + 3 > len(body) {
+        return out
+    }
+    let total = (body[p] << 16) | (body[p + 1] << 8) | body[p + 2]
+    let end = p + 3 + total
+    let mut q = p + 3
+    while q + 3 <= len(body) && q + 3 <= end {
+        let ln = (body[q] << 16) | (body[q + 1] << 8) | body[q + 2]
+        let off = q + 3
+        if off + ln > len(body) {
+            break
+        }
+        out.push(substr(body, off, ln))
+        q = off + ln
+    }
+    return out
 }
 
 // Certificate 消息体 → 第一张证书的 DER
@@ -302,6 +330,7 @@ fn tls_client_handshake(priv: str, ch_record: str, server_bytes: str) -> TlsClie
     let mut flight = ""
     let mut q = 0
     let mut cert_der = ""
+    let mut cert_msg = ""
     let mut cv_alg = 0
     let mut cv_sig = ""
     let mut th_before_cv = ""
@@ -349,6 +378,7 @@ fn tls_client_handshake(priv: str, ch_record: str, server_bytes: str) -> TlsClie
             }
             if mt == TLS_HS_CERTIFICATE {
                 cert_der = _tls_cert_der(body)
+                cert_msg = body
             }
             if mt == TLS_HS_CERTIFICATE_VERIFY {
                 if len(body) >= 4 {
@@ -409,10 +439,44 @@ fn tls_client_handshake(priv: str, ch_record: str, server_bytes: str) -> TlsClie
     r.server_finished_ok = fin_ok
     r.client_finished = cf
     r.transcript_hash = th2
+    r.cert_msg = cert_msg
     if fin_ok == 1 {
         r.ok = 1
     } else {
         r.err = "finished"
     }
     return r
+}
+
+
+// 用给定信任锚验证服务器证书链（host 非空时校验 SAN，now 是 Unix 秒）。
+// 返回 1 = 通过；0 = 失败。锚证书由调用方提供（当前没有内置根证书库）。
+fn tls_verify_chain(r: TlsClientResult, anchor: str, host: str, now: int) -> int {
+    let certs = _tls_cert_list(r.cert_msg)
+    let n = len(certs)
+    if n == 0 {
+        return 0
+    }
+    let leaf = certs.get(0)
+    let inter = vec[str].new(n)
+    let mut i = 1
+    while i < n {
+        inter.push(certs.get(i))
+        i = i + 1
+    }
+    return x509_verify_chain(leaf, inter, anchor, host, now)
+}
+
+// Certificate 消息里的证书数量
+fn tls_cert_count(r: TlsClientResult) -> int {
+    return len(_tls_cert_list(r.cert_msg))
+}
+
+// 第 i 张证书的 DER（0 = leaf）；越界返回 ""
+fn tls_cert(r: TlsClientResult, i: int) -> str {
+    let certs = _tls_cert_list(r.cert_msg)
+    if i < 0 || i >= len(certs) {
+        return ""
+    }
+    return certs.get(i)
 }

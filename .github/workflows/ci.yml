@@ -76,6 +76,9 @@ jobs:
       - name: X.509 解析 + 自签验签互操作（Python 手工 DER + bigint 签名）
         run: python tests/x509_test.py
 
+      - name: X.509 证书链 / 有效期 / 域名验证（三级链）
+        run: python tests/x509_chain_test.py
+
       - name: 自举对拍（词法 / 声明级 AST）
         run: |
           python tests/lexdiff.py
