@@ -602,6 +602,7 @@ def main():
     case_selfcheck("t74_set_deque", "tests/t74_set_deque.qma")
     case_selfcheck("t75_utf8", "tests/t75_utf8.qma")
     case_selfcheck("t76_codec", "tests/t76_codec.qma")
+    case_selfcheck("t78_lru", "tests/t78_lru.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),

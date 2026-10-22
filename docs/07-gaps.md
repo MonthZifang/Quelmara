@@ -46,7 +46,7 @@
 | 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠 |
 | 数学 | 有 sqrt/cbrt/powi/取整/gcd；**无 `exp` / `log` / `pow(x,y)` / `sin` / `cos`** | 图形、统计、复利 |
 | 哈希 | 有 SHA-1 / SHA-256 / **FNV-1a 32/64**（v1.29）；无 MD5 | 缓存键已有 FNV，MD5 只剩兼容旧协议 |
-| 数据结构 | ✅ v1.29：有 RingBuf / MinHeap / **set[int]·set[str]** / **deque**；仍无 LRU | LRU 要「map + 双向链表」双句柄 API，未做（见 §8） |
+| 数据结构 | ✅ v1.29/30：RingBuf / MinHeap / **set[int]·set[str]** / **deque** / **LRU**（自建开放寻址表 + 双向链表，单句柄） | LRU 的 key 只有 int（字符串先 `fnv1a64`）；无 TTL / 无容量自适应 |
 | 持久化 | 无 SQLite / KV / 序列化格式（`std/serialize` 只是编码原语） | 任何要存数据的应用 |
 | 正则 | 无 | 文本清洗、路由匹配 |
 | CLI | ✅ v1.29：`std/cli`（`--k=v` / `--k v` / `-k v` / 布尔 / 位置参数）；无子命令与自动 usage | 子命令要自己 switch |
@@ -91,7 +91,8 @@
 | **LICM 根修** | 普适（所有循环） | 根因是 x64 分配器布局敏感段错误；修好前 LICM 只能关 |
 | **loop_sum 三件套** | 循环 10.8 → ~4 cycles/iter | ① phi copy 消除（分配器 coalescing）② do-while 变换（CFG 要容错 jcc 回边）③ cssub 形态 |
 | **JSON memchr 化** | 2 ms → ~1 ms | 内建 `mem_chr` **已就绪**（v1.29）；JSON 内部仍逐字节（要同时找 引号 / 反斜杠 / <0x20 三类，需 `mem_lt` 或双 memchr + 控制字符复检） |
-| **gzip lazy matching** | 25 ms → ~15 ms | 匹配器改造，zlib 互操作必须仍全过 |
+| ~~gzip 编码提速~~ | ✅ v1.30 已做：**25–27 ms → 16 ms（1.6×）**，输出字节不变 | 走的是「mem_diff 批量比对 + 插入/滚动合并」，不是 lazy matching——lazy 只会更慢、压缩率更好 |
+| **gzip lazy matching** | 压缩率 -3~8%（时间 +20~30%） | 若要更好压缩率再做；与上面的提速是两个目标，别混 |
 | **AVX2 点积** | 新形状 | 需 `vpmullq`（SSE2 64 位乘语义不一致） |
 
 > 性能实验两条铁律（两次回滚换来的）：
@@ -177,8 +178,8 @@ v1.29 写 `__memchr` 的 SWAR 时踩到：`and rd, imm` 里 imm 取 `-2^63`（�
    loop_sum 三件套 → LICM 根修
 2. **语言层（§1）**：黄标逐项（`map[str]Struct`、`vec[map]`、函数值放宽、`result` struct 载荷、
    命名空间 / `pub`、`defer` …）
-3. **标准库（§2）**：红标剩余项——**LRU**（要双句柄 API）、**MD5**（只差旧协议兼容）、
-   HTTP 客户端封装（重定向/chunked/连接池）、路由/静态文件/MIME/cookie/session/multipart、
+3. **标准库（§2）**：红标剩余项——**MD5**（只差旧协议兼容）、HTTP 客户端封装
+   （重定向/chunked/连接池）、路由/静态文件/MIME/cookie/session/multipart、
    多 member gzip + zlib 容器、正则、持久化（KV/SQLite）、`exp/log/sin/cos`
 4. **工具链（§3）**：`.qla`、semver/registry、增量编译、覆盖率
 

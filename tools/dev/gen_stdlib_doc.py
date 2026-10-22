@@ -31,6 +31,7 @@ DESC = {
     "std/http.qma": "HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商）",
     "std/json.qma": "DOM 式 JSON 解析与 builder",
     "std/log.qma": "分级日志（stdout）+ 结构化字段 + 级别过滤",
+    "std/lru.qma": "LRU 缓存（开放寻址表 + 双向链表，单句柄 O(1)）",
     "std/math.qma": "浮点与整数数学（sqrt/cbrt/floor/ceil/round/powi/gcd）",
     "std/mem.qma": "slab 分配 / fd 表 / 缓冲 / 对象池",
     "std/net.qma": "阻塞 TCP 便捷层",

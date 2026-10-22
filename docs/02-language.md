@@ -301,6 +301,7 @@ fn add_one(n: int) -> result[int, str] {
 | `mem_ptr(p, off)` | 指针偏移（**str 指针算术必须用它**，`s + n` 会被拼接劫持） |
 | `mem_copy(dst, src, n)` / `mem_zero(p, n)` / `mem_cmp(a, b, n)` | 内存操作 |
 | `mem_chr(p, n, byte)` | 在 n 字节内找首个等于 byte 的字节，返回下标或 -1（v1.29，8 字节 SWAR） |
+| `mem_diff(p1, p2, n)` | 两段 n 字节的**首个不同字节下标**，全等返回 n（v1.30，8 字节字比较；即公共前缀长度） |
 | `mem_str(p, n)` | 内存转 str |
 | `mem_load8/32/64(p)`、`mem_store8/64(p, v)` | 裸读写（8/32 是字节偏移，64 是槽索引 ×8） |
 | `mem_alloc(n)` / `mem_free(p)` | 裸分配/释放 |

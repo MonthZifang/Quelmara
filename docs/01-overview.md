@@ -76,8 +76,8 @@ fn main() {
 ├── docs/                  # 全部文档（本目录）
 ├── examples/              # 18 个可直接运行的示例
 ├── bench/                 # 10 个基准 + baseline.json + loadgen.py
-├── tests/                 # 87 个 .qma 回归 + 12 个负向夹具 + 对拍/回归脚本
-├── std/                   # 38 个标准库模块（.qma 源码，编译期合并）
+├── tests/                 # 88 个 .qma 回归 + 12 个负向夹具 + 对拍/回归脚本
+├── std/                   # 39 个标准库模块（.qma 源码，编译期合并）
 │   └── net/               # core.qma（槽位层）/ udp.qma
 ├── bootstrap/             # 自举层：lexer/ + parser/（Quelmara 写的）
 ├── tools/

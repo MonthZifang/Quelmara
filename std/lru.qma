@@ -1,0 +1,288 @@
+// std/lru.qma —— LRU 缓存（v1.30）
+//
+// 为什么需要它：`07-gaps.md` §2 的数据结构红标里只剩 LRU。缓存淘汰策略里
+// LRU 是最常用的一种（HTTP 响应缓存、DNS 缓存、编译产物缓存、会话表）。
+//
+// 为什么不用 map：语言层 `map[K]V` 的句柄没法塞进 `vec[int]` 或 mem 块
+// （类型系统不允许），而 LRU 需要"哈希表 + 双向链表"两套结构共享同一个句柄。
+// 所以这里自建**开放寻址哈希表**（探测 + 墓碑）和**双向链表**，全部装在一个
+// `vec[int]` 里——单句柄、零依赖、纯 Quelmara。
+//
+// 布局（st 是 vec[int]，每槽 8 字节）：
+//   [0] cap      最多条目数
+//   [1] len      当前条目数
+//   [2] head     最近使用（MRU）的槽号，-1 = 空
+//   [3] tail     最久未用（LRU）的槽号，-1 = 空
+//   [4] tc       表容量（2 的幂，>= 2*cap）
+//   [5] free     空闲槽链表头
+//   [6 .. 6+2*tc)   表：每项 (key, slot)，slot = -1 空 / -2 墓碑
+//   [nodes .. )     节点：每槽 4 字 (key, val, prev, next)
+//
+// 复杂度：get / put / del 均摊 O(1)（探测链长度受负载因子 <= 0.5 约束）。
+//
+// 语义纪律：
+//   * `lru_get` 未命中返回 -1，所以**值域里 -1 有歧义**——要区分请先用 `lru_has`，
+//     或者用 `lru_get_or(st, k, def)` 给一个不会与真实值冲突的默认值；
+//   * `lru_put` 满了先淘汰 tail（最久未用），不会失败；
+//   * key 是 int：字符串 key 请先 `fnv1a64`（见 `std/hash`）——注意哈希碰撞会
+//     让两个 key 互相覆盖，这是调用方的责任，不是缓存能替你解决的。
+
+const LRU_HDR = 6
+
+fn _lru_tc(st: vec[int]) -> int {
+    return st.get(4)
+}
+
+fn _lru_nodes(st: vec[int]) -> int {
+    return LRU_HDR + st.get(4) * 2
+}
+
+// _lru_hash(k, mask) -> int：乘法散列（splitmix 常数）+ 高位回混
+fn _lru_hash(k: int, mask: int) -> int {
+    let mut h = k * -7046029254386353131
+    h = h ^ (h >> 29)
+    return h & mask
+}
+
+fn _lru_nkey(st: vec[int], s: int) -> int {
+    return st.get(_lru_nodes(st) + s * 4)
+}
+
+fn _lru_nval(st: vec[int], s: int) -> int {
+    return st.get(_lru_nodes(st) + s * 4 + 1)
+}
+
+fn _lru_nprev(st: vec[int], s: int) -> int {
+    return st.get(_lru_nodes(st) + s * 4 + 2)
+}
+
+fn _lru_nnext(st: vec[int], s: int) -> int {
+    return st.get(_lru_nodes(st) + s * 4 + 3)
+}
+
+fn _lru_snval(st: vec[int], s: int, v: int) -> int {
+    st.set(_lru_nodes(st) + s * 4 + 1, v)
+    return 0
+}
+
+fn _lru_snprev(st: vec[int], s: int, v: int) -> int {
+    st.set(_lru_nodes(st) + s * 4 + 2, v)
+    return 0
+}
+
+fn _lru_snnext(st: vec[int], s: int, v: int) -> int {
+    st.set(_lru_nodes(st) + s * 4 + 3, v)
+    return 0
+}
+
+// lru_new(cap) -> vec[int]：建缓存，cap 是**最大条目数**（<2 按 2 算）
+fn lru_new(cap: int) -> vec[int] {
+    if cap < 2 {
+        cap = 2
+    }
+    let mut tc = 8
+    while tc < cap * 2 {
+        tc = tc * 2
+    }
+    let total = LRU_HDR + tc * 2 + cap * 4
+    let st = vec[int].new(total + 1)
+    let mut i = 0
+    while i < total {
+        st.push(0)
+        i = i + 1
+    }
+    st.set(0, cap)
+    st.set(1, 0)
+    st.set(2, -1)
+    st.set(3, -1)
+    st.set(4, tc)
+    st.set(5, 0)
+    // 表槽位全部标记为空
+    i = 0
+    while i < tc {
+        st.set(LRU_HDR + i * 2 + 1, -1)
+        i = i + 1
+    }
+    // 空闲槽链表：0 -> 1 -> … -> cap-1 -> -1
+    let nodes = _lru_nodes(st)
+    i = 0
+    while i < cap {
+        st.set(nodes + i * 4 + 3, i + 1)
+        i = i + 1
+    }
+    st.set(nodes + (cap - 1) * 4 + 3, -1)
+    return st
+}
+
+fn lru_cap(st: vec[int]) -> int {
+    return st.get(0)
+}
+
+fn lru_len(st: vec[int]) -> int {
+    return st.get(1)
+}
+
+// _lru_tbl_find(st, k) -> int：命中返回表下标，未命中 -1
+fn _lru_tbl_find(st: vec[int], k: int) -> int {
+    let tc = _lru_tc(st)
+    let mask = tc - 1
+    let mut i = _lru_hash(k, mask)
+    let mut n = 0
+    while n < tc {
+        let slot = st.get(LRU_HDR + i * 2 + 1)
+        if slot == -1 {
+            return -1                       // 空位：探测链到此为止
+        }
+        if slot >= 0 && st.get(LRU_HDR + i * 2) == k {
+            return i
+        }
+        i = (i + 1) & mask
+        n = n + 1
+    }
+    return -1
+}
+
+// _lru_tbl_slot(st, k) -> int：插入点（第一个空位或墓碑），保证表未满
+fn _lru_tbl_slot(st: vec[int], k: int) -> int {
+    let tc = _lru_tc(st)
+    let mask = tc - 1
+    let mut i = _lru_hash(k, mask)
+    let mut n = 0
+    while n < tc {
+        let slot = st.get(LRU_HDR + i * 2 + 1)
+        if slot == -1 || slot == -2 {
+            return i
+        }
+        i = (i + 1) & mask
+        n = n + 1
+    }
+    return -1
+}
+
+// _lru_unlink(st, s)：从链表摘掉槽 s
+fn _lru_unlink(st: vec[int], s: int) -> int {
+    let p = _lru_nprev(st, s)
+    let nx = _lru_nnext(st, s)
+    if p >= 0 {
+        _lru_snnext(st, p, nx)
+    } else {
+        st.set(2, nx)                       // s 是 head
+    }
+    if nx >= 0 {
+        _lru_snprev(st, nx, p)
+    } else {
+        st.set(3, p)                        // s 是 tail
+    }
+    return 0
+}
+
+// _lru_push_front(st, s)：把槽 s 挂到 MRU 端
+fn _lru_push_front(st: vec[int], s: int) -> int {
+    let h = st.get(2)
+    _lru_snprev(st, s, -1)
+    _lru_snnext(st, s, h)
+    if h >= 0 {
+        _lru_snprev(st, h, s)
+    } else {
+        st.set(3, s)                        // 原来为空：s 同时是 tail
+    }
+    st.set(2, s)
+    return 0
+}
+
+fn lru_has(st: vec[int], k: int) -> bool {
+    return _lru_tbl_find(st, k) >= 0
+}
+
+// lru_get(st, k) -> int：命中返回并刷新为 MRU；未命中 -1（值域有歧义，见文件头）
+fn lru_get(st: vec[int], k: int) -> int {
+    let ti = _lru_tbl_find(st, k)
+    if ti < 0 {
+        return -1
+    }
+    let s = st.get(LRU_HDR + ti * 2 + 1)
+    _lru_unlink(st, s)
+    _lru_push_front(st, s)
+    return _lru_nval(st, s)
+}
+
+// lru_get_or(st, k, def) -> int：命中返回值，未命中返回 def（不插入）
+fn lru_get_or(st: vec[int], k: int, def: int) -> int {
+    let ti = _lru_tbl_find(st, k)
+    if ti < 0 {
+        return def
+    }
+    let s = st.get(LRU_HDR + ti * 2 + 1)
+    _lru_unlink(st, s)
+    _lru_push_front(st, s)
+    return _lru_nval(st, s)
+}
+
+// lru_put(st, k, v) -> int：写入并置为 MRU；满了淘汰 tail。返回 1=新增 / 0=更新
+fn lru_put(st: vec[int], k: int, v: int) -> int {
+    let ti = _lru_tbl_find(st, k)
+    if ti >= 0 {
+        let s = st.get(LRU_HDR + ti * 2 + 1)
+        _lru_snval(st, s, v)
+        _lru_unlink(st, s)
+        _lru_push_front(st, s)
+        return 0
+    }
+    // 需要新槽：先看空闲链，没有就淘汰 tail
+    let mut s = st.get(5)
+    if s >= 0 {
+        st.set(5, _lru_nnext(st, s))        // 空闲链出栈（len 统一在末尾 +1）
+    } else {
+        s = st.get(3)                       // tail
+        let oldk = _lru_nkey(st, s)
+        let oti = _lru_tbl_find(st, oldk)
+        if oti >= 0 {
+            st.set(LRU_HDR + oti * 2 + 1, -2)   // 墓碑
+        }
+        _lru_unlink(st, s)
+        st.set(1, st.get(1) - 1)            // 腾出后立刻加回，len 不变
+    }
+    st.set(_lru_nodes(st) + s * 4, k)
+    _lru_snval(st, s, v)
+    let ins = _lru_tbl_slot(st, k)
+    st.set(LRU_HDR + ins * 2, k)
+    st.set(LRU_HDR + ins * 2 + 1, s)
+    _lru_push_front(st, s)
+    st.set(1, st.get(1) + 1)
+    return 1
+}
+
+// lru_del(st, k) -> int：1=删掉了 / 0=本来没有
+fn lru_del(st: vec[int], k: int) -> int {
+    let ti = _lru_tbl_find(st, k)
+    if ti < 0 {
+        return 0
+    }
+    let s = st.get(LRU_HDR + ti * 2 + 1)
+    st.set(LRU_HDR + ti * 2 + 1, -2)        // 墓碑：探测链继续有效
+    _lru_unlink(st, s)
+    _lru_snnext(st, s, st.get(5))           // 归还空闲链
+    st.set(5, s)
+    st.set(1, st.get(1) - 1)
+    return 1
+}
+
+// lru_order(st) -> vec[int]：按 MRU -> LRU 顺序导出 key（测试与观测用）
+fn lru_order(st: vec[int]) -> vec[int] {
+    let out = vec[int].new(st.get(1) + 1)
+    let mut s = st.get(2)
+    while s >= 0 {
+        out.push(_lru_nkey(st, s))
+        s = _lru_nnext(st, s)
+    }
+    return out
+}
+
+// lru_peek(st, k) -> int：取值但**不**刷新使用顺序（观测/调试用）
+fn lru_peek(st: vec[int], k: int) -> int {
+    let ti = _lru_tbl_find(st, k)
+    if ti < 0 {
+        return -1
+    }
+    return _lru_nval(st, st.get(LRU_HDR + ti * 2 + 1))
+}

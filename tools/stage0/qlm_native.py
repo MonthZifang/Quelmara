@@ -629,6 +629,7 @@ class Lower:
         self.uses_memset = False
         self.uses_memcmp = False
         self.uses_memchr = False
+        self.uses_memdiff = False
         self.uses_mem_to_str = False
         self.uses_realloc = False
         self.uses_free = False
@@ -2424,6 +2425,18 @@ class Lower:
             self.uses_memchr = True
             d = fn.new_v()
             fn.emit("call", d, "__memchr", vals)
+            return d
+        if name == "mem_diff" and name not in self.fns_ast:
+            # mem_diff(p1, p2, n) -> int：两段 n 字节里**第一个不同字节的下标**，
+            # 全等返回 n（v1.30）。等价于"公共前缀长度"。
+            # 用途：LZ77 匹配长度（gzip deflate 的内层热点）、逐字节 diff。
+            # 实现见运行时 __memdiff（8 字节字比较）。
+            if len(e[2]) != 3:
+                raise SyntaxError("mem_diff(p1, p2, n) 需要三个实参")
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            self.uses_memdiff = True
+            d = fn.new_v()
+            fn.emit("call", d, "__memdiff", vals)
             return d
         if name == "mem_str" and name not in self.fns_ast:
             # mem_str(p, n) -> str：拷 n 字节并补 NUL（缓冲区 -> 不可变串）
@@ -6796,6 +6809,65 @@ class Lower:
         f.emit("label", l_tn)
         f.emit("ret", ("imm", -1))
         if self.uses_memchr:
+            self.out.append(f)
+
+        # __memdiff(a, b, n) -> int：首个不同字节的下标，全等返回 n（v1.30）
+        # 8 字节字比较：字相等就整字跳过，字不等再逐字节定位（公共前缀长度）。
+        # 这是 LZ77 匹配长度的核心——gzip 编码的内层热点原来是一字节一次比较。
+        f = Fn("__memdiff")
+        pa, pb, pn = f.new_v(), f.new_v(), f.new_v()
+        f.emit("args", [pa, pb, pn])
+        nw = f.new_v()
+        f.emit("bin", "shr", nw, pn, ("imm", 3))
+        k = f.new_v()
+        f.emit("mov", k, ("imm", 0))
+        l_wt, l_tail = f.label("mdwt"), f.label("mdtail")
+        l_next = f.label("mdnext")
+        l_bt, l_r1 = f.label("mdbt"), f.label("mdr1")
+        f.emit("label", l_wt)
+        f.emit("jcc", "ge", k, nw, l_tail)
+        wa = f.new_v()
+        f.emit("load", wa, pa, k)
+        wb = f.new_v()
+        f.emit("load", wb, pb, k)
+        x = f.new_v()
+        f.emit("bin", "xor", x, wa, wb)
+        f.emit("jz", x, l_next)                  # 整字相同 -> 下一个字
+        i = f.new_v()
+        f.emit("bin", "shl", i, k, ("imm", 3))
+        f.emit("label", l_bt)                    # 字内定位（保证返回**首个**不同）
+        f.emit("jcc", "ge", i, pn, l_next)
+        ba = f.new_v()
+        f.emit("load8", ba, pa, i)
+        bb = f.new_v()
+        f.emit("load8", bb, pb, i)
+        f.emit("jcc", "ne", ba, bb, l_r1)
+        f.emit("bin", "add", i, i, ("imm", 1))
+        f.emit("jmp", l_bt)
+        f.emit("label", l_r1)
+        f.emit("ret", i)
+        f.emit("label", l_next)
+        f.emit("bin", "add", k, k, ("imm", 1))
+        f.emit("jmp", l_wt)
+        # 尾字节（n % 8）
+        f.emit("label", l_tail)
+        i2 = f.new_v()
+        f.emit("bin", "shl", i2, nw, ("imm", 3))
+        l_tt, l_r2, l_none = f.label("mdtt"), f.label("mdr2"), f.label("mdnone")
+        f.emit("label", l_tt)
+        f.emit("jcc", "ge", i2, pn, l_none)
+        ba2 = f.new_v()
+        f.emit("load8", ba2, pa, i2)
+        bb2 = f.new_v()
+        f.emit("load8", bb2, pb, i2)
+        f.emit("jcc", "ne", ba2, bb2, l_r2)
+        f.emit("bin", "add", i2, i2, ("imm", 1))
+        f.emit("jmp", l_tt)
+        f.emit("label", l_r2)
+        f.emit("ret", i2)
+        f.emit("label", l_none)
+        f.emit("ret", pn)
+        if self.uses_memdiff:
             self.out.append(f)
 
         # __mem_to_str(p, n) -> str：拷 n 字节并补 NUL（缓冲区 -> 不可变串）

@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-38 个模块，**435 个公开函数**（另有 216 个 `_` 前缀的内部函数）。
+39 个模块，**445 个公开函数**（另有 216 个 `_` 前缀的内部函数）。
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -289,6 +289,23 @@ fn log_info(msg: str)
 fn log_warn(msg: str)
 fn log_error(msg: str)
 fn log_kv(tag: str, msg: str, kv: vec[str]) -> int
+```
+
+### `std/lru.qma`
+
+LRU 缓存（开放寻址表 + 双向链表，单句柄 O(1)）
+
+```quelmara
+fn lru_new(cap: int) -> vec[int]
+fn lru_cap(st: vec[int]) -> int
+fn lru_len(st: vec[int]) -> int
+fn lru_has(st: vec[int], k: int) -> bool
+fn lru_get(st: vec[int], k: int) -> int
+fn lru_get_or(st: vec[int], k: int, def: int) -> int
+fn lru_put(st: vec[int], k: int, v: int) -> int
+fn lru_del(st: vec[int], k: int) -> int
+fn lru_order(st: vec[int]) -> vec[int]
+fn lru_peek(st: vec[int], k: int) -> int
 ```
 
 ### `std/math.qma`
@@ -795,6 +812,7 @@ fn x509_rsa_exp(cert: str) -> int
 | `std/set` | `iset_*` / `sset_*`：add/has/del/len + 并/交/差 + to_vec | 无泛型 `set[T]`（map 的 V 只允许 int/str）；遍历顺序由哈希决定；**无 clear**（新建更快） |
 | `std/deque` | 两端 O(1) 进出 + 自动扩容，句柄是不变地址（扩容只换内部块） | 只有 `int` 元素；无迭代器；无 insert/drain |
 | `std/hash` | FNV-1a 32/64（缓存键、分片、采样） | 非密码学（要抗碰撞用 `std/sha256`）；无 MD5/CRC64 |
+| `std/lru` | LRU 缓存：get/put/del 均摊 O(1)，满了淘汰最久未用，单句柄（自建开放寻址表 + 双向链表） | key 只有 `int`（字符串请先 `fnv1a64`，碰撞由调用方负责）；`lru_get` 未命中返回 -1，与真实值 -1 有歧义（用 `lru_has` 或 `lru_get_or`） |
 | `std/cli` | `--k=v` / `--k v` / `-k v` / 布尔开关 / 位置参数 / 缺值回落默认 | 无子命令、无自动 usage、无环境变量回落；位置参数判定是启发式（见源码注释） |
 | `std/b64` | 标准字母表（带填充）+ **base64url**（无填充，JWT/URL 用） | 无流式编码（整块进内存） |
 | `std/sort` | `sort_int`（Lomuto 快排 + 小段插入）、`is_sorted` | 泛型比较器（函数值 ≤6 参限制） |

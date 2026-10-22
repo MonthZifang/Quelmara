@@ -357,17 +357,12 @@ fn deflate_raw(s: str) -> str {
                     if maxl < limit {
                         limit = maxl
                     }
-                    let mut l = 0
+                    // v1.30：匹配长度改 mem_diff（8 字节字比较，字内再逐字节定位）。
+                    // 旧实现是一字节一次 mem_load8 + 比较——重复文本下 limit 常常
+                    // 吃满 258，等于每候选 258 次读；现在是 ~33 次。
                     if best_len < limit && mem_load8(s, cp + best_len) == mem_load8(s, pos + best_len) {
                         if mem_load8(s, cp) == mem_load8(s, pos) {
-                            let mut stop = 0
-                            while l < limit && stop == 0 {
-                                if mem_load8(s, cp + l) != mem_load8(s, pos + l) {
-                                    stop = 1
-                                } else {
-                                    l = l + 1
-                                }
-                            }
+                            let l = mem_diff(mem_ptr(s, cp), mem_ptr(s, pos), limit)
                             if l > best_len {
                                 best_len = l
                                 best_dist = dist
@@ -383,27 +378,34 @@ fn deflate_raw(s: str) -> str {
         if best_len >= 3 {
             _emit_len(out, st, best_len)
             _emit_dist(out, st, best_dist)
-            // 把本次匹配覆盖的位置都插进哈希链（提高后续命中率）
+            // v1.30：插入哈希链与滚动哈希**合并成一趟**。
+            // 旧实现是两趟：先按位置重算 h2（3 次 mem_load8 + 2 次乘）插入，
+            // 再单独滚一遍 h。合并后每位置省 3 次读 + 2 次乘——1 MiB 重复文本
+            // 下这是 ~100 万次位置的量级，是编码器当前的头号成本。
+            // 滚动不变式：进入循环时 h 就是位置 pos 的哈希。
             let mut k = 0
             while k < best_len {
                 let p = pos + k
                 if p + 3 <= n {
-                    let h2 = ((mem_load8(s, p) * 961 + mem_load8(s, p + 1) * 31 + mem_load8(s, p + 2)) & 4095)
-                    mem_store64(prev, p, mem_load64(head, h2))
-                    mem_store64(head, h2, p + 1)
-                }
-                k = k + 1
-            }
-            // 滚动哈希同步：pos 推进 best_len，逐位置滑窗更新
-            // （h' = (h - s[pos]*961) * 31 + s[pos+3]，mod 4096 补码安全）
-            let mut step = 0
-            while step < best_len {
-                if pos + step + 3 < n {
-                    h = (((h - mem_load8(s, pos + step) * 961) * 31 + mem_load8(s, pos + step + 3)) & 4095)
+                    let mut hp = h
+                    if hok == 0 {
+                        // 尾部退化成逐位置重算（hok 只在末尾几字节失效）
+                        hp = ((mem_load8(s, p) * 961 + mem_load8(s, p + 1) * 31 + mem_load8(s, p + 2)) & 4095)
+                        h = hp
+                        hok = 1
+                    }
+                    mem_store64(prev, p, mem_load64(head, hp))
+                    mem_store64(head, hp, p + 1)
+                    // 滑窗一步：h(p+1) = (h(p) - s[p]*961) * 31 + s[p+3]
+                    if p + 4 <= n {
+                        h = (((hp - mem_load8(s, p) * 961) * 31 + mem_load8(s, p + 3)) & 4095)
+                    } else {
+                        hok = 0
+                    }
                 } else {
                     hok = 0
                 }
-                step = step + 1
+                k = k + 1
             }
             pos = pos + best_len
         } else {

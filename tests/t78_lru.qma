@@ -1,0 +1,94 @@
+// t78_lru.qma：LRU 缓存（v1.30）
+// 覆盖：命中刷新、淘汰最久未用、更新不增条目、墓碑复用、删除后重插、churn
+module t78
+
+import std.core
+import std.lru
+
+fn main() {
+    let c = lru_new(3)
+    assert(lru_cap(c) == 3, "cap 3")
+    assert(lru_len(c) == 0, "empty")
+
+    assert(lru_put(c, 1, 100) == 1, "put new 1")
+    assert(lru_put(c, 2, 200) == 1, "put new 2")
+    assert(lru_put(c, 3, 300) == 1, "put new 3")
+    assert(lru_len(c) == 3, "len 3")
+    assert(lru_get(c, 1) == 100, "get 1")
+    assert(lru_has(c, 2), "has 2")
+    assert(!lru_has(c, 9), "no 9")
+
+    // MRU -> LRU 顺序：刚 get 过 1，所以 1 在最前
+    let o = lru_order(c)
+    assert(len(o) == 3, "order len")
+    assert(o.get(0) == 1, "mru is 1")
+    assert(o.get(2) == 2, "lru is 2")
+
+    // 满了再插：淘汰最久未用的 2
+    assert(lru_put(c, 4, 400) == 1, "put 4 evicts")
+    assert(lru_len(c) == 3, "len stays 3")
+    assert(!lru_has(c, 2), "2 evicted")
+    assert(lru_has(c, 1) && lru_has(c, 3) && lru_has(c, 4), "survivors")
+
+    // 更新已有 key：不增条目、返回 0
+    assert(lru_put(c, 1, 111) == 0, "update")
+    assert(lru_len(c) == 3, "len after update")
+    assert(lru_get(c, 1) == 111, "updated value")
+    assert(lru_order(c).get(0) == 1, "update moves to mru")
+
+    // peek 不刷新顺序
+    let before = lru_order(c).get(2)
+    let pv = lru_peek(c, before)
+    assert(pv >= 0, "peek value")
+    assert(lru_order(c).get(2) == before, "peek keeps order")
+
+    // 删除 + 重插（走墓碑与空闲链）
+    assert(lru_del(c, 3) == 1, "del 3")
+    assert(lru_del(c, 3) == 0, "del again")
+    assert(lru_len(c) == 2, "len 2 after del")
+    assert(!lru_has(c, 3), "3 gone")
+    assert(lru_put(c, 3, 333) == 1, "reinsert 3")
+    assert(lru_get(c, 3) == 333, "reinsert value")
+    assert(lru_len(c) == 3, "len 3 again")
+
+    // get_or 默认值
+    assert(lru_get_or(c, 77, -999) == -999, "get_or miss")
+    assert(lru_get_or(c, 1, -999) == 111, "get_or hit")
+
+    // churn A：150 个热点 key 反复写（容量 200 装得下）-> 全是更新，len 停在 150
+    let big = lru_new(200)
+    let mut i = 0
+    let mut upd = 0
+    while i < 5000 {
+        let k = i % 150
+        if lru_put(big, k, k * 2) == 0 {
+            upd = upd + 1
+        }
+        i = i + 1
+    }
+    assert(lru_len(big) == 150, "churn len 150")
+    assert(upd > 0, "churn had updates")
+    assert(lru_get(big, 149) == 298, "hot key value")
+
+    // churn B：700 个 key 轮流写（容量 200 装不下）-> 持续淘汰，len 封顶
+    let mut e = 0
+    while e < 1000 {
+        lru_put(big, e % 700, e)
+        e = e + 1
+    }
+    assert(lru_len(big) == 200, "churn len capped")
+    assert(lru_has(big, 100), "recent key 100 present")
+    assert(!lru_has(big, 0), "old key 0 evicted")
+    assert(!lru_has(big, 99), "old key 99 evicted")
+
+    // 删空：最近 200 个 key 是 e=800..999 -> 100..299
+    let mut d = 0
+    while d < 200 {
+        lru_del(big, 100 + d)
+        d = d + 1
+    }
+    assert(lru_len(big) == 0, "all deleted")
+    assert(len(lru_order(big)) == 0, "order empty")
+
+    print("ok t78_lru")
+}
