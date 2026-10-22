@@ -14,7 +14,7 @@
 | 类型约束（trait bound） | ❌ | — | “T 须支持 <”是文档性的，违反它在 Lower 报类型错 |
 | `map[K]V` | 🟡 | V 仅 int/str，不能 `map[str]Struct` | 配置表/符号表要拆成平行 map |
 | `vec[T]` | ✅ v1.37 | 标量/str/具名聚合/嵌套 vec（任意深度）/map 句柄全支持 | 元素即用即取，无扁平化成本 |
-| struct 内嵌套聚合 | 🟡 | struct 字段里的 vec/map 按 1 槽占位（句柄语义），不是内联布局 | 复杂 AST 仍需注意拷贝语义 |
+| struct 内嵌套聚合 | ✅ v1.39 | 字段可装 vec/map/chan/slice/struct——vec/map/chan 按句柄 1 槽、slice 按 2 槽视图；方法/下标/派发全部可用 | 无（句柄语义即设计） |
 | 函数值 | 🟡 | `callr` ≤6 参、实参不能是 struct/slice、**无捕获**（无闭包） | 回调只能固定签名 |
 | 所有权检查 | 🟡 | **只查 `rc[T]` 句柄**；struct/数组/str 的别名与生命周期不查，并发竞争不查 | 不能对外宣称"Rust 那套借用检查" |
 | `interface` | 🟡 | 装箱不释放；同类型跨接口同名方法报错；接口与 impl 必须同源文件；AArch64 未接 vtable | 热点循环装箱会涨堆 |
@@ -226,6 +226,7 @@ CSE 的 `_cse_key` 对 xmm 族返回 `None`（不参与）。
    → ~~AES-NI~~（v1.31，CTR 31×）→ ~~GHASH 字级化~~（v1.32）→ ~~GHASH PCLMUL~~（v1.33，GCM 19 ms）→
    **JSON memchr** → loop_sum 三件套 → LICM 根修 → §7.4/§7.5 两个误编译
 2. **语言层（§1）**：~~泛型多参 + 调用点推导~~（v1.36）→ ~~`vec[map]`~~（v1.37）→
+   ~~result struct 载荷~~（v1.38）→ ~~struct 内嵌套聚合~~（v1.39）→
    黄标逐项（`map[str]Struct`、
    函数值放宽、命名空间 / `pub`、`defer` …）→ 红标逐项 红→黄→绿
    （泛型 struct / 泛型方法 / 类型约束）

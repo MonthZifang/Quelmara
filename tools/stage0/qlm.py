@@ -3905,7 +3905,7 @@ class Codegen:
             if mp:
                 return self.gen_map_method(m, ocode, mp, args, env)
             if m in ("send", "recv"):
-                if not (obj[0] == "name" and env.get("__chan__" + obj[1])):
+                if not self._is_chan_expr(obj, env):
                     raise SyntaxError(f".{m} 只能用于 chan 通道")
                 if m == "send":
                     if len(args) != 1:
@@ -3914,7 +3914,7 @@ class Codegen:
                     return f"qlm_chan_send({ocode}, {acode})", "int64_t"
                 return f"qlm_chan_recv({ocode})", "int64_t"
             if m == "close":
-                if not (obj[0] == "name" and env.get("__chan__" + obj[1])):
+                if not self._is_chan_expr(obj, env):
                     raise SyntaxError(".close 只能用于 chan 通道")
                 if args:
                     raise SyntaxError("ch.close() 不接受实参")
@@ -4135,6 +4135,27 @@ class Codegen:
         if t[0] == "named" and t[1] in self.enums:
             return "enum:" + t[1]
         return self.ctype(t)
+
+    def _is_chan_expr(self, obj, env):
+        """对象表达式是否是 chan：变量跟踪（__chan__ 前缀）或结构体字段的
+        静态类型是 chan（v1.39：b.ch.send(...)）。C 类型串里 chan 坍缩成
+        int64_t，只能回到 structs 表查字段类型（字段链递归）。
+        注意 `b.ch` 在 AST 里是 ("path", ["b","ch"]) 不是 field——先把
+        头段是变量的 path 归一化成字段链（与 gen_expr 的 path 处理一致）。"""
+        if obj[0] == "path" and len(obj) > 1 and obj[1] and obj[1][0] in env:
+            o = ("name", obj[1][0])
+            for seg in obj[1][1:]:
+                o = ("field", o, seg)
+            obj = o
+        if obj[0] == "name" and env.get("__chan__" + obj[1]):
+            return True
+        if obj[0] == "field":
+            st = self.infer.struct_of(self.infer.expr(obj[1], env))
+            if st:
+                for fn_, ft in self.structs.get(st, []):
+                    if fn_ == obj[2]:
+                        return isinstance(ft, tuple) and ft[0] == "chan"
+        return False
 
     def gen_map_method(self, m, ocode, mp, args, env):
         """m.set/get/has/del -> C 运行时调用（开放寻址表）。

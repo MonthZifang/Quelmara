@@ -1,0 +1,79 @@
+// t84_structnest.qma：struct 嵌套聚合字段全形态（v1.39）
+// 覆盖：
+//   1) vec 字段：构造/方法/取值（r.cells.push、r.cells.get）
+//   2) map 字段：set/get/has
+//   3) chan 字段：send/recv/close
+//   4) slice 字段：2 字 {ptr,len} 构造/下标/赋值（v1.39 修静默截断）
+//   5) str 字段：== 比较
+//   6) 嵌套 struct 字段 + 字段写（替换句柄）
+//   7) 结构体拷贝共享句柄底层（vec/map/chan 语义一致）
+//   8) 复合链：vec[struct].get(i).field.method
+// 语义纪律：vec/map/chan/slice 字段按句柄/视图 1-2 槽占位，**不是内联布局**；
+//          struct 拷贝共享容器底层（与 vec[vec] 一致）；slice 是零拷贝视图。
+module t84
+
+struct Row { cells: vec[int], m: map[str]int, tag: str }
+struct Box { ch: chan[int] }
+struct Win { s: []int }
+struct Inner { v: int }
+struct Outer { inner: Inner, rows: vec[Row] }
+
+fn mk_row() -> Row {
+    let v = vec[int].new(2)
+    v.push(1)
+    v.push(2)
+    let m = map[str]int.new(4)
+    m.set("a", 5)
+    return Row { cells: v, m: m, tag: "r" }
+}
+
+fn main() {
+    // 1) vec 字段
+    let r = mk_row()
+    r.cells.push(3)
+    assert(r.cells.len() == 3, "vec field len")
+    assert(r.cells.get(0) == 1, "vec field get")
+
+    // 2) map 字段
+    r.m.set("b", 7)
+    assert(r.m.get("a") == 5 and r.m.get("b") == 7, "map field")
+    assert(r.m.has("b") and !r.m.has("zz"), "map field has")
+
+    // 3) chan 字段
+    let b = Box { ch: chan[int].open(1) }
+    b.ch.send(42)
+    assert(b.ch.recv() == 42, "chan field")
+    b.ch.close()
+
+    // 4) slice 字段（2 字：早期 1 字 store 丢 len，静默错编）
+    let a = [10, 20, 30]
+    let w = Win { s: a[0..3] }
+    assert(w.s[0] == 10 and w.s[2] == 30, "slice field index")
+    assert(len(w.s) == 3, "slice field len")
+
+    // 5) str 字段
+    assert(r.tag == "r", "str field eq")
+
+    // 6) 字段写（替换句柄）+ 嵌套 struct 字段
+    let v2 = vec[int].new(1)
+    v2.push(99)
+    r.cells = v2
+    assert(r.cells.get(0) == 99, "field write")
+    let o = Outer { inner: Inner { v: 3 }, rows: vec[Row].new(1) }
+    o.rows.push(r)
+    assert(o.inner.v == 3, "nested struct field")
+
+    // 7) 结构体拷贝共享句柄底层
+    let r2 = r
+    r2.cells.push(4)
+    assert(r.cells.len() == 2, "shared vec handle after copy")
+    r2.m.set("c", 9)
+    assert(r.m.get("c") == 9, "shared map handle after copy")
+
+    // 8) 复合链：vec[struct].get(i).field.method
+    assert(o.rows.get(0).cells.get(0) == 99, "chain vec field")
+    assert(o.rows.get(0).m.get("c") == 9, "chain map field")
+    assert(o.rows.get(0).tag == "r", "chain str field")
+
+    print("structnest ok")
+}
