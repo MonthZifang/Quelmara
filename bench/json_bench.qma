@@ -1,0 +1,47 @@
+// bench/json_bench.qma —— JSON 解析吞吐（10 倍 p0 规模，测真实 MB/s）
+module json_bench
+
+import std.json
+import std.str
+
+fn main() {
+    let h = json_new(1048576)
+    json_begin_arr(h)
+    let mut k = 0
+    while k < 20000 {
+        json_begin_obj(h)
+        json_key_int(h, "id", k)
+        json_key_str(h, "name", "user-0123456789abcdef")
+        json_key_bool(h, "ok", true)
+        json_key_int(h, "score", k * 7)
+        json_end_obj(h)
+        k = k + 1
+    }
+    json_end_arr(h)
+    let doc = json_done(h)
+    print("payload: " + len(doc).to_str() + "B")
+
+    // 预热
+    let w = json_parse(doc)
+    assert(json_ok(w), "warm ok")
+
+    let mut best = 0 - 1
+    let mut r = 0
+    while r < 5 {
+        let t0 = now_ns()
+        let d = json_parse(doc)
+        let t1 = now_ns()
+        assert(json_ok(d), "parse ok")
+        let root = json_root(d)
+        assert(json_arr_len(d, root) == 20000, "len")
+        let ms = (t1 - t0) / 1000000
+        if best < 0 || ms < best {
+            best = ms
+        }
+        r = r + 1
+    }
+    // 吞吐：B/ms -> MB/s
+    let mbs = len(doc) / best * 1000 / 1048576
+    print("json parse x5 min: " + best.to_str() + " ms, ~" + mbs.to_str() + " MB/s")
+    print("json_bench ok")
+}

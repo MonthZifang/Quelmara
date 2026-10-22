@@ -7,9 +7,9 @@
 //
 // 表示（全部放在一个文档句柄里，无全局变量）：
 //   doc 布局（槽索引，每槽 8 字节）：
-//     0 pool   vec[int]：节点池，每节点 6 字 [tag, a, b, c, d, e]
-//     1 buf    vec[int]：所有字符串/数字的字节（避免 str 存不进 vec[int]）
-//     2 kids   vec[int]：子节点索引（数组=元素；对象=键值成对）
+//     0/15 pool   raw 块（v1.17e）：节点池，每节点 6 字 [tag, a, b, c, d, e]
+//     1/11 buf    raw 块（v1.17e）：所有字符串/数字的字节
+//     2/13 kids   raw 块（v1.17e）：子节点索引（数组=元素；对象=键值成对）
 //     3 cur    解析游标
 //     4 root   根节点索引（失败 -1）
 //     5 err    错误位置（1-based，0 = 成功）
@@ -46,21 +46,40 @@ const JDOM_N = 7
 const JDOM_PN = 8
 const JDOM_BN = 9
 const JDOM_KN = 10
+// v1.17e 字节缓冲从 vec[int]（逐字节 push call）换成 raw 块（mem_copy
+// 批量）：BUF 槽改存块指针，BCAP 存容量（句柄 88 -> 104 字节）。
+// 语义不变：buf_n 仍是已用字节数；无 json_free，块与 DOM 同生命周期。
+const JDOM_BBUF = 11
+const JDOM_BCAP = 12
+// v1.17e 二批：pool/kids 同样 raw 化（每节点 6 次 vec push、每子节点
+// 1 次 push 全部消灭）。KCAP=13、PCAP=14（句柄 104 -> 120 字节）。
+const JDOM_KBUF = 13
+const JDOM_KCAP = 14
+const JDOM_PBUF = 15
+const JDOM_PCAP = 16
 
 // ---------------------------------------------------------------------------
 // 文档与节点原语
 // ---------------------------------------------------------------------------
 
-fn _pool(d: int) -> vec[int] {
-    return mem_load64(d, JDOM_POOL)
+fn _pbuf(d: int) -> int {
+    return mem_load64(d, JDOM_PBUF)
+}
+
+fn _pcap(d: int) -> int {
+    return mem_load64(d, JDOM_PCAP)
 }
 
 fn _buf(d: int) -> vec[int] {
     return mem_load64(d, JDOM_BUF)
 }
 
-fn _kids(d: int) -> vec[int] {
-    return mem_load64(d, JDOM_KIDS)
+fn _kbuf(d: int) -> int {
+    return mem_load64(d, JDOM_KBUF)
+}
+
+fn _kcap(d: int) -> int {
+    return mem_load64(d, JDOM_KCAP)
 }
 
 fn _cur(d: int) -> int {
@@ -104,47 +123,113 @@ fn _kn(d: int) -> int {
     return mem_load64(d, JDOM_KN)
 }
 
+fn _bbuf(d: int) -> int {
+    return mem_load64(d, JDOM_BBUF)
+}
+
+fn _bcap(d: int) -> int {
+    return mem_load64(d, JDOM_BCAP)
+}
+
+fn _grow_to(d: int, need: int) -> int {
+    let mut cap = _bcap(d)
+    if cap < 64 {
+        cap = 64
+    }
+    while cap < need {
+        cap = cap * 2
+    }
+    let nbuf = mem_alloc(cap)
+    mem_copy(nbuf, _bbuf(d), _bn(d))
+    mem_store64(d, JDOM_BBUF, nbuf)
+    mem_store64(d, JDOM_BCAP, cap)
+    return 0
+}
+
 fn _bpush(d: int, b: int) -> int {
-    let v = _buf(d)
-    v.push(b)
-    mem_store64(d, JDOM_BN, mem_load64(d, JDOM_BN) + 1)
+    let bn = _bn(d)
+    if bn == _bcap(d) {
+        _grow_to(d, bn + 1)
+    }
+    mem_store8(_bbuf(d), bn, b)
+    mem_store64(d, JDOM_BN, bn + 1)
+    return 0
+}
+
+// 批量追加 [start, end) 的源串字节——一次 call 替代每字节一次
+// _bpush（v1.17e：字符串/数字扫描的热路径，2000 对象的 JSON
+// 解析大头就是这里的每字节调用开销）
+fn _bpush_span(d: int, s: str, start: int, end: int) -> int {
+    let n = end - start
+    if n <= 0 {
+        return 0
+    }
+    let bn = _bn(d)
+    if bn + n > _bcap(d) {
+        _grow_to(d, bn + n)
+    }
+    mem_copy(mem_ptr(_bbuf(d), bn), mem_ptr(s, start), n)
+    mem_store64(d, JDOM_BN, bn + n)
+    return 0
+}
+
+fn _grow_kids(d: int, need: int) -> int {
+    let mut cap = _kcap(d)
+    while cap < need {
+        cap = cap * 2
+    }
+    let nk = mem_alloc(cap * 8)
+    mem_copy(nk, _kbuf(d), _kn(d) * 8)
+    mem_store64(d, JDOM_KBUF, nk)
+    mem_store64(d, JDOM_KCAP, cap)
     return 0
 }
 
 fn _kpush(d: int, v: int) -> int {
-    let k = _kids(d)
-    k.push(v)
-    mem_store64(d, JDOM_KN, mem_load64(d, JDOM_KN) + 1)
+    let kn = _kn(d)
+    if kn == _kcap(d) {
+        _grow_kids(d, kn + 1)
+    }
+    mem_store64(_kbuf(d), kn, v)
+    mem_store64(d, JDOM_KN, kn + 1)
+    return 0
+}
+
+fn _grow_pool(d: int, need: int) -> int {
+    let mut cap = _pcap(d)
+    while cap < need {
+        cap = cap * 2
+    }
+    let np = mem_alloc(cap * 8)
+    mem_copy(np, _pbuf(d), _pn(d) * 8)
+    mem_store64(d, JDOM_PBUF, np)
+    mem_store64(d, JDOM_PCAP, cap)
     return 0
 }
 
 fn _node_new(d: int, tag: int) -> int {
-    let p = _pool(d)
-    let idx = _pn(d) / 6
-    let mut i = 0
-    while i < 6 {
-        p.push(0)
-        i = i + 1
+    // raw 池：一次容量检查 + 一次 store（原来 6 次 vec push + 1 次 set）
+    let pn = _pn(d)
+    if pn + 6 > _pcap(d) {
+        _grow_pool(d, pn + 6)
     }
-    mem_store64(d, JDOM_PN, _pn(d) + 6)
-    p.set(idx * 6, tag)
-    return idx
+    mem_store64(_pbuf(d), pn, tag)
+    mem_store64(d, JDOM_PN, pn + 6)
+    return pn / 6
 }
 
 fn _node_get(d: int, idx: int, w: int) -> int {
     if idx < 0 {
         return 0
     }
-    let p = _pool(d)
-    return p.get(idx * 6 + w)
+    return mem_load64(_pbuf(d), idx * 6 + w)
 }
 
 fn _node_set(d: int, idx: int, w: int, v: int) -> int {
     if idx < 0 {
         return 0
     }
-    let p = _pool(d)
-    p.set(idx * 6 + w, v)
+    mem_store64(_pbuf(d), idx * 6 + w, v)
     return 0
 }
 
@@ -241,12 +326,40 @@ fn _put_utf8(d: int, cp: int) -> int {
 // 解析字符串（游标在引号上），返回节点；字符串字节进 buf
 fn _parse_str(d: int) -> int {
     let n = _slen(d)
-    let b = _buf(d)
     let start = _bn(d)
     let s = _src(d)
     _setcur(d, _cur(d) + 1)          // 跳过开引号
     while true {
-            let i = _cur(d)
+        let i = _cur(d)
+        if i >= n {
+            return _fail(d)
+        }
+        // 快路径（v1.17e）：连续普通字节紧扫描（无转义、无引号、
+        // 可打印），一次 _bpush_span 批量入缓冲——99% 的字符串走这里，
+        // 每字节从 2 次 call（_bpush + _setcur）降到 0 次
+        let mut j = i
+        while j < n {
+            let cc = s[j]
+            if cc == 34 || cc == 92 || cc < 32 {
+                break
+            }
+            j = j + 1
+        }
+        if j > i {
+            _bpush_span(d, s, i, j)
+            if j >= n {
+                return _fail(d)
+            }
+            if s[j] == 34 {
+                _setcur(d, j + 1)
+                let node = _node_new(d, JSTR)
+                _node_set(d, node, 1, start)
+                _node_set(d, node, 2, _bn(d) - start)
+                return node
+            }
+            _setcur(d, j)
+        }
+        let i = _cur(d)
         if i >= n {
             return _fail(d)
         }
@@ -424,11 +537,7 @@ fn _parse_number(d: int) -> int {
         }
     }
     let start = _bn(d)
-    let mut k = from
-    while k < i {
-        _bpush(d, s[k])
-        k = k + 1
-    }
+    _bpush_span(d, s, from, i)
     _setcur(d, i)
     let node = _node_new(d, JNUM)
     _node_set(d, node, 1, start)
@@ -556,10 +665,13 @@ fn _parse_obj(d: int, depth: int) -> int {
 // 句柄不自动回收（一个文档一个块）；长驻进程请 mem_free(doc, 72) 并在
 // 之前释放 pool/buf/kids（当前不提供 json_free，见 docs/GAPS.md）。
 fn json_parse(s: str) -> int {
-    let d = mem_alloc(88)
-    mem_store64(d, JDOM_POOL, vec[int].new(32))
-    mem_store64(d, JDOM_BUF, vec[int].new(64))
-    mem_store64(d, JDOM_KIDS, vec[int].new(32))
+    let d = mem_alloc(136)
+    mem_store64(d, JDOM_PBUF, mem_alloc(32 * 6 * 8))
+    mem_store64(d, JDOM_PCAP, 32 * 6)
+    mem_store64(d, JDOM_BBUF, mem_alloc(256))
+    mem_store64(d, JDOM_BCAP, 256)
+    mem_store64(d, JDOM_KBUF, mem_alloc(32 * 8))
+    mem_store64(d, JDOM_KCAP, 32)
     mem_store64(d, JDOM_PN, 0)
     mem_store64(d, JDOM_BN, 0)
     mem_store64(d, JDOM_KN, 0)
@@ -629,14 +741,10 @@ fn json_is_obj(d: int, node: int) -> bool {
 
 // 从 buf 的 [start,len) 取字节成串
 fn _buf_slice(d: int, start: int, n: int) -> str {
-    let b = _buf(d)
-    let out = vec[int].new(n + 1)
-    let mut i = 0
-    while i < n {
-        out.push(b.get(start + i))
-        i = i + 1
-    }
-    return str_from_bytes(out)
+    // v1.17e：str_alloc + mem_copy 批量（原来每字节 vec get + push 双 call）
+    let out = str_alloc(n)
+    mem_copy(out, mem_ptr(_bbuf(d), start), n)
+    return out
 }
 
 fn json_bool(d: int, node: int) -> bool {
@@ -700,7 +808,7 @@ fn json_arr_at(d: int, node: int, i: int) -> int {
     if i < 0 || i >= n {
         return -1
     }
-    return _kids(d).get(_node_get(d, node, 1) + i)
+    return mem_load64(_kbuf(d), _node_get(d, node, 1) + i)
 }
 
 fn json_obj_len(d: int, node: int) -> int {
@@ -718,7 +826,7 @@ fn _obj_kid(d: int, node: int, i: int, which: int) -> int {
     if i < 0 || i >= n {
         return -1
     }
-    return _kids(d).get(_node_get(d, node, 1) + i * 2 + which)
+    return mem_load64(_kbuf(d), _node_get(d, node, 1) + i * 2 + which)
 }
 
 fn json_obj_key(d: int, node: int, i: int) -> str {
