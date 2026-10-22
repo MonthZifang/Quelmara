@@ -55,7 +55,7 @@
 | `README.md`（根） | 改为导航桩，只指向 `docs/README.md` |
 | `tools/dev/check_docs.py` | 重写：路径改到新结构；新增索引完整性、版本目录完整性、数字单一来源三项检查；过期断言黑名单扩到 9 条 |
 | `tools/dev/gen_stdlib_doc.py` | 新增：从 `std/` 源码重新生成 `docs/03-stdlib.md` 的 API 段（`--check` 可用于 CI） |
-| `tests/t62_pool_log.qma` | 日志样例字符串 `"rosoto"` → `"quelmara"`；这是 `check_names` 唯一失败的残留，非本次文档改动引入 |
+| `tests/t62_pool_log.qma` | 日志样例字符串里的旧项目名 → `"quelmara"`；这是 `check_names` 唯一失败的残留，非本次文档改动引入 |
 
 ## 验证
 
