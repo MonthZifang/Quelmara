@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-26 个模块，**309 个公开函数**（另有 123 个 `_` 前缀的内部函数）。
+27 个模块，**312 个公开函数**（另有 141 个 `_` 前缀的内部函数）。
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -23,6 +23,7 @@
 | `std/sha1` | SHA-1（WS 握手用） | 5 / 5 |
 | `std/sha256` | SHA-256 + HMAC-SHA256 | 11 / 11 |
 | `std/aes` | AES-128-GCM | 6 / 26 |
+| `std/x25519` | X25519 密钥交换（RFC 7748，TLS ECDHE 地基） | 3 / 21 |
 | `std/b64` | base64 编解码 | 5 / 5 |
 | `std/http` | HTTP/1.1 服务端 | 33 / 40 |
 | `std/ws` | WebSocket 服务端（RFC 6455） | 14 / 24 |
@@ -549,6 +550,16 @@ fn ws_send_bin(fd: int, data: str) -> int
 fn ws_ping(fd: int, data: str) -> int
 fn ws_close(fd: int, code: int) -> int
 ```
+
+### `std/x25519.qma`
+
+Curve25519 上的 X25519 密钥交换（RFC 7748，TLS ECDHE 地基）
+
+```quelmara
+fn x25519_clamp(k: str) -> str
+fn x25519(k: str, u: str) -> str
+fn x25519_base(k: str) -> str
+```
 <!-- api:end -->
 
 ## 4. 关键库的边界
@@ -562,6 +573,7 @@ fn ws_close(fd: int, code: int) -> int
 | `std/hex` | `hex_encode` / `hex_encode_upper` / `hex_decode` / `hex_decode_ok` / `hex_val` | 无 base32/base64url（base64url 用 `std/b64` 自行替换字符） |
 | `std/math` | `sqrt`（牛顿，相对误差 <1e-15）、`cbrt`、`floor/ceil/round/trunc_f`、`powi`、`gcd/lcm/isqrt`、NaN/inf 判定 | 无 `exp/log/pow(x,y)/sin/cos`（需要超越函数库）；`floor` 等受 int64 范围限制 |
 | `std/aes` | AES-128-GCM 加解密（FIPS/NIST 向量通过） | AES-256、AES-NI 加速 |
+| `std/x25519` | X25519 标量乘 / 公钥生成 / 共享密钥（RFC 7748 向量全过） | 单次约 7 ms（约 100× 于优化过的 C）；无 X448、无 Ed25519 |
 | `std/sha256` | SHA-256、HMAC-SHA256 | SHA-NI 硬件加速（基础设施已就绪，本机 CPU 无该扩展） |
 | `std/net` | 阻塞 TCP（IPv4 字面量） | 域名解析、IPv6、批量收发 |
 | `std/net/udp` | open/bind/sendto/recvfrom + 地址解析 | 可靠 UDP、批量收发、IPv6 |

@@ -33,7 +33,7 @@
 | 类别 | 缺什么 | 撞到什么场景 |
 |---|---|---|
 | 压缩 | 多 member gzip 流（一次只解第一个）；zlib 容器（`wbits=15`）需先用 `inflate_raw` | 拼接过的 gzip 文件 |
-| TLS | X25519、记录层、握手、X.509（现只有 SHA-256/HMAC/AES-GCM 零件） | https / wss 无法提供 |
+| TLS | **记录层 / 握手状态机 / X.509**（密码学零件已齐：SHA-256+HMAC、AES-128-GCM、X25519） | https / wss 无法提供 |
 | HTTP 客户端 | 出站请求（含 TLS 时才能 https） | 调用第三方 API |
 | 路由 / 中间件 | `std/http` 只有单回调，path 匹配要自己写 if 链 | 稍大的服务都要手写路由表 |
 | 静态文件 / MIME / cookie / session / multipart | 全缺 | 文件上传、登录态 |
@@ -102,14 +102,14 @@
 
 ### P0 —— 让"一个真实服务能上线"
 
-1. TLS：X25519 → 记录层 → 握手 → X.509 最小子集
+1. TLS：记录层 → 握手状态机 → X.509 最小子集（**X25519 已于 v1.20 完成**）
 2. HTTP 客户端 + DNS（DNS 需要 UDP，已有）
 3. 路由 / 静态文件 / MIME 最小层
 4. `result` 允许 struct 载荷 + 库层错误对象（停止"库函数只能退出进程"）
 5. 多 member gzip + zlib 容器解码（`inflate_raw` 已可处理裸流）
 
 > v1.19 已完成原本的 P0 第 1 项（gzip 解码），并把 `std/math`、`std/hex`、
-> 日志级别过滤一并补上。
+> 日志级别过滤一并补上；v1.20 补上 TLS 的最后一块密码学零件 X25519。
 
 ### P1 —— 让"语言能撑住中型程序"
 

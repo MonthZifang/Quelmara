@@ -43,6 +43,7 @@ DESC = {
     "std/timer.qma": "轮询式定时器（MinHeap 驱动）",
     "std/url.qma": "URL 解析 / query 取值 / 编码解码",
     "std/ws.qma": "WebSocket 服务端（RFC 6455）",
+    "std/x25519.qma": "Curve25519 上的 X25519 密钥交换（RFC 7748，TLS ECDHE 地基）",
     "std/net/core.qma": "连接槽位层（IOCP reactor 的底座）",
     "std/net/udp.qma": "UDP 封装与地址解析",
 }

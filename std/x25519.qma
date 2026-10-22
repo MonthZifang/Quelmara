@@ -1,0 +1,410 @@
+// std/x25519.qma —— Curve25519 上的 X25519 密钥交换（RFC 7748）—— v1.20
+//
+// 为什么需要它：TLS 1.3 的 ECDHE 默认曲线就是 X25519。没有它，https/wss
+// 永远缺第一块地基（docs/07-gaps.md 的 P0 第 1 项）。
+//
+// 表示：域元素 = 8 个 32 位 limb 的 vec[int]（小端），模 p = 2^255 - 19。
+//   64 位乘法的**位模式**是精确的（溢出只影响符号解释），所以
+//   低位 = a*b & 0xFFFFFFFF、高位 = (a*b >>> 32) & 0xFFFFFFFF 都正确。
+//   这一点已由 tests/t65_x25519.qma 的进位链覆盖。
+//
+// 算法：RFC 7748 §5 的 Montgomery ladder（254..0 位），a24 = 121665；
+//   求逆用平方-乘（指数 p-2，255 位）。
+//
+// 常量时间：cswap 用掩码交换，不按位分支；求逆的平方-乘按公开指数走。
+//
+// 命名：所有内部函数带 `_x_` 前缀——import 是扁平合并，两个库同名会冲突。
+
+// ---------------------------------------------------------------------------
+// 常量
+// ---------------------------------------------------------------------------
+
+// p = 2^255 - 19 = 0x7FFFFFFF_FFFFFFFF_..._FFFFFFED
+fn _x_p_limb(i: int) -> int {
+    if i == 0 {
+        return 0xFFFFFFED
+    }
+    if i == 7 {
+        return 0x7FFFFFFF
+    }
+    return 0xFFFFFFFF
+}
+
+// 2p = 2^256 - 38
+fn _x_twop_limb(i: int) -> int {
+    if i == 0 {
+        return 0xFFFFFFDA
+    }
+    return 0xFFFFFFFF
+}
+
+fn _x_zeros(n: int) -> vec[int] {
+    let v = vec[int].new(n)
+    let mut i = 0
+    while i < n {
+        v.push(0)
+        i = i + 1
+    }
+    return v
+}
+
+fn _x_fe_zero() -> vec[int] {
+    return _x_zeros(8)
+}
+
+fn _x_fe_one() -> vec[int] {
+    let r = _x_zeros(8)
+    r.set(0, 1)
+    return r
+}
+
+fn _x_fe_copy(a: vec[int]) -> vec[int] {
+    let r = _x_zeros(8)
+    let mut i = 0
+    while i < 8 {
+        r.set(i, a.get(i))
+        i = i + 1
+    }
+    return r
+}
+
+// ---------------------------------------------------------------------------
+// 归约与条件减法
+// ---------------------------------------------------------------------------
+
+// a -= p（仅当 a >= p）。返回 1 表示做了减法。
+fn _x_fe_cond_sub(a: vec[int]) -> int {
+    let t = _x_zeros(8)
+    let mut borrow = 0
+    let mut i = 0
+    while i < 8 {
+        let d = a.get(i) - _x_p_limb(i) - borrow
+        if d < 0 {
+            t.set(i, d + 0x100000000)
+            borrow = 1
+        } else {
+            t.set(i, d)
+            borrow = 0
+        }
+        i = i + 1
+    }
+    if borrow == 0 {
+        i = 0
+        while i < 8 {
+            a.set(i, t.get(i))
+            i = i + 1
+        }
+    }
+    return borrow
+}
+
+// 16 limb 乘积 → 8 limb 域元素（折 2^256 ≡ 38，三轮；再条件减 p 两次）
+fn _x_fe_reduce(t: vec[int]) -> vec[int] {
+    let mut round = 0
+    while round < 3 {
+        let mut carry = 0
+        let mut k = 0
+        while k < 8 {
+            let cur = t.get(k) + t.get(k + 8) * 38 + carry
+            t.set(k, cur & 0xFFFFFFFF)
+            carry = cur >>> 32
+            k = k + 1
+        }
+        t.set(8, carry)
+        k = 9
+        while k < 16 {
+            t.set(k, 0)
+            k = k + 1
+        }
+        round = round + 1
+    }
+    let r = _x_zeros(8)
+    let mut i = 0
+    while i < 8 {
+        r.set(i, t.get(i))
+        i = i + 1
+    }
+    _x_fe_cond_sub(r)
+    _x_fe_cond_sub(r)
+    return r
+}
+
+// ---------------------------------------------------------------------------
+// 域运算
+// ---------------------------------------------------------------------------
+
+fn _x_fe_add(a: vec[int], b: vec[int]) -> vec[int] {
+    let r = _x_zeros(8)
+    let mut carry = 0
+    let mut i = 0
+    while i < 8 {
+        let cur = a.get(i) + b.get(i) + carry
+        r.set(i, cur & 0xFFFFFFFF)
+        carry = cur >>> 32
+        i = i + 1
+    }
+    while carry != 0 {
+        let mut c = carry * 38
+        let mut k = 0
+        while c != 0 && k < 8 {
+            let cur = r.get(k) + c
+            r.set(k, cur & 0xFFFFFFFF)
+            c = cur >>> 32
+            k = k + 1
+        }
+        carry = c
+    }
+    _x_fe_cond_sub(r)
+    _x_fe_cond_sub(r)
+    return r
+}
+
+// a + 2p - b：先加 2p 保证非负，再借位减，最后才折叠 2^256 项。
+// 顺序很重要：若先折叠再相减，当 a < b 时 s 会退化成 a（因为 2p = 2^256-38），
+// 相减产生借位并回绕，结果会差 38（v1.20 调试实录）。
+fn _x_fe_sub(a: vec[int], b: vec[int]) -> vec[int] {
+    let s = _x_zeros(9)
+    let mut carry = 0
+    let mut i = 0
+    while i < 8 {
+        let cur = a.get(i) + _x_twop_limb(i) + carry
+        s.set(i, cur & 0xFFFFFFFF)
+        carry = cur >>> 32
+        i = i + 1
+    }
+    s.set(8, carry)
+    // s >= 2p > b，所以这一步不会留下借位
+    let r = _x_zeros(9)
+    let mut borrow = 0
+    i = 0
+    while i < 9 {
+        let mut bv = 0
+        if i < 8 {
+            bv = b.get(i)
+        }
+        let mut d = s.get(i) - bv - borrow
+        if d < 0 {
+            d = d + 0x100000000
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        r.set(i, d & 0xFFFFFFFF)
+        i = i + 1
+    }
+    // 折叠 r[8] * 2^256 ≡ r[8] * 38
+    let mut c = r.get(8) * 38
+    let mut k = 0
+    while c != 0 && k < 8 {
+        let cur = r.get(k) + c
+        r.set(k, cur & 0xFFFFFFFF)
+        c = cur >>> 32
+        k = k + 1
+    }
+    let out = _x_zeros(8)
+    i = 0
+    while i < 8 {
+        out.set(i, r.get(i))
+        i = i + 1
+    }
+    _x_fe_cond_sub(out)
+    _x_fe_cond_sub(out)
+    return out
+}
+
+fn _x_fe_mul(a: vec[int], b: vec[int]) -> vec[int] {
+    let t = _x_zeros(16)
+    let mut i = 0
+    while i < 8 {
+        let ai = a.get(i)
+        let mut carry = 0
+        let mut j = 0
+        while j < 8 {
+            let prod = ai * b.get(j)
+            let lo = prod & 0xFFFFFFFF
+            let hi = (prod >>> 32) & 0xFFFFFFFF
+            let cur = t.get(i + j) + lo + carry
+            t.set(i + j, cur & 0xFFFFFFFF)
+            carry = (cur >>> 32) + hi
+            j = j + 1
+        }
+        t.set(i + 8, t.get(i + 8) + carry)
+        i = i + 1
+    }
+    return _x_fe_reduce(t)
+}
+
+fn _x_fe_sq(a: vec[int]) -> vec[int] {
+    return _x_fe_mul(a, a)
+}
+
+// a * n（n < 2^17，用于 a24 = 121665）
+fn _x_fe_mul_small(a: vec[int], n: int) -> vec[int] {
+    let t = _x_zeros(16)
+    let mut carry = 0
+    let mut i = 0
+    while i < 8 {
+        let cur = a.get(i) * n + carry
+        t.set(i, cur & 0xFFFFFFFF)
+        carry = cur >>> 32
+        i = i + 1
+    }
+    t.set(8, carry)
+    return _x_fe_reduce(t)
+}
+
+// 条件交换（bit ∈ {0,1}）：掩码实现，不按位分支
+fn _x_fe_cswap(a: vec[int], b: vec[int], bit: int) -> int {
+    let mask = 0 - bit
+    let mut i = 0
+    while i < 8 {
+        let av = a.get(i)
+        let bv = b.get(i)
+        let d = (av ^ bv) & mask
+        a.set(i, av ^ d)
+        b.set(i, bv ^ d)
+        i = i + 1
+    }
+    return 0
+}
+
+// 求逆：a^(p-2) = a^(2^255 - 21)，平方-乘
+fn _x_fe_inv(a: vec[int]) -> vec[int] {
+    let mut r = _x_fe_one()
+    let mut t = 254
+    while t >= 0 {
+        r = _x_fe_sq(r)
+        let bit = _x_exp_bit(t)
+        if bit == 1 {
+            r = _x_fe_mul(r, a)
+        }
+        t = t - 1
+    }
+    return r
+}
+
+// p-2 的第 t 位：limb0=0xFFFFFFEB，limb1..6=0xFFFFFFFF，limb7=0x7FFFFFFF
+fn _x_exp_bit(t: int) -> int {
+    let li = t >> 5
+    let bi = t & 31
+    let mut limb = 0xFFFFFFFF
+    if li == 0 {
+        limb = 0xFFFFFFEB
+    }
+    if li == 7 {
+        limb = 0x7FFFFFFF
+    }
+    return (limb >> bi) & 1
+}
+
+// ---------------------------------------------------------------------------
+// 字节编解码
+// ---------------------------------------------------------------------------
+
+// 32 字节小端 → 8 limb（清最高位：RFC 7748 要求忽略 u 的最高位）
+fn _x_fe_from_u(u: str) -> vec[int] {
+    let r = _x_zeros(8)
+    let mut i = 0
+    while i < 8 {
+        let mut v = 0
+        let mut j = 0
+        while j < 4 {
+            v = v | (u[i * 4 + j] << (j * 8))
+            j = j + 1
+        }
+        r.set(i, v)
+        i = i + 1
+    }
+    r.set(7, r.get(7) & 0x7FFFFFFF)
+    return r
+}
+
+fn _x_fe_to_u(a: vec[int]) -> str {
+    let out = vec[int].new(33)
+    let mut i = 0
+    while i < 8 {
+        let v = a.get(i)
+        out.push(v & 0xFF)
+        out.push((v >>> 8) & 0xFF)
+        out.push((v >>> 16) & 0xFF)
+        out.push((v >>> 24) & 0xFF)
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+// ---------------------------------------------------------------------------
+// 公开 API
+// ---------------------------------------------------------------------------
+
+// 标量钳位：k[0] &= 248, k[31] &= 127, k[31] |= 64
+fn x25519_clamp(k: str) -> str {
+    if len(k) != 32 {
+        assert(false, "x25519: 私钥必须是 32 字节")
+    }
+    let out = vec[int].new(33)
+    let mut i = 0
+    while i < 32 {
+        out.push(k[i])
+        i = i + 1
+    }
+    out.set(0, out.get(0) & 248)
+    out.set(31, (out.get(31) & 127) | 64)
+    return str_from_bytes(out)
+}
+
+// X25519(k, u)：32 字节标量 × 32 字节 u 坐标 → 32 字节共享值
+fn x25519(k: str, u: str) -> str {
+    if len(k) != 32 || len(u) != 32 {
+        assert(false, "x25519: 标量与 u 都必须是 32 字节")
+    }
+    let kb = x25519_clamp(k)
+    let x1 = _x_fe_from_u(u)
+    let mut x2 = _x_fe_one()
+    let mut z2 = _x_fe_zero()
+    let mut x3 = _x_fe_copy(x1)
+    let mut z3 = _x_fe_one()
+    let mut swap = 0
+    let mut t = 254
+    while t >= 0 {
+        let kt = (kb[t >> 3] >> (t & 7)) & 1
+        swap = swap ^ kt
+        _x_fe_cswap(x2, x3, swap)
+        _x_fe_cswap(z2, z3, swap)
+        swap = kt
+        let a = _x_fe_add(x2, z2)
+        let aa = _x_fe_sq(a)
+        let b = _x_fe_sub(x2, z2)
+        let bb = _x_fe_sq(b)
+        let e = _x_fe_sub(aa, bb)
+        let c = _x_fe_add(x3, z3)
+        let d = _x_fe_sub(x3, z3)
+        let da = _x_fe_mul(d, a)
+        let cb = _x_fe_mul(c, b)
+        let x3n = _x_fe_sq(_x_fe_add(da, cb))
+        let z3n = _x_fe_mul(x1, _x_fe_sq(_x_fe_sub(da, cb)))
+        let x2n = _x_fe_mul(aa, bb)
+        let z2n = _x_fe_mul(e, _x_fe_add(aa, _x_fe_mul_small(e, 121665)))
+        x3 = x3n
+        z3 = z3n
+        x2 = x2n
+        z2 = z2n
+        t = t - 1
+    }
+    _x_fe_cswap(x2, x3, swap)
+    _x_fe_cswap(z2, z3, swap)
+    let zi = _x_fe_inv(z2)
+    return _x_fe_to_u(_x_fe_mul(x2, zi))
+}
+
+// 基点 9 上的标量乘：生成公钥（u = 9，小端：首字节 9，其余 0）
+fn x25519_base(k: str) -> str {
+    let base = vec[int].new(33)
+    base.push(9)
+    let mut i = 1
+    while i < 32 {
+        base.push(0)
+        i = i + 1
+    }
+    return x25519(k, str_from_bytes(base))
+}
