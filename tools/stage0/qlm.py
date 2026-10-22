@@ -2277,17 +2277,27 @@ def slice_env_elem(t):
     return t[6:] if is_slice_env(t) else None
 
 
-# ---- map[K]V（v0.10）：开放寻址哈希表（K/V 仅 int/bool/str 标量）----
+# ---- map[K]V（v0.10）：开放寻址哈希表 ----
+# 键：int/bool/str 标量（v0.10）；值：标量 + 具名 struct/enum（v1.41 值扩容，
+# 多字值按 agg 布局占 N 槽，槽宽由后端查符号表）。复合容器（vec/map/chan）作值
+# 仍不做——句柄语义要配 mapinner 标签链，留作后续。
 MAP_KV_SCALARS = ("int", "bool", "str")
 
 
 def map_kv_tag(t, which, line=None):
-    """map 的键/值类型必须是 int/bool/str 标量；返回标签，越界明确报错"""
-    if t is None or t[0] != "named" or t[1] not in MAP_KV_SCALARS:
+    """map 的键/值类型标签：键只允许标量；值 v1.41 起还允许具名聚合
+    （返回类型名，标量与聚合由消费方查符号表区分）。越界明确报错。"""
+    loc = f"line {line}: " if line is not None else ""
+    if t is None or t[0] != "named" or t[1] == "byte":
         got = t[1] if (t and t[0] == "named") else repr(t)
-        loc = f"line {line}: " if line is not None else ""
-        raise SyntaxError(f"{loc}map 的{which}只支持 int/bool/str 标量，得到 {got!r}")
-    return t[1]
+        raise SyntaxError(
+            f"{loc}map 的{which}只支持 int/bool/str 标量"
+            + ("或具名 struct/enum" if which == "值类型" else "")
+            + f"，得到 {got!r}")
+    if t[1] in MAP_KV_SCALARS or which == "值类型":
+        return t[1]          # 标量原样；值侧具名聚合放行（v1.41）
+    got = t[1]
+    raise SyntaxError(f"{loc}map 的{which}只支持 int/bool/str 标量，得到 {got!r}")
 
 
 def map_lit_cap(e):
@@ -2595,7 +2605,12 @@ class Infer:
             if mp:
                 kv, vv = mp
                 if m == "get":
-                    return "const char *" if vv == "str" else "int64_t"
+                    if vv == "str":
+                        return "const char *"
+                    if vv not in MAP_KV_SCALARS:
+                        # 聚合值（v1.41）：与 struct/enum 变量同类型串
+                        return ("struct:" if vv in self.structs else "enum:") + vv
+                    return "int64_t"
                 if m == "has":
                     return "bool"
                 return "int64_t"
@@ -3140,16 +3155,16 @@ static int64_t qlm_chan_closed(int64_t h) {
     return cl;
 }
 
-/* map[K]V：开放寻址 + 线性探测哈希表（SPEC 附录 v0.10）。
-   控制块 [cap, count, used, ktag, st, kt, vt]：st/kt/vt 三组平行槽，
-   每槽 state 0=空 1=占用 2=墓碑；键相等 int/bool 按值、str 按内容
-   （qlm_str_eq）；哈希：整数 splitmix64 终混、str FNV-1a ——
-   必须与原生后端 __map_hash_* 逐位一致，否则双链 diff 会挂。
-   扩容：used*10 >= cap*7 时容量翻倍 rehash（墓碑不带入）。
+/* map[K]V：开放寻址 + 线性探测哈希表（SPEC 附录 v0.10；v1.41 值扩容）。
+   控制块 [cap, count, used, ktag, esz, st, kt, vt]：st/kt/vt 三组平行槽，
+   值槽宽 esz 字（标量 1；聚合值按 C 类型 sizeof）。每槽 state 0=空 1=占用
+   2=墓碑；键相等 int/bool 按值、str 按内容（qlm_str_eq）；哈希：整数
+   splitmix64 终混、str FNV-1a —— 必须与原生后端 __map_hash_* 逐位一致，
+   否则双链 diff 会挂。扩容：used*10 >= cap*7 时容量翻倍 rehash（墓碑不带入）。
    arena 绑定：原生后端走 bump 分配器，arena 块结束整体回收；
    C 后端的 arena 是纯作用域，这里 malloc 出来的表到进程退出才回收。 */
 typedef struct {
-    int64_t cap, count, used, ktag;
+    int64_t cap, count, used, ktag, esz;
     int64_t *st, *kt, *vt;
 } QlmMap;
 
@@ -3193,14 +3208,15 @@ static void qlm_map_grow(QlmMap *m) {
     int64_t *ost = m->st, *okt = m->kt, *ovt = m->vt;
     int64_t *nst = (int64_t *)calloc((size_t)ncap, sizeof(int64_t));
     int64_t *nkt = (int64_t *)calloc((size_t)ncap, sizeof(int64_t));
-    int64_t *nvt = (int64_t *)calloc((size_t)ncap, sizeof(int64_t));
+    int64_t *nvt = (int64_t *)calloc((size_t)(ncap * m->esz), sizeof(int64_t));
     int64_t nused = 0;
     for (i = 0; i < ocap; i++) {
         if (ost[i] != 1) continue;                   /* 墓碑/空槽不带入 */
         int64_t k = okt[i];
         int64_t j = (int64_t)(qlm_map_hash(m, k) & (uint64_t)nmask);
         while (nst[j] == 1) j = (j + 1) & nmask;
-        nst[j] = 1; nkt[j] = k; nvt[j] = ovt[i];
+        nst[j] = 1; nkt[j] = k;
+        memcpy(nvt + j * m->esz, ovt + i * m->esz, (size_t)(m->esz * sizeof(int64_t)));
         nused++;
     }
     m->cap = ncap; m->used = nused;
@@ -3208,17 +3224,18 @@ static void qlm_map_grow(QlmMap *m) {
     free(ost); free(okt); free(ovt);
 }
 
-static int64_t qlm_map_open(int64_t cap, int64_t ktag) {
+static int64_t qlm_map_open(int64_t cap, int64_t ktag, int64_t esz) {
+    if (esz < 1) esz = 1;
     if (cap < 1) cap = 16;                           /* 默认容量 16 */
     cap--;                                           /* 向上取整到 2 的幂 */
     cap |= cap >> 1; cap |= cap >> 2; cap |= cap >> 4;
     cap |= cap >> 8; cap |= cap >> 16; cap |= cap >> 32;
     cap++;
     QlmMap *m = (QlmMap *)malloc(sizeof(QlmMap));
-    m->cap = cap; m->count = 0; m->used = 0; m->ktag = ktag;
+    m->cap = cap; m->count = 0; m->used = 0; m->ktag = ktag; m->esz = esz;
     m->st = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
     m->kt = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
-    m->vt = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
+    m->vt = (int64_t *)calloc((size_t)(cap * esz), sizeof(int64_t));
     return (int64_t)(intptr_t)m;
 }
 
@@ -3256,6 +3273,46 @@ static int64_t qlm_map_get(int64_t h, int64_t k) {
         exit(1);
     }
     return m->vt[i];
+}
+
+/* 聚合值插入/覆盖写（v1.41）：值写按 esz 字 memcpy 进 vt[i*esz]。
+   探测结构与 qlm_map_set 完全一致；只在聚合值 map 上生成调用。 */
+static int64_t qlm_map_set_n(int64_t h, int64_t k, const void *src) {
+    QlmMap *m = (QlmMap *)(intptr_t)h;
+    int64_t mask = m->cap - 1;
+    int64_t i = (int64_t)(qlm_map_hash(m, k) & (uint64_t)mask), first = -1;
+    for (;;) {
+        int64_t s = m->st[i];
+        if (s == 0) {
+            if (first >= 0) i = first;               /* 复用墓碑，探测链不断 */
+            m->st[i] = 1; m->kt[i] = k;
+            memcpy(m->vt + i * m->esz, src, (size_t)(m->esz * sizeof(int64_t)));
+            m->count++;
+            if (first < 0) m->used++;
+            if (m->used * 10 >= m->cap * 7) qlm_map_grow(m);
+            return 0;
+        }
+        if (s == 2) {
+            if (first < 0) first = i;                /* 记第一个墓碑 */
+        } else if (qlm_map_key_eq(m, m->kt[i], k)) {
+            memcpy(m->vt + i * m->esz, src, (size_t)(m->esz * sizeof(int64_t)));
+            return 0;                                /* 覆盖写 */
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+/* 聚合值拷出（v1.41）：键不存在同样 fail-fast；命中后 memcpy esz 字到 dst。 */
+static void *qlm_map_get_n(int64_t h, int64_t k, void *dst) {
+    QlmMap *m = (QlmMap *)(intptr_t)h;
+    int64_t i = qlm_map_find(m, k);
+    if (i < 0) {
+        fprintf(stderr, "quelmara: map key not found (fail-fast)\n");
+        fflush(stdout);
+        exit(1);
+    }
+    memcpy(dst, m->vt + i * m->esz, (size_t)(m->esz * sizeof(int64_t)));
+    return dst;
 }
 
 static bool qlm_map_has(int64_t h, int64_t k) {
@@ -3835,10 +3892,13 @@ class Codegen:
             if len(e[2]) > 1:
                 raise SyntaxError("map[K]V.new(cap) 至多一个容量实参")
             ktag = 1 if map_env_parts(tag)[0] == "str" else 0
+            vv0 = map_env_parts(tag)[1]
+            # 值扩容（v1.41）：聚合值槽宽 = sizeof(C 类型)；标量 1
+            esz = f"sizeof({vv0})" if vv0 not in MAP_KV_SCALARS else "1"
             cap = "16"
             if e[2]:
                 cap, _ = self.gen_expr(e[2][0], env)
-            return f"qlm_map_open({cap}, {ktag})", tag
+            return f"qlm_map_open({cap}, {ktag}, {esz})", tag
         if k == "method":
             obj, m, args = e[1], e[2], e[3]
             ocode, otype = self.gen_expr(obj, env)
@@ -4159,8 +4219,11 @@ class Codegen:
 
     def gen_map_method(self, m, ocode, mp, args, env):
         """m.set/get/has/del -> C 运行时调用（开放寻址表）。
-        键相等/哈希在运行时按句柄 ktag 分派：str 按内容，int/bool 按值。"""
+        键相等/哈希在运行时按句柄 ktag 分派：str 按内容，int/bool 按值。
+        值扩容（v1.41）：聚合值走 qlm_map_set_n/get_n（按值拷入/拷出），
+        模式与 vec[Struct] 的 push/get 相同（语句表达式物化 _vt）。"""
         kv, vv = mp
+        agg_v = vv not in MAP_KV_SCALARS
 
         def key_arg(a):
             kcode, ktype = self.gen_expr(a, env)
@@ -4173,11 +4236,19 @@ class Codegen:
             kcode = key_arg(args[0])
             vcode, vtype = self.gen_expr(args[1], env)
             self.check_map_arg("值", vv, vtype)
+            if agg_v:
+                return (f"({{ {vv} _vt = {vcode}; "
+                        f"qlm_map_set_n({ocode}, {kcode}, (const void *)&_vt); "
+                        f"(int64_t)0; }})", "int64_t")
             return f"qlm_map_set({ocode}, {kcode}, {vcode})", "int64_t"
         if m == "get":
             if len(args) != 1:
                 raise SyntaxError("m.get(k) 需要且只需要一个实参")
             kcode = key_arg(args[0])
+            if agg_v:
+                tn = ("struct:" if vv in self.structs else "enum:") + vv
+                return (f"({{ {vv} _vt; "
+                        f"qlm_map_get_n({ocode}, {kcode}, (void *)&_vt); _vt; }})", tn)
             code = f"qlm_map_get({ocode}, {kcode})"
             if vv == "str":
                 return f"((const char *)(intptr_t)({code}))", "const char *"
@@ -4196,10 +4267,15 @@ class Codegen:
 
     @staticmethod
     def check_map_arg(which, want, got):
-        """map 键/值实参类型校验：str 走内容语义，类型不匹配必须报错（不许静默错编）"""
+        """map 键/值实参类型校验：str 走内容语义，类型不匹配必须报错（不许静默错编）；
+        聚合值要求 struct:Name / enum:Name 精确同名（v1.41）"""
         if want == "str":
             if got != "const char *":
                 raise SyntaxError(f"map {which}类型是 str，实参类型不匹配（得到 {got}）")
+        elif want not in MAP_KV_SCALARS:
+            if got in ("struct:" + want, "enum:" + want):
+                return
+            raise SyntaxError(f"map 值类型是 {want}，实参类型不匹配（得到 {got}）")
         elif got == "const char *":
             raise SyntaxError(f"map {which}类型是 {want}，不能用 str 实参")
 

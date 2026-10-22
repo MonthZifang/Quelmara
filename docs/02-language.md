@@ -79,7 +79,7 @@ true  false
 | 定长数组 | `[N]T` | 值语义，可作参数/返回值 |
 | 切片 | `[]T` | 零拷贝视图 `{ptr, len}`，别名共享 |
 | 动态数组 | `vec[T]` | 堆上，2 倍扩容，句柄语义 |
-| 映射 | `map[K]V` | 开放寻址，K∈int/bool/str，V∈int/str |
+| 映射 | `map[K]V` | 开放寻址，K∈int/bool/str，V∈int/str/具名 struct/enum（v1.41 值扩容，按值拷入拷出） |
 | 通道 | `chan[T]` | 有界 MPMC |
 | 可选 | `option[T]` | 合成枚举，`some` / `none` |
 | 结果 | `result[T,E]` | 合成枚举，`ok` / `err`，支持 `?` |
@@ -454,6 +454,8 @@ rc_drop(c)               // count 1
 9. **泛型调用推不出类型参数时报错**：`f(...)` 按实参推导；推不出（如唯一约束形参
    不是类型参数）时报错并提示 `f[T](...)`。跨文件前向泛型（被调用方后解析）仍须显式。
 10. **`vec[map]` 存的是句柄**（v1.37）：`vec.clear/扩容` 不释放 map 本身；
-    `map[str]Struct`（结构体值）仍不支持。
+    `map[K]Struct` 是**按值存储**（v1.41）：`set` 拷 N 字进表槽、`get` 拷出副本，
+    改副本不影响表内——与 struct 赋值同语义；struct 里的 vec/map/chan 字段
+    是句柄，随值拷贝、底层共享（陷阱 7 同款）。
 11. **`substr(s, start, count)` 的第二参是长度，不是结束位置**——`substr("abcde", 1, 4)` 得
     `"bcde"`（4 个字符），不是 `"bcd"`。切片语法 `s[lo..hi]` 才是左闭右开。

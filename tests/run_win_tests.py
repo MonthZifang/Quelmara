@@ -610,6 +610,7 @@ def main():
     case_selfcheck("t83_resagg", "tests/t83_resagg.qma")
     case_selfcheck("t84_structnest", "tests/t84_structnest.qma")
     case_selfcheck("t85_narrowstore", "tests/t85_narrowstore.qma")
+    case_selfcheck("t86_mapstruct", "tests/t86_mapstruct.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),

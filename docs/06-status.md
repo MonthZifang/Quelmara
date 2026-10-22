@@ -9,11 +9,11 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=148 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
-| 词法器对拍 | **PASS=133 FAIL=0**（133 个源文件） | `python tests/lexdiff.py` |
-| 声明级 AST 对拍 | **PASS=117 FAIL=0**（跳过 4 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
+| PE 回归（主回归） | **PASS=149 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
+| 词法器对拍 | **PASS=134 FAIL=0**（134 个源文件） | `python tests/lexdiff.py` |
+| 声明级 AST 对拍 | **PASS=118 FAIL=0**（跳过 4 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
 | 函数体 dump 对拍 | **一致 1172 / 分叉 872 / SKIP 同步 24 / SKIP 不同步 18** | `python tests/bodydiff.py` |
-| IR 架构无关对拍 | **PASS=66 FAIL=0 SKIP=47**，并行后 **60 s**（原串行 5 min 41 s；SKIP 全是 arm64 未接的特性，t85 的 `trunc` 属此类） | `python tests/irdiff.py` |
+| IR 架构无关对拍 | **PASS=66 FAIL=0 SKIP=48**，并行后 **60 s**（原串行 5 min 41 s；SKIP 全是 arm64 未接的特性，t85 的 `trunc` / t86 的 map 聚合值属此类） | `python tests/irdiff.py` |
 | 发射层确定性对拍 | **PASS=10 FAIL=0** | `python tests/emitdiff.py` |
 | gzip 解码互操作 | **PASS=86 FAIL=0**（12 种编码组合 × 7 类输入 + 多 member 拼接）+ **损坏输入拒绝 5/5** | `python tests/gzip_inflate_test.py` |
 | ECDSA P-256 验签互操作 | **PASS=32 FAIL=0**（20 正向 + 12 负向，Python bigint 参考实现） | `python tests/ecdsa_p256_test.py` |

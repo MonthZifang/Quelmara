@@ -1356,9 +1356,12 @@ class Lower:
             kt = e[1][1][1] if e[1][0] == "map" else "int"
             vt = e[1][2][1] if e[1][0] == "map" else "int"
             ktag = 1 if kt == "str" else 0
+            # 值扩容（v1.41）：聚合值按 agg 布局占 N 槽；未声明的聚合在这里
+            # fail-fast（agg_size 报"未声明的结构体/枚举"）
+            vw = self.agg_size(vt) if self.is_agg(vt) else 1
             cap = self.eval(e[2][0], fn, env) if e[2] else ("imm", 16)
             d = fn.new_v()
-            fn.emit("call", d, "__map_open", [cap, ("imm", ktag)])
+            fn.emit("call", d, "__map_open", [cap, ("imm", ktag), ("imm", vw)])
             return self._mark_map(fn, d, kt, vt)
         if k == "unop":
             a = self.eval(e[2], fn, env)
@@ -2059,9 +2062,12 @@ class Lower:
     def lower_map_method(self, m, obj, mp, args, fn, env):
         """m.set/get/has/del -> __map_* 运行时（开放寻址 + 线性探测）。
         键相等/哈希在运行时按句柄 ktag 分派（str 走 __str_eq 内容比较）；
-        这里在编译期校验键/值实参与声明的 K/V 标量一致，不许静默错编。"""
+        这里在编译期校验键/值实参与声明的 K/V 标签一致，不许静默错编。
+        值扩容（v1.41）：聚合值走 __map_set_n/__map_get_n（N 字槽按值拷入/
+        拷出），标量值走原 __map_set/__map_get（热路径零改动）。"""
         kt, vt = mp
         self.uses_map = True
+        agg_v = self.is_agg(vt)      # 值是具名 struct/enum（v1.41）
 
         def key_arg(a):
             kv = self.eval(a, fn, env)
@@ -2073,6 +2079,14 @@ class Lower:
                 raise SyntaxError("m.set(k, v) 需要两个实参")
             kv = key_arg(args[0])
             vv = self.eval(args[1], fn, env)
+            if agg_v:
+                # 值是聚合：实参必须是同名 struct/enum 值（帧槽地址），
+                # 运行时按值拷 N 字进表槽——与 struct 拷贝同语义
+                if self._struct_of(fn, vv) != vt:
+                    raise SyntaxError(f"map 值类型是 {vt}，实参不是 {vt} 值")
+                d = fn.new_v()
+                fn.emit("call", d, "__map_set_n", [obj, kv, vv])
+                return d
             self.check_map_arg("值", vt, self._is_str(fn, vv))
             d = fn.new_v()
             fn.emit("call", d, "__map_set", [obj, kv, vv])
@@ -2081,6 +2095,12 @@ class Lower:
             if len(args) != 1:
                 raise SyntaxError("m.get(k) 需要且只需要一个实参")
             kv = key_arg(args[0])
+            if agg_v:
+                # 拷出到新帧槽并挂聚合标记——let/传参/取字段全部按既有
+                # struct 值语义走（与 vec[Struct].get 同构）
+                dst = self.alloc_struct(fn, vt)
+                fn.emit("call", None, "__map_get_n", [obj, kv, dst])
+                return dst
             d = fn.new_v()
             fn.emit("call", d, "__map_get", [obj, kv])
             return self._mark_str(fn, d) if vt == "str" else d
@@ -4966,10 +4986,12 @@ class Lower:
             f.emit("jmp", l_t)
             self.out.append(f)
 
-            # __map_open(cap, ktag) -> 句柄（cap<1 取 16，再向上取整到 2 的幂）
+            # __map_open(cap, ktag, vw) -> 句柄（cap<1 取 16，再向上取整到 2 的幂）
+            # vw = 值槽宽（字）。标量 1（与 v0.10 布局逐字节一致）；聚合值
+            # （v1.41）按 agg 布局 N 字，值表容量相应 ×vw，槽宽存控制块 [7]。
             f = Fn("__map_open")
-            cap, ktag = f.new_v(), f.new_v()
-            f.emit("args", [cap, ktag])
+            cap, ktag, vw = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [cap, ktag, vw])
             l_ok = f.label("mook")
             f.emit("jcc", "ge", cap, ("imm", 1), l_ok)
             f.emit("mov", cap, ("imm", 16))
@@ -4982,15 +5004,17 @@ class Lower:
                 f.emit("bin", "or", n, n, tt)
             f.emit("bin", "add", cap, n, ("imm", 1))
             blk = f.new_v()
-            f.emit("call", blk, "__alloc", [("imm", 56)])
+            f.emit("call", blk, "__alloc", [("imm", 64)])
             sz = f.new_v()
             f.emit("bin", "mul", sz, cap, ("imm", 8))
+            szv = f.new_v()
+            f.emit("bin", "mul", szv, sz, vw)          # 值表：cap*vw*8 字节
             st = f.new_v()
             f.emit("call", st, "__alloc", [sz])
             kt = f.new_v()
             f.emit("call", kt, "__alloc", [sz])
             vt = f.new_v()
-            f.emit("call", vt, "__alloc", [sz])
+            f.emit("call", vt, "__alloc", [szv])
             i = f.new_v()
             f.emit("mov", i, ("imm", 0))
             l_zt, l_ze = f.label("mozt"), f.label("moze")
@@ -5007,16 +5031,20 @@ class Lower:
             f.emit("store", blk, ("imm", 4), st)
             f.emit("store", blk, ("imm", 5), kt)
             f.emit("store", blk, ("imm", 6), vt)
+            f.emit("store", blk, ("imm", 7), vw)            # 值槽宽（v1.41）
             f.emit("ret", blk)
             self.out.append(f)
 
             # __map_grow(m)：容量翻倍 rehash（旧表是 bump 分配，不回收；
             # arena 块内随块整体回卷，块外到进程退出才丢）
+            # 值拷贝按控制块 [7] 的槽宽逐字搬（v1.41）；vw=1 时与旧布局一致
             f = Fn("__map_grow")
             m = f.new_v()
             f.emit("args", [m])
             cap = f.new_v()
             f.emit("load", cap, m, ("imm", 0))
+            vw = f.new_v()
+            f.emit("load", vw, m, ("imm", 7))
             ncap = f.new_v()
             f.emit("bin", "mul", ncap, cap, ("imm", 2))
             nmask = f.new_v()
@@ -5029,12 +5057,14 @@ class Lower:
             f.emit("load", ovt, m, ("imm", 6))
             nsz = f.new_v()
             f.emit("bin", "mul", nsz, ncap, ("imm", 8))
+            nszv = f.new_v()
+            f.emit("bin", "mul", nszv, nsz, vw)        # 新值表：ncap*vw*8
             nst = f.new_v()
             f.emit("call", nst, "__alloc", [nsz])
             nkt = f.new_v()
             f.emit("call", nkt, "__alloc", [nsz])
             nvt = f.new_v()
-            f.emit("call", nvt, "__alloc", [nsz])
+            f.emit("call", nvt, "__alloc", [nszv])
             i = f.new_v()
             f.emit("mov", i, ("imm", 0))
             l_zt, l_ze = f.label("mgzt"), f.label("mgze")
@@ -5049,6 +5079,7 @@ class Lower:
             f.emit("mov", i, ("imm", 0))
             l_rt, l_re = f.label("mgrt"), f.label("mgre")
             l_skip, l_pt, l_slot = f.label("mgsk"), f.label("mgpt"), f.label("mgsl")
+            l_vc, l_vd = f.label("mgvc"), f.label("mgvd")
             f.emit("label", l_rt)
             f.emit("jcc", "ge", i, cap, l_re)
             s = f.new_v()
@@ -5056,8 +5087,6 @@ class Lower:
             f.emit("jcc", "ne", s, ("imm", 1), l_skip)   # 墓碑/空槽不带入
             kk = f.new_v()
             f.emit("load", kk, okt, i)
-            vv = f.new_v()
-            f.emit("load", vv, ovt, i)
             h = f.new_v()
             f.emit("call", h, "__map_hash", [m, kk])
             j = f.new_v()
@@ -5072,7 +5101,25 @@ class Lower:
             f.emit("label", l_slot)
             f.emit("store", nst, j, ("imm", 1))
             f.emit("store", nkt, j, kk)
-            f.emit("store", nvt, j, vv)
+            # 值逐字拷贝：ovt[i*vw + w] -> nvt[j*vw + w]，w in 0..vw
+            base_o = f.new_v()
+            f.emit("bin", "mul", base_o, i, vw)
+            base_n = f.new_v()
+            f.emit("bin", "mul", base_n, j, vw)
+            w = f.new_v()
+            f.emit("mov", w, ("imm", 0))
+            f.emit("label", l_vc)
+            f.emit("jcc", "ge", w, vw, l_vd)
+            so = f.new_v()
+            f.emit("bin", "add", so, base_o, w)
+            vv = f.new_v()
+            f.emit("load", vv, ovt, so)
+            dn = f.new_v()
+            f.emit("bin", "add", dn, base_n, w)
+            f.emit("store", nvt, dn, vv)
+            f.emit("bin", "add", w, w, ("imm", 1))
+            f.emit("jmp", l_vc)
+            f.emit("label", l_vd)
             f.emit("bin", "add", nused, nused, ("imm", 1))
             f.emit("label", l_skip)
             f.emit("bin", "add", i, i, ("imm", 1))
@@ -5180,6 +5227,151 @@ class Lower:
             d = f.new_v()
             f.emit("load", d, vt, idx)
             f.emit("ret", d)
+            self.out.append(f)
+
+            # __map_set_n(m, k, src)：聚合值插入/覆盖写（v1.41）。
+            # 探测结构与 __map_set 完全一致，值写改为按控制块 [7] 的槽宽
+            # 逐字从 src 拷入 vt[i*vw + w]。只在聚合值 map 上发射，
+            # 标量热路径（__map_set）零改动。
+            f = Fn("__map_set_n")
+            m, k, src = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [m, k, src])
+            cap = f.new_v()
+            f.emit("load", cap, m, ("imm", 0))
+            vw = f.new_v()
+            f.emit("load", vw, m, ("imm", 7))
+            mask = f.new_v()
+            f.emit("bin", "sub", mask, cap, ("imm", 1))
+            st = f.new_v()
+            f.emit("load", st, m, ("imm", 4))
+            kt = f.new_v()
+            f.emit("load", kt, m, ("imm", 5))
+            vt = f.new_v()
+            f.emit("load", vt, m, ("imm", 6))
+            h = f.new_v()
+            f.emit("call", h, "__map_hash", [m, k])
+            i = f.new_v()
+            f.emit("bin", "and", i, h, mask)
+            first = f.new_v()
+            f.emit("mov", first, ("imm", -1))
+            l_t, l_ins = f.label("msnt"), f.label("msnins")
+            l_tomb, l_upd = f.label("msntm"), f.label("msnup")
+            l_next, l_use = f.label("msnn"), f.label("msnuse")
+            l_ucp, l_udone = f.label("msnuc"), f.label("msnud")
+            l_icp, l_idone = f.label("msnic"), f.label("msnid")
+            l_noused, l_grow = f.label("msnnu"), f.label("msngr")
+            f.emit("label", l_t)
+            s = f.new_v()
+            f.emit("load", s, st, i)
+            f.emit("jcc", "e", s, ("imm", 0), l_ins)
+            f.emit("jcc", "e", s, ("imm", 2), l_tomb)
+            kk = f.new_v()
+            f.emit("load", kk, kt, i)
+            eq = f.new_v()
+            f.emit("call", eq, "__map_key_eq", [m, kk, k])
+            f.emit("jnz", eq, l_upd)
+            f.emit("jmp", l_next)
+            f.emit("label", l_upd)
+            # 覆盖写：vt[i*vw + w] <- src[w]，逐字拷入后直接返回
+            base = f.new_v()
+            f.emit("bin", "mul", base, i, vw)
+            w = f.new_v()
+            f.emit("mov", w, ("imm", 0))
+            f.emit("label", l_ucp)
+            f.emit("jcc", "ge", w, vw, l_udone)
+            ld = f.new_v()
+            f.emit("load", ld, src, w)
+            dn = f.new_v()
+            f.emit("bin", "add", dn, base, w)
+            f.emit("store", vt, dn, ld)
+            f.emit("bin", "add", w, w, ("imm", 1))
+            f.emit("jmp", l_ucp)
+            f.emit("label", l_udone)
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_tomb)
+            f.emit("jcc", "ge", first, ("imm", 0), l_next)
+            f.emit("mov", first, i)                   # 记第一个墓碑
+            f.emit("jmp", l_next)
+            f.emit("label", l_ins)
+            f.emit("jcc", "l", first, ("imm", 0), l_use)
+            f.emit("mov", i, first)                   # 复用墓碑，探测链不断
+            f.emit("label", l_use)
+            f.emit("store", st, i, ("imm", 1))
+            f.emit("store", kt, i, k)
+            base2 = f.new_v()
+            f.emit("bin", "mul", base2, i, vw)
+            w2 = f.new_v()
+            f.emit("mov", w2, ("imm", 0))
+            f.emit("label", l_icp)
+            f.emit("jcc", "ge", w2, vw, l_idone)
+            ld2 = f.new_v()
+            f.emit("load", ld2, src, w2)
+            dn2 = f.new_v()
+            f.emit("bin", "add", dn2, base2, w2)
+            f.emit("store", vt, dn2, ld2)
+            f.emit("bin", "add", w2, w2, ("imm", 1))
+            f.emit("jmp", l_icp)
+            f.emit("label", l_idone)
+            cnt = f.new_v()
+            f.emit("load", cnt, m, ("imm", 1))
+            f.emit("bin", "add", cnt, cnt, ("imm", 1))
+            f.emit("store", m, ("imm", 1), cnt)
+            f.emit("jcc", "ge", first, ("imm", 0), l_noused)
+            used = f.new_v()
+            f.emit("load", used, m, ("imm", 2))
+            f.emit("bin", "add", used, used, ("imm", 1))
+            f.emit("store", m, ("imm", 2), used)
+            f.emit("label", l_noused)
+            used2 = f.new_v()
+            f.emit("load", used2, m, ("imm", 2))
+            u10 = f.new_v()
+            f.emit("bin", "mul", u10, used2, ("imm", 10))
+            c7 = f.new_v()
+            f.emit("bin", "mul", c7, cap, ("imm", 7))
+            f.emit("jcc", "ge", u10, c7, l_grow)     # 装载因子 >= 0.7 -> 扩容
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_grow)
+            f.emit("call", None, "__map_grow", [m])
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_next)
+            f.emit("bin", "add", i, i, ("imm", 1))
+            f.emit("bin", "and", i, i, mask)
+            f.emit("jmp", l_t)
+            self.out.append(f)
+
+            # __map_get_n(m, k, dst)：聚合值拷出（v1.41）。键不存在同样
+            # fail-fast；命中后按槽宽逐字 vt[idx*vw + w] -> dst[w]。
+            f = Fn("__map_get_n")
+            m, k, dst = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [m, k, dst])
+            idx = f.new_v()
+            f.emit("call", idx, "__map_find", [m, k])
+            l_ok = f.label("mgnok")
+            f.emit("jcc", "ge", idx, ("imm", 0), l_ok)
+            p = f.new_v()
+            f.emit("movaddr", p, gid_nf)
+            self.emit_write(f, 2, p, ("imm", len(msg_nf.encode("utf-8"))))
+            self.emit_exit(f, 1)
+            f.emit("label", l_ok)
+            vt = f.new_v()
+            f.emit("load", vt, m, ("imm", 6))
+            vw = f.new_v()
+            f.emit("load", vw, m, ("imm", 7))
+            base = f.new_v()
+            f.emit("bin", "mul", base, idx, vw)
+            w = f.new_v()
+            f.emit("mov", w, ("imm", 0))
+            l_cp, l_cpdone = f.label("mgncp"), f.label("mgncd")
+            f.emit("label", l_cp)
+            f.emit("jcc", "ge", w, vw, l_cpdone)
+            ld = f.new_v()
+            f.emit("load", ld, vt, base)              # vt[base + w]
+            f.emit("store", dst, w, ld)
+            f.emit("bin", "add", base, base, ("imm", 1))
+            f.emit("bin", "add", w, w, ("imm", 1))
+            f.emit("jmp", l_cp)
+            f.emit("label", l_cpdone)
+            f.emit("ret", dst)
             self.out.append(f)
 
             # __map_has(m, k) -> 0/1
