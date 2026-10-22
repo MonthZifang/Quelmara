@@ -26,7 +26,7 @@ fn main() {
     kv.push("id")
     kv.push("7")
     kv.push("user")
-    kv.push("rosoto")
+    kv.push("quelmara")
     log_kv("NET", "conn accepted", kv)
     log_info("plain line still works")
     print("ok t62_pool_log")
