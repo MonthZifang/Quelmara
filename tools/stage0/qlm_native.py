@@ -2662,6 +2662,20 @@ class Lower:
             if name == "tcp_recv":
                 return self._mark_str(fn, d)
             return d
+        if name == "tcp_connect" and name not in self.fns_ast:
+            # 客户端连接（v1.25）：tcp_connect(host, port) -> fd。
+            # Windows 走 getaddrinfo（系统 DNS + hosts），Linux 暂只支持
+            # IPv4 字面量（见运行时分支）。失败 fail-fast。
+            if self.platform != "windows":
+                raise SyntaxError(
+                    "tcp_connect() 目前只在 Windows PE 后端实现（Linux DNS 未实现）")
+            if len(e[2]) != 2:
+                raise SyntaxError("tcp_connect(host, port) 需要两个实参")
+            self.uses_net = True
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            d = fn.new_v()
+            fn.emit("call", d, "__tcp_connect", vals)
+            return d
         if name in ("tcp_send_n", "tcp_recv_n") and name not in self.fns_ast:
             # 零拷贝变体（v1.5）：直接给指针 + 长度，不构造 str、不扫 strlen。
             #   tcp_send_n(fd, ptr, n) -> 发送字节数
@@ -5492,7 +5506,7 @@ class Lower:
             # ---- 原生 socket 运行时（同一条 QuIR：Windows winapi / Linux syscall）----
             # 每步独立 fail 函数（无参 + exit(1)，与 __read_fail 同款；
             # 消息文本区分失败步骤，stderr 直接可读）
-            for tag in ("socket", "bind", "listen", "accept", "send", "recv"):
+            for tag in ("socket", "bind", "listen", "accept", "send", "recv", "connect"):
                 msg_n = "quelmara: tcp_" + tag + "() failed (fail-fast)\n"
                 gid_nf = self.intern_str(msg_n)
                 f = Fn("__net_fail_" + tag)
@@ -5630,6 +5644,77 @@ class Lower:
             net_fail(f, l_fs, "socket")
             net_fail(f, l_fb, "bind")
             net_fail(f, l_fl, "listen")
+            self.out.append(f)
+
+            # __tcp_connect(host, port) -> fd（v1.25，Windows getaddrinfo）
+            f = Fn("__tcp_connect")
+            host = f.new_v()
+            port = f.new_v()
+            f.emit("args", [host, port])
+            b = f.new_v()
+            l_fail = f.label("netfc")
+            gid_wsa2 = self.intern_array(8)
+            wsa2 = f.new_v()
+            f.emit("movaddr", wsa2, gid_wsa2)
+            sw2 = f.new_v()
+            f.emit("winapi", sw2, "WSAStartup", [("imm", 0x202), wsa2])
+            f.emit("jnz", sw2, l_fail)
+            # hints（48B）：family=AF_INET(2)@4、socktype=SOCK_STREAM(1)@8、
+            # protocol=IPPROTO_TCP(6)@12，其余 0
+            hints = f.new_v()
+            f.emit("call", hints, "__alloc", [("imm", 48)])
+            for slot in range(6):
+                f.emit("store", hints, ("imm", slot), ("imm", 0))
+            f.emit("store8", hints, ("imm", 4), ("imm", 2))
+            f.emit("store8", hints, ("imm", 8), ("imm", 1))
+            f.emit("store8", hints, ("imm", 12), ("imm", 6))
+            # PADDRINFOA *res = NULL
+            res = f.new_v()
+            f.emit("call", res, "__alloc", [("imm", 8)])
+            f.emit("store", res, ("imm", 0), ("imm", 0))
+            gr = f.new_v()
+            f.emit("winapi", gr, "getaddrinfo", [host, ("imm", 0), hints, res])
+            f.emit("jnz", gr, l_fail)
+            ai = f.new_v()
+            f.emit("load", ai, res, ("imm", 0))
+            f.emit("jz", ai, l_fail)
+            s = f.new_v()
+            f.emit("winapi", s, "socket", [("imm", 2), ("imm", 1), ("imm", 0)])
+            s32 = f.new_v()
+            f.emit("bin", "shl", s32, s, ("imm", 32))
+            s322 = f.new_v()
+            f.emit("bin", "sar", s322, s32, ("imm", 32))
+            f.emit("cmpset", "e", b, s322, ("imm", -1))
+            f.emit("jnz", b, l_fail)
+            # sockaddr_in：先整段拷 ai_addr（16B），再把端口写进字节 2/3
+            addr = f.new_v()
+            f.emit("load", addr, ai, ("imm", 4))       # ai_addr 在字节 32
+            sin = f.new_v()
+            f.emit("call", sin, "__alloc", [("imm", 16)])
+            for off in range(16):
+                bb = f.new_v()
+                f.emit("load8", bb, addr, ("imm", off))
+                f.emit("store8", sin, ("imm", off), bb)
+            hi = f.new_v()
+            f.emit("bin", "shr", hi, port, ("imm", 8))
+            f.emit("bin", "and", hi, hi, ("imm", 0xFF))
+            lo = f.new_v()
+            f.emit("bin", "and", lo, port, ("imm", 0xFF))
+            f.emit("store8", sin, ("imm", 2), hi)
+            f.emit("store8", sin, ("imm", 3), lo)
+            cr = f.new_v()
+            f.emit("winapi", cr, "connect", [s, sin, ("imm", 16)])
+            cr32 = f.new_v()
+            f.emit("bin", "shl", cr32, cr, ("imm", 32))
+            cr322 = f.new_v()
+            f.emit("bin", "sar", cr322, cr32, ("imm", 32))
+            f.emit("cmpset", "e", b, cr322, ("imm", -1))
+            f.emit("jnz", b, l_fail)
+            f.emit("winapi", None, "freeaddrinfo", [ai])
+            f.emit("ret", s)
+            f.emit("label", l_fail)
+            f.emit("call", None, "__net_fail_connect", [])
+            f.emit("ret", ("imm", 0))
             self.out.append(f)
 
             # __tcp_accept(fd) -> conn（阻塞）

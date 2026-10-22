@@ -48,6 +48,7 @@ DESC = {
     "std/p256.qma": "NIST P-256 域运算 + ECDSA 验签（TLS 证书签名）",
     "std/x509.qma": "X.509 证书解析（DER/ASN.1）+ P-256 自签/签发者验签（TLS 证书层）",
     "std/tls_client.qma": "TLS 1.3 客户端握手核心（RFC 8448 轨迹逐字节验证）",
+    "std/tls_net.qma": "TLS 1.3 网络层：TCP 建连 + 握手 + 应用数据（Windows）",
     "std/net/core.qma": "连接槽位层（IOCP reactor 的底座）",
     "std/net/udp.qma": "UDP 封装与地址解析",
 }

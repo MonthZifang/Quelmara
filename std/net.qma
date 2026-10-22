@@ -10,6 +10,12 @@ fn accept(fd: int) -> int {
     return tcp_accept(fd)
 }
 
+// 客户端连接（v1.25）：Windows 走系统 DNS（getaddrinfo + hosts），
+// Linux 暂未实现（编译期报错）。失败 fail-fast。
+fn connect(host: str, port: int) -> int {
+    return tcp_connect(host, port)
+}
+
 fn send(conn: int, data: str) -> int {
     return tcp_send(conn, data)
 }

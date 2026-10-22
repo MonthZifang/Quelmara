@@ -74,7 +74,7 @@ fn main() {
 ├── Quelmara.toml          # 全局配置：核数/网络/内存/构建（见 05-toolchain.md）
 ├── quelmara.cmd           # Windows 命令入口
 ├── docs/                  # 全部文档（本目录）
-├── examples/              # 17 个可直接运行的示例
+├── examples/              # 18 个可直接运行的示例
 ├── bench/                 # 8 个基准 + baseline.json + loadgen.py
 ├── tests/                 # 72 个 .qma 回归 + 12 个负向夹具 + 对拍/回归脚本
 ├── std/                   # 24 个标准库模块（.qma 源码，编译期合并）

@@ -33,12 +33,12 @@
 | 类别 | 缺什么 | 撞到什么场景 |
 |---|---|---|
 | 压缩 | 多 member gzip 流（一次只解第一个）；zlib 容器（`wbits=15`）需先用 `inflate_raw` | 拼接过的 gzip 文件 |
-| TLS | **接网络的握手**（离线核心 v1.24 已就绪、RFC 8448 逐字节；缺 `tcp_connect`/DNS 与证书策略层；RSA 验签缺） | https / wss 无法提供 |
-| HTTP 客户端 | 出站请求（含 TLS 时才能 https） | 调用第三方 API |
+| TLS | **证书策略层**（链构建/有效期/域名）与 Linux 网络层（`tcp_connect`/DNS）；RSA 验签缺 | 无法安全地信任对端；Linux 不能发 https |
+| HTTP 客户端 | TLS 通道已通（v1.25，Windows），缺 HTTP 封装（重定向/chunked/连接池） | 调用第三方 API |
 | 路由 / 中间件 | `std/http` 只有单回调，path 匹配要自己写 if 链 | 稍大的服务都要手写路由表 |
 | 静态文件 / MIME / cookie / session / multipart | 全缺 | 文件上传、登录态 |
 | `chunked` 请求体 | 回 501 | 部分客户端上传 |
-| DNS | 无解析器、无 `getaddrinfo` | 只能写 IPv4 字面量 |
+| DNS | Windows 走系统 `getaddrinfo`（v1.25）；Linux 无解析器 | Linux 只能写 IPv4 字面量 |
 | IPv6 | socket 家族改造（AF_INET6 + sockaddr_in6 + 字面量解析） | 现代部署基本要求 |
 | TCP 批量收发 | 只有单次 `tcp_send/recv` | 高吞吐场景 syscall 太多 |
 | 可靠 UDP | UDP 四件之上未做 | 游戏/实时传输 |
@@ -102,8 +102,7 @@
 
 ### P0 —— 让"一个真实服务能上线"
 
-1. TLS：客户端握手接网络（**离线核心 v1.24 已完成**，缺 `tcp_connect` + DNS）→
-   证书策略层（链构建 / 有效期 / 域名）
+1. TLS：证书策略层（链构建 / 有效期 / 域名）——客户端已能联网（v1.25，Windows）
 2. HTTP 客户端 + DNS（DNS 需要 UDP，已有）
 3. 路由 / 静态文件 / MIME 最小层
 4. `result` 允许 struct 载荷 + 库层错误对象（停止"库函数只能退出进程"）

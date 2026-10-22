@@ -1,0 +1,124 @@
+// std/tls_net.qma —— TLS 1.3 网络层（TCP + 握手 + 应用数据）—— v1.25
+//
+// 把 std/tls_client 的纯计算接到 std/net 的 TCP 上：
+//   tls_connect(host, port)      建连 + 完成握手（返回 TlsClientResult，fd 有效）
+//   tls_send_app(r, seq, data)   发一条应用数据记录（返回发送字节数）
+//   tls_read_app(r, seq)         收一条应用数据（跳过 NewSessionTicket 等握手消息）
+//
+// 边界：
+//   * 只在 Windows 可用（tcp_connect 依赖 getaddrinfo；Linux 尚未实现）
+//   * seq 由调用方维护；tls_read_app 内部会跳过握手消息，调用方拿不到跳过条数，
+//     因此适合"一次请求/一次响应"的场景。多轮读写需要把 seq 放进连接对象（下一步）。
+//   * 不校验证书链/有效期/域名（见 std/x509 与 07-gaps）
+
+import std.net
+import std.rand
+import std.tls13
+import std.tls_client
+import std.x25519
+
+// n 字节伪随机（xorshift64* 混 now_ns；不是 CSPRNG，握手临时密钥够用）
+fn tls_random(n: int) -> str {
+    rand_seed(now_ns() ^ (now_ns() >>> 7))
+    let v = vec[int].new(n + 1)
+    let mut i = 0
+    while i < n {
+        v.push(rand_next() & 0xFF)
+        i = i + 1
+    }
+    return str_from_bytes(v)
+}
+
+// 精确读 n 字节（对端提前关闭返回不足 n 的串）
+fn tls_recv_exact(fd: int, n: int) -> str {
+    let mut out = ""
+    while len(out) < n {
+        let part = tcp_recv(fd, n - len(out))
+        if len(part) == 0 {
+            break
+        }
+        out = out + part
+    }
+    return out
+}
+
+// 建连并完成握手；成功后 fd 有效，client_finished 已发送。
+fn tls_connect(host: str, port: int) -> TlsClientResult {
+    let rnd = tls_random(64)
+    let priv = substr(rnd, 0, 32)
+    let crnd = substr(rnd, 32, 32)
+    let ch = tls_client_hello(host, x25519_base(priv), crnd, "")
+    let fd = tcp_connect(host, port)
+    if tcp_send(fd, ch) != len(ch) {
+        let mut e = tls_client_err("send-ch")
+        e.fd = fd
+        return e
+    }
+    let mut buf = ""
+    let mut r = tls_client_err("no-finished")
+    let mut tries = 0
+    while tries < 16 {
+        let hdr = tls_recv_exact(fd, 5)
+        if len(hdr) != 5 {
+            r.err = "recv-hdr"
+            r.fd = fd
+            return r
+        }
+        let ln = (hdr[3] << 8) | hdr[4]
+        let body = tls_recv_exact(fd, ln)
+        if len(body) != ln {
+            r.err = "recv-body"
+            r.fd = fd
+            return r
+        }
+        buf = buf + hdr + body
+        r = tls_client_handshake(priv, ch, buf)
+        if r.ok == 1 {
+            r.fd = fd
+            tcp_send(fd, r.client_finished)
+            return r
+        }
+        if r.err != "no-finished" {
+            r.fd = fd
+            return r
+        }
+        tries = tries + 1
+    }
+    r.fd = fd
+    return r
+}
+
+// 发一条应用数据记录（seq 从 0 开始）
+fn tls_send_app(r: TlsClientResult, seq: int, data: str) -> int {
+    let rec = tls_seal_record(r.c_ap_key, r.c_ap_iv, seq, TLS_CT_APPLICATION_DATA, data)
+    return tcp_send(r.fd, rec)
+}
+
+// 收一条应用数据（跳过 NewSessionTicket / KeyUpdate 等握手消息）。
+// 对端关闭或解密失败返回空串。
+fn tls_read_app(r: TlsClientResult, seq: int) -> str {
+    let mut s = seq
+    let mut k = 0
+    while k < 8 {
+        let hdr = tls_recv_exact(r.fd, 5)
+        if len(hdr) != 5 {
+            return ""
+        }
+        let ln = (hdr[3] << 8) | hdr[4]
+        let body = tls_recv_exact(r.fd, ln)
+        if len(body) != ln {
+            return ""
+        }
+        let inner = tls_open_record_raw(r.s_ap_key, r.s_ap_iv, s, body)
+        if len(inner) == 0 {
+            return ""
+        }
+        let ct = inner[len(inner) - 1]
+        s = s + 1
+        if ct == TLS_CT_APPLICATION_DATA {
+            return substr(inner, 0, len(inner) - 1)
+        }
+        k = k + 1
+    }
+    return ""
+}

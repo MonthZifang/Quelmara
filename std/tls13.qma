@@ -263,6 +263,13 @@ fn tls_open_record(key: str, iv: str, seq: int, sealed: str) -> str {
     return substr(inner, 0, len(inner) - 1)
 }
 
+// 解密记录并保留末尾的内容类型字节（调用方可区分握手/应用数据/告警）。
+// 解密失败返回空串。
+fn tls_open_record_raw(key: str, iv: str, seq: int, sealed: str) -> str {
+    let nonce = tls_nonce(iv, seq)
+    return tls_open(key, nonce, tls_aad(TLS_CT_APPLICATION_DATA, len(sealed)), sealed)
+}
+
 // 握手消息头：type || 3 字节长度
 fn tls_hs_msg(mtype: int, body: str) -> str {
     let n = len(body)

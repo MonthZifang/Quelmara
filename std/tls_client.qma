@@ -36,7 +36,12 @@ struct TlsClientResult {
     cv: int,                  // CertificateVerify：1 通过 / 0 失败 / -1 算法不支持
     server_finished_ok: int,
     client_finished: str,     // 客户端 Finished 记录（可直接发送）
-    transcript_hash: str      // 服务器 Finished 之后的 transcript hash
+    transcript_hash: str,     // 服务器 Finished 之后的 transcript hash
+    fd: int,                  // tls_connect 建立的连接（-1 = 非网络模式）
+    c_ap_key: str,
+    c_ap_iv: str,
+    s_ap_key: str,
+    s_ap_iv: str
 }
 
 fn tls_client_err(code: str) -> TlsClientResult {
@@ -45,7 +50,8 @@ fn tls_client_err(code: str) -> TlsClientResult {
         c_hs_secret: "", s_hs_secret: "",
         c_hs_key: "", c_hs_iv: "", s_hs_key: "", s_hs_iv: "",
         c_ap_secret: "", s_ap_secret: "", cert_pub: "", cv: 0,
-        server_finished_ok: 0, client_finished: "", transcript_hash: ""
+        server_finished_ok: 0, client_finished: "", transcript_hash: "",
+        fd: -1, c_ap_key: "", c_ap_iv: "", s_ap_key: "", s_ap_iv: ""
     }
 }
 
@@ -394,6 +400,10 @@ fn tls_client_handshake(priv: str, ch_record: str, server_bytes: str) -> TlsClie
     r.s_hs_iv = s_iv
     r.c_ap_secret = c_ap
     r.s_ap_secret = s_ap
+    r.c_ap_key = tls_traffic_key(c_ap)
+    r.c_ap_iv = tls_traffic_iv(c_ap)
+    r.s_ap_key = tls_traffic_key(s_ap)
+    r.s_ap_iv = tls_traffic_iv(s_ap)
     r.cert_pub = cert_pub
     r.cv = cv
     r.server_finished_ok = fin_ok

@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-31 个模块，**359 个公开函数**（另有 188 个 `_` 前缀的内部函数）。
+32 个模块，**366 个公开函数**（另有 188 个 `_` 前缀的内部函数）。
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -24,15 +24,16 @@
 | `std/sha256` | SHA-256 + HMAC-SHA256 | 11 / 11 |
 | `std/aes` | AES-128-GCM | 6 / 26 |
 | `std/x25519` | X25519 密钥交换（RFC 7748，TLS ECDHE 地基） | 3 / 21 |
-| `std/tls13` | TLS 1.3 密钥调度 + AEAD 记录层（v1.21）+ 记录/握手解析（v1.24） | 28 / 28 |
+| `std/tls13` | TLS 1.3 密钥调度 + AEAD 记录层 + 记录/握手解析（v1.21/24） | 29 / 29 |
 | `std/tls_client` | TLS 1.3 客户端握手核心（RFC 8448 逐字节验证，v1.24） | 6 / 9 |
+| `std/tls_net` | TLS 1.3 网络层：TCP 建连 + 握手 + 应用数据（v1.25，Windows） | 5 / 5 |
 | `std/p256` | NIST P-256 域运算 + ECDSA 验签（v1.22） | 2 / 45 |
 | `std/x509` | X.509 DER 解析 + P-256 自签/签发者验签（v1.23） | 11 / 12 |
 | `std/b64` | base64 编解码 | 5 / 5 |
 | `std/http` | HTTP/1.1 服务端 | 33 / 40 |
 | `std/ws` | WebSocket 服务端（RFC 6455） | 14 / 24 |
 | `std/sse` | Server-Sent Events | 17 / 20 |
-| `std/net` | 阻塞 TCP 便捷层 | 6 / 6 |
+| `std/net` | 阻塞 TCP 便捷层（服务端 + 客户端 connect） | 7 / 7 |
 | `std/net/core` | 连接槽位层（640 B/连接） | 18 / 18 |
 | `std/net/udp` | UDP 封装 + 地址解析 | 3 / 3 |
 | `std/ds` | RingBuf + MinHeap | 10 / 10 |
@@ -313,6 +314,7 @@ fn pool_empty(h: int) -> bool
 ```quelmara
 fn listen(port: int) -> int
 fn accept(fd: int) -> int
+fn connect(host: str, port: int) -> int
 fn send(conn: int, data: str) -> int
 fn recv(conn: int, cap: int) -> str
 fn close_conn(fd: int)
@@ -551,6 +553,7 @@ fn tls_open(key: str, nonce: str, aad: str, sealed: str) -> str
 fn tls_record(ctype: int, payload: str) -> str
 fn tls_seal_record(key: str, iv: str, seq: int, ctype: int, plain: str) -> str
 fn tls_open_record(key: str, iv: str, seq: int, sealed: str) -> str
+fn tls_open_record_raw(key: str, iv: str, seq: int, sealed: str) -> str
 fn tls_hs_msg(mtype: int, body: str) -> str
 fn tls_u16(v: int) -> str
 fn tls_u24(v: int) -> str
@@ -570,6 +573,18 @@ fn tls_ecdsa_sig_raw(sig: str) -> str
 fn tls_verify_cert_verify(cert_der: str, alg: int, sig: str, transcript_hash: str) -> int
 fn tls_client_hello(host: str, pub: str, rnd: str, sid: str) -> str
 fn tls_client_handshake(priv: str, ch_record: str, server_bytes: str) -> TlsClientResult
+```
+
+### `std/tls_net.qma`
+
+TLS 1.3 网络层：TCP 建连 + 握手 + 应用数据（Windows）
+
+```quelmara
+fn tls_random(n: int) -> str
+fn tls_recv_exact(fd: int, n: int) -> str
+fn tls_connect(host: str, port: int) -> TlsClientResult
+fn tls_send_app(r: TlsClientResult, seq: int, data: str) -> int
+fn tls_read_app(r: TlsClientResult, seq: int) -> str
 ```
 
 ### `std/url.qma`
@@ -655,10 +670,11 @@ fn x509_verify_with_p256(cert: str, issuer_pub: str) -> int
 | `std/x25519` | X25519 标量乘 / 公钥生成 / 共享密钥（RFC 7748 向量全过） | 单次约 7 ms（约 100× 于优化过的 C）；无 X448、无 Ed25519 |
 | `std/tls13` | HKDF（RFC 5869）、Expand-Label、key schedule、AEAD 记录封装、Finished 派生、记录/握手消息解析 | 不含网络 I/O；握手状态机见 `std/tls_client` |
 | `std/tls_client` | ClientHello 构造、ServerHello 解析、服务器 flight 解密、Finished/CertificateVerify 验证、客户端 Finished 生成、应用流量密钥 | 无 TCP 连接（无 `tcp_connect`/DNS）；只支持 TLS1.3 + AES-128-GCM-SHA256 + x25519；不校验证书链/有效期/域名；RSA 验签返回 -1 |
+| `std/tls_net` | `tls_connect` 建连并握手、`tls_send_app` / `tls_read_app` 收发应用数据、`tls_random` / `tls_recv_exact` | 只在 Windows（依赖 `tcp_connect`）；seq 由调用方维护，适合单次请求/响应；不校验证书 |
 | `std/p256` | ECDSA-P256 验签（含无效曲线点防护）、曲线上点判定 | 只验签不签名；只支持 SHA-256 摘要与未压缩点；单次约 25 ms |
 | `std/x509` | DER TLV（≤3 字节长度）、TBSCertificate / SPKI / signatureValue 提取、`x509_verify_self_p256` 与 `x509_verify_with_p256` | 只认 ECDSA-P256 未压缩点；**不校验**有效期/域名/用途/链/CRL/OCSP；无 RSA、Ed25519、压缩点 |
 | `std/sha256` | SHA-256、HMAC-SHA256 | SHA-NI 硬件加速（基础设施已就绪，本机 CPU 无该扩展） |
-| `std/net` | 阻塞 TCP（IPv4 字面量） | 域名解析、IPv6、批量收发 |
+| `std/net` | 阻塞 TCP 服务端（listen/accept）+ 客户端 `connect`（Windows 走系统 DNS） | Linux 客户端未实现（`tcp_connect` 编译期报错）；IPv6、批量收发 |
 | `std/net/udp` | open/bind/sendto/recvfrom + 地址解析 | 可靠 UDP、批量收发、IPv6 |
 | `std/url` | scheme/host/port/path/query/fragment、query 取值、encode/decode | 规范化、相对路径解析 |
 | `std/str` | find/split/join/trim/replace/大小写/补齐/slice | `str_format`（无可变参数）、UTF-8 语义、正则 |
