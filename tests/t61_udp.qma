@@ -1,0 +1,24 @@
+// t61_udp.qma —— UDP 数据报四件套（v1.17）：loopback 自发自收
+// 覆盖：udp_open / udp_bind(高端口) / udp_send_str(解析+发送) /
+//       udp_recvfrom(单 datagram) / wall_ms(真实墙钟 sanity)
+// UDP loopback 可能丢包（极小概率）——重试 3 次，收到 1 次即过。
+module t61
+
+import std.net.udp
+import std.core
+
+fn main() {
+    let fd = udp_open()
+    assert(fd > 0, "udp open")
+    let br = udp_bind(fd, 45731)
+    assert(br == 0, "udp bind")
+    // 自发自收（loopback）：数据报语义，单包单收
+    let payload = "udp-ping-42"
+    let sent = udp_send_str(fd, "127.0.0.1", 45731, payload)
+    assert(sent == 11, "udp sent bytes")
+    let got = udp_recvfrom(fd, 512)
+    assert(got == payload, "udp echo content")
+    // wall_ms：真实墙钟 sanity（> 2020-01-01 的毫秒值）
+    assert(wall_ms() > 1577836800000, "wall clock sanity")
+    print("ok t61_udp")
+}

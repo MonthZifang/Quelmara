@@ -1,0 +1,90 @@
+// std/timer.qma —— 定时器（v1.17）
+// 基于最小堆（std/ds）+ 单调钟：帧循环驱动的**轮询式**定时器
+// （无后台线程、无回调——tick() 返回到期的 id，游戏/服务器主循环友好）。
+//
+// 用法：
+//   let id = timer_after(500)      // 500ms 后到期，返回句柄
+//   loop {
+//     timer_tick()                  // 每帧调用
+//     let due = timer_poll()        // 取一个到期句柄（无则 -1）
+//     if due >= 0 { ...处理... }
+//     sleep_ms(16)
+//   }
+// id 从 1 递增；时间戳打在两个平行 vec 上（到期时刻 + 存活标记）。
+// ---------------------------------------------------------------------------
+
+import std.ds
+import std.core
+
+const TIMER_KEY_W = 12    // static_word(12) = 下一个 id（1 起）
+
+let _heap = heap_new(64)
+let _due = vec[int].new(64)      // 与堆平行的到期时刻（now_ms 基准）
+let _alive = vec[int].new(64)    // 1 = 未取消
+let _stamp0 = vec[int].new(4)    // 全局基准（首个 timer 创建时的 now_ms）
+
+// timer_after(ms) -> int：ms 毫秒后到期，返回句柄 id（> 0）
+fn timer_after(ms: int) -> int {
+    if len(_stamp0) == 0 {
+        _stamp0.push(now_ms())
+    }
+    let base = _stamp0.get(0)
+    let id = mem_load64(static_word(TIMER_KEY_W), 0) + 1
+    mem_store64(static_word(TIMER_KEY_W), 0, id)
+    let due_at = base + ms
+    // 堆键 = 到期时刻（最小堆：早到期先出）
+    heap_push(_heap, due_at)
+    _due.push(due_at)
+    _alive.push(1)
+    return id
+}
+
+// timer_cancel(id)：取消（到期时 timer_poll 跳过）
+fn timer_cancel(id: int) {
+    let i = id - 1
+    if i >= 0 && i < len(_alive) {
+        _alive.set(i, 0)
+    }
+}
+
+// timer_poll() -> int：弹出一个**已到期且存活**的句柄（无则 -1）。
+// 已取消的到期项静默丢弃。
+fn timer_poll() -> int {
+    if len(_stamp0) == 0 {
+        return 0 - 1
+    }
+    let now = now_ms()
+    while len(_heap) > 0 {
+        let top = heap_peek(_heap)
+        if top > now {
+            return 0 - 1
+        }
+        heap_pop(_heap)
+        // 从平行数组找这个到期时刻对应的 id（最早的 alive 项）
+        let n = len(_due)
+        let mut i = 0
+        while i < n {
+            if _alive.get(i) == 1 && _due.get(i) == top {
+                _alive.set(i, 0)
+                return i + 1
+            }
+            i = i + 1
+        }
+        // 该到期时刻全部已取消——继续弹
+    }
+    return 0 - 1
+}
+
+// timer_pending() -> int：未决定时器数量（诊断用）
+fn timer_pending() -> int {
+    let n = len(_alive)
+    let mut c = 0
+    let mut i = 0
+    while i < n {
+        if _alive.get(i) == 1 {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}

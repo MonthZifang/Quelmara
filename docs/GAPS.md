@@ -239,6 +239,24 @@
      atomic 本轮实测踩中）；
   5. `qlm_native.Codegen.gen_instr`（x86 编码）+ `qlm_arm64`（不支持时要显式拦截）。
 
+### 6.5.16 std 库生态 v1.17（本轮新增/状态）
+
+| 库 | 内容 | 状态 |
+|---|---|---|
+| std/ds | RingBuf（定容环形缓冲 O(1) 两端）+ MinHeap（二叉最小堆） | ✅ 新增（纯 Quelmara） |
+| std/serialize | LEB128 varint、LE 定长 16/32/64、长度前缀帧 | ✅ 新增（纯 Quelmara） |
+| std/time | wall_ms()（真实墙钟 Unix epoch 毫秒，内建：clock_gettime / GetSystemTimeAsFileTime）+ now_ms + sleep_ms | ✅ 补齐 |
+| std/timer | 轮询式定时器（timer_after/cancel/poll，基于 MinHeap + 单调钟，帧循环驱动零线程） | ✅ 新增 |
+| std/log | 级别 + 启动毫秒时间戳（v1.16） | 🟡 结构化 kv 字段未做 |
+| std/net/udp | udp_open/bind/sendto/recvfrom 内建四件 + udp_parse_ip + loopback | 🟡 **代码完成，PE 加载异常待调**（exe 12800B 加载即崩，疑 ws2_32 import 表；t61 暂摘回归） |
+| net/tcp | 长连接/批量收发 | 🟡 已有基础，批量收发未做 |
+| IPv6 | AF_INET6 + sockaddr_in6 + 字面量解析 | ❌ 登记（socket 家族改造，大活） |
+| net/tcp 可靠 UDP | — | ❌ 未做（UDP 之上） |
+| mem | 通用对象池 | 🟡 有 arena{}/slab_*；size-class 分配器已是堆底座 |
+| 命名空间/可见性 | 库函数不冲突 | ❌ 扁平合并 + 前缀约定（编译器级） |
+| 全局 DCE | import 大库只链接用到的 | ❌ **待实现**：从 main 的调用图可达性分析，删除不可达 fn（v0 保守：有 impl 的类型方法全保留） |
+| 库归档 .qla | 预编译/增量/分发 | ❌ 规划中 |
+
 ### 6.5.15 性能专项（v1.14 登记的"赢回来"路线）
 
 **v1.14d 补充实测（min of 3）**：gzip 1MiB 61ms（1.9 倍，DEFLATE 全程

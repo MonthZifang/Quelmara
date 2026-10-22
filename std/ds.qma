@@ -1,0 +1,138 @@
+// std/ds.qma —— 数据结构（v1.17）
+// RingBuf：定容环形缓冲（O(1) 两端操作，游戏/流式场景）
+// MinHeap：二叉最小堆（timer 轮的底座，优先队列）
+// 全部纯 Quelmara（mem 块 + vec），零系统调用。
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// RingBuf：定容 int 环形缓冲
+// 布局：16 字节头（cap/count/head）+ cap*8 数据
+//   槽 0 = cap, 槽 1 = count, 槽 2 = head
+// full 时 push 返回 -1（fail-fast 的温和版：调用方可选处理）
+// ---------------------------------------------------------------------------
+
+fn rb_new(cap: int) -> int {
+    if cap <= 0 {
+        cap = 1
+    }
+    let rb = mem_alloc(24 + cap * 8)
+    mem_store64(rb, 0, cap)
+    mem_store64(rb, 1, 0)
+    mem_store64(rb, 2, 0)
+    return rb
+}
+
+fn rb_count(rb: int) -> int {
+    return mem_load64(rb, 1)
+}
+
+fn rb_cap(rb: int) -> int {
+    return mem_load64(rb, 0)
+}
+
+// rb_push(rb, v)：尾部入队。满返回 -1，否则 0。
+fn rb_push(rb: int, v: int) -> int {
+    let cap = mem_load64(rb, 0)
+    let count = mem_load64(rb, 1)
+    if count >= cap {
+        return 0 - 1
+    }
+    let head = mem_load64(rb, 2)
+    let tail = (head + count) % cap
+    let data = mem_ptr(rb, 24)
+    mem_store64(data, tail, v)
+    mem_store64(rb, 1, count + 1)
+    return 0
+}
+
+// rb_pop(rb) -> int：头部出队。空返回 -1（配合 rb_count 判别）。
+fn rb_pop(rb: int) -> int {
+    let count = mem_load64(rb, 1)
+    if count == 0 {
+        return 0 - 1
+    }
+    let head = mem_load64(rb, 2)
+    let data = mem_ptr(rb, 24)
+    let v = mem_load64(data, head)
+    mem_store64(rb, 2, (head + 1) % mem_load64(rb, 0))
+    mem_store64(rb, 1, count - 1)
+    return v
+}
+
+// rb_peek(rb) -> int：看头部不出队。空返回 -1。
+fn rb_peek(rb: int) -> int {
+    let count = mem_load64(rb, 1)
+    if count == 0 {
+        return 0 - 1
+    }
+    return mem_load64(mem_ptr(rb, 24), mem_load64(rb, 2))
+}
+
+// ---------------------------------------------------------------------------
+// MinHeap：二叉最小堆（vec[int]，动态扩容）
+// timer 轮的底座：到期时间作 key，句柄作 value——键值打包进一个 int
+// （调用方用 key*2^20 | id 的组合，或分两个堆）。
+// 这里提供 key-only 版本：push(key) / peek() / pop()。
+// ---------------------------------------------------------------------------
+
+fn heap_new(cap: int) -> vec[int] {
+    return vec[int].new(cap + 1)
+}
+
+fn heap_push(h: vec[int], key: int) {
+    h.push(key)
+    let mut i = len(h) - 1
+    while i > 0 {
+        let parent = (i - 1) / 2
+        if h.get(parent) <= h.get(i) {
+            break
+        }
+        let t = h.get(parent)
+        h.set(parent, h.get(i))
+        h.set(i, t)
+        i = parent
+    }
+}
+
+// heap_peek(h) -> int：最小 key。空返回 -1。
+fn heap_peek(h: vec[int]) -> int {
+    if len(h) == 0 {
+        return 0 - 1
+    }
+    return h.get(0)
+}
+
+// heap_pop(h) -> int：弹出最小 key。空返回 -1。
+fn heap_pop(h: vec[int]) -> int {
+    let n = len(h)
+    if n == 0 {
+        return 0 - 1
+    }
+    let top = h.get(0)
+    let last = h.get(n - 1)
+    h.set(0, last)
+    h.pop()
+    let n = len(h)
+    let mut i = 0
+    let mut go = 1
+    while go == 1 {
+        let l = i * 2 + 1
+        let r = i * 2 + 2
+        let mut m = i
+        if l < n && h.get(l) < h.get(m) {
+            m = l
+        }
+        if r < n && h.get(r) < h.get(m) {
+            m = r
+        }
+        if m == i {
+            go = 0
+        } else {
+            let t = h.get(i)
+            h.set(i, h.get(m))
+            h.set(m, t)
+            i = m
+        }
+    }
+    return top
+}

@@ -597,6 +597,8 @@ class Lower:
         self.gid_of_str = {}
         self.spawn_id = 0
         self.uses_chan = False
+        self.uses_udp = False
+        self.uses_wall = False
         self.asset_root = asset_root  # [src].asset（read_asset 基准，编译期嵌入）
         self.arr_elem = {}         # base vreg -> 元素类型（"f64"）；f64 数组的
                                    # index/arith 位模式链路依赖此标记
@@ -2182,6 +2184,41 @@ class Lower:
             self.uses_now = True
             d = fn.new_v()
             fn.emit("call", d, "__now_ns", [])
+            return d
+        if name == "wall_ms" and name not in self.fns_ast:
+            # wall_ms() -> int：真实墙钟毫秒（Unix epoch）。与单调的 now_ns
+            # 互补——wall 用于时间戳展示，单调用于测量。
+            if len(e[2]) != 0:
+                raise SyntaxError("wall_ms() 不需要实参")
+            self.uses_wall = True
+            d = fn.new_v()
+            fn.emit("call", d, "__wall_ms", [])
+            return d
+        if name == "udp_open" and name not in self.fns_ast:
+            # udp_open() -> fd：AF_INET + SOCK_DGRAM 数据报套接字。
+            # Windows 首次调用走 WSAStartup（与 TCP 同款的 8B WSADATA）。
+            if len(e[2]) != 0:
+                raise SyntaxError("udp_open() 不需要实参")
+            self.uses_udp = True
+            d = fn.new_v()
+            fn.emit("call", d, "__udp_open", [])
+            return d
+        if name in ("udp_bind", "udp_sendto", "udp_recvfrom") and name not in self.fns_ast:
+            # udp_bind(fd, port) -> 0/-1
+            # udp_sendto(fd, ip_u32, port, data) -> 发送字节数/-1
+            #   ip_u32 是**网络序**（std/net/udp.qma 的 udp_parse_ip 产出）
+            # udp_recvfrom(fd, cap) -> str（单 datagram，源地址 v0 丢弃）
+            if self.arch != "x86_64":
+                raise SyntaxError(f"{name} 目前只在 x86_64 后端实现")
+            self.uses_udp = True
+            need = {"udp_bind": 2, "udp_sendto": 4, "udp_recvfrom": 2}[name]
+            if len(e[2]) != need:
+                raise SyntaxError(f"{name} 需要 {need} 个实参")
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            d = fn.new_v()
+            fn.emit("call", d, "__" + name, vals)
+            if name == "udp_recvfrom":
+                return self._mark_str(fn, d)
             return d
         if name == "mem_alloc" and name not in self.fns_ast:
             if len(e[2]) != 1:
@@ -6667,6 +6704,216 @@ class Lower:
             f.emit("bin", "mul", ns, sec, ("imm", 1000000000))
             f.emit("bin", "add", ns, ns, nsec)
             f.emit("ret", ns)
+        if self.uses_udp:
+            # ---- UDP（v1.17）：数据报套接字四件 ----
+            # 块内自带 net_fail（TCP gate 未触发时外层的 def 不存在）
+            def udp_net_fail(f, lb, tag):
+                f.emit("label", lb)
+                f.emit("call", None, "__net_fail_" + tag, [])
+
+            def net_fail(f, lb, tag):
+                udp_net_fail(f, lb, tag)
+
+            # UDP 自己的 __net_fail_* 运行库（TCP gate 只定义了它的五个）
+            for tag, msg in (("udpsocket", "quelmara: udp socket failed (fail-fast)\n"),
+                             ("udpsendto", "quelmara: udp sendto failed (fail-fast)\n"),
+                             ("udprecvfrom", "quelmara: udp recvfrom failed (fail-fast)\n")):
+                gid_nf = self.intern_str(msg)
+                f = Fn("__net_fail_" + tag)
+                bp = f.new_v()
+                f.emit("movaddr", bp, gid_nf)
+                self.emit_write(f, 2, bp, ("imm", len(msg.encode("utf-8"))))
+                self.emit_exit(f, 1)
+                self.out.append(f)
+
+            # sockaddr_in 16B：[0]=family(2)|htons(port)<<16，[1]=ip(网络序)
+            # Windows 的 API int 返回值高 32 位为 0（SOCKET_ERROR 形态
+            # 0x00000000FFFFFFFF），失败判定走 shl32+sar32 符号扩展后 == -1
+            gid_wsa_udp = self.intern_array(8)
+            gid_sa = self.intern_array(2)
+
+            def udp_sin(f, ip_v, port_v):
+                """构造 sockaddr_in，返回堆指针 vreg"""
+                sinb = f.new_v()
+                f.emit("call", sinb, "__alloc", [("imm", 16)])
+                f.emit("store", sinb, ("imm", 0), ("imm", 2))   # family = AF_INET
+                pb = f.new_v()
+                f.emit("bin", "and", pb, port_v, ("imm", 0xFF))
+                pb2 = f.new_v()
+                f.emit("bin", "shl", pb2, pb, ("imm", 8))
+                ph = f.new_v()
+                f.emit("bin", "shr", ph, port_v, ("imm", 8))
+                ph2 = f.new_v()
+                f.emit("bin", "and", ph2, ph, ("imm", 0xFF))
+                pw = f.new_v()
+                f.emit("bin", "or", pw, pb2, ph2)              # htons(port)
+                f.emit("store", sinb, ("imm", 1), pw)          # 槽1 低16 = port
+                f.emit("store", sinb, ("imm", 2), ip_v)        # 槽2 = ip 网络序
+                return sinb
+
+            # __udp_open
+            f = Fn("__udp_open")
+            if self.platform == "windows":
+                wsa = f.new_v()
+                f.emit("movaddr", wsa, gid_wsa_udp)
+                f.emit("winapi", None, "WSAStartup", [("imm", 0x202), wsa])
+                s = f.new_v()
+                f.emit("winapi", s, "socket", [("imm", 2), ("imm", 2), ("imm", 0)])
+                b = f.new_v()
+                r32 = f.new_v()
+                f.emit("bin", "shl", r32, s, ("imm", 32))
+                r322 = f.new_v()
+                f.emit("bin", "sar", r322, r32, ("imm", 32))
+                f.emit("cmpset", "e", b, r322, ("imm", -1))
+                lf = f.label("uof")
+                f.emit("jnz", b, lf)
+                net_fail(f, lf, "udpsocket")
+            else:
+                s = f.new_v()
+                f.emit("syscall", s, self.sc["socket"],
+                       [("imm", 2), ("imm", 2), ("imm", 0), ("imm", 0), ("imm", 0), ("imm", 0)])
+                f.emit("ret", s)
+            if self.platform == "windows":
+                f.emit("ret", s)
+            self.out.append(f)
+
+            # __udp_bind(fd, port)
+            f = Fn("__udp_bind")
+            fdu, pu = f.new_v(), f.new_v()
+            f.emit("args", [fdu, pu])
+            sinb = udp_sin(f, ("imm", 0), pu)
+            if self.platform == "windows":
+                r = f.new_v()
+                f.emit("winapi", r, "bind", [fdu, sinb, ("imm", 16)])
+                b = f.new_v()
+                r32 = f.new_v()
+                f.emit("bin", "shl", r32, r, ("imm", 32))
+                r322 = f.new_v()
+                f.emit("bin", "sar", r322, r32, ("imm", 32))
+                f.emit("cmpset", "ne", b, r322, ("imm", -1))
+                r2 = f.new_v()
+                f.emit("bin", "sub", r2, b, ("imm", 1))
+                f.emit("ret", r2)
+            else:
+                f.emit("syscall", r, self.sc["bind"],
+                       [fdu, sinb, ("imm", 16), ("imm", 0), ("imm", 0), ("imm", 0)])
+                z = f.new_v()
+                f.emit("cmpset", "e", z, r, ("imm", 0))
+                r2 = f.new_v()
+                f.emit("bin", "sub", r2, z, ("imm", 1))
+                f.emit("ret", r2)
+            self.out.append(f)
+
+            # __udp_sendto(fd, ip, port, data)
+            f = Fn("__udp_sendto")
+            fdu, ipu, pu, du = f.new_v(), f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [fdu, ipu, pu, du])
+            sinb = udp_sin(f, ipu, pu)
+            dn = f.new_v()
+            f.emit("call", dn, "__str_len", [du])
+            if self.platform == "windows":
+                r = f.new_v()
+                f.emit("winapi", r, "sendto",
+                       [fdu, du, dn, ("imm", 0), sinb, ("imm", 16)])
+                b = f.new_v()
+                r32 = f.new_v()
+                f.emit("bin", "shl", r32, r, ("imm", 32))
+                r322 = f.new_v()
+                f.emit("bin", "sar", r322, r32, ("imm", 32))
+                f.emit("cmpset", "l", b, r322, ("imm", 0))
+                lf = f.label("usf")
+                f.emit("jnz", b, lf)
+                net_fail(f, lf, "udpsendto")
+                f.emit("ret", r)
+            else:
+                f.emit("syscall", r, self.sc["sendto"],
+                       [fdu, du, dn, ("imm", 0), sinb, ("imm", 16)])
+                b = f.new_v()
+                f.emit("cmpset", "l", b, r, ("imm", 0))
+                lf = f.label("usf")
+                f.emit("jnz", b, lf)
+                net_fail(f, lf, "udpsendto")
+                f.emit("ret", r)
+            self.out.append(f)
+
+            # __udp_recvfrom(fd, cap) -> str（单 datagram，src 丢弃）
+            f = Fn("__udp_recvfrom")
+            fdu, capu = f.new_v(), f.new_v()
+            f.emit("args", [fdu, capu])
+            nb = f.new_v()
+            f.emit("bin", "add", nb, capu, ("imm", 9))
+            buf = f.new_v()
+            f.emit("call", buf, "__alloc", [nb])
+            sinb = f.new_v()
+            f.emit("call", sinb, "__alloc", [("imm", 16)])
+            slen = f.new_v()
+            f.emit("call", slen, "__alloc", [("imm", 8)])
+            f.emit("store", slen, ("imm", 0), ("imm", 16))
+            bufd = f.new_v()
+            f.emit("bin", "add", bufd, buf, ("imm", 8))
+            if self.platform == "windows":
+                r = f.new_v()
+                f.emit("winapi", r, "recvfrom",
+                       [fdu, bufd, capu, ("imm", 0), sinb, slen])
+                b = f.new_v()
+                r32 = f.new_v()
+                f.emit("bin", "shl", r32, r, ("imm", 32))
+                r322 = f.new_v()
+                f.emit("bin", "sar", r322, r32, ("imm", 32))
+                f.emit("cmpset", "l", b, r322, ("imm", 0))
+                lf = f.label("urf")
+                f.emit("jnz", b, lf)
+                net_fail(f, lf, "udprecvfrom")
+            else:
+                r = f.new_v()
+                f.emit("syscall", r, self.sc["recvfrom"],
+                       [fdu, bufd, capu, ("imm", 0), sinb, slen])
+                b = f.new_v()
+                f.emit("cmpset", "l", b, r, ("imm", 0))
+                lf = f.label("urf")
+                f.emit("jnz", b, lf)
+                net_fail(f, lf, "udprecvfrom")
+            f.emit("store", buf, ("imm", 0), r)       # 长度头 = 实收字节数
+            f.emit("store8", buf, 8 + 0, ("imm", 0))
+            rbuf = f.new_v()
+            f.emit("bin", "add", rbuf, buf, ("imm", 8))
+            f.emit("ret", rbuf)
+            self.out.append(f)
+
+        if self.uses_wall:
+            # __wall_ms：Linux clock_gettime(CLOCK_REALTIME)；Windows
+            # GetSystemTimeAsFileTime（1601 epoch 100ns -> 1970 epoch 毫秒）
+            f = Fn("__wall_ms")
+            if self.platform == "windows":
+                ft = f.new_v()
+                f.emit("call", ft, "__alloc", [("imm", 8)])
+                f.emit("winapi", None, "GetSystemTimeAsFileTime", [ft])
+                v = f.new_v()
+                f.emit("load", v, ft, ("imm", 0))
+                # 116444736000000000 * 100ns = 1601->1970 秒差
+                adj = f.new_v()
+                f.emit("bin", "sub", adj, v, ("imm", 116444736000000000))
+                ms = f.new_v()
+                f.emit("bin", "div", ms, adj, ("imm", 10000))
+                f.emit("ret", ms)
+            else:
+                ts = f.new_v()
+                f.emit("call", ts, "__alloc", [("imm", 16)])
+                f.emit("syscall", None, self.sc["clock_gettime"],
+                       [("imm", 0), ts, ("imm", 0), ("imm", 0), ("imm", 0), ("imm", 0)])
+                sec = f.new_v()
+                f.emit("load", sec, ts, ("imm", 0))
+                nsec = f.new_v()
+                f.emit("load", nsec, ts, ("imm", 1))
+                ms = f.new_v()
+                f.emit("bin", "mul", ms, sec, ("imm", 1000))
+                ms2 = f.new_v()
+                f.emit("bin", "add", ms2, ms, nsec)
+                ms3 = f.new_v()
+                f.emit("bin", "div", ms3, ms2, ("imm", 1000000))
+                f.emit("ret", ms3)
+            self.out.append(f)
+
         if self.uses_now:
             self.out.append(f)
 

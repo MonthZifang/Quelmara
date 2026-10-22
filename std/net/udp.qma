@@ -1,0 +1,52 @@
+// std/net/udp.qma —— UDP 数据报（v1.17）
+// 内建四件（udp_open/udp_bind/udp_sendto/udp_recvfrom）的 Quelmara 封装
+// + IPv4 点分字面量解析。datagram 语义：一次 recvfrom = 一个完整数据报。
+// IPv6：登记 GAPS（socket 家族 AF_INET6 改造 + sockaddr_in6 28B）。
+// ---------------------------------------------------------------------------
+
+// udp_parse_ip("1.2.3.4") -> int：点分 IPv4 -> 网络序 u32
+// （a.b.c.d -> a | b<<8 | c<<16 | d<<24——网络字节序即大端存放）
+fn udp_parse_ip(ip: str) -> int {
+    let n = len(ip)
+    let mut v = 0
+    let mut cur = 0
+    let mut oct = 0
+    let mut i = 0
+    while i < n {
+        let c = ip[i]
+        if c == 46 {
+            v = v | (cur << (oct * 8))
+            cur = 0
+            oct = oct + 1
+            if oct > 3 {
+                return 0
+            }
+        } else {
+            if c < 48 || c > 57 {
+                return 0
+            }
+            cur = cur * 10 + (c - 48)
+            if cur > 255 {
+                return 0
+            }
+        }
+        i = i + 1
+    }
+    v = v | (cur << (oct * 8))
+    return v
+}
+
+// udp_send_str(fd, ip, port, data) -> int：字符串地址便捷层
+// （解析失败返回 -1）
+fn udp_send_str(fd: int, ip: str, port: int, data: str) -> int {
+    let ipu = udp_parse_ip(ip)
+    if ipu == 0 {
+        return 0 - 1
+    }
+    return udp_sendto(fd, ipu, port, data)
+}
+
+// udp_loopback() -> int：127.0.0.1 的网络序常量
+fn udp_loopback() -> int {
+    return 127 | (0 << 8) | (0 << 16) | (1 << 24)
+}

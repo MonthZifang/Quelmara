@@ -1,0 +1,113 @@
+// std/serialize.qma —— 二进制序列化（v1.17）
+// 变长整数（LEB128 无符号）、定长整数（小端 16/32/64）、长度前缀帧。
+// 纯 Quelmara（str_alloc/mem 原语），O(n) 单遍。
+// ---------------------------------------------------------------------------
+
+// varint_put(v) -> str：无符号 64 位 LEB128（每字节 7 位有效 + 续位标志）
+fn varint_put(v: int) -> str {
+    // 最坏 10 字节
+    let s = str_alloc(10)
+    let w = mem_ptr(s, 0)
+    let mut x = v
+    let mut n = 0
+    while x > 127 {
+        mem_store8(w, n, (x & 127) | 128)
+        x = x >> 7
+        n = n + 1
+    }
+    mem_store8(w, n, x & 127)
+    n = n + 1
+    // 重设长度头为 n（str_alloc 的 len 是预估 10）
+    mem_store64(mem_ptr(s, 0) - 8, 0, n)
+    return s
+}
+
+// varint_get(buf: str, off: int) -> int：从 off 读 varint，
+// 返回 (值 << 32) | 新偏移——高 32 位是值、低 32 是偏移。
+// 解析越过串尾返回 (0 << 32) | -1（调用方查低 32 == 0xFFFFFFFF 判失败）。
+fn varint_get(buf: str, off: int) -> int {
+    let n = len(buf)
+    let mut x = 0
+    let mut shift = 0
+    let mut i = off
+    while i < n {
+        let b = buf[i]
+        x = x | ((b & 127) << shift)
+        if (b & 128) == 0 {
+            return (x << 32) | (i + 1)
+        }
+        shift = shift + 7
+        i = i + 1
+        if shift > 63 {
+            return (0 << 32) | 0xFFFFFFFF
+        }
+    }
+    return (0 << 32) | 0xFFFFFFFF
+}
+
+// put_u16le / put_u32le / put_u64le：小端定长写入（返回写入后偏移）
+fn put_u16le(w: int, off: int, v: int) -> int {
+    mem_store8(w, off, v & 0xFF)
+    mem_store8(w, off + 1, (v >> 8) & 0xFF)
+    return off + 2
+}
+
+fn put_u32le(w: int, off: int, v: int) -> int {
+    mem_store8(w, off, v & 0xFF)
+    mem_store8(w, off + 1, (v >> 8) & 0xFF)
+    mem_store8(w, off + 2, (v >> 16) & 0xFF)
+    mem_store8(w, off + 3, (v >> 24) & 0xFF)
+    return off + 4
+}
+
+fn put_u64le(w: int, off: int, v: int) -> int {
+    let mut i = 0
+    while i < 8 {
+        mem_store8(w, off + i, (v >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+    return off + 8
+}
+
+// get_u16le / get_u32le / get_u64le：小端定长读取
+fn get_u16le(buf: int, off: int) -> int {
+    return mem_load8(buf, off) | (mem_load8(buf, off + 1) << 8)
+}
+
+fn get_u32le(buf: int, off: int) -> int {
+    return mem_load8(buf, off) | (mem_load8(buf, off + 1) << 8) | (mem_load8(buf, off + 2) << 16) | (mem_load8(buf, off + 3) << 24)
+}
+
+fn get_u64le(buf: int, off: int) -> int {
+    let mut x = 0
+    let mut i = 7
+    while i >= 0 {
+        x = (x << 8) | mem_load8(buf, off + i)
+        i = i - 1
+    }
+    return x
+}
+
+// frame_put(payload) -> str：长度前缀帧（4 字节 LE 长度 + 内容）
+fn frame_put(payload: str) -> str {
+    let n = len(payload)
+    let s = str_alloc(n + 4)
+    let w = mem_ptr(s, 0)
+    put_u32le(w, 0, n)
+    mem_copy(mem_ptr(w, 4), payload, n)
+    return s
+}
+
+// frame_get(buf: str, off: int) -> str：从 off 解出一帧内容。
+// 无完整帧返回空串。
+fn frame_get(buf: str, off: int) -> str {
+    let n = len(buf)
+    if off + 4 > n {
+        return ""
+    }
+    let plen = get_u32le(mem_ptr(buf, 0), off)
+    if off + 4 + plen > n {
+        return ""
+    }
+    return str_from_mem(mem_ptr(buf, off + 4), plen)
+}
