@@ -1,0 +1,19 @@
+// fixtures/qpm-demo/pkg-demo/hello.qma —— qpm 端到端测试的示例依赖包
+module pkg_demo
+
+fn greet(who: str) -> str {
+    return str_concat3("hello, ", who, "!")
+}
+
+fn str_concat3(a: str, b: str, c: str) -> str {
+    // 简单三段拼接（v1.14 的 str_alloc 批量构造）
+    let n = len(a) + len(b) + len(c)
+    let s = str_alloc(n)
+    let w = mem_ptr(s, 0)
+    mem_copy(w, a, len(a))
+    w = mem_ptr(w, len(a))
+    mem_copy(w, b, len(b))
+    w = mem_ptr(w, len(b))
+    mem_copy(w, c, len(c))
+    return s
+}
