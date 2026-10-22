@@ -7,6 +7,9 @@ build/
 fixtures/**/*.exe
 fixtures/**/*.qex
 
+# qpm 端到端夹具里临时 git init 出来的仓库（演示时重建）
+fixtures/qpm-demo/.git/
+
 # Python
 __pycache__/
 *.pyc
