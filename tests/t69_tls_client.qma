@@ -53,9 +53,10 @@ fn main() {
            "der sig 33-byte r")
     assert(len(tls_ecdsa_sig_raw(hex_decode("3006020101"))) == 0, "der sig truncated")
 
-    // 7) 服务器证书是 RSA → 我们只解析出空公钥，CV 标记 -1（不支持）
+    // 7) 服务器证书是 RSA → EC 公钥为空，但 RSA-PSS CertificateVerify 应通过
     assert(len(r.cert_pub) == 0, "rsa cert pub empty")
-    assert(r.cv == -1, "cv unsupported")
+    assert(r.cv == 1, "rsa pss cv")
+    assert(tls_cert_count(r) == 1, "cert count")
 
     // 8) 自建 ClientHello 的结构自检
     let pub = x25519_base(priv)

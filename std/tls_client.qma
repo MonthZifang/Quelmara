@@ -15,6 +15,7 @@
 //   * 不校验证书链 / 有效期 / 域名 / 用途；调用方必须自己决定是否信任 cert_pub
 //   * 服务器 flight 必须能完整收到（记录可多条、握手消息可跨记录拼接）
 
+import std.rsa
 import std.tls13
 import std.x509
 import std.p256
@@ -180,7 +181,12 @@ fn _tls_cert_list(body: str) -> vec[str] {
             break
         }
         out.push(substr(body, off, ln))
-        q = off + ln
+        // TLS 1.3 CertificateEntry 末尾还有 2 字节 extensions 长度
+        if off + ln + 2 > len(body) {
+            break
+        }
+        let elen = (body[off + ln] << 8) | body[off + ln + 1]
+        q = off + ln + 2 + elen
     }
     return out
 }
@@ -222,8 +228,9 @@ fn tls_client_hello(host: str, pub: str, rnd: str, sid: str) -> str {
     let sni = tls_ext(0, sni_body)
     // supported_groups: x25519
     let groups = tls_ext(10, tls_u16(2) + tls_u16(0x001d))
-    // signature_algorithms: ecdsa_secp256r1_sha256
-    let sigalgs = tls_ext(13, tls_u16(2) + tls_u16(0x0403))
+    // signature_algorithms: ECDSA-P256 + RSA-PSS + RSA-PKCS#1（v1.27）
+    let sigalgs = tls_ext(13, tls_u16(6) + tls_u16(0x0403) +
+                          tls_u16(0x0804) + tls_u16(0x0401))
     // supported_versions: TLS 1.3
     let versions = tls_ext(43, chr(2) + tls_u16(0x0304))
     // key_share: x25519
@@ -405,6 +412,15 @@ fn tls_client_handshake(priv: str, ch_record: str, server_bytes: str) -> TlsClie
     }
     if cv_alg == 0x0403 {
         cv = tls_verify_cert_verify(cert_der, cv_alg, cv_sig, th_before_cv)
+    } else if cv_alg == 0x0804 {
+        // rsa_pss_rsae_sha256（TLS 1.3 的 RSA CertificateVerify）
+        let rn = x509_rsa_pub(cert_der)
+        if len(rn) > 0 && len(cv_sig) > 0 {
+            cv = rsa_verify_pss_sha256(rn, x509_rsa_exp(cert_der), cv_sig,
+                                       tls_cert_verify_hash(th_before_cv), 32)
+        } else {
+            cv = 0
+        }
     } else {
         cv = -1
     }

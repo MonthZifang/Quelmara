@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-32 个模块，**378 个公开函数**（另有 199 个 `_` 前缀的内部函数）。
+33 个模块，**383 个公开函数**（另有 209 个 `_` 前缀的内部函数）。
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -22,13 +22,14 @@
 | `std/math` | sqrt/cbrt/取整/powi/gcd（v1.19） | 21 / 21 |
 | `std/sha1` | SHA-1（WS 握手用） | 5 / 5 |
 | `std/sha256` | SHA-256 + HMAC-SHA256 | 11 / 11 |
+| `std/rsa` | RSA PKCS#1 v1.5 / PSS 验签（SHA-256） | 2 / 12 |
 | `std/aes` | AES-128-GCM | 6 / 26 |
 | `std/x25519` | X25519 密钥交换（RFC 7748，TLS ECDHE 地基） | 3 / 21 |
 | `std/tls13` | TLS 1.3 密钥调度 + AEAD 记录层 + 记录/握手解析（v1.21/24） | 29 / 29 |
 | `std/tls_client` | TLS 1.3 客户端握手核心 + 证书链入口（v1.24/26） | 9 / 13 |
 | `std/tls_net` | TLS 1.3 网络层：TCP 建连 + 握手 + 应用数据（v1.25，Windows） | 5 / 5 |
 | `std/p256` | NIST P-256 域运算 + ECDSA 验签（v1.22） | 2 / 45 |
-| `std/x509` | X.509 解析 + P-256 验签 + 链/有效期/域名校验（v1.23/26） | 20 / 31 |
+| `std/x509` | X.509 解析 + P-256/RSA 验签 + 链/有效期/域名校验（v1.23/26/27） | 23 / 34 |
 | `std/b64` | base64 编解码 | 5 / 5 |
 | `std/http` | HTTP/1.1 服务端 | 33 / 40 |
 | `std/ws` | WebSocket 服务端（RFC 6455） | 14 / 24 |
@@ -376,6 +377,15 @@ fn rand_below(n: int) -> int
 fn rand_range(lo: int, hi: int) -> int
 ```
 
+### `std/rsa.qma`
+
+RSA PKCS#1 v1.5 / PSS 验签（SHA-256，证书链与 TLS 用）
+
+```quelmara
+fn rsa_verify_pkcs1_sha256(n: str, e: int, sig: str, hash: str) -> int
+fn rsa_verify_pss_sha256(n: str, e: int, sig: str, hash: str, salt_len: int) -> int
+```
+
 ### `std/serialize.qma`
 
 LEB128 varint / 定长整数 / 长度前缀帧
@@ -665,6 +675,9 @@ fn x509_is_ca(cert: str) -> int
 fn x509_san(cert: str) -> vec[str]
 fn x509_host_ok(cert: str, host: str) -> int
 fn x509_verify_chain(leaf: str, inter: vec[str], anchor: str, host: str, now: int) -> int
+fn x509_sig_bits(cert: str) -> str
+fn x509_rsa_pub(cert: str) -> str
+fn x509_rsa_exp(cert: str) -> int
 ```
 <!-- api:end -->
 
@@ -684,8 +697,9 @@ fn x509_verify_chain(leaf: str, inter: vec[str], anchor: str, host: str, now: in
 | `std/tls_client` | ClientHello 构造、ServerHello 解析、服务器 flight 解密、Finished/CertificateVerify 验证、客户端 Finished 生成、应用流量密钥、`tls_verify_chain` 证书链入口 | 无 TCP 连接（网络层见 `std/tls_net`）；只支持 TLS1.3 + AES-128-GCM-SHA256 + x25519；**没有内置根证书库**，链验证需调用方给锚证书；RSA 验签返回 -1 |
 | `std/tls_net` | `tls_connect` 建连并握手、`tls_send_app` / `tls_read_app` 收发应用数据、`tls_random` / `tls_recv_exact` | 只在 Windows（依赖 `tcp_connect`）；seq 由调用方维护，适合单次请求/响应；不校验证书 |
 | `std/p256` | ECDSA-P256 验签（含无效曲线点防护）、曲线上点判定 | 只验签不签名；只支持 SHA-256 摘要与未压缩点；单次约 25 ms |
-| `std/x509` | DER TLV、TBS/SPKI/签名提取、`x509_verify_self_p256` / `x509_verify_with_p256`、`x509_verify_chain`（链 + 有效期 + SAN，通配符只匹配一级）、`x509_is_ca` / `x509_san` / `x509_validity` | 只认 ECDSA-P256 未压缩点；不校验用途 / CRL / OCSP / 策略；无 RSA、Ed25519、压缩点；无根证书库 |
+| `std/x509` | DER TLV、TBS/SPKI/签名提取、P-256 与 RSA 公钥解析、`x509_verify_chain`（链 + 有效期 + SAN，通配符只匹配一级）、`x509_is_ca` / `x509_san` / `x509_validity` | EC 只认 P-256 未压缩点；RSA 只认 PKCS#1 v1.5；不校验用途 / CRL / OCSP / 策略；无 P-384、Ed25519；无根证书库 |
 | `std/sha256` | SHA-256、HMAC-SHA256 | SHA-NI 硬件加速（基础设施已就绪，本机 CPU 无该扩展） |
+| `std/rsa` | PKCS#1 v1.5 与 PSS（SHA-256）验签，2048 位约几十毫秒 | 只验签；无 SHA-384/512；无密钥生成/签名；指数按 32 位 |
 | `std/net` | 阻塞 TCP 服务端（listen/accept）+ 客户端 `connect`（Windows 走系统 DNS） | Linux 客户端未实现（`tcp_connect` 编译期报错）；IPv6、批量收发 |
 | `std/net/udp` | open/bind/sendto/recvfrom + 地址解析 | 可靠 UDP、批量收发、IPv6 |
 | `std/url` | scheme/host/port/path/query/fragment、query 取值、encode/decode | 规范化、相对路径解析 |

@@ -69,6 +69,16 @@ fn main() {
     let v = x509_validity(leaf)
     print(v.get(0).to_str())
     print(len(x509_san(leaf)).to_str())
+
+    // RSA 根：leaf2(EC) ← inter2(EC) ← root(RSA PKCS#1 v1.5)
+    let rroot = hex_decode(str_trim(lines.get(5)))
+    let rinter = hex_decode(str_trim(lines.get(6)))
+    let rleaf = hex_decode(str_trim(lines.get(7)))
+    let rone = vec[str].new(1)
+    rone.push(rinter)
+    print(x509_verify_chain(rleaf, rone, rroot, "example.com", now).to_str())
+    print(x509_verify_chain(rroot, none, rroot, "", now).to_str())
+    print(x509_verify_chain(rinter, none, rroot, "", now).to_str())
 }
 '''
 
@@ -117,6 +127,65 @@ def sign_digest(priv, e):
         return r, s
 
 
+# ---------------- RSA（1024 位，测试用） ----------------
+def _is_prime(n, k=20):
+    if n < 2:
+        return False
+    for p in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
+        if n % p == 0:
+            return n == p
+    d, r = n - 1, 0
+    while d % 2 == 0:
+        d //= 2
+        r += 1
+    for _ in range(k):
+        a = random.randrange(2, n - 1)
+        x = pow(a, d, n)
+        if x in (1, n - 1):
+            continue
+        for _ in range(r - 1):
+            x = x * x % n
+            if x == n - 1:
+                break
+        else:
+            return False
+    return True
+
+
+def _gen_prime(bits):
+    while True:
+        n = random.getrandbits(bits) | (1 << (bits - 1)) | 1
+        if _is_prime(n):
+            return n
+
+
+def gen_rsa(bits=1024, e=65537):
+    while True:
+        p, q = _gen_prime(bits // 2), _gen_prime(bits // 2)
+        if p == q:
+            continue
+        phi = (p - 1) * (q - 1)
+        if phi % e == 0:
+            continue
+        n = p * q
+        if n.bit_length() == bits:
+            return n, e, pow(e, -1, phi)
+
+
+def rsa_sign_pkcs1_sha256(tbs, key):
+    n, e, d = key
+    k = (n.bit_length() + 7) // 8
+    di = bytes.fromhex("3031300d060960864801650304020105000420")
+    h = hashlib.sha256(tbs).digest()
+    em = b"\x00\x01" + b"\xff" * (k - 3 - len(di) - len(h)) + b"\x00" + di + h
+    return pow(int.from_bytes(em, "big"), d, n).to_bytes(k, "big")
+
+
+def spki_rsa(n, e):
+    return seq(seq(oid(OID_RSA), tlv(0x05, b"")),
+               tlv(0x03, b"\x00" + seq(integer(n), integer(e))))
+
+
 # ---------------- DER ----------------
 def der_len(n):
     if n < 0x80:
@@ -148,6 +217,8 @@ OID_CN = "550403"
 OID_EC_PUBKEY = "2a8648ce3d0201"
 OID_PRIME256V1 = "2a8648ce3d030107"
 OID_ECDSA_SHA256 = "2a8648ce3d040302"
+OID_RSA = "2a864886f70d010101"
+OID_SHA256_RSA = "2a864886f70d01010b"
 OID_BASIC_CONSTRAINTS = "551d13"
 OID_SAN = "551d11"
 
@@ -204,6 +275,31 @@ def make_cert(subject_cn, issuer_cn, subject_priv, signer_priv, serial,
     return seq(tbs, alg, sig)
 
 
+def make_cert_rsa(subject_cn, issuer_cn, subject_priv, rsa_key, serial,
+                  nb, na, exts=b""):
+    """主体用 EC 公钥，但由 RSA 根签发（混合链）。"""
+    qx, qy = pmul(subject_priv, G)
+    alg = seq(oid(OID_SHA256_RSA))
+    body = (tlv(0xA0, integer(2)) + integer(serial) + alg +
+            name(issuer_cn) + validity(nb, na) + name(subject_cn) +
+            spki(qx, qy) + exts)
+    tbs = seq(body)
+    sig = rsa_sign_pkcs1_sha256(tbs, rsa_key)
+    return seq(tbs, alg, tlv(0x03, b"\x00" + sig))
+
+
+def make_root_rsa(cn, rsa_key, serial, nb, na):
+    alg = seq(oid(OID_SHA256_RSA))
+    n, _e, _d = rsa_key
+    body = (tlv(0xA0, integer(2)) + integer(serial) + alg +
+            name(cn) + validity(nb, na) + name(cn) +
+            spki_rsa(n, 65537) +
+            extensions(ext(OID_BASIC_CONSTRAINTS, basic_constraints(True), True)))
+    tbs = seq(body)
+    sig = rsa_sign_pkcs1_sha256(tbs, rsa_key)
+    return seq(tbs, alg, tlv(0x03, b"\x00" + sig))
+
+
 def build_probe():
     os.makedirs(os.path.join(ROOT, "build"), exist_ok=True)
     with open(SRC, "w", encoding="utf-8") as f:
@@ -241,13 +337,27 @@ def main():
                         "100101000000Z", "110101000000Z",
                         extensions(ext(OID_SAN, san("example.com"))))
 
+    rsa_key = gen_rsa(1024)
+    rsa_root = make_root_rsa("Quelmara RSA Root", rsa_key, 9,
+                             "200101000000Z", "400101000000Z")
+    inter2_priv = random.randrange(1, N)
+    leaf2_priv = random.randrange(1, N)
+    rsa_inter = make_cert_rsa("Quelmara RSA Inter", "Quelmara RSA Root",
+                              inter2_priv, rsa_key, 10,
+                              "200101000000Z", "400101000000Z",
+                              extensions(ext(OID_BASIC_CONSTRAINTS, basic_constraints(True), True)))
+    rsa_leaf = make_cert("example.com", "Quelmara RSA Inter", leaf2_priv,
+                         inter2_priv, 11, "200101000000Z", "400101000000Z",
+                         extensions(ext(OID_SAN, san("example.com"))))
+
     bad = bytearray(leaf)
     idx = bad.find(b"example.com")
     bad[idx] ^= 0x01
     tampered = bytes(bad)
 
     with open(IN, "w", encoding="ascii") as f:
-        for c in (leaf, inter, root, expired, tampered):
+        for c in (leaf, inter, root, expired, tampered,
+                  rsa_root, rsa_inter, rsa_leaf):
             f.write(c.hex() + "\n")
 
     r = subprocess.run([os.path.join(ROOT, "build", "_x509_chain_probe.exe"), IN],
@@ -258,10 +368,12 @@ def main():
     got = [ln.strip() for ln in r.stdout.decode().splitlines() if ln.strip()]
 
     expect = ["1", "1", "0", "0", "0", "0", "1", "0",
-              str(1577836800), "2"]   # 2020-01-01 UTC；2 个 SAN
+              str(1577836800), "2",
+              "1", "1", "1"]   # 2020-01-01 UTC；2 个 SAN；RSA 根三级链
     labels = ["正常链 + 域名", "通配符一级", "通配符跨级拒绝", "域名不匹配",
               "过期拒绝", "缺中间证书拒绝", "根自签", "篡改拒绝",
-              "有效期解析", "SAN 数量"]
+              "有效期解析", "SAN 数量",
+              "RSA 根三级链", "RSA 根自签", "RSA 中间证书"]
 
     ok = 0
     bad_n = 0

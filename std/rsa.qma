@@ -1,0 +1,382 @@
+// std/rsa.qma —— RSA PKCS#1 v1.5 验签（SHA-256）—— v1.27
+//
+// TLS 证书链里大量根/中间证书是 RSA（example.com、Cloudflare 的根都是），
+// 没有 RSA 验签，链验证在最后一节必然失败。
+//
+// 实现：32 位 limb 大整数 + Montgomery 乘法（CIOS）+ 平方-乘模幂。
+// 只做**验签**（公钥运算），不做签名/密钥生成。
+//
+// 验证：tests/t71_rsa.qma（Python 纯整数生成的 1024 位密钥与 PKCS#1 v1.5 签名）
+//
+// 边界：
+//   * 只支持 PKCS#1 v1.5 + SHA-256（DigestInfo 前缀固定）
+//   * 指数按 32 位处理（常见 65537）；模数长度不限（按 32 位对齐）
+//   * 不做 RSA-PSS、不做 SHA-1/384/512
+
+import std.sha256
+
+// 32 位掩码
+const RSA_M32 = 0xFFFFFFFF
+
+// 大端字节串 → L 个小端 32 位 limb（不足左侧补 0）
+fn _rsa_from_bytes(b: str, l: int) -> vec[int] {
+    let out = vec[int].new(l + 1)
+    let mut i = 0
+    while i < l {
+        out.push(0)
+        i = i + 1
+    }
+    let mut pos = len(b)
+    let mut limb = 0
+    while limb < l && pos > 0 {
+        let mut v = 0
+        let mut k = 0
+        while k < 4 && pos > 0 {
+            pos = pos - 1
+            v = v | (b[pos] << (8 * k))
+            k = k + 1
+        }
+        out.set(limb, v)
+        limb = limb + 1
+    }
+    return out
+}
+
+// L 个 limb → 大端字节串（固定 L*4 字节）
+fn _rsa_to_bytes(a: vec[int], l: int) -> str {
+    let out = vec[int].new(l * 4 + 1)
+    let mut i = l - 1
+    while i >= 0 {
+        let v = a.get(i)
+        out.push((v >>> 24) & 0xFF)
+        out.push((v >>> 16) & 0xFF)
+        out.push((v >>> 8) & 0xFF)
+        out.push(v & 0xFF)
+        i = i - 1
+    }
+    return str_from_bytes(out)
+}
+
+// a >= b（各 L 个 limb）→ 1
+fn _rsa_ge(a: vec[int], b: vec[int], l: int) -> int {
+    let mut i = l - 1
+    while i >= 0 {
+        let x = a.get(i)
+        let y = b.get(i)
+        if x > y {
+            return 1
+        }
+        if x < y {
+            return 0
+        }
+        i = i - 1
+    }
+    return 1
+}
+
+// a -= b（原地，L 个 limb）
+fn _rsa_sub(a: vec[int], b: vec[int], l: int) -> int {
+    let mut borrow = 0
+    let mut i = 0
+    while i < l {
+        let av = a.get(i)
+        let bv = b.get(i) + borrow
+        let mut d = av - bv
+        if av < bv {
+            d = d + 0x100000000
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        a.set(i, d & RSA_M32)
+        i = i + 1
+    }
+    return borrow
+}
+
+// -n[0]^{-1} mod 2^32（Newton 迭代 5 轮足够）
+fn _rsa_n0inv(n0: int) -> int {
+    let mut inv = 1
+    let mut i = 0
+    while i < 5 {
+        inv = (inv * (2 - n0 * inv)) & RSA_M32
+        i = i + 1
+    }
+    return (0x100000000 - inv) & RSA_M32
+}
+
+// Montgomery 乘法（CIOS）：返回 a*b*R^{-1} mod n
+fn _rsa_mont_mul(a: vec[int], b: vec[int], n: vec[int], n0inv: int, l: int) -> vec[int] {
+    let t = vec[int].new(l + 3)
+    let mut z = 0
+    while z < l + 2 {
+        t.push(0)
+        z = z + 1
+    }
+    let mut i = 0
+    while i < l {
+        let bi = b.get(i)
+        let mut c = 0
+        let mut j = 0
+        while j < l {
+            let uv = t.get(j) + a.get(j) * bi + c
+            t.set(j, uv & RSA_M32)
+            c = uv >>> 32
+            j = j + 1
+        }
+        let uv2 = t.get(l) + c
+        t.set(l, uv2 & RSA_M32)
+        t.set(l + 1, uv2 >>> 32)
+
+        let m = (t.get(0) * n0inv) & RSA_M32
+        let uv3 = t.get(0) + m * n.get(0)
+        c = uv3 >>> 32
+        j = 1
+        while j < l {
+            let uv = t.get(j) + m * n.get(j) + c
+            t.set(j - 1, uv & RSA_M32)
+            c = uv >>> 32
+            j = j + 1
+        }
+        let uv4 = t.get(l) + c
+        t.set(l - 1, uv4 & RSA_M32)
+        t.set(l, t.get(l + 1) + (uv4 >>> 32))
+        i = i + 1
+    }
+    let out = vec[int].new(l + 1)
+    let mut k = 0
+    while k < l {
+        out.push(t.get(k))
+        k = k + 1
+    }
+    if t.get(l) != 0 {
+        _rsa_sub(out, n, l)
+    } else if _rsa_ge(out, n, l) == 1 {
+        _rsa_sub(out, n, l)
+    }
+    return out
+}
+
+// a = 2a mod n（用于算 R^2 mod n）
+fn _rsa_mod_double(a: vec[int], n: vec[int], l: int) -> vec[int] {
+    let out = vec[int].new(l + 1)
+    let mut c = 0
+    let mut i = 0
+    while i < l {
+        let v = a.get(i) * 2 + c
+        out.push(v & RSA_M32)
+        c = v >>> 32
+        i = i + 1
+    }
+    if c != 0 {
+        _rsa_sub(out, n, l)
+    } else if _rsa_ge(out, n, l) == 1 {
+        _rsa_sub(out, n, l)
+    }
+    return out
+}
+
+fn _rsa_one(l: int) -> vec[int] {
+    let out = vec[int].new(l + 1)
+    let mut i = 0
+    while i < l {
+        if i == 0 {
+            out.push(1)
+        } else {
+            out.push(0)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// base^e mod n（e < 2^32）
+fn _rsa_powm(base: vec[int], e: int, n: vec[int], l: int) -> vec[int] {
+    let n0inv = _rsa_n0inv(n.get(0))
+    // R^2 mod n：从 1 开始倍增 64L 次
+    let mut r2 = _rsa_one(l)
+    let mut i = 0
+    while i < 64 * l {
+        r2 = _rsa_mod_double(r2, n, l)
+        i = i + 1
+    }
+    let one = _rsa_one(l)
+    let ar = _rsa_mont_mul(base, r2, n, n0inv, l)
+    let om = _rsa_mont_mul(one, r2, n, n0inv, l)
+    let mut res = om
+    let mut started = 0
+    let mut bit = 31
+    while bit >= 0 {
+        let b = (e >>> bit) & 1
+        if started == 1 {
+            res = _rsa_mont_mul(res, res, n, n0inv, l)
+        }
+        if b == 1 {
+            if started == 1 {
+                res = _rsa_mont_mul(res, ar, n, n0inv, l)
+            } else {
+                res = ar
+                started = 1
+            }
+        }
+        bit = bit - 1
+    }
+    if started == 0 {
+        return one
+    }
+    return _rsa_mont_mul(res, one, n, n0inv, l)
+}
+
+// PKCS#1 v1.5 + SHA-256 验签。
+// n：模数（大端、无前导 0）；e：指数；sig：签名字节；hash：32 字节摘要。
+// 返回 1 = 有效，0 = 无效。
+fn rsa_verify_pkcs1_sha256(n: str, e: int, sig: str, hash: str) -> int {
+    if len(hash) != 32 || len(sig) == 0 || len(n) == 0 || e <= 0 {
+        return 0
+    }
+    let l = (len(n) + 3) / 4
+    let nn = _rsa_from_bytes(n, l)
+    let s = _rsa_from_bytes(sig, l)
+    if _rsa_ge(s, nn, l) == 1 {
+        return 0
+    }
+    let m = _rsa_powm(s, e, nn, l)
+    let em = _rsa_to_bytes(m, l)
+    let k = len(em)
+    let tlen = 19 + 32
+    if k < tlen + 11 {
+        return 0
+    }
+    if em[0] != 0 || em[1] != 1 {
+        return 0
+    }
+    let mut i = 2
+    while i < k - tlen - 1 {
+        if em[i] != 0xFF {
+            return 0
+        }
+        i = i + 1
+    }
+    if em[k - tlen - 1] != 0 {
+        return 0
+    }
+    let di = "\x30\x31\x30\x0d\x06\x09\x60\x86\x48\x01\x65\x03\x04\x02\x01\x05\x00\x04\x20"
+    let mut j = 0
+    while j < 19 {
+        if em[k - tlen + j] != di[j] {
+            return 0
+        }
+        j = j + 1
+    }
+    let mut q = 0
+    while q < 32 {
+        if em[k - 32 + q] != hash[q] {
+            return 0
+        }
+        q = q + 1
+    }
+    return 1
+}
+
+// MGF1（SHA-256）
+fn _rsa_mgf1(seed: str, n: int) -> str {
+    let out = vec[int].new(n + 1)
+    let mut ctr = 0
+    while len(out) < n {
+        let v = vec[int].new(len(seed) + 5)
+        let mut i = 0
+        while i < len(seed) {
+            v.push(seed[i])
+            i = i + 1
+        }
+        v.push((ctr >>> 24) & 0xFF)
+        v.push((ctr >>> 16) & 0xFF)
+        v.push((ctr >>> 8) & 0xFF)
+        v.push(ctr & 0xFF)
+        let t = mem_str(sha256_str(str_from_bytes(v)), 32)
+        i = 0
+        while i < 32 && len(out) < n {
+            out.push(t[i])
+            i = i + 1
+        }
+        ctr = ctr + 1
+    }
+    return str_from_bytes(out)
+}
+
+// RSASSA-PSS + SHA-256 验签（TLS 1.3 CertificateVerify 用，0x0804）
+fn rsa_verify_pss_sha256(n: str, e: int, sig: str, hash: str, salt_len: int) -> int {
+    if len(hash) != 32 || len(sig) == 0 || len(n) == 0 || e <= 0 || salt_len < 0 {
+        return 0
+    }
+    let l = (len(n) + 3) / 4
+    let nn = _rsa_from_bytes(n, l)
+    let s = _rsa_from_bytes(sig, l)
+    if _rsa_ge(s, nn, l) == 1 {
+        return 0
+    }
+    let em = _rsa_to_bytes(_rsa_powm(s, e, nn, l), l)
+    let k = len(em)
+    let hlen = 32
+    if k < hlen + salt_len + 2 {
+        return 0
+    }
+    if em[k - 1] != 0xBC {
+        return 0
+    }
+    if (em[0] & 0x80) != 0 {
+        return 0
+    }
+    let db_len = k - hlen - 1
+    let h = substr(em, db_len, hlen)
+    let mask = _rsa_mgf1(h, db_len)
+    let db = vec[int].new(db_len + 1)
+    let mut i = 0
+    while i < db_len {
+        db.push(em[i] ^ mask[i])
+        i = i + 1
+    }
+    db.set(0, db.get(0) & 0x7F)
+    let ps_len = db_len - salt_len - 1
+    i = 0
+    while i < ps_len {
+        if db.get(i) != 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    if db.get(ps_len) != 1 {
+        return 0
+    }
+    let salt = vec[int].new(salt_len + 1)
+    i = 0
+    while i < salt_len {
+        salt.push(db.get(db_len - salt_len + i))
+        i = i + 1
+    }
+    let msg = vec[int].new(8 + 32 + salt_len + 1)
+    i = 0
+    while i < 8 {
+        msg.push(0)
+        i = i + 1
+    }
+    i = 0
+    while i < 32 {
+        msg.push(hash[i])
+        i = i + 1
+    }
+    i = 0
+    while i < salt_len {
+        msg.push(salt.get(i))
+        i = i + 1
+    }
+    let hh = mem_str(sha256_str(str_from_bytes(msg)), 32)
+    i = 0
+    while i < 32 {
+        if hh[i] != h[i] {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}

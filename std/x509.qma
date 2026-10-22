@@ -16,6 +16,7 @@
 
 import std.sha256
 import std.p256
+import std.rsa
 
 // DER 标签
 const X509_TAG_INTEGER = 0x02
@@ -222,6 +223,9 @@ fn x509_pubkey(cert: str) -> str {
     }
     if cert[v + 1] != 0x04 {
         return ""                      // 只支持未压缩点
+    }
+    if x509_curve_oid(cert) != "\x2a\x86\x48\xce\x3d\x03\x01\x07" {
+        return ""                      // 只认 prime256v1
     }
     return substr(cert, v + 2, 64)
 }
@@ -658,10 +662,20 @@ fn _x509_link(child: str, issuer: str, now: int) -> int {
         return 0
     }
     let pub = x509_pubkey(issuer)
-    if len(pub) != 64 {
-        return 0
+    if len(pub) == 64 {
+        return x509_verify_with_p256(child, pub)
     }
-    return x509_verify_with_p256(child, pub)
+    // RSA 颁发者：PKCS#1 v1.5（证书链签名主流）
+    let n = x509_rsa_pub(issuer)
+    if len(n) > 0 {
+        let sig = x509_sig_bits(child)
+        if len(sig) == 0 {
+            return 0
+        }
+        let h = mem_str(sha256_str(x509_tbs(child)), 32)
+        return rsa_verify_pkcs1_sha256(n, x509_rsa_exp(issuer), sig, h)
+    }
+    return 0
 }
 
 // 验证 leaf（可选 intermediates，按 leaf→root 顺序）到 anchor。
@@ -672,14 +686,14 @@ fn x509_verify_chain(leaf: str, inter: vec[str], anchor: str, host: str, now: in
         return 0
     }
     let mut cur = leaf
-    let mut i = len(inter) - 1
-    while i >= 0 {
+    let mut i = 0
+    while i < len(inter) {
         let up = inter.get(i)
         if _x509_link(cur, up, now) == 0 {
             return 0
         }
         cur = up
-        i = i - 1
+        i = i + 1
     }
     if _x509_link(cur, anchor, now) == 0 {
         return 0
@@ -690,4 +704,116 @@ fn x509_verify_chain(leaf: str, inter: vec[str], anchor: str, host: str, now: in
         }
     }
     return 1
+}
+
+
+// ---------------------------------------------------------------------------
+// RSA（v1.27）：SPKI 公钥与原始签名
+// ---------------------------------------------------------------------------
+
+// 签名值原始字节（BIT STRING 去掉 unused-bits 字节；RSA 用）
+fn x509_sig_bits(cert: str) -> str {
+    let root = x509_root(cert)
+    if len(root) == 0 {
+        return ""
+    }
+    let tbs = x509_tlv(cert, root.get(2))
+    if x509_ok(tbs) == 0 {
+        return ""
+    }
+    let alg = x509_tlv(cert, tbs.get(4))
+    if x509_ok(alg) == 0 {
+        return ""
+    }
+    let bits = x509_tlv(cert, alg.get(4))
+    if x509_ok(bits) == 0 || bits.get(0) != X509_TAG_BIT_STRING {
+        return ""
+    }
+    if bits.get(3) < 2 {
+        return ""
+    }
+    let v = bits.get(2)
+    if cert[v] != 0 {
+        return ""
+    }
+    return substr(cert, v + 1, bits.get(3) - 1)
+}
+
+// RSA 模数（大端、去前导 0）；非 RSA 返回 ""
+fn x509_rsa_pub(cert: str) -> str {
+    let spki = x509_spki_tlv(cert)
+    if len(spki) == 0 {
+        return ""
+    }
+    let alg = x509_tlv(cert, spki.get(2))
+    if x509_ok(alg) == 0 {
+        return ""
+    }
+    let bits = x509_tlv(cert, alg.get(4))
+    if x509_ok(bits) == 0 || bits.get(0) != X509_TAG_BIT_STRING {
+        return ""
+    }
+    if bits.get(3) < 4 {
+        return ""
+    }
+    let v = bits.get(2)
+    if cert[v] != 0 {
+        return ""
+    }
+    let seq = x509_tlv(cert, v + 1)
+    if x509_ok(seq) == 0 || seq.get(0) != X509_TAG_SEQUENCE {
+        return ""
+    }
+    let n = x509_tlv(cert, seq.get(2))
+    if x509_ok(n) == 0 || n.get(0) != X509_TAG_INTEGER {
+        return ""
+    }
+    let raw = substr(cert, n.get(2), n.get(3))
+    let mut off = 0
+    while off < len(raw) - 1 && raw[off] == 0 {
+        off = off + 1
+    }
+    return substr(raw, off, len(raw) - off)
+}
+
+// RSA 公钥指数（通常 65537）
+fn x509_rsa_exp(cert: str) -> int {
+    let spki = x509_spki_tlv(cert)
+    if len(spki) == 0 {
+        return 0
+    }
+    let alg = x509_tlv(cert, spki.get(2))
+    if x509_ok(alg) == 0 {
+        return 0
+    }
+    let bits = x509_tlv(cert, alg.get(4))
+    if x509_ok(bits) == 0 || bits.get(0) != X509_TAG_BIT_STRING {
+        return 0
+    }
+    if bits.get(3) < 4 {
+        return 0
+    }
+    let v = bits.get(2)
+    if cert[v] != 0 {
+        return 0
+    }
+    let seq = x509_tlv(cert, v + 1)
+    if x509_ok(seq) == 0 || seq.get(0) != X509_TAG_SEQUENCE {
+        return 0
+    }
+    let n = x509_tlv(cert, seq.get(2))
+    if x509_ok(n) == 0 {
+        return 0
+    }
+    let e = x509_tlv(cert, n.get(4))
+    if x509_ok(e) == 0 || e.get(0) != X509_TAG_INTEGER {
+        return 0
+    }
+    let mut val = 0
+    let mut i = 0
+    while i < e.get(3) {
+        val = val * 256 + cert[e.get(2) + i]
+        i = i + 1
+    }
+    return val
 }

@@ -33,6 +33,7 @@ DESC = {
     "std/net.qma": "阻塞 TCP 便捷层",
     "std/rand.qma": "xorshift64* 伪随机",
     "std/serialize.qma": "LEB128 varint / 定长整数 / 长度前缀帧",
+    "std/rsa.qma": "RSA PKCS#1 v1.5 / PSS 验签（SHA-256，证书链与 TLS 用）",
     "std/sha1.qma": "SHA-1",
     "std/sha256.qma": "SHA-256 + HMAC-SHA256",
     "std/sort.qma": "快速排序与有序性检查",
