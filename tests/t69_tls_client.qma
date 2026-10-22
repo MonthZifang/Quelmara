@@ -1,0 +1,81 @@
+// t69_tls_client.qma：TLS 1.3 客户端握手核心 —— RFC 8448 §3 逐字节对拍
+// 向量全部来自 RFC 8448（simple 1-RTT handshake），不依赖网络与第三方库。
+module t69
+
+import std.hex
+import std.str
+import std.tls13
+import std.tls_client
+
+fn main() {
+    let priv = hex_decode("49af42ba7f7994852d713ef2784bcbcaa7911de26adc5642cb634540e7ea5005")
+    let ch = hex_decode("16030100c4010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001")
+    let srv = hex_decode("160303005a020000560303a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e2692800130100002e00330024001d0020c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f002b0002030417030302a2d1ff334a56f5bff6594a07cc87b580233f500f45e489e7f33af35edf7869fcf40aa40aa2b8ea73f848a7ca07612ef9f945cb960b4068905123ea78b111b429ba9191cd05d2a389280f526134aadc7fc78c4b729df828b5ecf7b13bd9aefb0e57f271585b8ea9bb355c7c79020716cfb9b1183ef3ab20e37d57a6b9d7477609aee6e122a4cf51427325250c7d0e509289444c9b3a648f1d71035d2ed65b0e3cdd0cbae8bf2d0b227812cbb360987255cc744110c453baa4fcd610928d809810e4b7ed1a8fd991f06aa6248204797e36a6a73b70a2559c09ead686945ba246ab66e5edd8044b4c6de3fcf2a89441ac66272fd8fb330ef8190579b3684596c960bd596eea520a56a8d650f563aad27409960dca63d3e688611ea5e22f4415cf9538d51a200c27034272968a264ed6540c84838d89f72c24461aad6d26f59ecaba9acbbb317b66d902f4f292a36ac1b639c637ce343117b659622245317b49eeda0c6258f100d7d961ffb138647e92ea330faeea6dfa31c7a84dc3bd7e1b7a6c7178af36879018e3f252107f243d243dc7339d5684c8b0378bf30244da8c87c843f5e56eb4c5e8280a2b48052cf93b16499a66db7cca71e4599426f7d461e66f99882bd89fc50800becca62d6c74116dbd2972fda1fa80f85df881edbe5a37668936b335583b599186dc5c6918a396fa48a181d6b6fa4f9d62d513afbb992f2b992f67f8afe67f76913fa388cb5630c8ca01e0c65d11c66a1e2ac4c85977b7c7a6999bbf10dc35ae69f5515614636c0b9b68c19ed2e31c0b3b66763038ebba42f3b38edc0399f3a9f23faa63978c317fc9fa66a73f60f0504de93b5b845e275592c12335ee340bbc4fddd502784016e4b3be7ef04dda49f4b440a30cb5d2af939828fd4ae3794e44f94df5a631ede42c1719bfdabf0253fe5175be898e750edc53370d2b")
+
+    let r = tls_client_handshake(priv, ch, srv)
+
+    // 1) 握手核心：服务器 Finished 通过
+    assert(r.ok == 1, "handshake ok")
+    assert(r.server_finished_ok == 1, "server finished")
+    assert(len(r.err) == 0, "no error")
+
+    // 2) X25519 共享密钥
+    assert(hex_encode(r.shared) == "8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d", "shared secret")
+
+    // 3) handshake traffic secrets
+    assert(hex_encode(r.c_hs_secret) == "b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21", "c hs traffic")
+    assert(hex_encode(r.s_hs_secret) == "b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38", "s hs traffic")
+
+    // 4) handshake keys / IVs
+    assert(hex_encode(r.c_hs_key) == "dbfaa693d1762c5b666af5d950258d01", "c hs key")
+    assert(hex_encode(r.c_hs_iv) == "5bd3c71b836e0b76bb73265f", "c hs iv")
+    assert(hex_encode(r.s_hs_key) == "3fce516009c21727d0f2e4e86ee403bc", "s hs key")
+    assert(hex_encode(r.s_hs_iv) == "5d313eb2671276ee13000b30", "s hs iv")
+
+    // 5) application traffic secrets
+    assert(hex_encode(r.c_ap_secret) == "9e40646ce79a7f9dc05af8889bce6552875afa0b06df0087f792ebb7c17504a5", "c ap traffic")
+    assert(hex_encode(r.s_ap_secret) == "a11af9f05531f856ad47116b45a950328204b4f44bfb6b3a4b4f1f3fcb631643", "s ap traffic")
+    assert(hex_encode(r.transcript_hash) == "9608102a0f1ccc6db6250b7b7e417b1a000eaada3daae4777a7686c9ff83df13", "transcript hash")
+
+    // 6) 客户端 Finished 记录与 RFC 逐字节一致（58 字节）
+    assert(hex_encode(r.client_finished) == "170303003575ec4dc238cce60b298044a71e219c56cc77b0517fe9b93c7a4bfc44d87f38f80338ac98fc46deb384bd1caeacab6867d726c40546", "client finished record")
+
+    // 6b) CertificateVerify 待签名内容哈希（64 空格 || context || 0x00 || th）
+    assert(hex_encode(tls_cert_verify_hash(hex_decode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"))) ==
+           "fff8ad38564dc7418429170b33d850b8d3ef09a72f894eb19d1907176d290cdf", "cv content hash")
+
+    // 6c) DER ECDSA 签名 → 64 字节 r||s（TLS 1.3 的 CertificateVerify 用 DER）
+    assert(hex_encode(tls_ecdsa_sig_raw(hex_decode("3006020101020102"))) ==
+           "00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002",
+           "der sig small")
+    assert(hex_encode(tls_ecdsa_sig_raw(hex_decode("30260221008000000000000000000000000000000000000000000000000000000000000000020101"))) ==
+           "80000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+           "der sig 33-byte r")
+    assert(len(tls_ecdsa_sig_raw(hex_decode("3006020101"))) == 0, "der sig truncated")
+
+    // 7) 服务器证书是 RSA → 我们只解析出空公钥，CV 标记 -1（不支持）
+    assert(len(r.cert_pub) == 0, "rsa cert pub empty")
+    assert(r.cv == -1, "cv unsupported")
+
+    // 8) 自建 ClientHello 的结构自检
+    let pub = x25519_base(priv)
+    let mych = tls_client_hello("server", pub, hex_decode("cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7"), "")
+    assert(mych[0] == 22, "ch record type")
+    assert(mych[5] == 1, "ch handshake type")
+    assert(len(mych) > 120, "ch length")
+    assert(str_contains(mych, pub), "ch key share")
+    assert(str_contains(mych, "server"), "ch sni")
+
+    // 9) 篡改服务器 Finished 的最后一条记录 → 必须失败
+    let bad = vec[int].new(len(srv) + 1)
+    let mut i = 0
+    while i < len(srv) {
+        bad.push(srv[i])
+        i = i + 1
+    }
+    bad.set(len(bad) - 1, bad.get(len(bad) - 1) ^ 0x01)
+    let rb = tls_client_handshake(priv, ch, str_from_bytes(bad))
+    assert(rb.ok == 0, "tampered rejected")
+
+    print("ok t69_tls_client")
+}

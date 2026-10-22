@@ -295,3 +295,54 @@ fn tls_u24(v: int) -> str {
     out.push(v & 0xFF)
     return str_from_bytes(out)
 }
+
+// ---------------------------------------------------------------------------
+// 记录 / 握手消息解析（v1.24，握手状态机用）
+// ---------------------------------------------------------------------------
+
+// 解析记录头：返回 [ctype, hdr_len, payload_off, payload_len, next_off]；非法返回空 vec。
+fn tls_record_parse(buf: str, pos: int) -> vec[int] {
+    let out = vec[int].new(6)
+    let n = len(buf)
+    if pos < 0 || pos + 5 > n {
+        return out
+    }
+    let ctype = buf[pos]
+    let ln = (buf[pos + 3] << 8) | buf[pos + 4]
+    let off = pos + 5
+    if off + ln > n {
+        return out
+    }
+    out.push(ctype)
+    out.push(5)
+    out.push(off)
+    out.push(ln)
+    out.push(off + ln)
+    return out
+}
+
+// 解析握手消息头：返回 [mtype, hdr_len, body_off, body_len, next_off]；非法返回空 vec。
+fn tls_hs_parse(buf: str, pos: int) -> vec[int] {
+    let out = vec[int].new(6)
+    let n = len(buf)
+    if pos < 0 || pos + 4 > n {
+        return out
+    }
+    let mtype = buf[pos]
+    let blen = (buf[pos + 1] << 16) | (buf[pos + 2] << 8) | buf[pos + 3]
+    let off = pos + 4
+    if off + blen > n {
+        return out
+    }
+    out.push(mtype)
+    out.push(4)
+    out.push(off)
+    out.push(blen)
+    out.push(off + blen)
+    return out
+}
+
+// 构造扩展：type || len || body
+fn tls_ext(etype: int, body: str) -> str {
+    return tls_u16(etype) + tls_u16(len(body)) + body
+}

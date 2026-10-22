@@ -47,6 +47,7 @@ DESC = {
     "std/tls13.qma": "TLS 1.3 密钥调度（HKDF-Expand-Label）+ AEAD 记录层",
     "std/p256.qma": "NIST P-256 域运算 + ECDSA 验签（TLS 证书签名）",
     "std/x509.qma": "X.509 证书解析（DER/ASN.1）+ P-256 自签/签发者验签（TLS 证书层）",
+    "std/tls_client.qma": "TLS 1.3 客户端握手核心（RFC 8448 轨迹逐字节验证）",
     "std/net/core.qma": "连接槽位层（IOCP reactor 的底座）",
     "std/net/udp.qma": "UDP 封装与地址解析",
 }
@@ -109,7 +110,9 @@ def main():
         print("FAIL：以下 std 模块未在 DESC 登记，会被漏出文档：" + "、".join(missing))
         return 1
 
-    text = open(DOC, encoding="utf-8").read()
+    raw = open(DOC, "rb").read()
+    crlf = b"\r\n" in raw
+    text = raw.decode("utf-8").replace("\r\n", "\n")
     if BEGIN not in text or END not in text:
         print(f"FAIL：{DOC} 缺少 {BEGIN} / {END} 标记")
         return 1
@@ -130,8 +133,10 @@ def main():
         print(f"PASS：{nmod} 个模块 / {nfn} 个公开函数，文档与源码一致")
         return 0
 
-    with open(DOC, "w", encoding="utf-8") as f:
-        f.write(new)
+    if crlf:
+        new = new.replace("\n", "\r\n")
+    with open(DOC, "wb") as f:
+        f.write(new.encode("utf-8"))
     print(f"已更新 {os.path.relpath(DOC, ROOT)}：{nmod} 个模块 / {nfn} 个公开函数")
     return 0
 

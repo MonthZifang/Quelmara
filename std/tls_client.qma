@@ -1,0 +1,408 @@
+// std/tls_client.qma —— TLS 1.3 客户端握手核心（RFC 8446）—— v1.24
+//
+// 本模块做**握手状态机的纯计算部分**：输入 ClientHello 字节与服务器回包字节，
+// 输出密钥、解密后的服务器 flight、Finished 验证结果，以及可直接发送的
+// 客户端 Finished 记录。不做网络 I/O（还没有 tcp_connect 内建），也不做证书
+// 策略（有效期 / 域名 / 链 / CRL）。
+//
+// 验证：tests/t69_tls_client.qma 用 RFC 8448 §3 的完整轨迹逐字节对拍——
+// 共享密钥、c/s hs traffic、key/iv、c/s ap traffic、服务器 Finished，
+// 以及客户端 Finished 记录（58 字节，与 RFC 完全一致）。
+//
+// 边界：
+//   * 只支持 TLS 1.3 + TLS_AES_128_GCM_SHA256（0x1301）+ x25519
+//   * CertificateVerify 只验 ECDSA-P256-SHA256（0x0403）；RSA（0x0804）返回 -1
+//   * 不校验证书链 / 有效期 / 域名 / 用途；调用方必须自己决定是否信任 cert_pub
+//   * 服务器 flight 必须能完整收到（记录可多条、握手消息可跨记录拼接）
+
+import std.tls13
+import std.x509
+import std.p256
+import std.x25519
+
+struct TlsClientResult {
+    ok: int,                  // 1 = 服务器 Finished 验证通过
+    err: str,                 // 失败原因（ok=1 时为空）
+    shared: str,              // X25519 共享密钥
+    c_hs_secret: str,
+    s_hs_secret: str,
+    c_hs_key: str,
+    c_hs_iv: str,
+    s_hs_key: str,
+    s_hs_iv: str,
+    c_ap_secret: str,
+    s_ap_secret: str,
+    cert_pub: str,            // 服务器证书里的 P-256 公钥（64B；非 P-256 为 ""）
+    cv: int,                  // CertificateVerify：1 通过 / 0 失败 / -1 算法不支持
+    server_finished_ok: int,
+    client_finished: str,     // 客户端 Finished 记录（可直接发送）
+    transcript_hash: str      // 服务器 Finished 之后的 transcript hash
+}
+
+fn tls_client_err(code: str) -> TlsClientResult {
+    return TlsClientResult {
+        ok: 0, err: code, shared: "",
+        c_hs_secret: "", s_hs_secret: "",
+        c_hs_key: "", c_hs_iv: "", s_hs_key: "", s_hs_iv: "",
+        c_ap_secret: "", s_ap_secret: "", cert_pub: "", cv: 0,
+        server_finished_ok: 0, client_finished: "", transcript_hash: ""
+    }
+}
+
+// n 个空格（CertificateVerify 的 64 字节前缀）
+fn _tls_spaces(n: int) -> str {
+    let v = vec[int].new(n + 1)
+    let mut i = 0
+    while i < n {
+        v.push(0x20)
+        i = i + 1
+    }
+    return str_from_bytes(v)
+}
+
+// CertificateVerify 的待签名内容哈希：
+//   64 个 0x20 || "TLS 1.3, server CertificateVerify" || 0x00 || transcript_hash
+fn tls_cert_verify_hash(transcript_hash: str) -> str {
+    return tls_hash(_tls_spaces(64) + "TLS 1.3, server CertificateVerify" + chr(0) + transcript_hash)
+}
+
+// 把 r/s 右对齐写进 32 字节（去前导 0，超长返回 0）
+fn _tls_pad32(s: str, off: int, n: int, out: vec[int]) -> int {
+    let mut start = off
+    let mut cnt = n
+    while cnt > 1 && s[start] == 0 {
+        start = start + 1
+        cnt = cnt - 1
+    }
+    if cnt > 32 {
+        return 0
+    }
+    let mut i = 0
+    while i < 32 - cnt {
+        out.push(0)
+        i = i + 1
+    }
+    i = 0
+    while i < cnt {
+        out.push(s[start + i])
+        i = i + 1
+    }
+    return 1
+}
+
+// TLS 1.3 的 ECDSA 签名是 DER 的 SEQUENCE { INTEGER r, INTEGER s }，
+// 这里转成 64 字节 r||s；格式非法返回 ""。
+fn tls_ecdsa_sig_raw(sig: str) -> str {
+    if len(sig) < 8 || sig[0] != 0x30 {
+        return ""
+    }
+    let l0 = sig[1]
+    let mut p = 0
+    if l0 < 0x80 {
+        p = 2
+    } else if l0 == 0x81 && len(sig) >= 3 {
+        p = 3
+    } else {
+        return ""
+    }
+    let out = vec[int].new(65)
+    if p + 2 > len(sig) || sig[p] != 0x02 {
+        return ""
+    }
+    let rlen = sig[p + 1]
+    let rstart = p + 2
+    if rstart + rlen > len(sig) {
+        return ""
+    }
+    if _tls_pad32(sig, rstart, rlen, out) == 0 {
+        return ""
+    }
+    let q = rstart + rlen
+    if q + 2 > len(sig) || sig[q] != 0x02 {
+        return ""
+    }
+    let slen = sig[q + 1]
+    let sstart = q + 2
+    if sstart + slen > len(sig) {
+        return ""
+    }
+    if _tls_pad32(sig, sstart, slen, out) == 0 {
+        return ""
+    }
+    return str_from_bytes(out)
+}
+
+// 验证 CertificateVerify：alg 0x0403 = ecdsa_secp256r1_sha256。
+// 返回 1 通过 / 0 失败 / -1 算法不支持（如 RSA）。
+fn tls_verify_cert_verify(cert_der: str, alg: int, sig: str, transcript_hash: str) -> int {
+    if alg != 0x0403 {
+        return -1
+    }
+    let pub = x509_pubkey(cert_der)
+    if len(pub) != 64 {
+        return 0
+    }
+    let raw = tls_ecdsa_sig_raw(sig)
+    if len(raw) != 64 {
+        return 0
+    }
+    return ecdsa_p256_verify(substr(pub, 0, 32), substr(pub, 32, 32),
+                             tls_cert_verify_hash(transcript_hash),
+                             substr(raw, 0, 32), substr(raw, 32, 32))
+}
+
+// Certificate 消息体 → 第一张证书的 DER
+fn _tls_cert_der(body: str) -> str {
+    if len(body) < 8 {
+        return ""
+    }
+    let ctx = body[0]
+    let p = 1 + ctx
+    if p + 3 > len(body) {
+        return ""
+    }
+    let q = p + 3
+    if q + 3 > len(body) {
+        return ""
+    }
+    let dlen = (body[q] << 16) | (body[q + 1] << 8) | body[q + 2]
+    let off = q + 3
+    if off + dlen > len(body) {
+        return ""
+    }
+    return substr(body, off, dlen)
+}
+
+// ---------------------------------------------------------------------------
+// ClientHello
+// ---------------------------------------------------------------------------
+
+// 构造 ClientHello 记录（单 cipher suite、单 key share、SNI）。
+// rnd 必须是 32 字节随机数，sid 是 0..32 字节的 legacy_session_id。
+fn tls_client_hello(host: str, pub: str, rnd: str, sid: str) -> str {
+    if len(rnd) != 32 || len(pub) != 32 || len(sid) > 32 {
+        assert(false, "tls_client_hello: 参数长度非法")
+    }
+    // SNI
+    let sni_body = tls_u16(1 + 2 + len(host)) + chr(0) + tls_u16(len(host)) + host
+    let sni = tls_ext(0, sni_body)
+    // supported_groups: x25519
+    let groups = tls_ext(10, tls_u16(2) + tls_u16(0x001d))
+    // signature_algorithms: ecdsa_secp256r1_sha256
+    let sigalgs = tls_ext(13, tls_u16(2) + tls_u16(0x0403))
+    // supported_versions: TLS 1.3
+    let versions = tls_ext(43, chr(2) + tls_u16(0x0304))
+    // key_share: x25519
+    let ks_body = tls_u16(2 + 2 + len(pub)) + tls_u16(0x001d) + tls_u16(len(pub)) + pub
+    let keyshare = tls_ext(51, ks_body)
+
+    let exts = sni + groups + sigalgs + versions + keyshare
+    let body = tls_u16(0x0303) + rnd + chr(len(sid)) + sid +
+               tls_u16(2) + tls_u16(0x1301) +
+               chr(1) + chr(0) +
+               tls_u16(len(exts)) + exts
+    return tls_record(TLS_CT_HANDSHAKE, tls_hs_msg(TLS_HS_CLIENT_HELLO, body))
+}
+
+// ---------------------------------------------------------------------------
+// 握手：ClientHello 记录 + 服务器回包字节 → 结果
+// ---------------------------------------------------------------------------
+
+fn tls_client_handshake(priv: str, ch_record: str, server_bytes: str) -> TlsClientResult {
+    if len(priv) != 32 {
+        return tls_client_err("priv-len")
+    }
+    if len(ch_record) < 5 || ch_record[0] != TLS_CT_HANDSHAKE {
+        return tls_client_err("ch-record")
+    }
+    // transcript 从 ClientHello 握手消息开始（不含记录头）
+    let mut transcript = substr(ch_record, 5, len(ch_record) - 5)
+
+    // ---- ServerHello ----
+    let rec = tls_record_parse(server_bytes, 0)
+    if len(rec) == 0 {
+        return tls_client_err("sh-record")
+    }
+    if rec.get(0) != TLS_CT_HANDSHAKE {
+        return tls_client_err("sh-type")
+    }
+    let sh = substr(server_bytes, rec.get(2), rec.get(3))
+    let shm = tls_hs_parse(sh, 0)
+    if len(shm) == 0 || shm.get(0) != TLS_HS_SERVER_HELLO {
+        return tls_client_err("sh-msg")
+    }
+    let shb = substr(sh, shm.get(2), shm.get(3))
+    if len(shb) < 38 {
+        return tls_client_err("sh-short")
+    }
+    let sidlen = shb[34]
+    let cs_off = 35 + sidlen
+    if cs_off + 3 > len(shb) {
+        return tls_client_err("sh-sid")
+    }
+    let suite = (shb[cs_off] << 8) | shb[cs_off + 1]
+    if suite != 0x1301 {
+        return tls_client_err("cipher")
+    }
+    let ext_len_off = cs_off + 3
+    let ext_total = (shb[ext_len_off] << 8) | shb[ext_len_off + 1]
+    let mut p = ext_len_off + 2
+    let ext_end = p + ext_total
+    if ext_end > len(shb) {
+        return tls_client_err("sh-ext")
+    }
+    let mut server_pub = ""
+    let mut ver_ok = 0
+    while p + 4 <= ext_end {
+        let et = (shb[p] << 8) | shb[p + 1]
+        let el = (shb[p + 2] << 8) | shb[p + 3]
+        let ep = p + 4
+        if ep + el > ext_end {
+            return tls_client_err("sh-extlen")
+        }
+        if et == 0x0033 && el >= 36 {
+            server_pub = substr(shb, ep + 4, el - 4)
+        }
+        if et == 0x002b && el >= 2 {
+            // ServerHello 里 supported_versions 的数据就是 2 字节选中版本（无内层长度）
+            let v = (shb[ep] << 8) | shb[ep + 1]
+            if v == 0x0304 {
+                ver_ok = 1
+            }
+        }
+        p = ep + el
+    }
+    if ver_ok == 0 || len(server_pub) != 32 {
+        return tls_client_err("sh-params")
+    }
+
+    transcript = transcript + sh
+
+    // ---- 密钥调度 ----
+    let shared = x25519(priv, server_pub)
+    let th = tls_hash(transcript)
+    let early = tls_early_secret()
+    let hs = tls_handshake_secret(early, shared)
+    let c_hs = tls_derive_secret(hs, "c hs traffic", th)
+    let s_hs = tls_derive_secret(hs, "s hs traffic", th)
+    let c_key = tls_traffic_key(c_hs)
+    let c_iv = tls_traffic_iv(c_hs)
+    let s_key = tls_traffic_key(s_hs)
+    let s_iv = tls_traffic_iv(s_hs)
+
+    // ---- 解密服务器 flight（逐记录解密、逐消息解析；见到 Finished 即停） ----
+    let mut pos = rec.get(4)
+    let mut seq = 0
+    let mut flight = ""
+    let mut q = 0
+    let mut cert_der = ""
+    let mut cv_alg = 0
+    let mut cv_sig = ""
+    let mut th_before_cv = ""
+    let mut th_before_fin = ""
+    let mut fin_ok = 0
+    let mut fin_seen = 0
+    while pos < len(server_bytes) && fin_seen == 0 {
+        let rr = tls_record_parse(server_bytes, pos)
+        if len(rr) == 0 {
+            break
+        }
+        if rr.get(0) == TLS_CT_CHANGE_CIPHER_SPEC {
+            pos = rr.get(4)
+            continue
+        }
+        if rr.get(0) != TLS_CT_APPLICATION_DATA {
+            break
+        }
+        let sealed = substr(server_bytes, rr.get(2), rr.get(3))
+        let plain = tls_open_record(s_key, s_iv, seq, sealed)
+        if len(plain) == 0 {
+            return tls_client_err("decrypt")
+        }
+        flight = flight + plain
+        seq = seq + 1
+        pos = rr.get(4)
+        // 消费已经完整的握手消息；跨记录分片留到下一轮
+        while q < len(flight) && fin_seen == 0 {
+            let m = tls_hs_parse(flight, q)
+            if len(m) == 0 {
+                break
+            }
+            let mt = m.get(0)
+            let body = substr(flight, m.get(2), m.get(3))
+            if mt == TLS_HS_CERTIFICATE_VERIFY {
+                th_before_cv = tls_hash(transcript)
+            }
+            if mt == TLS_HS_FINISHED {
+                th_before_fin = tls_hash(transcript)
+                let expect = tls_finished_verify_data(tls_finished_key(s_hs), th_before_fin)
+                if body == expect {
+                    fin_ok = 1
+                }
+                fin_seen = 1
+            }
+            if mt == TLS_HS_CERTIFICATE {
+                cert_der = _tls_cert_der(body)
+            }
+            if mt == TLS_HS_CERTIFICATE_VERIFY {
+                if len(body) >= 4 {
+                    cv_alg = (body[0] << 8) | body[1]
+                    let slen = (body[2] << 8) | body[3]
+                    if 4 + slen <= len(body) {
+                        cv_sig = substr(body, 4, slen)
+                    }
+                }
+            }
+            transcript = transcript + substr(flight, q, m.get(4) - q)
+            q = m.get(4)
+        }
+    }
+    if fin_seen == 0 {
+        return tls_client_err("no-finished")
+    }
+
+    // ---- CertificateVerify ----
+    let mut cv = 0
+    let mut cert_pub = ""
+    if len(cert_der) > 0 {
+        cert_pub = x509_pubkey(cert_der)
+    }
+    if cv_alg == 0x0403 {
+        cv = tls_verify_cert_verify(cert_der, cv_alg, cv_sig, th_before_cv)
+    } else {
+        cv = -1
+    }
+
+    // ---- 应用流量密钥（transcript 已含服务器 Finished） ----
+    let th2 = tls_hash(transcript)
+    let master = tls_master_secret(hs)
+    let c_ap = tls_derive_secret(master, "c ap traffic", th2)
+    let s_ap = tls_derive_secret(master, "s ap traffic", th2)
+
+    // ---- 客户端 Finished ----
+    let c_vd = tls_finished_verify_data(tls_finished_key(c_hs), th2)
+    let cf = tls_seal_record(c_key, c_iv, 0, TLS_CT_HANDSHAKE,
+                             tls_hs_msg(TLS_HS_FINISHED, c_vd))
+
+    let mut r = tls_client_err("")
+    r.shared = shared
+    r.c_hs_secret = c_hs
+    r.s_hs_secret = s_hs
+    r.c_hs_key = c_key
+    r.c_hs_iv = c_iv
+    r.s_hs_key = s_key
+    r.s_hs_iv = s_iv
+    r.c_ap_secret = c_ap
+    r.s_ap_secret = s_ap
+    r.cert_pub = cert_pub
+    r.cv = cv
+    r.server_finished_ok = fin_ok
+    r.client_finished = cf
+    r.transcript_hash = th2
+    if fin_ok == 1 {
+        r.ok = 1
+    } else {
+        r.err = "finished"
+    }
+    return r
+}

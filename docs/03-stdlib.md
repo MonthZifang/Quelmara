@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-30 个模块，**350 个公开函数**（另有 185 个 `_` 前缀的内部函数）。
+31 个模块，**359 个公开函数**（另有 188 个 `_` 前缀的内部函数）。
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -24,7 +24,8 @@
 | `std/sha256` | SHA-256 + HMAC-SHA256 | 11 / 11 |
 | `std/aes` | AES-128-GCM | 6 / 26 |
 | `std/x25519` | X25519 密钥交换（RFC 7748，TLS ECDHE 地基） | 3 / 21 |
-| `std/tls13` | TLS 1.3 密钥调度 + AEAD 记录层（v1.21） | 25 / 25 |
+| `std/tls13` | TLS 1.3 密钥调度 + AEAD 记录层（v1.21）+ 记录/握手解析（v1.24） | 28 / 28 |
+| `std/tls_client` | TLS 1.3 客户端握手核心（RFC 8448 逐字节验证，v1.24） | 6 / 9 |
 | `std/p256` | NIST P-256 域运算 + ECDSA 验签（v1.22） | 2 / 45 |
 | `std/x509` | X.509 DER 解析 + P-256 自签/签发者验签（v1.23） | 11 / 12 |
 | `std/b64` | base64 编解码 | 5 / 5 |
@@ -553,6 +554,22 @@ fn tls_open_record(key: str, iv: str, seq: int, sealed: str) -> str
 fn tls_hs_msg(mtype: int, body: str) -> str
 fn tls_u16(v: int) -> str
 fn tls_u24(v: int) -> str
+fn tls_record_parse(buf: str, pos: int) -> vec[int]
+fn tls_hs_parse(buf: str, pos: int) -> vec[int]
+fn tls_ext(etype: int, body: str) -> str
+```
+
+### `std/tls_client.qma`
+
+TLS 1.3 客户端握手核心（RFC 8448 轨迹逐字节验证）
+
+```quelmara
+fn tls_client_err(code: str) -> TlsClientResult
+fn tls_cert_verify_hash(transcript_hash: str) -> str
+fn tls_ecdsa_sig_raw(sig: str) -> str
+fn tls_verify_cert_verify(cert_der: str, alg: int, sig: str, transcript_hash: str) -> int
+fn tls_client_hello(host: str, pub: str, rnd: str, sid: str) -> str
+fn tls_client_handshake(priv: str, ch_record: str, server_bytes: str) -> TlsClientResult
 ```
 
 ### `std/url.qma`
@@ -636,7 +653,8 @@ fn x509_verify_with_p256(cert: str, issuer_pub: str) -> int
 | `std/math` | `sqrt`（牛顿，相对误差 <1e-15）、`cbrt`、`floor/ceil/round/trunc_f`、`powi`、`gcd/lcm/isqrt`、NaN/inf 判定 | 无 `exp/log/pow(x,y)/sin/cos`（需要超越函数库）；`floor` 等受 int64 范围限制 |
 | `std/aes` | AES-128-GCM 加解密（FIPS/NIST 向量通过） | AES-256、AES-NI 加速 |
 | `std/x25519` | X25519 标量乘 / 公钥生成 / 共享密钥（RFC 7748 向量全过） | 单次约 7 ms（约 100× 于优化过的 C）；无 X448、无 Ed25519 |
-| `std/tls13` | HKDF（RFC 5869）、Expand-Label、key schedule、AEAD 记录封装、Finished 派生 | **无握手状态机**——还不能独立完成真实握手（证书解析见 `std/x509`） |
+| `std/tls13` | HKDF（RFC 5869）、Expand-Label、key schedule、AEAD 记录封装、Finished 派生、记录/握手消息解析 | 不含网络 I/O；握手状态机见 `std/tls_client` |
+| `std/tls_client` | ClientHello 构造、ServerHello 解析、服务器 flight 解密、Finished/CertificateVerify 验证、客户端 Finished 生成、应用流量密钥 | 无 TCP 连接（无 `tcp_connect`/DNS）；只支持 TLS1.3 + AES-128-GCM-SHA256 + x25519；不校验证书链/有效期/域名；RSA 验签返回 -1 |
 | `std/p256` | ECDSA-P256 验签（含无效曲线点防护）、曲线上点判定 | 只验签不签名；只支持 SHA-256 摘要与未压缩点；单次约 25 ms |
 | `std/x509` | DER TLV（≤3 字节长度）、TBSCertificate / SPKI / signatureValue 提取、`x509_verify_self_p256` 与 `x509_verify_with_p256` | 只认 ECDSA-P256 未压缩点；**不校验**有效期/域名/用途/链/CRL/OCSP；无 RSA、Ed25519、压缩点 |
 | `std/sha256` | SHA-256、HMAC-SHA256 | SHA-NI 硬件加速（基础设施已就绪，本机 CPU 无该扩展） |
