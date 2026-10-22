@@ -1,7 +1,7 @@
 # 当前状态（实测）
 
 > **本文是全部实测数字的唯一出处。** 其它文档引用数字时写"见 `06-status.md`"。
-> 口径日期：2026-10-22。环境：Windows 10/11 x86-64，Xeon E5-2666 v3（Haswell 代，
+> 口径日期：2026-10-23。环境：Windows 10/11 x86-64，Xeon E5-2666 v3（Haswell 代，
 > **无 SHA-NI、无 AVX2**），VBS/Hyper-V 开启（进程冷启动 ~426 ms，跑分噪声 ±50%）。
 > 解释器：Python 3.13.12。
 
@@ -9,11 +9,11 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=147 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
-| 词法器对拍 | **PASS=132 FAIL=0**（132 个源文件） | `python tests/lexdiff.py` |
-| 声明级 AST 对拍 | **PASS=116 FAIL=0**（跳过 4 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
-| 函数体 dump 对拍 | **一致 1170 / 分叉 867 / SKIP 同步 24 / SKIP 不同步 18** | `python tests/bodydiff.py` |
-| IR 架构无关对拍 | **PASS=66 FAIL=0 SKIP=46**，并行后 **60 s**（原串行 5 min 41 s；SKIP 全是 arm64 未接的特性） | `python tests/irdiff.py` |
+| PE 回归（主回归） | **PASS=148 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
+| 词法器对拍 | **PASS=133 FAIL=0**（133 个源文件） | `python tests/lexdiff.py` |
+| 声明级 AST 对拍 | **PASS=117 FAIL=0**（跳过 4 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
+| 函数体 dump 对拍 | **一致 1172 / 分叉 872 / SKIP 同步 24 / SKIP 不同步 18** | `python tests/bodydiff.py` |
+| IR 架构无关对拍 | **PASS=66 FAIL=0 SKIP=47**，并行后 **60 s**（原串行 5 min 41 s；SKIP 全是 arm64 未接的特性，t85 的 `trunc` 属此类） | `python tests/irdiff.py` |
 | 发射层确定性对拍 | **PASS=10 FAIL=0** | `python tests/emitdiff.py` |
 | gzip 解码互操作 | **PASS=86 FAIL=0**（12 种编码组合 × 7 类输入 + 多 member 拼接）+ **损坏输入拒绝 5/5** | `python tests/gzip_inflate_test.py` |
 | ECDSA P-256 验签互操作 | **PASS=32 FAIL=0**（20 正向 + 12 负向，Python bigint 参考实现） | `python tests/ecdsa_p256_test.py` |

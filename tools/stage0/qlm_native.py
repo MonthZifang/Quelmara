@@ -675,6 +675,8 @@ class Lower:
         self.asset_root = asset_root  # [src].asset（read_asset 基准，编译期嵌入）
         self.arr_elem = {}         # base vreg -> 元素类型（"f64"）；f64 数组的
                                    # index/arith 位模式链路依赖此标记
+        self.arr_narrow = {}       # base vreg -> (bits, signed)；窄元素数组的
+                                   # 下标赋值/整体赋值按声明宽度截断（v1.40）
         self.uses_map = False
         self.uses_arena = False
         self.uses_join = False
@@ -938,10 +940,15 @@ class Lower:
         fn.emit("frameaddr", addr, base)
         return self._mark_arr(fn, addr, n)
 
-    def array_copy(self, fn, dst, src, n):
+    def array_copy(self, fn, dst, src, n, nb=None):
+        """逐字拷贝；nb 给定时按声明宽度截断每个元素（v1.40 窄数组）"""
         for i in range(n):
             t = fn.new_v()
             fn.emit("load", t, src, ("imm", i))
+            if nb is not None:
+                tt = fn.new_v()
+                fn.emit("trunc", tt, t, nb[0], nb[1])
+                t = tt
             fn.emit("store", dst, ("imm", i), t)
 
     def emit_bounds(self, fn, idx, n, dynamic=False):
@@ -970,6 +977,12 @@ class Lower:
     def narrow_of(cls, ty):
         if ty and ty[0] == "named":
             return cls.NARROW_BITS.get(ty[1])
+        return None
+
+    def _arr_narrow_of(self, ty):
+        """声明类型 ("array", n, elem) -> 元素窄宽度 (bits, signed) / None"""
+        if ty and ty[0] == "array" and len(ty) > 2:
+            return self.narrow_of(ty[2])
         return None
 
     def trunc_to(self, fn, v, nb):
@@ -1004,6 +1017,9 @@ class Lower:
                 self.words_copy(fn, sub, val, SLICE_WORDS)
             else:
                 val = self.conv_to(fn, val, self._float_of(fn, val), self._ty_float_w(ftype))
+                nb = self.narrow_of(ftype)
+                if nb is not None:
+                    val = self.trunc_to(fn, val, nb)   # 窄字段按声明宽度截断（v1.40）
                 fn.emit("store", addr, ("imm", off), val)
         return addr
 
@@ -1031,6 +1047,9 @@ class Lower:
                 off += self.agg_size(ftype[1])
             else:
                 val = self.conv_to(fn, val, self._float_of(fn, val), self._ty_float_w(ftype))
+                nb = self.narrow_of(ftype)
+                if nb is not None:
+                    val = self.trunc_to(fn, val, nb)   # 窄载荷按声明宽度截断（v1.40）
                 fn.emit("store", addr, ("imm", off), val)
                 off += 1
         return self._mark_struct(fn, addr, ename)
@@ -1972,6 +1991,9 @@ class Lower:
             return ("imm", 0)
         if m == "push":
             v = one_arg()
+            nb = self.narrow_of(("named", elem)) if isinstance(elem, str) else None
+            if nb is not None:
+                v = self.trunc_to(fn, v, nb)      # vec[u8] 等窄元素（v1.40）
             if (isinstance(elem, tuple) and elem[0] == "agg"
                     and self._is_iface(elem[1])):
                 sn = self._struct_of(fn, v)
@@ -2024,6 +2046,9 @@ class Lower:
                 raise SyntaxError("vec.set(i, v) 需要两个实参")
             i = self.eval(args[0], fn, env)
             v = self.eval(args[1], fn, env)
+            nb = self.narrow_of(("named", elem)) if isinstance(elem, str) else None
+            if nb is not None:
+                v = self.trunc_to(fn, v, nb)      # vec[u8] 等窄元素（v1.40）
             if isinstance(elem, tuple) and elem[0] == "agg":
                 fn.emit("call", None, "__vec_set_n", [obj, i, v])
             else:
@@ -3557,12 +3582,25 @@ class Lower:
                         spec = self.box_iface(fn, spec, sn, at[1])
             n = self._arr_of(fn, spec)
             if n is not None:
+                ann = s[4][1] if (len(s) > 4 and s[4][0] == "as") else None
+                nb = self._arr_narrow_of(ann)
                 if s[3][0] == "arraylit":
-                    # 字面量已经是在帧上新建的数组，直接绑定，不再多拷一次
+                    # 字面量已经是在帧上新建的数组，直接绑定，不再多拷一次；
+                    # 窄元素：字面量按 64 位存槽，就地把每个元素截到声明宽度（v1.40）
                     env[s[2]] = spec
+                    if nb is not None:
+                        self.arr_narrow[spec] = nb
+                        for i in range(n):
+                            t = fn.new_v()
+                            fn.emit("load", t, spec, ("imm", i))
+                            tt = fn.new_v()
+                            fn.emit("trunc", tt, t, nb[0], nb[1])
+                            fn.emit("store", spec, ("imm", i), tt)
                     return
                 dst = self.alloc_array(fn, n)
-                self.array_copy(fn, dst, spec, n)
+                self.array_copy(fn, dst, spec, n, nb=nb)
+                if nb is not None:
+                    self.arr_narrow[dst] = nb
                 env[s[2]] = dst
                 return
             if self._rc_of(fn, spec) is not None:
@@ -3629,7 +3667,8 @@ class Lower:
                 spec = self.eval(s[3], fn, env)
                 if self._arr_of(fn, spec) != n:
                     raise SyntaxError("数组赋值两侧长度不一致")
-                self.array_copy(fn, cur, spec, n)
+                # 窄元素数组：目标侧的声明宽度约束拷入值（v1.40）
+                self.array_copy(fn, cur, spec, n, nb=self.arr_narrow.get(cur))
                 return
             sname = self._struct_of(fn, cur)
             if sname is not None:
@@ -3825,8 +3864,11 @@ class Lower:
             self.words_copy(fn, sub, spec, SLICE_WORDS)
             return
         spec = self.eval(s[3], fn, env)
+        nb = self.narrow_of(ftype)
         if op == "=":
             spec = self.conv_to(fn, spec, self._float_of(fn, spec), self._ty_float_w(ftype))
+            if nb is not None:
+                spec = self.trunc_to(fn, spec, nb)   # 窄字段赋值截断（v1.40）
             fn.emit("store", addr, ("imm", off), spec)
             return
         binop = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}[op]
@@ -3837,6 +3879,8 @@ class Lower:
             self._mark_float(fn, cur, fw)
         tmp = self.arith(binop, cur, spec, fn, env)
         tmp = self.conv_to(fn, tmp, self._float_of(fn, tmp), fw)
+        if nb is not None:
+            tmp = self.trunc_to(fn, tmp, nb)         # 窄字段复合赋值也截断（v1.40）
         fn.emit("store", addr, ("imm", off), tmp)
 
     def lower_assign_index(self, s, fn, env):
@@ -3855,7 +3899,10 @@ class Lower:
         idx = self.eval(idxe, fn, env)
         self.emit_bounds(fn, idx, nval, dynamic=dyn)
         val = self.eval(rhs, fn, env)
+        nb = self.arr_narrow.get(obj)     # 窄元素数组（v1.40）：存槽截断
         if op == "=":
+            if nb is not None:
+                val = self.trunc_to(fn, val, nb)
             fn.emit("store", tgt, idx, val)
             return
         binop = {"+=": "add", "-=": "sub", "*=": "mul",
@@ -3863,6 +3910,8 @@ class Lower:
         cur = fn.new_v()
         fn.emit("load", cur, tgt, idx)
         fn.emit("bin", binop, cur, cur, val)
+        if nb is not None:
+            fn.emit("trunc", cur, cur, nb[0], nb[1])
         fn.emit("store", tgt, idx, cur)
 
     def block(self, stmts, fn, env):
@@ -4278,10 +4327,14 @@ class Lower:
             elif ty[0] == "vec":
                 self._mark_vec(fn, params[i], self._vec_tag_of(ty[1]))
             elif ty[0] == "array":
-                # 数组形参按值语义：就地拷一份，函数内改动不外泄
+                # 数组形参按值语义：就地拷一份，函数内改动不外泄；
+                # 窄元素按声明宽度截断（v1.40）
                 dst = self.alloc_array(fn, ty[1])
-                self.array_copy(fn, dst, params[i], ty[1])
+                nb = self._arr_narrow_of(ty)
+                self.array_copy(fn, dst, params[i], ty[1], nb=nb)
                 env[name] = dst
+                if nb is not None:
+                    self.arr_narrow[dst] = nb
                 if len(ty) > 2 and "f64" in str(ty[2]):
                     self.arr_elem[dst] = "f64"
             elif ty[0] == "array":
@@ -7898,6 +7951,11 @@ class Lower:
             return "str"
         if et and et[0] == "named" and self.is_agg(et[1]):
             return ("agg", et[1])
+        if et and et[0] == "named" and et[1] in self.NARROW_BITS:
+            # 窄标量元素（v1.40）：标签 = 类型名（与 parser 的 vec_elem_tag 一致）。
+            # 消费方全是 "== 'str'" / isinstance(tuple) 判定，字符串标签走标量路径；
+            # push/set 凭它查出窄宽度做截断，vecinner 嵌套时随内层标签穿透。
+            return et[1]
         if et and et[0] == "vec":
             return ("vecinner", self._vec_tag_of(et[1]))
         if et and et[0] == "map":

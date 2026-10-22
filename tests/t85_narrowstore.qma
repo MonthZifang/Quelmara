@@ -1,0 +1,84 @@
+// t85_narrowstore.qma：窄值存储截断全覆盖（v1.40）
+// 覆盖：v1.8 在 let 标注 / 形参 / 返回值 / 赋值边界截断；本版补齐剩余存储点——
+//   1) struct 窄字段：字面量构造 / 字段赋值 / 复合赋值
+//   2) enum 窄载荷：变体构造时截断
+//   3) vec 窄元素：push / set 截断
+//   4) 定长数组窄元素：标注字面量就地截断 / 下标赋值 / 复合下标赋值 /
+//      整体赋值拷入截断 / 形参入口截断
+// 语义纪律：表达式内部仍按 64 位提升（不中途回绕）；截断只发生在存储边界。
+//       uN 零回绕、iN 符号回绕；切片别名写入暂不截断（见 07-gaps §1 边界）。
+module t85
+
+struct P { w: u8, h: i16 }
+enum E {
+    A
+    B(v: u16)
+}
+
+fn first_of(a: [2]u8) -> int {
+    return a[0]
+}
+
+fn echo_byte(x: u8) -> u8 {
+    return x          // 返回值出口截断
+}
+
+fn main() {
+    // 1) struct 窄字段：字面量构造截断
+    let p = P { w: 300, h: 40000 }
+    assert(p.w == 44, "u8 field literal truncates")
+    assert(p.h == -25536, "i16 field literal sign-wraps")
+
+    // 字段赋值 + 复合赋值
+    p.w = 513
+    assert(p.w == 1, "u8 field assign truncates")
+    p.h += 65536
+    assert(p.h == -25536, "i16 field compound assign re-wraps")
+    p.w = p.w + 255
+    assert(p.w == 0, "u8 field assign of promoted sum truncates")
+
+    // 2) enum 窄载荷
+    let e = E.B(70000)
+    match e {
+        E.B(v) => { assert(v == 4464, "u16 enum payload truncates") }
+        E.A => { assert(false, "wrong variant") }
+    }
+
+    // 3) vec 窄元素
+    let v = vec[u8].new(4)
+    v.push(300)
+    assert(v.get(0) == 44, "vec[u8] push truncates")
+    v.set(0, 257)
+    assert(v.get(0) == 1, "vec[u8] set truncates")
+    let v2 = vec[i16].new(2)
+    v2.push(32768)
+    assert(v2.get(0) == -32768, "vec[i16] push sign-wraps")
+
+    // 4) 定长数组窄元素
+    let a: [3]u8 = [300, 1, 258]
+    assert(a[0] == 44 and a[1] == 1 and a[2] == 2, "narrow array literal truncates")
+    a[0] = 512
+    assert(a[0] == 0, "narrow array index assign truncates")
+    a[1] += 256
+    assert(a[1] == 1, "narrow array compound index assign re-wraps")
+
+    // 整体赋值：拷入时按目标声明宽度截断
+    let mut b: [3]u8 = [0, 0, 0]
+    let c: [3]u8 = [1000, 1000, 1000]
+    b = c
+    assert(b[0] == 232 and b[2] == 232, "array copy-in truncates to u8")
+    b = a
+    assert(b[0] == 0 and b[1] == 1, "array copy-in keeps stored values")
+
+    // 形参入口截断（数组实参按值拷贝）
+    assert(first_of([300, 5]) == 44, "narrow array param truncates at entry")
+
+    // 标量纪律复核（v1.8 既有行为不回退）
+    assert(echo_byte(300) == 44, "u8 return truncates")
+    let mut x: u8 = 200
+    assert(x + 100 == 300, "expression still promotes to 64-bit")
+    x = x + 100
+    assert(x == 44, "scalar assign still truncates")
+
+    print("narrowstore ok")
+}
