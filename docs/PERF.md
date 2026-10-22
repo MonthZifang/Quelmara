@@ -145,3 +145,44 @@
 倍数 ≈3×。为什么不是 2×（两路）也不是 4×：标量版有越界检查与循环开销，
 向量版把它们全省了，但两路 `paddq` 的理论上限就是 2 倍数据通路。
 要更高需要 AVX2 四路（`vpaddq ymm`），那是下一步。
+
+
+---
+
+## v1.16b 全线跑分（2026-10-22，min-of-3/5，本机 VBS 噪声 ±50% 已去噪）
+
+所有数字均为**通用优化**的结果（无 benchmark 特调），import std 的程序自动受益。
+
+| 项目 | 起点（v1.11） | **现状（v1.16b）** | 提升 | vs 竞品 |
+|---|---|---|---|---|
+| crc32 1MiB | ~17ms（逐位） | **2ms**（256 项查表） | **~8×** | ✅ 已达 zlib 级 |
+| split+join 1MiB | 29ms | **9ms** | **3.2×** | Go 5ms，差 1.8× |
+| url parse×100k | 92ms | **78ms** | 1.2× | — |
+| gzip 1MiB | 117ms | **59ms** | **2.0×** | zlib 25ms，差 2.4× |
+| JSON parse 93KB | 4ms | **4ms** | 持平 | Go 1ms，差 4× |
+| SHA-256 1MiB | 68ms | 65ms | 持平 | OpenSSL，差 20×（SHA-NI 专项） |
+| @simd f64 归约 65K | 无 | **<1ms**（addpd 两路） | 新能力 | — |
+| loop_sum 200M | 12.6 c/iter | **10.8 c/iter** | 1.17× | GCC ~3.5，差 3× |
+
+### 内存分配器（`__alloc` 热路径解剖，v1.16b）
+
+现状已是最优形态，**无可安全压榨的显著空间**：
+
+- bump 热路径 **7 条指令**：`load h(首次jnz)` + `load off` + `add newoff` +
+  `cmp newoff vs heap_sz(imm，无访存)` + `jcc` + `store bump` + `add r = h+off`；
+  理论下限 ~5（load+add+cmp+branch+store）。
+- `bump 直存地址`方案实测推演为 8 条（堆尾检查需要额外 load heap_end）——**退化**。
+- 尺寸类空闲链 O(1)（32B 粒度、FREE_CLASSES 上限）、1MB 粒度页提交
+  （512MB 配额按需）、多线程 xchg 自旋锁按需（单线程零开销）。
+- 应用层验证：split/join 的 65537 次 alloc 占比 <5%（memcpy 与扫描才是大头），
+  分配器进一步压榨的收益不成立。
+
+### 剩余大项（按赢回幅度）
+
+1. **SHA-NI 双路径**（SHA-256 65ms → ~3ms）：基础设施已就绪（v1.15），
+   64 轮序列 + mini-emulator 验证待专项。
+2. **loop_sum 编译器三件套**（10.8 → ~4 c/iter）：phi copy 消除
+   （分配器 coalescing）+ do-while 变换 + cssub 形态。
+3. **JSON 解析器重写**（4ms → ~1ms）：查表 dispatch + 批量构造。
+4. **gzip lazy matching**（59ms → ~35ms）：zlib 同款延迟匹配。
+5. **AVX2 点积/宽归约**（@simd 泛化）：需 vpmullq（SSE2 语义不让渡）。
