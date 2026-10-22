@@ -262,8 +262,8 @@ return expr
 | `map[K]V` | `set` `get` `del` `has`（长度用 `len(m)`；**没有** `clear`，清空请新建） |
 | `chan[T]` | `send` `recv` `close` |
 | `int` / `f64` | `to_str` `to_int` |
-| `option[T]` | 构造 `option[int].some(x)` / `.none()`；解构走 `match Option.Some/None` |
-| `result[T,E]` | 构造 `result[int,str].ok(x)` / `.err(e)`；解构走 `match Result.Ok/Err` |
+| `option[T]` | 构造 `option[int].some(x)` / `.none()`；T 可为具名 struct/enum（v1.38）；解构走 `match Option.Some/None` |
+| `result[T,E]` | 构造 `result[int,str].ok(x)` / `.err(e)`；T/E 可为具名 struct/enum（v1.38，errno+上下文可装入 Err）；解构走 `match Result.Ok/Err` |
 | 任务句柄 | `join` |
 | 接口值 | 接口声明的方法（运行期派发） |
 
@@ -278,7 +278,8 @@ fn add_one(n: int) -> result[int, str] {
 }
 ```
 
-只接受两变体、单标量载荷的 result。
+只接受两变体、单载荷的 result；载荷可为标量或**具名 struct/enum**（v1.38，多字——
+enum 布局本就是 1+最大载荷字，零新机制）。`?` 所在函数必须返回同一 result 枚举。
 
 ### 6.4 其它
 

@@ -1,0 +1,106 @@
+// t83_resagg.qma：result[T,E] / option[T] 具名 struct 载荷（v1.38）
+// 覆盖：
+//   1) result[P, Err] 双 struct 载荷：ok/err 构造 + match 解构
+//   2) ? 正常分支：Ok 载荷是 struct，提取后字段继续用
+//   3) ? 错误分支：Err struct 原样传播（穿两层）
+//   4) T/E 对调：result[str, Err]（Ok 标量 + Err struct）
+//   5) option[P]：Some(struct) / None 构造与解构
+//   6) ? 提出 struct 后直接取字段（不落变量）
+// 语义：合成枚举布局本就是 1+最大载荷字，struct 载荷零新机制——
+// 库层从此能把 errno + 上下文装进 Err（错误处理黄标翻绿的语言侧前提）。
+// 边界：? 只能用于返回同一 result 枚举的函数（main 返回 void 不能用）。
+module t83
+
+struct P { x: int, y: int }
+struct Err2 { code: int, pos: int }
+
+fn parse_it(s: str) -> result[P, Err2] {
+    if len(s) < 2 {
+        return result[P, Err2].err(Err2 { code: 1, pos: 0 })
+    }
+    return result[P, Err2].ok(P { x: 1, y: 2 })
+}
+
+fn use_it(s: str) -> result[P, Err2] {
+    let p = parse_it(s)?
+    return result[P, Err2].ok(P { x: p.x + 1, y: p.y })
+}
+
+fn use_it2(s: str) -> result[P, Err2] {
+    let p = use_it(s)?
+    return result[P, Err2].ok(P { x: p.x * 10, y: p.y + 5 })
+}
+
+fn label(s: str) -> result[str, Err2] {
+    if len(s) == 0 {
+        return result[str, Err2].err(Err2 { code: 7, pos: 42 })
+    }
+    return result[str, Err2].ok(s)
+}
+
+fn find_p(flag: bool) -> option[P] {
+    if flag {
+        return option[P].some(P { x: 9, y: 8 })
+    }
+    return option[P].none()
+}
+
+fn probe(s: str) -> result[P, Err2] {
+    let px = use_it(s)?
+    return result[P, Err2].ok(P { x: px.x, y: px.y })
+}
+
+fn main() {
+    // 1) Ok struct + match 解构
+    let r = use_it("ab")
+    match r {
+        Result.Ok(p) => { assert(p.x == 2 and p.y == 2, "ok payload") }
+        Result.Err(e) => { assert(false, "should be ok") }
+    }
+    // 2) Err struct + match 解构
+    let r2 = use_it("a")
+    match r2 {
+        Result.Ok(p) => { assert(false, "should be err") }
+        Result.Err(e) => { assert(e.code == 1 and e.pos == 0, "err payload") }
+    }
+    // 3) ? 链式传播（Ok 分支改字段、Err 原样穿两层）
+    let r3 = use_it2("xy")
+    match r3 {
+        Result.Ok(p) => { assert(p.x == 20 and p.y == 7, "chained ok") }
+        Result.Err(e) => { assert(false, "should be ok2") }
+    }
+    let r4 = use_it2("z")
+    match r4 {
+        Result.Ok(p) => { assert(false, "should be err2") }
+        Result.Err(e) => { assert(e.code == 1, "chained err") }
+    }
+    // 4) T=str, E=struct 对调
+    let r5 = label("")
+    match r5 {
+        Result.Ok(s) => { assert(false, "should be err3") }
+        Result.Err(e) => { assert(e.code == 7 and e.pos == 42, "err struct T/E flip") }
+    }
+    let r6 = label("hi")
+    match r6 {
+        Result.Ok(s) => { assert(s == "hi", "ok str") }
+        Result.Err(e) => { assert(false, "should be ok3") }
+    }
+    // 5) option[struct]
+    let o1 = find_p(true)
+    match o1 {
+        Option.Some(p) => { assert(p.x == 9 and p.y == 8, "opt some") }
+        Option.None => { assert(false, "should be some") }
+    }
+    let o2 = find_p(false)
+    match o2 {
+        Option.Some(p) => { assert(false, "should be none") }
+        Option.None => { assert(true, "opt none") }
+    }
+    // 6) ? 提出 struct 后直接取字段（不落变量）
+    let r7 = probe("ab")
+    match r7 {
+        Result.Ok(p) => { assert(p.x == 2, "field on try result") }
+        Result.Err(e) => { assert(false, "probe should be ok") }
+    }
+    print("resagg ok")
+}
