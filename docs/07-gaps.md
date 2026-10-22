@@ -15,7 +15,7 @@
 | `map[K]V` | ✅ v1.41 | V 支持 int/bool/str + 具名 struct/enum（值槽按 agg 布局 N 字，set/get 按值拷入拷出）；**键仍限标量**；复合容器（vec/map）作值不做（需 mapinner 标签链） | 配置表/符号表不再拆平行 map |
 | `vec[T]` | ✅ v1.37 | 标量/str/具名聚合/嵌套 vec（任意深度）/map 句柄全支持 | 元素即用即取，无扁平化成本 |
 | struct 内嵌套聚合 | ✅ v1.39 | 字段可装 vec/map/chan/slice/struct——vec/map/chan 按句柄 1 槽、slice 按 2 槽视图；方法/下标/派发全部可用 | 无（句柄语义即设计） |
-| 函数值 | 🟡 | `callr` ≤6 参、实参不能是 struct/slice、**无捕获**（无闭包） | 回调只能固定签名 |
+| 函数值 | ✅ v1.42 | `callr` 8 参 + struct/slice 实参（x86-64 第 7 参起走栈传参；A64 用满 X0-X7，>8 fail-fast）；**无捕获**（见下行"闭包 / 捕获"）；聚合返回值的目标不可间接调用 | 回调带聚合载荷可行；闭包是独立条目 |
 | 所有权检查 | 🟡 | **只查 `rc[T]` 句柄**；struct/数组/str 的别名与生命周期不查，并发竞争不查 | 不能对外宣称"Rust 那套借用检查" |
 | `interface` | 🟡 | 装箱不释放；同类型跨接口同名方法报错；接口与 impl 必须同源文件；AArch64 未接 vtable | 热点循环装箱会涨堆 |
 | 错误处理 | ✅ v1.38 | result/option 载荷支持具名 struct/enum——库层可把 errno+上下文装入 Err（std 库尚未批量改造为富错误，属标准库工作） | 错误对象成为可能 |
@@ -228,9 +228,9 @@ CSE 的 `_cse_key` 对 xmm 族返回 `None`（不参与）。
 2. **语言层（§1）**：~~泛型多参 + 调用点推导~~（v1.36）→ ~~`vec[map]`~~（v1.37）→
    ~~result struct 载荷~~（v1.38）→ ~~struct 内嵌套聚合~~（v1.39）→
    ~~窄值存储截断全覆盖~~（v1.40；整数宽度行剩"槽宽压缩"一项）→
-   ~~`map[K]Struct` 值扩容~~（v1.41）→
-   黄标逐项（函数值放宽、命名空间 / `pub`、`defer` …）→ 红标逐项 红→黄→绿
-   （泛型 struct / 泛型方法 / 类型约束）
+   ~~`map[K]Struct` 值扩容~~（v1.41）→ ~~函数值放宽（8 参 + 聚合实参）~~（v1.42）→
+   黄标逐项（命名空间 / `pub`、`defer`、`@simd` 形状、并发原语 …）→
+   红标逐项 红→黄→绿（泛型 struct / 泛型方法 / 类型约束）
 3. **标准库（§2）**：红标剩余项——**MD5**（只差旧协议兼容）、HTTP 客户端封装
    （重定向/chunked/连接池）、路由/静态文件/MIME/cookie/session/multipart、
    多 member gzip + zlib 容器、正则、持久化（KV/SQLite）、`exp/log/sin/cos`

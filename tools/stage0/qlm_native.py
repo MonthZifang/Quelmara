@@ -3133,16 +3133,24 @@ class Lower:
         if name not in self.fns_ast:
             if len(e[1]) == 1 and name in env:
                 # 通过值调用：标识符是持有函数地址的局部变量（fnaddr 或 vreg）
-                # -> callr 间接调用。无形参类型信息：实参原样传递（标量/str），
-                # 不做隐式转换；返回值按标量处理。
+                # -> callr 间接调用。无签名信息：返回值按标量处理（聚合/切片
+                # 返回的目标不可间接调用）；标量/str 实参原样传；
+                # 聚合实参按值编组——拷进临时帧槽传地址（v1.42，与直接调用的
+                # 聚合编组同语义；目标形参须是聚合类型，无签名校验，
+                # 与标量路径同信任级）。参数个数不再限 6（v1.42 栈传参）。
                 callee = env[name]
                 args = [self.eval(a, fn, env) for a in e[2]]
-                for a in args:
-                    if self._struct_of(fn, a) is not None or self._is_slice(fn, a):
-                        raise SyntaxError(
-                            "间接调用暂不支持结构体/切片实参（标量与 str 可以）")
-                if len(args) > 6:
-                    raise SyntaxError("间接调用最多 6 个实参（自研 ABI 参数寄存器上限）")
+                for i, a in enumerate(args):
+                    if self._is_slice(fn, a):
+                        tmp = self.alloc_slice(fn)
+                        self.words_copy(fn, tmp, a, SLICE_WORDS)
+                        args[i] = tmp
+                        continue
+                    sname = self._struct_of(fn, a)
+                    if sname is not None:
+                        tmp = self.alloc_struct(fn, sname)
+                        self.struct_copy(fn, tmp, a, sname)
+                        args[i] = tmp
                 d = fn.new_v()
                 fn.emit("callr", d, callee, args)
                 return d
@@ -8663,10 +8671,49 @@ class Codegen:
                 else:
                     raise RuntimeError("并行搬移无法调度")
 
+    def _emit_call_args(self, args):
+        """调用实参布局（v1.42 ABI）：前 6 参进 ARG_REGS（并行搬移，既有路径），
+        第 7 参起进调用方溢出区：sub rsp 开区 -> 逐参经 SCRATCH 存 [rsp+8j]。
+        返回栈参数个数（call/callr 在 call 之后按它回卷 rsp）。
+        安全性：参数搬移只写 ARG_REGS 与 SCRATCH（都在分配池外），池寄存器与
+        RBP 相对槽不受影响——栈实参的取值在搬移前后读都正确。
+        调用点栈布局：call 压返回地址后，被调方 [rbp+8]=返回地址、
+        [rbp+16+8j]=第 7+j 参（'args' 指令的 ("stk", j) 源与之对应）。"""
+        reg = args[:6]
+        stk = args[6:]
+        moves = [(self.src_move(a), ("r", ARG_REGS[i])) for i, a in enumerate(reg)]
+        self.parallel_move(moves)
+        if stk:
+            self.enc.alu_ri("sub", RSP, 8 * len(stk))
+            for j, a in enumerate(stk):
+                self.mat(SCRATCH, a)
+                self.enc.mov_mr(RSP, 4, 0, 8 * j, SCRATCH)
+        return len(stk)
+
+    def _stkarg_base(self):
+        """栈实参在被调方帧里的基址偏移（v1.42）。
+        序言是 push callee-saved -> push rbp -> mov rbp,rsp，所以 [rbp+8]
+        不是返回地址：ret 在 [rbp + 8*(1+n)]（n = rbp 之前的 push 数），
+        第一个栈实参在 [rbp + 8*(2+n)]（= 调用点的 [rsp+0]，call 压 ret 后
+        恰好落到这里）。线程入口（win_thread）在 callee-saved 之前还压了
+        RDI/RSI 两次，一并计入——线程函数当前不收栈实参，公式保持成立。"""
+        n = len(self.used_callee or [])
+        if getattr(self, "cur_fn_thread", False):
+            n += 2
+        return 8 * (2 + n)
+
     def emit_move(self, src, dst):
         if src[0] == "r" and dst[0] == "r":
             if src[1] != dst[1]:
                 self.enc.mov_rr(dst[1], src[1])
+        elif src[0] == "stk":
+            # 栈实参（v1.42）：调用方溢出区 -> dst（偏移见 _stkarg_base）
+            base = self._stkarg_base() + src[1] * 8
+            if dst[0] == "r":
+                self.enc.mov_rm(dst[1], RBP, 4, 0, base)
+            else:
+                self.enc.mov_rm(SCRATCH, RBP, 4, 0, base)
+                self.enc.mov_mr(RBP, 4, 0, -dst[1], SCRATCH)
         elif src[0] == "r" and dst[0] == "m":
             self.enc.mov_mr(RBP, 4, 0, -dst[1], src[1])
         elif src[0] == "m" and dst[0] == "r":
@@ -9023,23 +9070,23 @@ class Codegen:
             enc.movzx_r_r8(ACC, RAX)
             self.commit(dst, ACC)
         elif op == "call":
-            moves = []
-            for i, arg in enumerate(ins[3]):
-                moves.append((self.src_move(arg), ("r", ARG_REGS[i])))
-            self.parallel_move(moves)
+            nk = self._emit_call_args(ins[3])
             enc.call(ins[2])
+            if nk:
+                enc.alu_ri("add", RSP, 8 * nk)     # 回卷溢出区（v1.42）
             if ins[1] is not None:
                 self.commit(ins[1], ACC)
         elif op == "callr":
-            # 间接调用（自研 ABI，与 call 同参数寄存器）。函数地址先物化进
+            # 间接调用（自研 ABI，与 call 同参数布局）。函数地址先物化进
             # SCRATCH2（r10 不在分配池，不会被随后的参数搬移覆盖；
             # fnaddr/ga 操作数在此走 movabs + 回填，PE 下生成 DIR64 重定位）。
+            # 栈传参（v1.42）：第 7 参起落调用方溢出区；r10 全程无人碰
+            # （栈区存取走 SCRATCH，参数搬移只写 ARG_REGS）。
             freg = self.mat(SCRATCH2, ins[2])
-            moves = []
-            for i, arg in enumerate(ins[3]):
-                moves.append((self.src_move(arg), ("r", ARG_REGS[i])))
-            self.parallel_move(moves)
+            nk = self._emit_call_args(ins[3])
             enc.call_reg(SCRATCH2)
+            if nk:
+                enc.alu_ri("add", RSP, 8 * nk)     # 回卷溢出区（v1.42）
             if ins[1] is not None:
                 self.commit(ins[1], ACC)
         elif op == "cssub":
@@ -9184,7 +9231,12 @@ class Codegen:
         elif op == "args":
             moves = []
             for i, d in enumerate(ins[1]):
-                moves.append((("r", ARG_REGS[i]), self.dst_move(d)))
+                if i < 6:
+                    moves.append((("r", ARG_REGS[i]), self.dst_move(d)))
+                else:
+                    # 第 7+ 参从调用方溢出区读（v1.42）：[rbp+16+8j]，
+                    # 与 _emit_call_args 的调用点布局逐字节对应
+                    moves.append((("stk", i - 6), self.dst_move(d)))
             self.parallel_move(moves)
         else:
             raise SyntaxError(f"无法发射指令 {ins!r}")

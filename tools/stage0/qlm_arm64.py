@@ -38,7 +38,10 @@ X27, X28, X29, X30, SP, XZR = 27, 28, 29, 30, 31, 31
 
 POOL_A64 = [X9, X10, X11, X12, X13, X14, X15, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28]
 CALLEE_A64 = [X19, X20, X21, X22, X23, X24, X25, X26, X27, X28]
-ARG_REGS = [X0, X1, X2, X3, X4, X5]
+# v1.42：扩到 8 个（SysV AArch64 本就定义 X0-X7 传参；X6/X7 此前闲置）。
+# 与 x86-64 后端的"6 寄存器 + 栈传参"不同构——A64 未接栈传参，>8 实参
+# 在 call/args 处 fail-fast（irdiff SKIP 如实登记）。
+ARG_REGS = [X0, X1, X2, X3, X4, X5, X6, X7]
 ACC = X0           # call/syscall 返回值
 SCRATCH, SCRATCH2 = X16, X17   # IP0/IP1（约定俗成的编码期临时）
 
@@ -386,6 +389,8 @@ class CodegenA64:
             enc.cset(SCRATCH, COND[cc])
             self.commit(dst, SCRATCH)
         elif op == "call":
+            if len(ins[3]) > len(ARG_REGS):
+                raise SyntaxError("A64 暂不支持超过 8 个实参（栈传参未接）")
             moves = [(self.src_move(arg), ("r", ARG_REGS[i])) for i, arg in enumerate(ins[3])]
             self.parallel_move(moves)
             enc.bl(ins[2])
@@ -393,7 +398,9 @@ class CodegenA64:
                 self.commit(ins[1], ACC)
         elif op == "callr":
             # 间接调用（自研 ABI）：函数地址先物化进 SCRATCH2（IP1，不在
-            # 分配池），参数进 X0-X5 后 BLR（fnaddr/ga 在 fetch 里回填）。
+            # 分配池），参数进 X0-X7 后 BLR（fnaddr/ga 在 fetch 里回填）。
+            if len(ins[3]) > len(ARG_REGS):
+                raise SyntaxError("A64 暂不支持超过 8 个实参（栈传参未接）")
             fr = self.fetch(SCRATCH2, ins[2])
             if fr != SCRATCH2:
                 self.enc.mov_rr(SCRATCH2, fr)
@@ -468,6 +475,8 @@ class CodegenA64:
             if dst is not None:
                 self.commit(dst, ACC)
         elif op == "args":
+            if len(ins[1]) > len(ARG_REGS):
+                raise SyntaxError("A64 暂不支持超过 8 个形参（栈传参未接）")
             moves = [(("r", ARG_REGS[i]), self.dst_move(d)) for i, d in enumerate(ins[1])]
             self.parallel_move(moves)
         else:
