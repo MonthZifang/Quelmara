@@ -199,15 +199,41 @@ let m = pair[int, str](1, "x")      // 显式多参
 跨文件调用时若被调用方在调用方之后解析，仍需显式方括号（解析期还不知道它是泛型）。
 开箱即用的泛型算法（min/max/clamp/contains/index_of/reverse）见 `std/gen`。
 
-### 4.6 常量（编译期算术）
+### 4.6 常量与 `const fn`（编译期求值）
 
 ```quelmara
 const KB: int = 1024
 const BUF: int = 4 * KB        // 引用前面的 const
 const HALF: int = BUF / 2      // C 截断除法
+
+const fn fact(n: int) -> int {  // 编译期可求值，运行期也可调
+    let mut r = 1
+    let mut i = 2
+    while i <= n {
+        r = r * i
+        i = i + 1
+    }
+    return r
+}
+
+const F5 = fact(5)              // 解析期解释执行 → 120
+const BIG = fact(5) * 2 + 1     // 调用可嵌在算术里
+const EVEN = is_even(10)        // 返回 bool 的 const fn
 ```
 
-只支持整型 `+ - * / %`、括号与 const 引用，按声明序求值。`const fn` 未做。
+`const` 右值：整型字面量 / 一元负号 / 括号 / `+ - * / %` / const 引用 / **const fn 调用**，
+按声明序求值（引用未声明即报错）。`const fn` 的支持子集：
+
+| 项 | 范围 |
+|---|---|
+| 形参与返回值 | `int` / `bool`（其余编译期拒绝） |
+| 语句 | `let` / 赋值（含 `+=` 等）/ `if` / `while` / `return` / 表达式 |
+| 表达式 | 字面量、变量、算术、比较、逻辑、位运算、调用其他 const fn（含递归，深度 ≤ 64） |
+| 求值口径 | **有符号 64 位回卷**——与同一个函数在运行时的结果逐位一致 |
+| 拒绝 | `str` 值、普通函数调用、`break`/`continue`、超 200000 步（疑似死循环） |
+
+`const fn` 同时是**普通函数**：照常发射、运行时可调，只是多了一个"能在解析期被解释执行"
+的身份。证据：`tests/t98_constfn.qma`（18 条断言）、`tests/bad/constfn_*.qma`（必须编译失败）。
 
 ### 4.7 注解
 
@@ -405,19 +431,20 @@ enum 布局本就是 1+最大载荷字，零新机制）。`?` 所在函数必�
 证据：`tests/t49_width.qma`（14 条断言）、`tests/t85_narrowstore.qma`（20 条断言，v1.40）、
 `tests/t94_slice_narrow.qma`（16 条断言，v1.56 切片别名写入）。
 
-### 8.2 `@simd`：两种形状，不是向量化器
+### 8.2 `@simd`：三种形状，不是向量化器
 
 | 形状 | 指令 | 要求 |
 |---|---|---|
 | `acc += a[i]`，`acc: int`，`a: [N]int` | SSE2 `paddq` 两路 | 循环体只有这一条语句 |
 | `acc += a[i]`，`acc: f64`，`a: [N]f64` | SSE2 `addpd` 两路 | 同上 |
+| `acc += a[i] * b[i]`，`acc: f64`，`a/b: [N]f64` | SSE2 `mulpd` 两路（v1.57） | 同上，两数组同长 |
 
 - 逐元素越界检查**被跳过**，调用方保证 `lo..hi ⊆ [0, len(a)]`。
 - f64 归约**改变求和顺序**，结果可能与标量版不逐位相等（2 的幂可逐位验证）。
 - 形状不匹配：函数级注解静默回落标量；语句级注解直接编译报错。
-- 点积 `a[i]*b[i]` 需要 AVX2 `vpmullq`，未做。
+- f64 点积已接（v1.57）：SSE2 `mulpd` 两路，求和顺序同样改变（测试值精确可表示时与标量逐位相等）。int 点积需 SSE4.1 `pmulld`（int64 无 SSE2 乘法）、AVX2 4 通道留待。
 
-证据：`tests/t50_simd.qma`、`tests/t59_simdf64.qma`。
+证据：`tests/t50_simd.qma`、`tests/t59_simdf64.qma`、`tests/t96_simddot.qma`；`bench/dot_bench.qma`（1024 f64 点积 4.6×）。
 
 ### 8.3 `rc[T]` 与所有权检查
 

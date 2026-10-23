@@ -330,6 +330,10 @@ class Parser:
         # 泛型模板全集（v1.11）：调用点 f[int](...) 的解析需要知道 f 是不是
         # 泛型——种子跨文件传递（与 consts 同一批两遍解析）。
         self.generic_fns = dict(generic_fns) if generic_fns else {}
+        # const fn 表（v1.58）：既进 fns 列表（运行时可调），也在这里登记
+        # 供 const 右值做编译期解释执行。按声明序可见（与 const 同规则）。
+        self.const_fns = {}
+        self._const_steps = 0
         self._prescan()
 
     def _prescan(self):
@@ -382,8 +386,31 @@ class Parser:
                 neg = True
             tf = self.next()
             return ("num", -tf.val if neg else tf.val)
+        # v1.58：返回 bool 的 const fn 调用（int 返回值的走 _const_int_expr，
+        # 这样 `const A = sq(3) + 1` 这类算术里嵌调用也能求值）
+        if (t.kind == "NAME" and t.val in self.const_fns
+                and self.const_fns[t.val].get("ret") == ("named", "bool")
+                and self.peek(1).kind == "SYM" and self.peek(1).val == "("):
+            self.next()
+            self.next()
+            args = []
+            if not self.at("SYM", ")"):
+                args.append(self._const_arg(name))
+                while self.at("SYM", ","):
+                    self.next()
+                    args.append(self._const_arg(name))
+            self.eat("SYM", ")")
+            return self._const_call(t.val, args, t.line, name)
         # int 路径：字面量或编译期算术
         return ("num", self._const_int_expr(name))
+
+    def _const_arg(self, ctx):
+        """const fn 调用的实参：bool 字面量或整型常量表达式。"""
+        t = self.peek()
+        if t.kind in ("true", "false"):
+            self.next()
+            return t.kind == "true"
+        return self._const_int_expr(ctx)
 
     def _const_int_expr(self, name):
         """编译期整型表达式求值（const 专用，递归下降）。
@@ -404,6 +431,24 @@ class Parser:
             if t.kind == "INT":
                 self.next()
                 return t.val
+            if t.kind == "NAME" and self.peek(1).kind == "SYM" \
+                    and self.peek(1).val == "(":
+                # v1.58：const fn 调用可以嵌在算术里（fact(5) + 1）
+                if t.val in self.const_fns:
+                    self.next()
+                    self.next()
+                    args = []
+                    if not self.at("SYM", ")"):
+                        args.append(self._const_arg(name))
+                        while self.at("SYM", ","):
+                            self.next()
+                            args.append(self._const_arg(name))
+                    self.eat("SYM", ")")
+                    self._const_steps = 0
+                    return self._const_invoke(t.val, args, t.line, 0)
+                raise SyntaxError(
+                    f"line {t.line}: const {name} 调用了非 const fn 的 {t.val!r}"
+                    "（const 右值里只能调用 const fn）")
             if t.kind == "NAME":
                 if t.val in self.consts:
                     cv = self.consts[t.val]
@@ -446,6 +491,212 @@ class Parser:
 
         return expr()
 
+    # ---- v1.58：const fn —— 编译期求值 -----------------------------------
+    #
+    # 语义：const fn 既是普通函数（运行时可调、照常发射），也能在 const 右值里
+    # 被解释执行。求值结果按**有符号 64 位回卷**——必须与同一个函数在运行时的
+    # 结果逐位一致，否则 `const X = f(3)` 与 `let x = f(3)` 会分叉。
+    #
+    # 支持子集（fail-fast，不静默降级）：int/bool 形参与返回值；语句
+    # let / 赋值（含 += 等）/ if / while / return / 表达式；表达式字面量、
+    # 变量、算术、比较、逻辑、位运算、调用其他 const fn（含递归）。
+    _CONST_STEP_LIMIT = 200000
+    _CONST_DEPTH_LIMIT = 64
+
+    @staticmethod
+    def _wrap64(x):
+        """按有符号 64 位回卷（与运行时 int 一致）。"""
+        x &= (1 << 64) - 1
+        return x - (1 << 64) if x >> 63 else x
+
+    def _const_check_fn(self, f):
+        ok = {("named", "int"), ("named", "bool")}
+        for pname, pty in f["params"]:
+            if pty not in ok:
+                raise SyntaxError(
+                    f"const fn {f['name']}: 形参 {pname} 的类型暂不支持"
+                    "（只支持 int / bool）")
+        ret = f.get("ret")
+        if ret is not None and ret not in ok and ret != ("named", "void"):
+            raise SyntaxError(
+                f"const fn {f['name']}: 返回类型暂不支持（只支持 int / bool）")
+
+    def _const_call(self, fname, args, line, ctx):
+        """const 右值里的 const fn 调用：解释执行，返回 AST 常量节点。"""
+        f = self.const_fns[fname]
+        if len(args) != len(f["params"]):
+            raise SyntaxError(
+                f"line {line}: const {ctx} 调用 {fname} 需要 "
+                f"{len(f['params'])} 个实参，得到 {len(args)} 个")
+        self._const_steps = 0
+        v = self._const_invoke(fname, args, line, 0)
+        if f.get("ret") == ("named", "bool"):
+            return ("bool", bool(v))
+        return ("num", v)
+
+    def _const_invoke(self, fname, args, line, depth):
+        if depth > self._CONST_DEPTH_LIMIT:
+            raise SyntaxError(
+                f"line {line}: const fn {fname} 递归超过 "
+                f"{self._CONST_DEPTH_LIMIT} 层")
+        f = self.const_fns[fname]
+        env = {}
+        for (pname, pty), v in zip(f["params"], args):
+            if pty == ("named", "bool"):
+                if not isinstance(v, bool):
+                    raise SyntaxError(
+                        f"line {line}: const fn {fname} 的形参 {pname} 需要 bool")
+            elif isinstance(v, bool) or not isinstance(v, int):
+                raise SyntaxError(
+                    f"line {line}: const fn {fname} 的形参 {pname} 需要 int")
+            env[pname] = v
+        sig, v = self._const_run(f["body"], env, line, depth)
+        if sig == "break" or sig == "continue":
+            raise SyntaxError(
+                f"line {line}: const fn {fname} 里的 break/continue 没有外层循环")
+        ret = f.get("ret")
+        if ret == ("named", "bool"):
+            if v is None:
+                raise SyntaxError(
+                    f"line {line}: const fn {fname} 声明返回 bool 但没有 return")
+            return bool(v)
+        if ret is not None and ret != ("named", "void") and v is None:
+            raise SyntaxError(
+                f"line {line}: const fn {fname} 声明返回 int 但没有 return")
+        return self._wrap64(v) if isinstance(v, int) and not isinstance(v, bool) else 0
+
+    def _const_tick(self, line):
+        self._const_steps += 1
+        if self._const_steps > self._CONST_STEP_LIMIT:
+            raise SyntaxError(
+                f"line {line}: const fn 求值超过 {self._CONST_STEP_LIMIT} 步"
+                "（疑似死循环）")
+
+    def _const_run(self, stmts, env, line, depth):
+        """执行语句序列，返回 (信号, 值)：normal / return / break / continue。"""
+        for s in stmts:
+            self._const_tick(line)
+            k = s[0]
+            if k == "let":
+                env[s[2]] = self._const_eval(s[3], env, line, depth)
+            elif k == "assign":
+                name, op = s[1], s[2]
+                if name not in env:
+                    raise SyntaxError(
+                        f"line {line}: const fn 给未声明的 {name!r} 赋值")
+                v = self._const_eval(s[3], env, line, depth)
+                if op != "=":
+                    v = self._const_binop(op[:-1], env[name], v, line)
+                env[name] = v
+            elif k == "if":
+                branch = s[2] if self._const_eval(s[1], env, line, depth) else s[3]
+                if branch:
+                    sig, v = self._const_run(branch, env, line, depth)
+                    if sig != "normal":
+                        return sig, v
+            elif k == "while":
+                while self._const_eval(s[1], env, line, depth):
+                    self._const_tick(line)
+                    sig, v = self._const_run(s[2], env, line, depth)
+                    if sig == "return":
+                        return sig, v
+                    if sig == "break":
+                        break
+            elif k == "return":
+                return "return", (self._const_eval(s[1], env, line, depth)
+                                  if s[1] is not None else None)
+            elif k == "break":
+                return "break", None
+            elif k == "continue":
+                return "continue", None
+            elif k == "expr":
+                self._const_eval(s[1], env, line, depth)
+            else:
+                raise SyntaxError(
+                    f"line {line}: const fn 不支持 {k!r} 语句"
+                    "（只支持 let / 赋值 / if / while / return / 表达式）")
+        return "normal", None
+
+    def _const_eval(self, e, env, line, depth):
+        k = e[0]
+        if k in ("num", "bool"):
+            return e[1]
+        if k == "str":
+            raise SyntaxError(f"line {line}: const fn 暂不支持 str 值")
+        if k == "name":
+            if e[1] in env:
+                return env[e[1]]
+            if e[1] in self.consts:
+                cv = self.consts[e[1]]
+                if cv[0] in ("num", "bool"):
+                    return cv[1]
+            raise SyntaxError(
+                f"line {line}: const fn 里引用了未声明的 {e[1]!r}"
+                "（只认形参 / 局部变量 / 顶层 const）")
+        if k == "unop":
+            v = self._const_eval(e[2], env, line, depth)
+            if e[1] == "-":
+                if isinstance(v, bool):
+                    raise SyntaxError(f"line {line}: const fn 对 bool 取负")
+                return self._wrap64(-v)
+            if e[1] == "!":
+                return not v
+            raise SyntaxError(f"line {line}: const fn 不支持一元运算符 {e[1]!r}")
+        if k == "binop":
+            a = self._const_eval(e[2], env, line, depth)
+            b = self._const_eval(e[3], env, line, depth)
+            return self._const_binop(e[1], a, b, line)
+        if k == "call":
+            if len(e[1]) == 1 and e[1][0] in self.const_fns:
+                args = [self._const_eval(a, env, line, depth) for a in e[2]]
+                return self._const_invoke(e[1][0], args, line, depth + 1)
+            raise SyntaxError(
+                f"line {line}: const fn 里只能调用 const fn，"
+                f"{'.'.join(str(x) for x in e[1])} 不是")
+        raise SyntaxError(
+            f"line {line}: const fn 不支持 {k!r} 表达式"
+            "（只支持字面量 / 变量 / 算术 / 比较 / 逻辑 / 位运算 / 调用 const fn）")
+
+    def _const_binop(self, op, a, b, line):
+        if op in ("==", "!=", "<", "<=", ">", ">="):
+            return {"==": a == b, "!=": a != b, "<": a < b,
+                    "<=": a <= b, ">": a > b, ">=": a >= b}[op]
+        if op == "&&":
+            return bool(a) and bool(b)
+        if op == "||":
+            return bool(a) or bool(b)
+        if isinstance(a, bool) or isinstance(b, bool):
+            raise SyntaxError(
+                f"line {line}: const fn 的 {op} 不接受 bool 操作数")
+        if op == "+":
+            return self._wrap64(a + b)
+        if op == "-":
+            return self._wrap64(a - b)
+        if op == "*":
+            return self._wrap64(a * b)
+        if op in ("/", "%"):
+            if b == 0:
+                raise SyntaxError(f"line {line}: const fn 编译期除零")
+            q = abs(a) // abs(b)
+            q = -q if (a < 0) != (b < 0) else q
+            return q if op == "/" else a - q * b
+        if op == "&":
+            return self._wrap64(a & b)
+        if op == "|":
+            return self._wrap64(a | b)
+        if op == "^":
+            return self._wrap64(a ^ b)
+        if op in ("<<", ">>", ">>>"):
+            if not 0 <= b < 64:
+                raise SyntaxError(
+                    f"line {line}: const fn 的移位位数越界（{b}）")
+            if op == "<<":
+                return self._wrap64(a << b)
+            if op == ">>":
+                return a >> b
+            return self._wrap64((a & ((1 << 64) - 1)) >> b)
+        raise SyntaxError(f"line {line}: const fn 不支持运算符 {op!r}")
+
     def peek(self, off=0):
         return self.toks[min(self.pos + off, len(self.toks) - 1)]
 
@@ -483,6 +734,18 @@ class Parser:
                 # v1.11：右值支持整型算术（+ - * / % 与括号、const 引用），
                 # 编译期求值、C 截断语义；类型标注仅文档性（不做检查）。
                 self.next()
+                if self.at("fn"):
+                    # const fn（v1.58）：既是普通函数（运行时可调、照常发射），
+                    # 也能在 const 右值里被编译期解释执行（见 _const_call）。
+                    fdef = self.parse_fn()
+                    if fdef.get("type_params"):
+                        raise SyntaxError(
+                            f"const fn {fdef['name']!r} 暂不支持泛型类型参数")
+                    self._const_check_fn(fdef)
+                    fdef["const_fn"] = True
+                    self.const_fns[fdef["name"]] = fdef
+                    fns.append(fdef)
+                    continue
                 cname = self.eat("NAME").val
                 if self.at("SYM", ":"):
                     self.next()

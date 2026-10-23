@@ -623,7 +623,9 @@ def main():
             ("iface_no_impl", "类型未实现接口", "没有实现接口"),
             ("iface_dup_method", "跨接口同名方法", "同名方法跨接口暂不支持"),
             ("defer_let", "defer 跟带作用域的语句", "defer 只支持"),
-            ("neg_str", "对 str 取负", "一元 - 不能用于 str")):
+            ("neg_str", "对 str 取负", "一元 - 不能用于 str"),
+            ("constfn_str", "const fn 用 str 形参", "只支持 int / bool"),
+            ("constfn_call", "const 右值调普通函数", "只能调用 const fn")):
         try:
             build(os.path.join(ROOT, f"tests/bad/{nm}.qma"),
                   os.path.join(ROOT, "build", f"bad_{nm}.exe"))
@@ -650,6 +652,9 @@ def main():
     case_selfcheck("t92_httpc", "tests/t92_httpc.qma")
     case_selfcheck("t94_slice_narrow", "tests/t94_slice_narrow.qma")
     case_selfcheck("t95_hash512", "tests/t95_hash512.qma")
+    # @simd f64 点积（v1.57）：acc += a[i] * b[i]，SSE2 mulpd 两路
+    case_selfcheck("t96_simddot", "tests/t96_simddot.qma")
+    case_selfcheck("t98_constfn", "tests/t98_constfn.qma")
     # pub + 限定语法负向（多文件）：非 pub 跨模块引用必须编译失败
     # （限定调用可能先被通用 pub 检查或指向校验拦下，两种消息都算对）
     for nm, needles in (("pub_hidden", ("非 pub",)),
