@@ -1,0 +1,149 @@
+// t117_simdintdot.qma：@simd int 点积 acc += a[i] * b[i]（v1.81）
+// 指令：SSE2 movdqu 两路 + 3×pmuludq 拼 64x64->低 64 + paddq 两路累加 + 标量尾。
+// 覆盖：向量段（偶数元素）、标量尾（奇数元素）、两种写法（+= 与 s = s + ...）、
+//       非零起点、负值、跨 32 位的乘积（a_hi/b_hi 参与）、64 位回绕、
+//       零向量/空区间、与标量逐位相等。
+module t117
+
+@simd
+fn dot_i(a: [8]int, b: [8]int) -> int {
+    let mut s = 0
+    for i in 0..8 { s += a[i] * b[i] }
+    return s
+}
+
+fn dot_scalar(a: [8]int, b: [8]int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < 8 {
+        s = s + a[i] * b[i]
+        i = i + 1
+    }
+    return s
+}
+
+@simd
+fn dot_form2(a: [8]int, b: [8]int) -> int {
+    // 另一种写法：s = s + a[i] * b[i]（与 += 等价，parser 形态不同）
+    let mut s = 0
+    for i in 0..8 { s = s + a[i] * b[i] }
+    return s
+}
+
+@simd
+fn dot_12(a: [12]int, b: [12]int) -> int {
+    let mut s = 0
+    for i in 0..12 { s += a[i] * b[i] }
+    return s
+}
+
+fn main() {
+    let a = [1, 2, 4, 8, 16, 32, 64, 128]
+    let one = [1, 1, 1, 1, 1, 1, 1, 1]
+    assert(dot_i(a, one) == 255, "dot ones")
+    assert(dot_i(a, one) == dot_scalar(a, one), "simd == scalar ones")
+    assert(dot_form2(a, one) == 255, "form2 ones")
+
+    // 混合符号：1*1 + 2*(-2) + 4*3 + 8*(-4) + 16*5 + 32*(-6) + 64*7 + 128*(-8)
+    //         = 1 - 4 + 12 - 32 + 80 - 192 + 448 - 1024 = -711
+    let c = [1, -2, 3, -4, 5, -6, 7, -8]
+    assert(dot_i(a, c) == 0 - 711, "dot mixed sign")
+    assert(dot_i(a, c) == dot_scalar(a, c), "simd == scalar mixed")
+    assert(dot_form2(a, c) == 0 - 711, "form2 mixed")
+
+    // 跨 32 位的乘积：2^32 * 3 = 12884901888。只做 a_lo*b_lo 的实现会得 0，
+    // 只做 a_lo*b_lo + (a_lo*b_hi<<32) 的实现也会得 0——这条钉住 a_hi*b_lo。
+    let big = [4294967296, 0, 0, 0, 0, 0, 0, 0]
+    let three = [3, 0, 0, 0, 0, 0, 0, 0]
+    assert(dot_i(big, three) == 12884901888, "2^32 * 3")
+    assert(dot_i(big, three) == dot_scalar(big, three), "2^32 * 3 scalar eq")
+
+    // 负的 2^32 * 3 = -12884901888（有符号：高 32 位按补码，pmuludq 按无符号，
+    // 低 64 位仍逐位相等）
+    let nbig = [0 - 4294967296, 0, 0, 0, 0, 0, 0, 0]
+    assert(dot_i(nbig, three) == 0 - 12884901888, "-2^32 * 3")
+    assert(dot_i(nbig, three) == dot_scalar(nbig, three), "-2^32 * 3 scalar eq")
+
+    // 2^32 * 2^32 = 2^64 -> 回绕成 0（与标量 64 位 imul 一致）
+    assert(dot_i(big, big) == 0, "2^64 wraps to 0")
+    assert(dot_i(big, big) == dot_scalar(big, big), "wrap scalar eq")
+
+    // 2^62 * 4 = 2^64 -> 0
+    let h = [4611686018427387904, 0, 0, 0, 0, 0, 0, 0]
+    let four = [4, 0, 0, 0, 0, 0, 0, 0]
+    assert(dot_i(h, four) == 0, "2^62*4 wraps")
+
+    // 标量尾：3 个元素 = 1 对向量 + 1 标量尾，期望 1 + 2 + 4 = 7
+    let mut t3 = 0
+    @simd for i in 0..3 { t3 += a[i] * one[i] }
+    assert(t3 == 7, "tail 3")
+    // 5 个元素 = 2 对向量 + 1 标量尾，期望 1 - 4 + 12 - 32 + 80 = 57
+    let mut t5 = 0
+    @simd for i in 0..5 { t5 += a[i] * c[i] }
+    assert(t5 == 57, "tail 5")
+    // 1 个元素：纯标量尾
+    let mut t1 = 0
+    @simd for i in 0..1 { t1 += a[i] * one[i] }
+    assert(t1 == 1, "tail 1")
+
+    // 非零起点（1..8）：跳过首元素，期望 255 - 1 = 254
+    let mut t = 0
+    @simd for i in 1..8 { t += a[i] * one[i] }
+    assert(t == 254, "nonzero lo")
+
+    // 12 个元素（6 对，无尾）：b 全 1 → 1+2+4+...+2048 = 4095
+    let b12 = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    let a12 = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+    assert(dot_12(a12, b12) == 4095, "dot 12 even")
+
+    // 零向量与空区间
+    let z = [0, 0, 0, 0, 0, 0, 0, 0]
+    assert(dot_i(a, z) == 0, "dot zero")
+    let mut t0 = 0
+    @simd for i in 0..0 { t0 += a[i] * one[i] }
+    assert(t0 == 0, "empty range")
+
+    // 16 元素全区间 + 奇数尾区间，与标量逐个比对（含负值交替）
+    let a16 = [3, -5, 7, -9, 11, -13, 15, -17, 19, -21, 23, -25, 27, -29, 31, -33]
+    let b16 = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32]
+    let mut k = 0
+    let mut sc = 0
+    while k < 16 {
+        sc = sc + a16[k] * b16[k]
+        k = k + 1
+    }
+    let mut vs = 0
+    @simd for i in 0..16 { vs += a16[i] * b16[i] }
+    assert(vs == sc, "16 elems == scalar")
+    let mut vs15 = 0
+    @simd for i in 0..15 { vs15 += a16[i] * b16[i] }
+    let mut sc15 = 0
+    let mut k15 = 0
+    while k15 < 15 {
+        sc15 = sc15 + a16[k15] * b16[k15]
+        k15 = k15 + 1
+    }
+    assert(vs15 == sc15, "15 elems == scalar")
+
+    // 性能环（min of 5，验证向量段确实在跑）
+    let mut best = 0 - 1
+    let mut r = 0
+    while r < 5 {
+        let mut acc = 0
+        let t0n = now_ns()
+        let mut rep = 0
+        while rep < 200 {
+            acc += dot_i(a, c)
+            rep = rep + 1
+    }
+        let t1n = now_ns()
+        assert(acc == 0 - 142200, "perf acc")
+        let us = (t1n - t0n) / 1000
+        if best < 0 || us < best {
+            best = us
+        }
+        r = r + 1
+    }
+    print("simd int dot 8 elems: " + best.to_str() + " us (min of 5)")
+    print("ok t117_simdintdot")
+}
