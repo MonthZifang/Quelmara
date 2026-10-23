@@ -640,6 +640,20 @@ def main():
         bad("pub_hidden 应当编译失败却通过了")
     # pub 正例（v1.43，多文件）：pub 声明跨模块可用
     case_selfcheck("t88_pubvis", "fixtures/pubvis/main.qma")
+    # 限定语法正例（v1.44，多文件）：lib.fn()/lib.Enum.Variant/限定模式
+    case_selfcheck("t89_qualified", "fixtures/qualified/main.qma")
+    # pub + 限定语法负向（多文件）：非 pub 跨模块引用必须编译失败
+    # （限定调用可能先被通用 pub 检查或指向校验拦下，两种消息都算对）
+    for nm, needles in (("pub_hidden", ("非 pub",)),
+                        ("pub_hidden_q", ("非 pub", "无法解析"))):
+        try:
+            build(os.path.join(ROOT, f"tests/bad/{nm}/main.qma"),
+                  os.path.join(ROOT, "build", f"bad_{nm}.exe"))
+        except SyntaxError as ex:
+            ok(f"pub 负例拦下 {nm}") if any(n in str(ex) for n in needles) \
+                else bad(f"{nm} 报错但信息不符（期望含 {needles!r}）：{ex}")
+        else:
+            bad(f"{nm} 应当编译失败却通过了")
     # gzip 的唯一权威证明：Python zlib 逐字节解压
     r = subprocess.run([sys.executable, os.path.join(ROOT, "tests/gzip_interop.py")],
                        cwd=ROOT, capture_output=True, text=True, errors="replace")

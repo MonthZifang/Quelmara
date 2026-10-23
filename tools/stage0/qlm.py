@@ -318,6 +318,11 @@ class Parser:
         # pub 可见性（v1.43）：pub 标记跨模块导出；本 Parser 实例 = 一个文件。
         self.pub_types = set()     # pub struct/enum/interface 名
         self._pending_pub = False  # `pub` 已吃掉、等下一个 fn/struct/enum 消化
+        # 命名空间限定语法（v1.44）：lib.fn(...) / lib.Enum.Variant /
+        # 模式 lib.Enum.Variant —— import 全串见 self.import_paths，
+        # 限定引用（import 串, 名字）见 self.qrefs（load_program 校验指向）。
+        self.import_paths = set()
+        self.qrefs = set()
         # 顶层 const，编译期内联。consts= 跨文件种子（load_program 两遍解析：
         # 第一遍收集各文件 const，第二遍带着全集重解析——import 侧的 const
         # 因此可见，std 库的槽位布局常量得以跨文件共享）。
@@ -472,6 +477,7 @@ class Parser:
                     self.next()
                     path.append(self.eat("NAME").val)
                 imports.append(".".join(path))
+                self.import_paths.add(".".join(path))
             elif self.at("const"):
                 # const NAME [: T] = <编译期可求值>：解析期内联，无运行时存储。
                 # v1.11：右值支持整型算术（+ - * / % 与括号、const 引用），
@@ -951,6 +957,12 @@ class Parser:
         while self.at("SYM", "."):
             self.next()
             path.append(self.eat("NAME").val)
+        # 命名空间限定模式（v1.44）：lib.Color.Red -> Color.Red（剥模块段）
+        if len(path) > 2:
+            imp, rest = self._match_import(tuple(path[:-1]))
+            if imp is not None and len(rest) >= 1:
+                self.qrefs.add((imp, rest[0]))
+                path = list(rest) + [path[-1]]
         binds = []
         if self.at("SYM", "("):
             self.next()
@@ -1177,7 +1189,33 @@ class Parser:
             return ("spawn", target)
         return self.parse_postfix()
 
+    def _match_import(self, segs):
+        """段元组 -> (匹配的 import 全串, 剥离模块段后的剩余段)。
+        精确等于某 import -> rest=()；某 import 是段前缀 -> rest=多余段
+        （`ws.ws_core.greet` 的 ("ws","ws_core") 精确、("ws",) 前缀均命中）；
+        不匹配 -> (None, None)。"""
+        if not segs or not self.import_paths:
+            return None, None
+        joined = ".".join(segs)
+        if joined in self.import_paths:
+            return joined, ()
+        for imp in sorted(self.import_paths):
+            ps = imp.split(".")
+            if len(segs) > len(ps) and tuple(segs[:len(ps)]) == tuple(ps):
+                return imp, tuple(segs[len(ps):])
+        return None, None
+
     def parse_postfix(self):
+        e = self._postfix_inner()
+        if e[0] == "path":
+            # 命名空间限定路径（v1.44）：lib.Color.Red -> Color.Red（剥模块段）
+            imp, rest = self._match_import(tuple(e[1]))
+            if imp is not None and rest:
+                self.qrefs.add((imp, rest[0]))
+                e = ("path", list(rest))
+        return e
+
+    def _postfix_inner(self):
         e = self.parse_primary()
         line = self.peek().line
         while True:
@@ -1187,6 +1225,31 @@ class Parser:
                 if self.at("SYM", "("):
                     self.next()
                     args = self.parse_args()
+                    # 命名空间限定调用（v1.44）：lib.fn(...) / lib.Color.Red(...)
+                    # —— 头部段匹配本文件 import 时改写为扁平调用/枚举构造，
+                    # 并记录限定引用（load_program 校验指向与 pub）。
+                    cand = None
+                    if e[0] == "name":
+                        cand = (e[1],)
+                    elif e[0] == "path":
+                        cand = tuple(e[1])
+                    if cand is not None:
+                        imp, rest = self._match_import(cand)
+                        if imp is not None:
+                            if rest:
+                                # 枚举构造：限定引用记枚举名（rest[0]），
+                                # 变体名不是顶层声明
+                                self.qrefs.add((imp, rest[0]))
+                                if any(a[0] == "namedarg" for a in args):
+                                    raise SyntaxError(
+                                        f"line {line}: 限定枚举构造只支持位置实参"
+                                        f"（字段表在被导入模块里，命名实参无法在此校验）")
+                                e = ("enumlit_pos", list(rest) + [name],
+                                     list(args))
+                            else:
+                                self.qrefs.add((imp, name))
+                                e = ("call", [name], list(args))
+                            continue
                     # `Shape.Circle(radius: 5)` -> 枚舉變體構造
                     if e[0] == "name" and self.enum_variant_of([e[1], name]):
                         e = self.mk_enumlit([e[1], name], args, line)
@@ -1945,6 +2008,8 @@ def load_program(src_path, cfg=None):
     src_dir = os.path.dirname(os.path.abspath(src_path))
     seen, order, stack = {}, [], []
     order_labels = []          # 与 order 平行：每个被导入文件的 basename（报错用）
+    order_aps = []             # 与 order 平行：绝对路径（defs_of/限定引用校验键）
+    imp_of = {}                # (文件 ap, import 串) -> 目标文件 ap（限定引用校验）
 
     def parse_file(path, consts=None, generic_fns=None):
         with open(path, encoding="utf-8") as f:
@@ -1955,7 +2020,7 @@ def load_program(src_path, cfg=None):
         seed = set(generic_fns or {})
         gens = {k: bool(p.generic_fns[k].get("pub"))
                 for k in p.generic_fns if k not in seed}
-        return res, p.pub_types, gens
+        return res, p.pub_types, gens, p.qrefs
 
     main_dir = os.path.dirname(os.path.abspath(src_path))
     src_cfg = (cfg or {}).get("src", {}) if isinstance(cfg, dict) else {}
@@ -1992,19 +2057,24 @@ def load_program(src_path, cfg=None):
             raise SyntaxError(f"import 循环："
                               f"{' -> '.join(chain + [os.path.basename(path)])}")
         stack.append(ap)
-        res, pub_types, gens = parse_file(ap)
+        res, pub_types, gens, qrefs = parse_file(ap)
         stack.pop()
-        seen[ap] = (res, pub_types, gens)
+        seen[ap] = (res, pub_types, gens, qrefs)
         order.append(res)
         order_labels.append(os.path.basename(path))
+        order_aps.append(ap)
         for imp in res[1]:
             cand = resolve_or_raise(imp, path)
+            imp_of[(ap, imp)] = os.path.normpath(os.path.abspath(cand))
             load(cand, chain + [os.path.basename(path)])
 
-    main_res, main_pub_types, main_gens = parse_file(src_path)
+    main_res, main_pub_types, main_gens, main_qrefs = parse_file(src_path)
     main_label = os.path.basename(src_path)
+    main_ap = os.path.normpath(os.path.abspath(src_path))
     for imp in main_res[1]:
-        load(resolve_or_raise(imp, src_path), [os.path.basename(src_path)])
+        cand = resolve_or_raise(imp, src_path)
+        imp_of[(main_ap, imp)] = os.path.normpath(os.path.abspath(cand))
+        load(cand, [os.path.basename(src_path)])
 
     # 两遍解析（const 跨 import 可见）：第一遍已把各文件解析过、const 都已
     # 登记；这里收集全部顶层 const 成全集（同名不同值报错），再带全集把
@@ -2032,32 +2102,40 @@ def load_program(src_path, cfg=None):
                     f"泛型函数冲突：{k!r} 在多个模块中定义不同")
             acc_gf[k] = v
     if acc or acc_gf:
-        seen2, order2, pex2, labels2 = {}, [], [], []
+        seen2, order2, pex2, labels2, aps2 = {}, [], [], [], []
 
         def reload(path):
             ap = os.path.normpath(os.path.abspath(path))
             if ap in seen2:
                 return
-            res, pub_types, gens = parse_file(ap, consts=acc, generic_fns=acc_gf)
+            res, pub_types, gens, qrefs = parse_file(
+                ap, consts=acc, generic_fns=acc_gf)
             seen2[ap] = res
             order2.append(res)
-            pex2.append((pub_types, gens))
+            pex2.append((pub_types, gens, qrefs))
             labels2.append(os.path.basename(path))
+            aps2.append(ap)
             for imp in res[1]:
+                cand = resolve_or_raise(imp, path)
+                imp_of[(ap, imp)] = os.path.normpath(os.path.abspath(cand))
                 reload(resolve_or_raise(imp, path))
 
-        main_res, main_pub_types, main_gens = parse_file(
+        main_res, main_pub_types, main_gens, main_qrefs = parse_file(
             src_path, consts=acc, generic_fns=acc_gf)
         for imp in main_res[1]:
+            cand = resolve_or_raise(imp, src_path)
+            imp_of[(main_ap, imp)] = os.path.normpath(os.path.abspath(cand))
             reload(resolve_or_raise(imp, src_path))
         seen, order = seen2, order2
         pex_list = pex2
         labels = labels2
-        main_pex = (main_pub_types, main_gens)
+        aps = aps2
+        main_pex = (main_pub_types, main_gens, main_qrefs)
     else:
         pex_list = [seen[ap][1:] for ap in seen]
         labels = order_labels
-        main_pex = (main_pub_types, main_gens)
+        aps = order_aps
+        main_pex = (main_pub_types, main_gens, main_qrefs)
 
     # ---- pub 可见性检查（v1.43）----
     # 规则：文件 X 引用了名字 r，且 r 定义在另一文件 Y（X 自己没定义），
@@ -2102,19 +2180,33 @@ def load_program(src_path, cfg=None):
             for x in e.values():
                 _collect(x, refs, bound)
 
-    files = [(main_label, main_res, main_pex)] + [
-        (label, res, pex) for label, (res, pex) in zip(order_labels, zip(order, pex_list))]
+    files = [(main_label, main_ap, main_res, main_pex)] + [
+        (label, ap, res, pex)
+        for label, (ap, (res, pex)) in zip(order_labels, zip(aps, zip(order, pex_list)))]
     defs_of = {}
-    for _label, res, (pub_types, gens) in files:
+    for _label, ap, res, (pub_types, gens, _qr) in files:
         fdefs = {f["name"]: bool(f.get("pub")) for f in res[2]}
         for k in res[4]:
             fdefs[k] = k in pub_types        # struct/enum/interface
+        for k in res[5]:
+            # v1.44 修复：enum 也要进定义表——v1.43 漏收，枚举的跨模块
+            # pub 检查被静默跳过（r not in defs_of 直接 continue）
+            fdefs[k] = k in pub_types
         fdefs.update(gens)
         for name, is_pub in fdefs.items():
             # fn/struct/enum 重名已由上面的合并冲突检查报错；这里 setdefault
             # 只兜 interface/泛型这类没有专属冲突检查的条目
-            defs_of.setdefault(name, (_label, is_pub))
-    for label, res, (_pt, _gn) in files:
+            defs_of.setdefault(name, (ap, is_pub))
+    for label, ap, res, (_pt, _gn, qrefs) in files:
+        # 限定引用指向校验（v1.44）：lib.name 的 name 必须定义在 lib 解析
+        # 到的那个文件里（扁平唯一性下，指错模块 = 该模块没有这个名字）
+        for imp, name in qrefs:
+            tgt = imp_of.get((ap, imp))
+            d = defs_of.get(name)
+            if tgt is None or d is None or d[0] != tgt:
+                raise SyntaxError(
+                    f"{label}: 限定引用 {imp}.{name} 无法解析——"
+                    f"{imp} 模块里没有声明 {name!r}")
         refs, bound = set(), set()
         for f in res[2]:
             for pn, _pt in f["params"]:
@@ -2133,9 +2225,9 @@ def load_program(src_path, cfg=None):
         for r in refs:
             if r in bound or r not in defs_of:
                 continue
-            dlabel, is_pub = defs_of[r]
-            if dlabel != label and not is_pub:
-                viols.append(f"{r!r} <- {dlabel}")
+            dap, is_pub = defs_of[r]
+            if dap != ap and not is_pub:
+                viols.append(f"{r!r} <- {os.path.basename(dap)}")
         if viols:
             raise SyntaxError(
                 f"{label}: 引用了非 pub 声明（{len(viols)} 处）："
@@ -2767,6 +2859,8 @@ class Infer:
         if k == "structlit":
             return "struct:" + ".".join(e[1])
         if k == "enumlit":
+            return "enum:" + e[1][0]
+        if k == "enumlit_pos":
             return "enum:" + e[1][0]
         if k == "match":
             t = None
@@ -4203,7 +4297,7 @@ class Codegen:
                 fcode, _ = self.gen_expr(fexpr, env)
                 parts.append(f".{fname} = {fcode}")
             return f"(({sname}){{ {', '.join(parts)} }})", "struct:" + sname
-        if k == "enumlit":
+        if k in ("enumlit", "enumlit_pos"):
             return self.gen_enumlit(e, env)
         if k == "match":
             inner, res_var, res_type = self.gen_match(e, env, 1, None, as_expr=True)
@@ -4212,7 +4306,9 @@ class Codegen:
         raise SyntaxError(f"无法生成表达式: {e!r}")
 
     def gen_enumlit(self, e, env):
-        """枚举构造 -> C 复合字面量 { .__tag = i, .u.Variant = { .f = ... } }"""
+        """枚举构造 -> C 复合字面量 { .__tag = i, .u.Variant = { .f = ... } }。
+        ("enumlit_pos", path, [expr])：位置实参（v1.44 限定枚举构造），
+        字段名按 merged 变体表下标映射。"""
         path, fields = e[1], e[2]
         ename, vname = path[0], path[1]
         if ename not in self.enums:
@@ -4220,10 +4316,16 @@ class Codegen:
         vidx, vfields = self.enum_variant(ename, vname)
         parts = [f".__tag = {vidx}"]
         if vfields:
-            exprs = dict(fields)
-            if set(exprs) != {f for f, _ in vfields}:
-                raise SyntaxError(
-                    f"{ename}.{vname} 构造需给出全部载荷字段 {[f for f, _ in vfields]}")
+            if e[0] == "enumlit_pos":
+                if len(fields) != len(vfields):
+                    raise SyntaxError(
+                        f"{ename}.{vname} 构造需 {len(vfields)} 个载荷字段，得到 {len(fields)}")
+                exprs = {vf[0]: fields[i] for i, vf in enumerate(vfields)}
+            else:
+                exprs = dict(fields)
+                if set(exprs) != {f for f, _ in vfields}:
+                    raise SyntaxError(
+                        f"{ename}.{vname} 构造需给出全部载荷字段 {[f for f, _ in vfields]}")
             inits = []
             for fname, ftype in vfields:
                 fcode, _ = self.gen_expr(exprs[fname], env)
@@ -5023,6 +5125,9 @@ def walk_expr(e, declared, assigned, referenced):
             walk_expr(v, declared, assigned, referenced)
     elif k == "enumlit":
         for _n, v in e[2]:
+            walk_expr(v, declared, assigned, referenced)
+    elif k == "enumlit_pos":
+        for v in e[2]:
             walk_expr(v, declared, assigned, referenced)
     elif k == "match":
         walk_expr(e[1], declared, assigned, referenced)

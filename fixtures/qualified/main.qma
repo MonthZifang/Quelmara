@@ -1,0 +1,48 @@
+// t89_qualified.qma：命名空间限定语法（v1.44）——多文件正例
+// 覆盖：
+//   1) lib.fn(...) 限定调用（解析为扁平调用 + 指向/pub 双重校验）
+//   2) lib.Enum.Variant(payload) 带载荷枚举构造 + 无载荷 lib.pick(...)
+//   3) 模式里的限定路径 lib.Color.Red =>（match 解构）
+//   4) lib.Type 消费：make_point 返回的 struct 字段照常用
+//   5) 自有枚举不受影响：本文件自己的 Enum.Variant 照常解析
+// 语义纪律：限定头必须匹配本文件 import（否则按方法调用处理，报"未定义
+//          变量"）；限定引用必须 pub 且定义在 import 解析到的文件里。
+//          struct 字面量的限定形态本版不做（用 pub 工厂函数），如实登记。
+module t89
+
+import ns_lib
+
+enum Own {
+    A
+    B(v: int)
+}
+
+fn main() {
+    // 1) 限定调用
+    let g = ns_lib.greet("qm")
+    assert(g == "3:qm", "qualified call")
+
+    // 2) 限定枚举构造：带载荷 + 无载荷（经函数返回）
+    let e = ns_lib.Color.Red()
+    match e {
+        ns_lib.Color.Red => { }
+        ns_lib.Color.Green => { assert(false, "wrong variant") }
+    }
+    match ns_lib.pick(1) {
+        ns_lib.Color.Green => { }
+        ns_lib.Color.Red => { assert(false, "wrong variant 2") }
+    }
+
+    // 3) 限定调用返回 pub struct：字段访问
+    let p = ns_lib.make_point(3, 4)
+    assert(p.x == 3 and p.y == 4, "qualified returning struct")
+
+    // 4) 自有枚举不受限定语法影响
+    let o = Own.B(v: 7)
+    match o {
+        Own.B(v) => { assert(v == 7, "own enum payload") }
+        Own.A => { assert(false, "own wrong variant") }
+    }
+
+    print("qualified ok")
+}

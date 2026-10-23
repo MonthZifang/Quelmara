@@ -19,6 +19,12 @@ import std.core     // 扁平合并：递归加载 std/ 与同目录 .qma
   并指明定义文件）。`pub` 是上下文关键字——只在顶层声明位识别，函数内
   `pub` 变量名不受影响。`const` 本就解析期内联全局共享，无需 pub；
   interface/impl 仍限同源文件（既有边界）。命名空间与版本未做（`load_program`）。
+- **限定语法（v1.44）**：`lib.fn(...)` 限定调用、`lib.Color.Red(v)` 限定枚举
+  构造（只收位置实参）、模式 `lib.Color.Red =>`——头段必须匹配本文件
+  `import`（拼错模块名/漏 import 编译期报错），且目标必须 `pub` 并定义在
+  该 import 解析到的文件里。限定是纯语法糖 + 校验：生成的调用与扁平直呼
+  其名完全一致。**限定 struct 字面量不做**（用 pub 工厂函数）；跨模块
+  同名声明不允许（扁平唯一性），前缀约定仍用于避免撞名。
 - 查找顺序：主文件目录 → `std/` → `[src].lib` → `[src].ref` → `.qpm/deps`，
   **惰性解析**（import 什么加载什么）。布局规则见 [`05-toolchain.md`](05-toolchain.md)。
 - 名字冲突、循环 import、被导入文件定义 `main`，一律编译报错。

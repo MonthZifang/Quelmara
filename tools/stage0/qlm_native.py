@@ -1024,16 +1024,26 @@ class Lower:
         return addr
 
     def lower_enum_lit(self, e, fn, env):
-        """枚举构造 -> 帧槽块：字 0 存 tag，字 1.. 存载荷"""
+        """枚举构造 -> 帧槽块：字 0 存 tag，字 1.. 存载荷。
+        ("enumlit", path, [(fname, expr)]) 命名实参（parse 期已按本文件
+        变体表展开）；("enumlit_pos", path, [expr]) 位置实参（v1.44 限定
+        枚举构造——parse 期拿不到跨模块变体表，这里按 merged 表校验个数
+        并按下标映射字段名）。"""
         path, fields = e[1], e[2]
         ename, vname = path[0], path[1]
         if ename not in self.enums:
             raise SyntaxError(f"未声明的枚举 {ename}")
         vidx, vfields = self.enum_variant(ename, vname)
-        exprs = dict(fields)
-        if set(exprs) != {f for f, _ in vfields}:
-            raise SyntaxError(
-                f"{ename}.{vname} 构造需给出全部载荷字段 {[f for f, _ in vfields]}")
+        if e[0] == "enumlit_pos":
+            if len(fields) != len(vfields):
+                raise SyntaxError(
+                    f"{ename}.{vname} 构造需 {len(vfields)} 个载荷字段，得到 {len(fields)}")
+            exprs = {vf[0]: fields[i] for i, vf in enumerate(vfields)}
+        else:
+            exprs = dict(fields)
+            if set(exprs) != {f for f, _ in vfields}:
+                raise SyntaxError(
+                    f"{ename}.{vname} 构造需给出全部载荷字段 {[f for f, _ in vfields]}")
         addr = self.alloc_struct(fn, ename)
         fn.emit("store", addr, ("imm", 0), ("imm", vidx))
         off = 1
@@ -1589,7 +1599,7 @@ class Lower:
             if sname is None:
                 raise SyntaxError(f"原生后端不支持的结构体字面量 {'.'.join(path)}")
             return self.lower_struct_lit(sname, fields, fn, env)
-        if k == "enumlit":
+        if k in ("enumlit", "enumlit_pos"):
             return self.lower_enum_lit(e, fn, env)
         if k == "match":
             return self.lower_match(e, fn, env, as_expr=True)
