@@ -89,6 +89,14 @@
 | `@simd` | **1 µs** |
 | 加速比 | **4×** |
 
+### 3.4b f64 点积（`bench/dot_bench.qma`，1024 元素 ×2000，v1.60）
+
+| 版本 | 每次 |
+|---|---|
+| 标量 | 约 1850 ns |
+| `@simd` 点积（`acc += a[i] * b[i]`） | 约 535 ns |
+| 加速比 | **3.5×** |
+
 ### 3.5 并发原语（`bench/sync_bench.qma`，rdtsc，n=2e6，单线程）
 
 | 操作 | cycles/iter |
@@ -118,6 +126,7 @@ python tools/stage0/qlm_cli.py run bench/gbench.qma     --target win
 python tools/stage0/qlm_cli.py run bench/bench_str.qma  --target win
 python tools/stage0/qlm_cli.py run bench/find_bench.qma --target win
 python tools/stage0/qlm_cli.py run bench/simd_bench.qma --target win
+python tools/stage0/qlm_cli.py run bench/dot_bench.qma  --target win
 python tools/stage0/qlm_cli.py run bench/sync_bench.qma --target win
 ```
 
