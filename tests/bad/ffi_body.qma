@@ -1,0 +1,12 @@
+// ffi_body.qma：@ffi 声明带函数体必须编译期拒绝（v1.87）
+// 符号在 DLL 里，函数体无处发射——写出来就说明作者混淆了"声明"与"实现"。
+module ffi_body
+
+@ffi("kernel32.dll")
+fn GetTickCount64() -> int {
+    return 0
+}
+
+fn main() {
+    print(GetTickCount64())
+}

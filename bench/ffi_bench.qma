@@ -1,0 +1,96 @@
+// ffi_bench.qma：FFI 调用开销与批量吞吐（v1.87）
+// 三段，各 3 轮取最小值（本机 VBS 噪声大，见 docs/06-status.md 口径）：
+//   [1] 调用开销：原生空函数 vs @ffi 调 kernel32!GetCurrentProcessId
+//   [2] 批量拷贝：内建 mem_copy vs ntdll!RtlMoveMemory（1 MiB x 100）
+//   [3] 串长度：内建 len vs kernel32!lstrlenA（1 MiB）
+// 输出顺序：nop_ns pid_ns copy_mbs rtl_mbs len_ns lstrlen_ns
+module ffi_bench
+
+@ffi("kernel32.dll", "GetCurrentProcessId")
+fn ffi_pid() -> int
+
+@ffi("ntdll.dll", "RtlMoveMemory")
+fn rtl_move(dst: int, src: int, n: int)
+
+@ffi("kernel32.dll", "lstrlenA")
+fn lstrlen(p: int) -> int
+
+// 递归函数不会被内联——它是"真调用"的基线（空函数会被内联掉，测不到调用开销）
+fn nop(x: int) -> int {
+    if x <= 0 { return 0 }
+    return nop(x - 1)
+}
+
+fn main() {
+    let n = 2000000
+    let mut best_nop = 0 - 1
+    let mut best_pid = 0 - 1
+    let mut r = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let mut i = 0
+        let mut acc = 0
+        while i < n { acc = acc + nop(0)  i = i + 1 }
+        let t1 = now_ns()
+        let mut j = 0
+        while j < n { ffi_pid()  j = j + 1 }
+        let t2 = now_ns()
+        let a = (t1 - t0) / n
+        let b = (t2 - t1) / n
+        if best_nop < 0 || a < best_nop { best_nop = a }
+        if best_pid < 0 || b < best_pid { best_pid = b }
+        r = r + 1
+    }
+    print(best_nop)
+    print(best_pid)
+
+    // ---- 批量拷贝 1 MiB ----
+    let sz = 1048576
+    let src = mem_alloc(sz)
+    let dst = mem_alloc(sz)
+    mem_zero(src, sz)
+    mem_zero(dst, sz)
+    let mut best_copy = 0 - 1
+    let mut best_rtl = 0 - 1
+    r = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let mut i = 0
+        while i < 100 { mem_copy(dst, src, sz)  i = i + 1 }
+        let t1 = now_ns()
+        let mut j = 0
+        while j < 100 { rtl_move(dst, src, sz)  j = j + 1 }
+        let t2 = now_ns()
+        if best_copy < 0 || t1 - t0 < best_copy { best_copy = t1 - t0 }
+        if best_rtl < 0 || t2 - t1 < best_rtl { best_rtl = t2 - t1 }
+        r = r + 1
+    }
+    // 100 MiB = 104857600 字节；MB/s（1 MB = 1e6 字节）= 字节 * 1000 / ns
+    print(104857600 * 1000 / best_copy)
+    print(104857600 * 1000 / best_rtl)
+
+    // ---- 串长度 1 MiB（str 头 + 字节区，末尾 NUL）----
+    let s = str_alloc(sz)
+    let mut k = 0
+    while k < sz { mem_store8(s, k, 65)  k = k + 1 }
+    let mut best_len = 0 - 1
+    let mut best_lstr = 0 - 1
+    r = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let mut i = 0
+        let mut acc = 0
+        while i < 1000 { acc = acc + len(s)  i = i + 1 }
+        let t1 = now_ns()
+        let p = cstr(s)
+        let mut j = 0
+        let mut acc2 = 0
+        while j < 1000 { acc2 = acc2 + lstrlen(p)  j = j + 1 }
+        let t2 = now_ns()
+        if best_len < 0 || t1 - t0 < best_len { best_len = t1 - t0 }
+        if best_lstr < 0 || t2 - t1 < best_lstr { best_lstr = t2 - t1 }
+        r = r + 1
+    }
+    print(best_len)
+    print(best_lstr)
+}

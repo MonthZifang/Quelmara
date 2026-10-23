@@ -1,0 +1,11 @@
+// ffi_str_param.qma：@ffi 形参写 str 必须编译期拒绝（v1.87）
+// str 是长度前缀 ABI（[len][bytes]），末尾没有 NUL；C 侧按 char* 读会越界。
+// 正确写法：形参写 int，调用点传 cstr(s)。
+module ffi_str_param
+
+@ffi("kernel32.dll", "lstrlenA")
+fn lstrlen(p: str) -> int
+
+fn main() {
+    print(lstrlen("x"))
+}

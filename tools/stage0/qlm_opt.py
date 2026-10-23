@@ -34,6 +34,7 @@ LICM 的安全性论证:
 #   ('load'/'load8', dst, base, idx) ('store'/'store8', base, idx, src)
 #   ('movaddr', dst, gid) ('frameaddr', dst, word)
 #   ('syscall', dst|None, num, [6 args]) ('winapi', dst|None, name, [args])
+#   ('ffi', dst|None, dll, sym, kinds, ret, [args])   v1.87 PE 导入调用
 #   ('args', [dsts]) ('winargs', [dsts])
 # ---------------------------------------------------------------------------
 
@@ -73,6 +74,8 @@ def vreg_mentions(ins):
         return [ins[1]], ints([ins[2], ins[3]])
     if op == "vdotd":
         return [ins[1]], ints([ins[2], ins[3], ins[4]])
+    if op == "vdot":
+        return [ins[1]], ints([ins[2], ins[3], ins[4]])
     if op == "vsum":
         return [ins[1]], ints([ins[2], ins[3]])
     if op == "atomic":
@@ -108,6 +111,9 @@ def vreg_mentions(ins):
         return ints([ins[1]]), ints(ins[3])
     if op == "winapi":
         return ints([ins[1]]), ints(ins[3])
+    if op == "ffi":
+        # dll/sym/kinds/ret 是字符串/元组常量，不是 vreg
+        return ints([ins[1]]), ints(ins[6])
     if op == "args":
         return list(ins[1]), []
     if op == "winargs":
@@ -116,6 +122,10 @@ def vreg_mentions(ins):
         return [], []
     if op == "xchg":
         return [ins[1]], ints([ins[2], ins[3]])
+    if op == "ldar":
+        return [ins[1]], ints([ins[2]])
+    if op == "stlr":
+        return [], ints([ins[1], ins[2]])
     if op == "cpuid_sha":
         return [ins[1]], []
     if op == "cpuid_aes":
@@ -394,7 +404,7 @@ def opt_cse(fn):
     for ins in fn.instrs:
         op = ins[0]
         if op in BRANCHES or op in ("label", "args", "call", "syscall",
-                                    "store", "store8"):
+                                    "ffi", "store", "store8"):
             table.clear()
             new.append(ins)
             continue
@@ -755,7 +765,8 @@ def opt_strength_reduce(fn, rounds=3):
 _LAT = {"mov": 1, "neg": 1, "not": 1, "cmpset": 2,
         "load": 5, "load8": 5, "load32": 5, "store": 1, "store8": 1,
         "movaddr": 1, "call": 6, "callr": 6, "cssub": 2, "syscall": 20,
-        "winapi": 12, "args": 1, "winargs": 1, "spawn_child": 8, "xchg": 6}
+        "winapi": 12, "ffi": 12, "args": 1, "winargs": 1, "spawn_child": 8,
+        "xchg": 6}
 _BIN_LAT = {"add": 1, "sub": 1, "and": 1, "or": 1, "xor": 1,
             "shl": 1, "shr": 1, "sar": 1,
             "mul": 3, "umulhi": 5, "div": 25, "mod": 25}
@@ -796,7 +807,7 @@ def check_suspicious_loops(fns):
 
 
 
-_EFF = ("call", "callr", "syscall", "winapi", "spawn_child", "xchg", "ret",
+_EFF = ("call", "callr", "syscall", "winapi", "ffi", "spawn_child", "xchg", "ret",
         "store", "store8", "load", "load8", "load32",
         # v1.62 调试标记：line/dbgvar/dbgparam 是"语句边界 + 变量绑定"的
         # 位置钉。列表调度会把无依赖指令浮到基本块尾部——行号标记若可浮动，
@@ -806,12 +817,15 @@ _EFF = ("call", "callr", "syscall", "winapi", "spawn_child", "xchg", "ret",
         "line", "dbgvar", "dbgparam",
         # vsum 读一整段内存（最多 count*8 字节）：必须与访存保持原序，
         # 否则调度器会把它挪到数组初始化之前（v1.8 实测：归约少一个元素）。
-        "vsum", "vsumd", "vdotd",
+        "vsum", "vsumd", "vdotd", "vdot",
         # atomic 是读改写，mfence 是全屏障：都不可被调度器跨越或重排
         # （v1.10 实测纪律：atomic 忘登记 _EFF 会造成计数静默丢失）。
         # rdtsc 同理——它虽无副作用，但被挪过 call 会让测量差值变成
         # 垃圾（实测 mutex 段 2e6 次锁操作只报 18 cycles）。
         "atomic", "mfence", "rdtsc",
+        # acquire/release 访存（v1.98）：与 load/store 同组——顺序语义是它们
+        # 存在的唯一理由，调度器一旦跨越就白写了。
+        "ldar", "stlr",
         # SHA-NI / XMM 族（v1.15）：xmm_ld/st 读内存，sha_* 有外部语义
         # （xmm 固定槽协议）——调度器一律不跨越、不重排
         "cpuid_sha", "cpuid_aes", "cpuid_pclmul", "xmm_ld", "xmm_st",
@@ -1593,6 +1607,9 @@ def _subst_vregs(ins, sub):
     if op == "winapi":
         return ("winapi", sub(ins[1]) if ins[1] is not None else None,
                 ins[2], L(ins[3]))                       # API 名不是 vreg
+    if op == "ffi":
+        return ("ffi", sub(ins[1]) if ins[1] is not None else None,
+                ins[2], ins[3], ins[4], ins[5], L(ins[6]))   # dll/sym 不是 vreg
     if op == "args":
         return ("args", [sub(x) for x in ins[1]])
     if op == "winargs":
@@ -1615,6 +1632,10 @@ def _subst_vregs(ins, sub):
                      (sub(v) if isinstance(v, int) else v) for v in ins)
     if op == "xchg":
         return ("xchg", sub(ins[1]), S(ins[2]), S(ins[3]))
+    if op == "ldar":
+        return ("ldar", sub(ins[1]), S(ins[2]))
+    if op == "stlr":
+        return ("stlr", S(ins[1]), S(ins[2]))
     if op == "atomic":
         # ('atomic', sub, dst, addr, a[, b])：addr/a/b 都是 vreg 位置。
         # 漏登记的后果（v1.10 实测）：copy_prop 塌掉 addr 的定义 mov，

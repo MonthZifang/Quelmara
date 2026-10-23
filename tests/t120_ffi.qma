@@ -1,0 +1,97 @@
+// t120_ffi.qma：@ffi 调用系统库（v1.87）
+// 覆盖：int/void/bool/f64/f32 返回与形参、栈传参（5/7 参）、多 DLL
+//       （kernel32 / ntdll / ucrtbase）、cstr/cstr_read 往返、隐式 int->f64。
+// 全部断言与机器无关：不依赖具体 PID/时间值，只校验关系与魔数。
+module t120_ffi
+
+@ffi("kernel32.dll")
+fn GetTickCount64() -> int
+
+@ffi("kernel32.dll", "Sleep")
+fn sleep_ms(ms: int)
+
+@ffi("kernel32.dll", "GetCurrentProcessId")
+fn current_pid() -> int
+
+@ffi("kernel32.dll", "IsDebuggerPresent")
+fn debugger_present() -> bool
+
+@ffi("kernel32.dll", "lstrlenA")
+fn lstrlen(p: int) -> int
+
+@ffi("kernel32.dll", "GetModuleFileNameA")
+fn module_path(hmod: int, buf: int, cap: int) -> int
+
+@ffi("kernel32.dll", "CreateFileA")
+fn create_file(name: int, access: int, share: int, sec: int, disp: int,
+               flags: int, tmpl: int) -> int
+
+@ffi("kernel32.dll", "ReadFile")
+fn read_file(h: int, buf: int, n: int, got: int, ov: int) -> bool
+
+@ffi("kernel32.dll", "CloseHandle")
+fn close_handle(h: int) -> bool
+
+@ffi("ntdll.dll", "RtlMoveMemory")
+fn rtl_move(dst: int, src: int, n: int)
+
+@ffi("ucrtbase.dll", "sqrt")
+fn c_sqrt(x: f64) -> f64
+
+@ffi("ucrtbase.dll", "pow")
+fn c_pow(x: f64, y: f64) -> f64
+
+@ffi("ucrtbase.dll", "sqrtf")
+fn c_sqrtf(x: f32) -> f32
+
+fn main() {
+    // ---- 1. int 返回 + void 返回 + 单调时钟 ----
+    let t0 = GetTickCount64()
+    sleep_ms(1)
+    let t1 = GetTickCount64()
+    assert(t1 >= t0, "GetTickCount64 必须单调不减")
+    assert(current_pid() > 0, "GetCurrentProcessId 必须为正")
+
+    // ---- 2. bool 返回（BOOL 是 32 位，按零扩展读） ----
+    assert(debugger_present() == false, "测试进程不应被调试")
+
+    // ---- 3. str -> C 串 -> str 往返 ----
+    assert(lstrlen(cstr("hello")) == 5, "lstrlenA(cstr(\"hello\")) 应为 5")
+    assert(lstrlen(cstr("")) == 0, "空串长度应为 0")
+    assert(lstrlen(cstr("你好")) == 6, "UTF-8 中文是 6 字节")
+    let buf = mem_alloc(64)
+    rtl_move(buf, cstr("abcdef"), 6)
+    mem_store8(buf, 6, 0)
+    assert(cstr_read(buf) == "abcdef", "cstr_read 往返必须逐字节一致")
+
+    // ---- 4. 浮点：f64 返回 / f64 双参 / f32 返回 ----
+    let s2 = c_sqrt(2.0)
+    assert(s2 > 1.4142135 && s2 < 1.4142136, "sqrt(2) 精度不符")
+    assert(c_pow(2.0, 10.0) == 1024.0, "pow(2,10) 应为 1024")
+    assert(c_sqrtf(9.0) == 3.0, "sqrtf(9) 应为 3")
+    // 隐式转换：整数实参自动拓宽成 f64（C 口径）
+    assert(c_sqrt(9) == 3.0, "c_sqrt(9) 应隐式转成 f64")
+
+    // ---- 5. 栈传参：7 参（后 3 个落栈）+ 5 参（第 5 个落栈）----
+    // 用自身 exe 做只读打开——不写任何文件，也不依赖固定路径。
+    let pb = mem_alloc(512)
+    let n = module_path(0, pb, 512)
+    assert(n > 0, "GetModuleFileNameA 必须返回路径长度")
+    let path = cstr_read(pb)
+    assert(len(path) > 4, "路径不应为空")
+    // GENERIC_READ(0x80000000) / FILE_SHARE_READ(1) / OPEN_EXISTING(3)
+    // FILE_ATTRIBUTE_NORMAL(0x80)
+    let h = create_file(cstr(path), 0x80000000, 1, 0, 3, 0x80, 0)
+    assert(h != 0 - 1, "CreateFileA 应成功（7 参，3 个走栈）")
+    let rbuf = mem_alloc(64)
+    let got = mem_alloc(8)
+    let ok = read_file(h, rbuf, 64, got, 0)
+    assert(ok, "ReadFile 应成功（5 参，第 5 个走栈）")
+    assert(mem_load64(got, 0) == 64, "ReadFile 应读满 64 字节")
+    // PE 魔数：'M' 'Z'
+    assert(mem_load8(rbuf, 0) == 77, "自身 exe 首字节应为 M")
+    assert(mem_load8(rbuf, 1) == 90, "自身 exe 次字节应为 Z")
+    assert(close_handle(h), "CloseHandle 应成功")
+
+    print("ffi ok")
+}

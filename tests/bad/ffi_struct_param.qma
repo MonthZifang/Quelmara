@@ -1,0 +1,13 @@
+// ffi_struct_param.qma：@ffi 形参写 struct 必须编译期拒绝（v1.87）
+// Win64 的按值结构体传参（<=8 字节按整数、>8 字节按引用 + 隐式指针）
+// 未实现；显式传指针是当前口径。
+module ffi_struct_param
+
+struct Point { x: int, y: int }
+
+@ffi("user32.dll", "MessageBoxA")
+fn box(p: Point) -> int
+
+fn main() {
+    print(0)
+}

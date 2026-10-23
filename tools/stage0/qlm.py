@@ -135,6 +135,10 @@ TWO_CHAR = {"->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", ".
             "<<", ">>", "&=", "|=", "^=", "%="}
 ONE_CHAR = "(){}[],:.=<>+-*/%!?@&|^~"
 
+# 闭包值的字段表（v1.95）：word0 = 代码地址，word1 = 捕获环境指针（0 = 无捕获）。
+# 与接口值 {data, vt} 同构——两字聚合，拷贝/传参/返回全走既有聚合 ABI。
+CLOSURE_FIELDS = (("code", ("named", "int")), ("env", ("named", "int")))
+
 SYMBOLS = sorted(FOUR_CHAR | THREE_CHAR | TWO_CHAR | set(ONE_CHAR), key=len, reverse=True)
 
 
@@ -294,6 +298,132 @@ def tokenize(src, keep_comments=False):
 
 
 # ---------------------------------------------------------------------------
+# 1b. doc comment（`///` / `//!`）—— 语言层语法的唯一实现（v1.92）
+#
+# 设计取舍：doc comment **不进记号流**。词法上它与 `//` 一样被丢弃，语法
+# 分析器看不到它；前端用本节的扫描器按行把文档挂到声明上（f["doc"] /
+# Parser.type_docs）。理由：
+#   * lexdiff / parsediff 的对拍契约是"记号序列 + 声明级 AST"，把文档塞进
+#     记号流会让两份实现同时改，收益为零（文档不参与语义）；
+#   * 文档是**声明级**事实，按行号关联比按记号关联更直接（声明行号本来
+#     就在 f["line"] 里）。
+# 语法规则见 docs/02-language.md §2.4；消费方见 tools/stage0/qlm_doc.py。
+# ---------------------------------------------------------------------------
+
+_DOC_KINDS = ("fn", "struct", "enum", "interface")
+
+
+def _doc_text(rest):
+    """`///` 之后的部分 -> 文档文本：剥一个前导空格与行尾 CR。"""
+    if rest.startswith(" "):
+        rest = rest[1:]
+    return rest.rstrip("\r")
+
+
+def _decl_head(s):
+    """顶层声明行 -> (kind, name, is_pub)；不是声明返回 None。
+
+    只认行首写法（无缩进由调用方保证）：`[pub] [const] fn|struct|enum|interface`。
+    """
+    pub = False
+    if s.startswith("pub "):
+        pub, s = True, s[4:]
+    if s.startswith("const "):
+        s = s[6:]
+    for kind in _DOC_KINDS:
+        if s.startswith(kind + " "):
+            rest = s[len(kind) + 1:]
+            j = 0
+            while j < len(rest) and (rest[j].isalnum() or rest[j] == "_"):
+                j += 1
+            if j:
+                return kind, rest[:j], pub
+            return None
+    return None
+
+
+def scan_doc_comments(src):
+    """扫描 doc comment -> (module_doc, blocks, orphans)。
+
+    module_doc: `//!` 行文本列表（只认文件开头、代码之前的连续块）
+    blocks:     [(声明行号, kind, name, is_pub, [文档行])]，按出现顺序
+    orphans:    [(行号, 原因)] —— 写了 `///` 却没挂上声明的块
+
+    规则（与 02-language.md §2.4 一一对应）：
+      * `///` 必须**紧贴**下一行的顶层声明；空行、`//` 注释或其它代码即脱离；
+      * 顶层的 `@注解` 行不算脱离（`///` + `@derive` + `pub struct` 合法）；
+      * `////`（4 个及以上斜杠）与 `//` 是普通注释，不产生文档；
+      * 缩进的 `///`（函数体 / impl 内部）按普通注释处理，不收也不报错；
+      * `///` 后一个空格被剥掉；`///` 独占一行 = 空串（Markdown 段落分隔）。
+    """
+    lines = src.splitlines()
+    n = len(lines)
+    module_doc, blocks, orphans = [], [], []
+
+    i = 0
+    while i < n:
+        raw = lines[i]
+        if raw.startswith("//!"):
+            module_doc.append(_doc_text(raw[3:]))
+            i += 1
+            continue
+        if not raw.strip():
+            i += 1
+            continue
+        break
+
+    pending = None                       # (起始行号, [文本])
+    while i < n:
+        raw = lines[i]
+        if raw.startswith("///") and not raw.startswith("////"):
+            if pending is None:
+                pending = (i + 1, [])
+            pending[1].append(_doc_text(raw[3:]))
+            i += 1
+            continue
+        if pending is not None:
+            if not raw.strip():
+                orphans.append((pending[0], "doc 块与声明之间有空行"))
+                pending = None
+                i += 1
+                continue
+            if raw[:1] in (" ", "\t"):
+                orphans.append((pending[0], "doc 块后面不是顶层声明（缩进）"))
+                pending = None
+                i += 1
+                continue
+            if raw.startswith("@"):
+                i += 1                   # 注解行：文档继续等待真正的声明
+                continue
+            head = _decl_head(raw)
+            if head:
+                blocks.append((i + 1, head[0], head[1], head[2], pending[1]))
+            else:
+                orphans.append((pending[0], "doc 块后面不是顶层声明"))
+            pending = None
+        elif raw.startswith("//!"):
+            orphans.append((i + 1, "//! 只能出现在文件开头"))
+        i += 1
+    if pending is not None:
+        orphans.append((pending[0], "文件结尾的 doc 块没有声明"))
+    return module_doc, blocks, orphans
+
+
+def iter_decls(src):
+    """逐行找**顶层**声明 -> (行号, kind, name, is_pub)。
+
+    文档工具用它统计"公开 API 面"（含没有 `///` 的那些），与
+    scan_doc_comments 共用 _decl_head，保证两边认的声明是同一批。
+    """
+    for i, raw in enumerate(src.splitlines()):
+        if not raw or raw[0] in (" ", "\t"):
+            continue
+        head = _decl_head(raw)
+        if head:
+            yield i + 1, head[0], head[1], head[2]
+
+
+# ---------------------------------------------------------------------------
 # 2. 语法分析（递归下降）
 #    AST 节点：元组形式
 #      stmt: ('let',mut,name,expr) ('assign',name,op,expr)
@@ -312,14 +442,81 @@ def tokenize(src, keep_comments=False):
 # ---------------------------------------------------------------------------
 
 
+# 限定引用的内部编码分隔符（v1.99）：`模块串 \x01 名字`。
+# 解析期把模块信息**留在 AST 里**，load_program 才能按节点解析——
+# 这是 per-module mangling 的前提：同一个文件里 `helper()` 与 `lib.helper()`
+# 必须能落到两个不同的符号上（v1.44 的做法是"剥掉模块段 + 记一个集合"，
+# 集合无法区分这两个节点）。\x01 不可能出现在标识符里。
+QSEP = "\x01"
+
+
+def qref(imp, name):
+    """把限定引用编码成可解析的内部名字。"""
+    return imp + QSEP + name
+
+
+def parse_version(text, what, line):
+    """`"1.2.3"` / `"1.2"` / `"1"` -> (major, minor, patch)（v1.99）。
+
+    接受可选前缀 `>=` / `^` / `=`（都表示"至少这个版本、且同 major"）——
+    模块版本只用来**挡住不兼容的导入**，不做完整 semver 求解（那是 qpm 的活）。
+    """
+    t = text.strip()
+    for pre in (">=", "^", "="):
+        if t.startswith(pre):
+            t = t[len(pre):].strip()
+            break
+    parts = t.split(".")
+    if not 1 <= len(parts) <= 3 or any(not x.isdigit() for x in parts):
+        raise SyntaxError(
+            f"line {line}: {what} 的版本号 {text!r} 不合法——"
+            "写法是 \"1.2.3\" / \"1.2\" / \"1\"（可带 >= / ^ 前缀）")
+    nums = [int(x) for x in parts] + [0, 0]
+    return (nums[0], nums[1], nums[2])
+
+
 class Parser:
-    def __init__(self, toks, consts=None, generic_fns=None):
+    def __init__(self, toks, consts=None, generic_fns=None, ifaces=None,
+                 lenient_iface=False, src=None):
         self.toks, self.pos = toks, 0
+        # doc comment（v1.92）：src= 给出源码文本时按行号把 `///` 挂到声明上。
+        # 不给就完全跳过（第一次宽松扫描、单测里手工喂记号时不需要）。
+        # 快路径：源码里没有 `///` / `//!` 就一行都不扫。
+        self.module_doc = []
+        self.type_docs = {}        # 类型名 -> [文档行]（struct/enum/interface）
+        self._doc_by_line = {}     # 声明行号 -> [文档行]（fn 用）
+        if src is not None and ("///" in src or "//!" in src):
+            self.module_doc, blocks, _orphans = scan_doc_comments(src)
+            for line, kind, name, _pub, doc in blocks:
+                if kind == "fn":
+                    self._doc_by_line[line] = doc
+                else:
+                    self.type_docs[name] = doc
         self.structs = {}          # name -> [(field, type)]（预扫描先登记名字）
         self.enums = {}            # name -> [(variant, [(field, type)])]（预扫描先登记名字）
         self.decl_order = []       # [("struct"|"enum", name)] 声明顺序（C typedef 输出顺序）
         self.externs = {}          # name -> fdef（@extern("C") 声明，无函数体）
-        self.interfaces = {}       # name -> [(method, [param types], ret)]
+        # v1.87：@ffi("dll"[, "Symbol"]) 声明——自研 PE 后端按导入表解析的
+        # 外部函数。与 @extern("C") 的区别是**有 DLL 名**，因此能进导入表，
+        # 不需要系统链接器。
+        self.ffis = {}             # name -> fdef（带 fdef["ffi"] = {dll, sym}）
+        # 接口表。ifaces= 跨文件种子（v1.81，与 consts/generic_fns 同一批两遍
+        # 解析）：被导入文件声明的接口在这里可见，`impl T : Iface` 因此可以
+        # 写在别的文件里。种子同时带来接口值的 {data,vt} 两字布局。
+        self.interfaces = dict(ifaces) if ifaces else {}
+        self._iface_seed = set(ifaces) if ifaces else set()
+        # 内建接口 Drop（v1.93）：析构钩子。不注册成 struct——Drop 不是可装箱
+        # 的值类型，只是"这个类型有析构函数"的挂载点：
+        #   impl F : Drop { fn drop(f: F) { ... } }
+        # 每个文件都能直接写，不必自己声明接口。用户显式声明同名同签名的
+        # interface Drop 也走幂等分支（签名一致不报错）。
+        self.interfaces.setdefault(
+            "Drop", [("drop", [("named", "__self__")], ("named", "void"))])
+        self._lenient_iface = lenient_iface
+        # 宽松期"凭空登记"的接口名（v1.88）：第一遍扫描遇到 `impl T : Iface`
+        # 时接口可能还没被扫到，只能先占位。占位**不能**进跨文件种子——
+        # 否则"根本没声明的接口"会被第二遍当成合法种子放行（静默通过）。
+        self.iface_provisional = set()
         self.impls = {}            # (iface, type) -> {method: fdef}
         self.methods = {}          # (type, method) -> fdef（impl 里定义的实例方法）
         # pub 可见性（v1.43）：pub 标记跨模块导出；本 Parser 实例 = 一个文件。
@@ -330,6 +527,9 @@ class Parser:
         # 限定引用（import 串, 名字）见 self.qrefs（load_program 校验指向）。
         self.import_paths = set()
         self.qrefs = set()
+        # 模块版本（v1.99）：module util "1.2.3" 声明；import util ">=1.2" 要求。
+        self.mod_version = None    # (major, minor, patch) 或 None
+        self.import_reqs = {}      # import 串 -> (major, minor, patch)
         # 顶层 const，编译期内联。consts= 跨文件种子（load_program 两遍解析：
         # 第一遍收集各文件 const，第二遍带着全集重解析——import 侧的 const
         # 因此可见，std 库的槽位布局常量得以跨文件共享）。
@@ -358,11 +558,30 @@ class Parser:
         # 本文件定义的泛型模板（种子里的不算）：类型约束名要等 interface
         # 全部解析完才能校验（v1.61），所以在 parse_program 末尾统一查。
         self._own_templates = []
+        # 待展开的 @derive（v1.96）：(类型名, 字段/变体表, "struct"|"enum", 行号)
+        self._pending_derives = []
+        # 运行时反射（v1.96）：非常量下标改写成按需生成的查表函数
+        self._refl_helpers = {}     # (what, 类型名) -> 生成的函数名
+        self._refl_pending = []     # [(函数名, what, 类型名, 行号)]
+        # 通用 token 宏（v1.96）：名字 -> (形参表, 宏体记号, 定义行号)。
+        # 与 @derive 同一层（语法分析之前），但**不理解宏体语义**：只搬运记号。
+        self.macros = {}
+        self._scan_macros()
         # 属性宏 @derive（v1.71）：类型名 -> (派生项列表, 行号)。
         # 在 _scan_derives 里从记号流中摘掉注解，parse_program 只看到普通声明。
         self.derives = {}
         self._scan_derives()
         self._prescan()
+        # 跨文件接口种子：接口值的布局（{data, vt} 两字）必须在本文件可见，
+        # 否则 `let s: Shape = ...` 找不到结构体布局（v1.81）。
+        for _iname in self._iface_seed:
+            self.structs.setdefault(
+                _iname, [("data", ("named", "int")),
+                         ("vt", ("named", "int"))])
+        # 闭包值布局（v1.95）：`closure` = {code, env} 两字，与接口值同构。
+        # 注册成结构体后，布局/拷贝/形参/返回值/vec 元素全部复用既有聚合机制；
+        # 用户在类型位写 `closure`（`let f: closure` / `fn apply(f: closure)`）。
+        self.structs.setdefault("closure", list(CLOSURE_FIELDS))
 
     def _prescan(self):
         """顶层预扫描：先把 struct 名字登记下来。
@@ -743,12 +962,54 @@ class Parser:
         t = self.peek()
         raise SyntaxError(f"line {t.line}: 期望 {val or kind}，得到 {t.val!r}")
 
+    # v1.87：@ffi 声明的绑定与类型校验（解析期就 fail-fast——
+    # 外部符号的参数宽度/寄存器类一旦写错，错在运行期是"垃圾值"，比崩溃更难查）
+    FFI_SCALARS = ("int", "bool", "f64", "f32")
+
+    def _bind_ffi(self, fdef, aargs, line):
+        """@ffi("dll") / @ffi("dll", "Symbol") -> fdef["ffi"] = {dll, sym}
+
+        口径：
+          * 只接受标量形参/返回（int/bool/f64/f32，返回可为 void）；
+            `str` 是长度前缀 ABI，C 侧要 NUL 结尾——用 `cstr(s)` 显式转换，
+            不在这里静默改写（静默转换会在调用点悄悄多一次分配）。
+          * 聚合/容器/切片一律拒绝：Win64 ABI 的按值结构体传参未实现。
+        """
+        name = fdef["name"]
+        if not 1 <= len(aargs) <= 2:
+            raise SyntaxError(
+                f'line {line}: @ffi 需要 1–2 个字符串参数：'
+                f'@ffi("kernel32.dll") 或 @ffi("kernel32.dll", "Symbol")')
+        if fdef["body"] is not None:
+            raise SyntaxError(f"line {line}: @ffi 声明不能带函数体（符号在 DLL 里）")
+        dll, sym = aargs[0], (aargs[1] if len(aargs) == 2 else name)
+        if not dll:
+            raise SyntaxError(f"line {line}: @ffi 的 DLL 名不能为空")
+        for pname, pt in fdef["params"]:
+            if not (pt[0] == "named" and pt[1] in self.FFI_SCALARS):
+                raise SyntaxError(
+                    f"line {line}: @ffi 函数 {name!r} 的形参 {pname!r} 类型是 "
+                    f"{pt[1] if pt[0] == 'named' else pt[0]}——FFI 只接受 "
+                    f"int/bool/f64/f32。str 请改声明为 int 并传 cstr(s)；"
+                    f"缓冲区请用 mem_alloc 并传指针")
+        rt = fdef["ret"]
+        if not (rt[0] == "named" and (rt[1] in self.FFI_SCALARS or rt[1] == "void")):
+            raise SyntaxError(
+                f"line {line}: @ffi 函数 {name!r} 的返回类型不支持"
+                f"（只接受 int/bool/f64/f32/void）")
+        fdef["ffi"] = {"dll": dll, "sym": sym}
+        self.ffis[name] = fdef
+
     def parse_program(self):
         mod, imports, fns, tests = None, [], [], []
         while not self.at("EOF"):
             if self.at("module"):
                 self.next()
                 mod = self.eat("NAME").val
+                if self.at("STR"):
+                    # 模块版本（v1.99）：module util "1.2.3"
+                    vt = self.next()
+                    self.mod_version = parse_version(vt.val, "module", vt.line)
             elif self.at("import"):
                 self.next()
                 path = [self.eat("NAME").val]
@@ -757,6 +1018,11 @@ class Parser:
                     path.append(self.eat("NAME").val)
                 imports.append(".".join(path))
                 self.import_paths.add(".".join(path))
+                if self.at("STR"):
+                    # 版本要求（v1.99）：import util ">=1.2"
+                    vt = self.next()
+                    self.import_reqs[".".join(path)] = parse_version(
+                        vt.val, "import", vt.line)
             elif self.at("const"):
                 # const NAME [: T] = <编译期可求值>：解析期内联，无运行时存储。
                 # v1.11：右值支持整型算术（+ - * / % 与括号、const 引用），
@@ -782,14 +1048,15 @@ class Parser:
                 self.consts[cname] = self.parse_const_value(cname)
             elif self.at("NAME", "pub"):
                 # pub 可见性（v1.43）：上下文关键字——只在顶层声明位识别，
-                # 函数内的 pub 变量名不受影响。只作用于顶层 fn/struct/enum；
-                # const 本就解析期内联全局共享、interface 与 impl 必须同源
-                # 文件（既有边界），都不需要 pub。
+                # 函数内的 pub 变量名不受影响。作用于顶层 fn/struct/enum；
+                # interface 自 v1.81 起也可 pub（跨文件 impl 的前提）。
+                # const 本就解析期内联全局共享，不需要 pub。
                 self.next()
                 nxt = self.peek()
-                if nxt.kind not in ("fn", "struct", "enum") and nxt.val not in ("fn", "struct", "enum"):
+                if nxt.kind not in ("fn", "struct", "enum") and nxt.val not in (
+                        "fn", "struct", "enum", "interface"):
                     raise SyntaxError(
-                        f"line {nxt.line}: pub 只支持 fn/struct/enum，"
+                        f"line {nxt.line}: pub 只支持 fn/struct/enum/interface，"
                         f"得到 {nxt.val!r}")
                 self._pending_pub = True
             elif self.at("fn"):
@@ -810,36 +1077,48 @@ class Parser:
                 else:
                     fns.append(fdef)
             elif self.at("SYM", "@"):
-                # 注解：@extern("C") fn ... （v0.11）
+                # 注解：@extern("C") fn ... （v0.11）/ @ffi("dll"[, "Sym"])（v1.87）
+                # 参数一律是字符串字面量，逗号分隔（v1.87 起支持多参——
+                # @ffi 需要 DLL 名 + 可选符号名）。
                 annots = []
                 while self.at("SYM", "@"):
                     at = self.next()
                     aname = self.eat("NAME").val
-                    aarg = None
+                    aargs = []
                     if self.at("SYM", "("):
                         self.next()
-                        if self.at("STR"):
-                            aarg = self.next().val
+                        while not self.at("SYM", ")"):
+                            if not self.at("STR"):
+                                raise SyntaxError(
+                                    f"line {at.line}: @{aname} 的参数必须是"
+                                    f"字符串字面量")
+                            aargs.append(self.next().val)
+                            if self.at("SYM", ","):
+                                self.next()
                         self.eat("SYM", ")")
-                    annots.append((aname, aarg, at.line))
+                    annots.append((aname, aargs, at.line))
                 if not self.at("fn"):
                     raise SyntaxError(
                         f"line {annots[-1][2]}: 注解只能用于 fn 声明")
                 fdef = self.parse_fn()
-                fdef["annots"] = [(a, g) for a, g, _ in annots]
-                if fdef["body"] is not None and any(a == "extern" for a, _, _ in annots):
+                fdef["annots"] = [(a, (g[0] if len(g) == 1 else (tuple(g) or None)))
+                                  for a, g, _ in annots]
+                if fdef["body"] is not None and any(
+                        a in ("extern", "ffi") for a, _, _ in annots):
                     raise SyntaxError(
-                        f"line {annots[-1][2]}: @extern 声明不能带函数体")
-                for aname, aarg, line in annots:
+                        f"line {annots[-1][2]}: @extern/@ffi 声明不能带函数体")
+                for aname, aargs, line in annots:
                     if aname == "extern":
-                        if aarg != "C":
+                        if aargs != ["C"]:
                             raise SyntaxError(
-                                f"line {line}: @extern 只支持 \"C\"，得到 {aarg!r}")
+                                f"line {line}: @extern 只支持 \"C\"，得到 {aargs!r}")
                         fdef["extern"] = True
                         self.externs[fdef["name"]] = fdef
+                    elif aname == "ffi":
+                        self._bind_ffi(fdef, aargs, line)
                     elif aname in ("simd", "no_preempt"):
                         # v1.8：函数级提示/约定，语义见 docs/LANG.md
-                        if aarg is not None:
+                        if aargs:
                             raise SyntaxError(f"line {line}: @{aname} 不接受参数")
                     elif aname == "rc":
                         # @rc 只允许出现在返回 rc[T] 的函数上（借用检查用）
@@ -847,11 +1126,19 @@ class Parser:
                     else:
                         raise SyntaxError(
                             f"line {line}: 未知注解 @{aname}"
-                            f"（支持 @extern(\"C\") / @simd / @no_preempt）")
+                            f"（支持 @extern(\"C\") / @ffi(\"dll\"[, \"Sym\"]) / "
+                            f"@simd / @no_preempt）")
+                if fdef.get("extern") and fdef.get("ffi"):
+                    raise SyntaxError(
+                        f"line {fdef['line']}: @extern 与 @ffi 不能同时出现在"
+                        f" {fdef['name']!r} 上（一个是 C 后端原型，一个是 PE 导入）")
                 fns.append(fdef)
             elif self.at("interface"):
                 self.next()
                 iname = self.eat("NAME").val
+                if self._pending_pub:
+                    self.pub_types.add(iname)     # pub interface（v1.81）
+                    self._pending_pub = False
                 self.eat("SYM", "{")
                 msigs = []
                 while not self.at("SYM", "}"):
@@ -876,7 +1163,15 @@ class Parser:
                         rty = self.parse_type()
                     msigs.append((mname, ptypes, rty))
                 self.eat("SYM", "}")
+                if iname in self.interfaces and self.interfaces[iname] != msigs:
+                    # 两遍解析会把本文件自己的声明也当种子送回来（幂等），
+                    # 只有"同名不同签名"才是真冲突（v1.81）
+                    raise SyntaxError(
+                        f"line {line}: 接口 {iname} 在多个模块中声明不一致"
+                        f"（跨文件接口必须同名同签名）")
                 self.interfaces[iname] = msigs
+                # 真声明覆盖宽松占位：这个名字从此不再是"凭空登记"（v1.88）
+                self.iface_provisional.discard(iname)
                 # 接口值 = {data, vt} 两字（v1.9 动态分发）：
                 #   data = 堆上装箱的 payload 指针；vt = vtable 地址（代码段）
                 # 注册成 struct 后，布局/复制/vec[Shape] 元素全部复用既有机制。
@@ -917,7 +1212,22 @@ class Parser:
                 self.eat("SYM", ":")
                 iname = self.eat("NAME").val
                 if iname not in self.interfaces:
-                    raise SyntaxError(f"line {self.peek().line}: 未声明的接口 {iname}")
+                    if self._lenient_iface:
+                        # 第一遍收集期（load_program 的 const/泛型/接口扫描）：
+                        # 接口可能声明在另一个还没扫到的文件里，先登记空签名，
+                        # 真正的校验在第二遍（带全量种子）做。v1.81
+                        # 占位名记进 iface_provisional：它不进跨文件种子，
+                        # 否则"完全没声明"的接口会被第二遍误当成合法种子（v1.88）
+                        self.interfaces[iname] = []
+                        self.iface_provisional.add(iname)
+                        self.structs.setdefault(
+                            iname, [("data", ("named", "int")),
+                                    ("vt", ("named", "int"))])
+                    else:
+                        raise SyntaxError(
+                            f"line {self.peek().line}: 未声明的接口 {iname}"
+                            f"（接口可以声明在别的模块里，但必须被 import，"
+                            f"且要加 pub）")
                 if targs is not None and sname not in self.generic_structs \
                         and sname not in self.generic_enums:
                     raise SyntaxError(
@@ -971,6 +1281,13 @@ class Parser:
                     fd = self.parse_fn()
                     bodies[fd["name"]] = fd
                 self.eat("SYM", "}")
+                if (iname, tname) in self.impls:
+                    # v1.93：同一 (类型, 接口) 只能有一个 impl。此前是静默
+                    # 覆盖——两个 impl 里后写的赢，对 Drop 尤其危险（两个
+                    # 析构函数，谁生效看书写顺序）。
+                    raise SyntaxError(
+                        f"line {impl_tok.line}: impl {tname} : {iname} 重复实现"
+                        f"（同一类型在同一接口上只能有一个 impl）")
                 self.impls[(iname, tname)] = bodies
                 sig = {m: (pt, rt) for m, pt, rt in self.interfaces[iname]}
                 for mname, fd in bodies.items():
@@ -985,16 +1302,16 @@ class Parser:
                     fd["iface_sig"] = sig
                     prev = self.methods.get((tname, mname))
                     if prev is not None and prev.get("impl_iface") != iname:
-                        # 同一类型在两个接口里有同名方法：mangling 会撞车，
-                        # 现在没有消歧义规则，直接报错比静默覆盖好。
-                        raise SyntaxError(
-                            f"{tname}.{mname} 同时出现在 impl {tname} : "
-                            f"{prev.get('impl_iface')} 与 impl {tname} : {iname} 里；"
-                            f"同名方法跨接口暂不支持（请改名）")
-                    self.methods[(tname, mname)] = fd
+                        # 同一类型在两个接口里有同名方法（v1.81）：按接口名
+                        # 二次 mangling（Type__Iface__m），两条都进 fns。
+                        # 静态调用 `c.m()` 从此是歧义（后端报错并指引走接口值），
+                        # vtable 派发按各接口的槽位各走各的。
+                        fd["name"] = f"{tname}__{iname}__{mname}"
+                    else:
+                        self.methods[(tname, mname)] = fd
                     fns.append(fd)
             elif self.at("struct"):
-                self.next()
+                dline = self.next().line
                 name = self.eat("NAME").val
                 if self._pending_pub:
                     self.pub_types.add(name)
@@ -1051,6 +1368,13 @@ class Parser:
                         self.next()
                 self.eat("SYM", "}")
                 self._cur_struct_tparams = None
+                # v1.96：按值自包含的聚合没有有限布局，必须在声明处拦下——
+                # 否则尺寸计算会无限递归（RecursionError 指不到源码行）
+                for _fn2, _ft2 in fields:
+                    if _ft2 == ("named", name):
+                        raise SyntaxError(
+                            f"line {dline}: struct {name} 不能按值包含自身"
+                            f"（用 vec[{name}] / map / chan 间接引用）")
                 if stparams:
                     # _prescan 把 `struct NAME` 当普通结构体登记了空字段占位，
                     # 模板必须摘掉——否则 `Box { }` 会被当成零字段结构体
@@ -1067,13 +1391,16 @@ class Parser:
                     self.structs[name] = fields
                     self.decl_order.append(("struct", name))
                     if name in self.derives:
-                        # 属性宏展开（v1.71）：字段表刚齐，就地生成派生函数。
-                        # 放在这里而不是 parse_program 末尾——生成的方法要能
-                        # 被**同一文件后面**的函数直接调用（无前向引用问题）。
-                        self._expand_derive(name, fields, "struct",
-                                            self.derives[name][1], fns, imports)
+                        # 属性宏展开（v1.71 / v1.96）：登记到文件末尾统一展开。
+                        # 不在声明处就地展开，是因为字段类型可能是**后面**才
+                        # 声明的 struct/enum（`_prescan` 只登记了名字，变体表
+                        # 还是空的）——就地展开会在 `_zero_lit` / 嵌套检查上
+                        # 读到半成品。派生函数是普通函数，展开顺序不影响调用。
+                        self._pending_derives.append(
+                            (name, fields, "struct", self.derives[name][1],
+                             len(fns)))
             elif self.at("enum"):
-                self.next()
+                eline = self.next().line
                 name = self.eat("NAME").val
                 if self._pending_pub:
                     self.pub_types.add(name)
@@ -1110,21 +1437,34 @@ class Parser:
                         self.next()
                 self.eat("SYM", "}")
                 seen = set()
-                for vn, _ in variants:
+                for vn, vf in variants:
                     if vn in seen:
                         raise SyntaxError(f"enum {name} 变体 {vn} 重复声明")
                     seen.add(vn)
+                    for _fn2, _ft2 in vf:
+                        if _ft2 == ("named", name):
+                            raise SyntaxError(
+                                f"line {eline}: enum {name} 不能按值包含自身"
+                                f"（变体 {vn} 的载荷）；递归类型请用 vec[{name}] "
+                                "或 map 间接引用")
                 if eparams:
                     self.enums.pop(name, None)   # _prescan 的占位登记要摘掉
+                    if name in self.derives:
+                        # 与泛型 struct 同一条规则：载荷类型还是类型参数，
+                        # 展开时字段表不完整，必须在声明处拒绝（v1.96）
+                        raise SyntaxError(
+                            f"line {self.derives[name][1]}: 泛型 enum {name} "
+                            "不能直接 @derive（载荷类型还是类型参数）——"
+                            "请对实例化后的类型派生，或在 impl 里手写")
                     self.generic_enums[name] = {
                         "params": eparams, "variants": variants}
                 else:
                     self.enums[name] = variants
                     self.decl_order.append(("enum", name))
                     if name in self.derives:
-                        # 枚举派生尚未实现：明确拒绝，不静默忽略
-                        self._expand_derive(name, variants, "enum",
-                                            self.derives[name][1], fns, imports)
+                        self._pending_derives.append(
+                            (name, variants, "enum", self.derives[name][1],
+                             len(fns)))
             elif self.at("test"):
                 # 内建测试块：test "名字" { ... }（SPEC §8 `quelmara test`）
                 self.next()
@@ -1203,11 +1543,11 @@ class Parser:
                     inst["iface_sig"] = tmpl["sig"]
                     prev = self.methods.get((iname, mname))
                     if prev is not None:
-                        raise SyntaxError(
-                            f"{iname}.{mname} 同时出现在 impl {iname} : "
-                            f"{prev.get('impl_iface')} 与泛型 impl {gsname}[...] : "
-                            f"{iface} 里；同名方法跨接口暂不支持（请改名）")
-                    self.methods[(iname, mname)] = inst
+                        # 与普通 impl 同一条规则（v1.81）：同名方法跨接口按
+                        # 接口名二次 mangling，静态调用变歧义而不是编译失败
+                        inst["name"] = f"{iname}__{iface}__{mname}"
+                    else:
+                        self.methods[(iname, mname)] = inst
                     bodies[mname] = inst
                     fns.append(inst)
                 self.impls[key] = bodies
@@ -1253,13 +1593,38 @@ class Parser:
                         raise SyntaxError(f"{label}.{mname}: 第 {i} 个参数类型与接口不一致")
                 if fd["ret"] != rty:
                     raise SyntaxError(f"{label}.{mname}: 返回类型与接口声明不一致")
-        # ---- 编译期反射折叠（v1.71）----
-        # 到这里 struct/enum 表已完整，refl_*[T](i) 全部换成字面量。
+        # ---- @derive 统一展开（v1.96）----
+        # 到这里 struct / enum 表才完整：字段类型可能指向后面声明的类型。
+        # 生成物仍然**插回声明处**（`at` = 登记时的 fns 长度）——声明顺序是
+        # parsediff 的比对口径，展开放到文件末尾会让 dump 顺序变掉。
+        _blocks = []
+        for _dn, _df, _dk, _dl, _at in self._pending_derives:
+            _before = len(fns)
+            self._expand_derive(_dn, _df, _dk, _dl, fns, imports)
+            _blocks.append((_at, fns[_before:]))
+            del fns[_before:]
+        _off = 0
+        for _at, _blk in sorted(_blocks, key=lambda x: x[0]):
+            fns[_at + _off:_at + _off] = _blk
+            _off += len(_blk)
+        self._pending_derives = []
+
+        # ---- 编译期反射折叠（v1.71 / v1.96）----
+        # 到这里 struct/enum 表已完整：常量下标折叠成字面量，非常量下标改写成
+        # 按需生成的查表函数（v1.96）——表是代码，不是数据，仍然零元数据段。
         for fd in fns:
             if fd.get("body") is not None:
                 fd["body"] = self._refl_resolve(fd["body"])
         for tdef in tests:
             tdef["body"] = self._refl_resolve(tdef["body"])
+        if self._refl_pending:
+            src = "\n\n".join(self._refl_helper_src(*p)
+                               for p in self._refl_pending)
+            sub = Parser(tokenize(src), consts=self.consts,
+                         generic_fns=self.generic_fns)
+            sub.structs, sub.enums = self.structs, self.enums
+            sub.const_fns = self.const_fns
+            fns.extend(sub.parse_program()[2])
         self._methods = self.methods
         return mod, imports, fns, tests, self.structs, self.enums, self.decl_order
 
@@ -1377,6 +1742,161 @@ class Parser:
         return (name in _GEN_SCALARS or name in self.structs
                 or name in self.enums or name in self.generic_structs)
 
+    # ---- 通用 token 宏（v1.96）----
+    def _scan_macros(self):
+        """`macro 名字(形参) { 记号 }` —— 通用 token 宏（v1.96）。
+
+        与 `@derive` 的分工：`@derive` 是**结构化**的（编译器知道字段表，按表
+        生成代码）；宏是**纯记号替换**（编译器不理解宏体语义，只搬运记号）。
+        两者都在语法分析之前跑，产物是普通记号流——宏不可能造出后端没见过的
+        AST 形状，这是"宏 = 代码生成"最省事的正确性来源。
+
+        规则（每条都有负向夹具 `tests/bad/macro_*.qma`）：
+          * 只能在顶层定义；宏体里的花括号必须配平；
+          * 调用点必须是 `名字(`，且前一个记号不是 `.`（`x.macro(...)` 不展开）；
+          * 实参按**顶层逗号**切分，个数必须与形参一致（缺/多都编译期报错）；
+          * 展开是递归的（宏体里可以再调宏），层数上限 `_MACRO_MAX_DEPTH`；
+          * **无卫生性**（hygiene）：形参按记号替换，不加括号、不改名。因此宏体
+            里引用的自由名字与调用点同作用域，形参最好整体使用（`(x)` 而不是
+            `x * 2` 里的半个表达式）。
+          * 宏名不得与关键字同名；与函数/类型同名时宏优先（定义顺序无关）。
+        """
+        toks = self.toks
+        out = []
+        depth, i = 0, 0
+        while i < len(toks):
+            t = toks[i]
+            if t.kind == "SYM" and t.val == "{":
+                depth += 1
+            elif t.kind == "SYM" and t.val == "}":
+                depth -= 1
+            if depth == 0 and t.kind == "NAME" and t.val == "macro":
+                i = self._macro_define(toks, i, out)
+                continue
+            out.append(t)
+            i += 1
+        toks = out
+
+        # 展开：一轮扫一遍，没有命中就停（命中过就再来一轮，支持宏调宏）
+        for _round in range(_MACRO_MAX_DEPTH):
+            if not self.macros:
+                break
+            out, i, hit = [], 0, False
+            while i < len(toks):
+                t = toks[i]
+                prev_dot = bool(out) and out[-1].kind == "SYM" and out[-1].val == "."
+                if (t.kind == "NAME" and t.val in self.macros and not prev_dot
+                        and i + 1 < len(toks) and toks[i + 1].kind == "SYM"
+                        and toks[i + 1].val == "("):
+                    params, body, dline = self.macros[t.val]
+                    args, j = self._macro_args(toks, i + 1, t.val, t.line)
+                    if len(args) != len(params):
+                        raise SyntaxError(
+                            f"line {t.line}: 宏 {t.val} 需要 {len(params)} 个实参"
+                            f"（{'、'.join(params) if params else '无'}），"
+                            f"得到 {len(args)} 个")
+                    sub = dict(zip(params, args))
+                    for bt in body:
+                        if bt.kind == "NAME" and bt.val in sub:
+                            out.extend(sub[bt.val])
+                        else:
+                            # 宏体记号的诊断行号统一改成调用点：报错指向用户
+                            # 写的那一行，而不是宏定义（宏体不是用户直接写的）
+                            out.append(Tok(bt.kind, bt.val, t.line))
+                    i, hit = j, True
+                    continue
+                out.append(t)
+                i += 1
+            toks = out
+            if not hit:
+                break
+        else:
+            raise SyntaxError(
+                f"宏展开超过 {_MACRO_MAX_DEPTH} 层——宏体里可能自递归")
+        self.toks = toks
+
+    def _macro_define(self, toks, i, out):
+        """解析一条 `macro` 定义，登记进 self.macros，返回定义之后的记号下标。"""
+        line = toks[i].line
+        j = i + 1
+        if j >= len(toks) or toks[j].kind != "NAME":
+            raise SyntaxError(f"line {line}: macro 后面需要宏名")
+        name = toks[j].val
+        j += 1
+        if name in KEYWORDS:
+            raise SyntaxError(f"line {line}: 宏名 {name} 与关键字同名")
+        if j >= len(toks) or not (toks[j].kind == "SYM" and toks[j].val == "("):
+            raise SyntaxError(f"line {line}: macro {name} 需要形参表："
+                              f"macro {name}(a, b) {{ ... }}")
+        j += 1
+        params = []
+        while j < len(toks) and not (toks[j].kind == "SYM" and toks[j].val == ")"):
+            tk = toks[j]
+            if tk.kind == "NAME":
+                if tk.val in params:
+                    raise SyntaxError(
+                        f"line {line}: macro {name} 的形参 {tk.val} 重复")
+                params.append(tk.val)
+            elif not (tk.kind == "SYM" and tk.val == ","):
+                raise SyntaxError(
+                    f"line {line}: macro {name} 的形参表只接受名字，得到 {tk.val!r}")
+            j += 1
+        if j >= len(toks):
+            raise SyntaxError(f"line {line}: macro {name} 的形参表没有闭合")
+        j += 1
+        if j >= len(toks) or not (toks[j].kind == "SYM" and toks[j].val == "{"):
+            raise SyntaxError(f"line {line}: macro {name} 的定义体需要花括号")
+        j += 1
+        body, bd = [], 0
+        while j < len(toks):
+            tk = toks[j]
+            if tk.kind == "SYM" and tk.val == "{":
+                bd += 1
+            elif tk.kind == "SYM" and tk.val == "}":
+                if bd == 0:
+                    break
+                bd -= 1
+            elif tk.kind == "EOF":
+                break
+            body.append(tk)
+            j += 1
+        if j >= len(toks) or not (toks[j].kind == "SYM" and toks[j].val == "}"):
+            raise SyntaxError(f"line {line}: macro {name} 的定义体没有闭合")
+        j += 1
+        if name in self.macros:
+            raise SyntaxError(f"line {line}: 宏 {name} 重复定义"
+                              f"（前一次在第 {self.macros[name][2]} 行）")
+        if not body:
+            raise SyntaxError(f"line {line}: macro {name} 的定义体是空的")
+        self.macros[name] = (params, body, line)
+        return j
+
+    def _macro_args(self, toks, i, name, line):
+        """从 `(` 起切分实参（按顶层逗号），返回 (实参记号列表, `)` 之后的下标)。"""
+        assert toks[i].kind == "SYM" and toks[i].val == "("
+        args, cur, depth = [], [], 0
+        j = i + 1
+        while j < len(toks):
+            tk = toks[j]
+            if tk.kind == "SYM" and tk.val in ("(", "[", "{"):
+                depth += 1
+            elif tk.kind == "SYM" and tk.val in (")", "]", "}"):
+                if depth == 0 and tk.val == ")":
+                    if cur or args:
+                        args.append(cur)
+                    return args, j + 1
+                depth -= 1
+            elif tk.kind == "SYM" and tk.val == "," and depth == 0:
+                args.append(cur)
+                cur = []
+                j += 1
+                continue
+            elif tk.kind == "EOF":
+                break
+            cur.append(tk)
+            j += 1
+        raise SyntaxError(f"line {line}: 宏 {name} 的调用没有闭合的 ')'")
+
     def _scan_derives(self):
         """`@derive(A, B)` 属性宏扫描（v1.71）——在语法分析**之前**跑。
 
@@ -1461,7 +1981,7 @@ class Parser:
 
     # ---- @derive：字段分类 ----
     def _derive_field_kind(self, ty, tname, line):
-        """字段类型 -> (kind, info)。kind ∈ int/bool/str/struct/vec。
+        """字段类型 -> (kind, info)。kind ∈ int/bool/str/f64/struct/enum/vec。
 
         不支持的形状一律 fail-fast 并说清"为什么不支持"——静默跳过某个字段
         会让 JSON 少一个键，比编译不过危险得多。
@@ -1481,19 +2001,22 @@ class Parser:
                 return ("bool", t)
             if t == "str":
                 return ("str", t)
-            if t in _FLOAT_NAMES:
-                bad("f64/f32 暂无 str→浮点解析原语，见 docs/07-gaps.md §7.10")
+            if t in ("f64", "float"):
+                return ("f64", "f64")
+            if t == "f32":
+                bad("f32 不参与派生——JSON 数字统一按 f64 读写，"
+                    "请把字段声明成 f64（f32 只有 7 位有效数字，往返会丢精度）")
             if t in self.structs:
                 return ("struct", t)
             if t in self.enums:
-                bad("enum 字段暂不支持（enum 自身的 derive 也还没有）")
-            bad("既不是标量也不是本文件声明的 struct")
+                return ("enum", t)
+            bad("既不是标量也不是本文件声明的 struct/enum")
         if ty[0] == "vec":
             ek, einfo = self._derive_field_kind(ty[1], tname, line)
             if ek == "vec":
                 bad("vec[vec[...]] 暂不支持")
             return ("vec", (ek, einfo))
-        bad("只支持标量 / struct / vec[标量或 struct]")
+        bad("只支持标量 / f64 / struct / enum / vec[标量·struct·enum]")
 
     def _zero_lit(self, ty, tname, line):
         """字段类型的零值字面量（解码函数先用它构造完整 struct 再逐字段赋值）。"""
@@ -1504,8 +2027,20 @@ class Parser:
             return "false"
         if k == "str":
             return '""'
+        if k == "f64":
+            return "0.0"
         if k == "vec":
             return f"vec[{self._type_text(ty[1])}].new(0)"
+        if k == "enum":
+            # 枚举零值 = 第一个**无载荷**变体；都带载荷就用第一个变体的零载荷
+            vs = self.enums[info]
+            for vn, vf in vs:
+                if not vf:
+                    return f"{info}.{vn}"
+            vn, vf = vs[0]
+            inner = ", ".join(f"{n}: {self._zero_lit(t, tname, line)}"
+                              for n, t in vf)
+            return f"{info}.{vn}({inner})"
         flds = self.structs[info]
         if not flds:
             return f"{info} {{}}"
@@ -1513,7 +2048,111 @@ class Parser:
                           for n, t in flds)
         return f"{info} {{ {inner} }}"
 
+    def _check_derive_nested(self, owner, fields, item, line):
+        """嵌套的 struct/enum 必须派生同一项。
+
+        提前查（而不是让 Lower 报"未定义函数"）是因为后者的信息指不到根因：
+        用户只看到 `<T>__json_into` 不存在，不知道是字段类型漏了派生。
+        """
+        fn_of = {"Json": "__json_into", "Eq": "__eq", "Show": "__show"}
+        for fname, fty in fields:
+            k, info = self._derive_field_kind(fty, owner, line)
+            if k == "vec":
+                k, info = info
+            if k in ("struct", "enum"):
+                items = self.derives.get(info, ((), 0))[0]
+                if item not in items:
+                    raise SyntaxError(
+                        f"line {line}: @derive 作用在 {owner} 上，字段 {fname} 的类型 "
+                        f"{info} 没有派生 {item}——生成的代码要调 "
+                        f"{info}{fn_of[item]}，请给 {info} 也写 @derive({item})")
+
+    def _derive_uses_f64(self, fields):
+        for _fname, fty in fields:
+            k, info = self._derive_field_kind(fty, "", 0)
+            if k == "f64":
+                return True
+            if k == "vec" and info[0] == "f64":
+                return True
+        return False
+
     # ---- @derive：代码生成（三个派生项各自产出一段源码文本）----
+    def _json_emit_field(self, expr, fname, fty, owner, line, ind, idx):
+        """`"fname": <expr 的 JSON>` 的源码行（vec 展开成循环）。"""
+        k, info = self._derive_field_kind(fty, owner, line)
+        if k == "int":
+            return [f'{ind}json_key_int(h, "{fname}", {expr})']
+        if k == "bool":
+            return [f'{ind}json_key_bool(h, "{fname}", {expr})']
+        if k == "str":
+            return [f'{ind}json_key_str(h, "{fname}", {expr})']
+        if k == "f64":
+            # f64 走 f64_repr（最短往返文本），不用 to_str——后者只有 7 位
+            # 有效数字，写进 JSON 就是静默丢精度
+            return [f'{ind}json_key_raw(h, "{fname}", f64_repr({expr}))']
+        if k in ("struct", "enum"):
+            return [f'{ind}json_key(h, "{fname}")',
+                    f"{ind}{info}__json_into({expr}, h)"]
+        ek, einfo = info
+        L = [f'{ind}json_key(h, "{fname}")',
+             f"{ind}json_begin_arr(h)",
+             f"{ind}let mut j{idx} = 0",
+             f"{ind}while j{idx} < {expr}.len() {{"]
+        L += self._json_emit_value(f"{expr}.get(j{idx})", ek, einfo, ind + "    ")
+        L += [f"{ind}    j{idx} = j{idx} + 1", f"{ind}}}", f"{ind}json_end_arr(h)"]
+        return L
+
+    def _json_emit_value(self, expr, ek, einfo, ind):
+        """数组元素 / 无键值的 JSON 写入。"""
+        if ek == "int":
+            return [f"{ind}json_val_int(h, {expr})"]
+        if ek == "bool":
+            return [f"{ind}json_val_bool(h, {expr})"]
+        if ek == "str":
+            return [f"{ind}json_val_str(h, {expr})"]
+        if ek == "f64":
+            return [f"{ind}json_val_raw(h, f64_repr({expr}))"]
+        return [f"{ind}{einfo}__json_into({expr}, h)"]
+
+    def _json_read_expr(self, fname, fty, owner, line, ind, idx):
+        """读一个字段 -> (前置语句行, 求值表达式)。
+
+        f64 需要一条 let + 一条 assert（`json_num_raw` 对非数字返回空串，
+        直接喂给 f64_parse 的报错指不到字段名）；vec 需要先搭容器。
+        """
+        k, info = self._derive_field_kind(fty, owner, line)
+        key = f'json_obj_get(d, n, "{fname}")'
+        if k == "int":
+            return [], f"json_int(d, {key})"
+        if k == "bool":
+            return [], f"json_bool(d, {key})"
+        if k == "str":
+            return [], f"json_str(d, {key})"
+        if k == "f64":
+            return ([f"{ind}let mut r{idx} = json_num_raw(d, {key})",
+                     f'{ind}assert(r{idx} != "", "字段 {fname} 不是 JSON 数字")'],
+                    f"f64_parse(r{idx})")
+        if k in ("struct", "enum"):
+            return [], f"{info}__from_node(d, {key})"
+        ek, einfo = info
+        L = [f"{ind}let mut v{idx} = vec[{self._type_text(fty[1])}].new(0)",
+             f"{ind}let a{idx} = {key}",
+             f"{ind}let mut j{idx} = 0",
+             f"{ind}while j{idx} < json_arr_len(d, a{idx}) {{"]
+        inner = f"json_arr_at(d, a{idx}, j{idx})"
+        if ek == "f64":
+            L += [f"{ind}    v{idx}.push(f64_parse(json_num_raw(d, {inner})))"]
+        elif ek == "int":
+            L += [f"{ind}    v{idx}.push(json_int(d, {inner}))"]
+        elif ek == "bool":
+            L += [f"{ind}    v{idx}.push(json_bool(d, {inner}))"]
+        elif ek == "str":
+            L += [f"{ind}    v{idx}.push(json_str(d, {inner}))"]
+        else:
+            L += [f"{ind}    v{idx}.push({einfo}__from_node(d, {inner}))"]
+        L += [f"{ind}    j{idx} = j{idx} + 1", f"{ind}}}"]
+        return L, f"v{idx}"
+
     def _gen_json(self, name, fields, line):
         """derive(Json)：编码 `<T>__json` / `<T>__json_into` + 解码 `<T>_from_json`。
 
@@ -1529,33 +2168,8 @@ class Parser:
              f"fn {name}__json_into(self: {name}, h: int) -> int {{",
              "    json_begin_obj(h)"]
         for i, (fname, fty) in enumerate(fields):
-            k, info = self._derive_field_kind(fty, name, line)
-            if k == "int":
-                L.append(f'    json_key_int(h, "{fname}", self.{fname})')
-            elif k == "bool":
-                L.append(f'    json_key_bool(h, "{fname}", self.{fname})')
-            elif k == "str":
-                L.append(f'    json_key_str(h, "{fname}", self.{fname})')
-            elif k == "struct":
-                L.append(f'    json_key(h, "{fname}")')
-                L.append(f"    {info}__json_into(self.{fname}, h)")
-            else:
-                ek, einfo = info
-                L.append(f'    json_key(h, "{fname}")')
-                L.append("    json_begin_arr(h)")
-                L.append(f"    let mut j{i} = 0")
-                L.append(f"    while j{i} < self.{fname}.len() {{")
-                if ek == "int":
-                    L.append(f"        json_val_int(h, self.{fname}.get(j{i}))")
-                elif ek == "bool":
-                    L.append(f"        json_val_bool(h, self.{fname}.get(j{i}))")
-                elif ek == "str":
-                    L.append(f"        json_val_str(h, self.{fname}.get(j{i}))")
-                else:
-                    L.append(f"        {einfo}__json_into(self.{fname}.get(j{i}), h)")
-                L.append(f"        j{i} = j{i} + 1")
-                L.append("    }")
-                L.append("    json_end_arr(h)")
+            L += self._json_emit_field(f"self.{fname}", fname, fty, name, line,
+                                       "    ", i)
         L += ["    json_end_obj(h)",
               "    return 0",
               "}",
@@ -1571,35 +2185,93 @@ class Parser:
                           for fn, ft in fields)
         L.append(f"    let mut out = {name} {{ {zeros} }}")
         for i, (fname, fty) in enumerate(fields):
-            k, info = self._derive_field_kind(fty, name, line)
-            if k == "int":
-                L.append(f'    out.{fname} = json_int(d, json_obj_get(d, n, "{fname}"))')
-            elif k == "bool":
-                L.append(f'    out.{fname} = json_bool(d, json_obj_get(d, n, "{fname}"))')
-            elif k == "str":
-                L.append(f'    out.{fname} = json_str(d, json_obj_get(d, n, "{fname}"))')
-            elif k == "struct":
-                L.append(f'    out.{fname} = {info}__from_node(d, '
-                         f'json_obj_get(d, n, "{fname}"))')
-            else:
-                ek, einfo = info
-                L.append(f'    let a{i} = json_obj_get(d, n, "{fname}")')
-                L.append(f"    let mut j{i} = 0")
-                L.append(f"    while j{i} < json_arr_len(d, a{i}) {{")
-                if ek == "int":
-                    L.append(f"        out.{fname}.push(json_int(d, json_arr_at(d, a{i}, j{i})))")
-                elif ek == "bool":
-                    L.append(f"        out.{fname}.push(json_bool(d, json_arr_at(d, a{i}, j{i})))")
-                elif ek == "str":
-                    L.append(f"        out.{fname}.push(json_str(d, json_arr_at(d, a{i}, j{i})))")
-                else:
-                    L.append(f"        out.{fname}.push({einfo}__from_node(d, "
-                             f"json_arr_at(d, a{i}, j{i})))")
-                L.append(f"        j{i} = j{i} + 1")
-                L.append("    }")
+            pre, expr = self._json_read_expr(fname, fty, name, line, "    ", i)
+            L += pre
+            L.append(f"    out.{fname} = {expr}")
         L += ["    return out",
               "}"]
         return "\n".join(L)
+
+    # ---- @derive：enum 的 JSON（v1.96）----
+    def _gen_json_enum(self, name, variants, line):
+        """enum 的 JSON 表示：`{"$v":"变体名", <载荷字段>...}`。
+
+        约定（唯一事实来源，文档 §4.8.1 同款）：
+          * 无载荷变体 → `{"$v":"Dot"}`；
+          * 有载荷变体 → `{"$v":"Circle","r":3}`，载荷按**声明顺序**跟在 $v 后；
+          * 解码只认 `$v` 字面量，未知变体 fail-fast（不猜、不给默认值）。
+        为什么不用"裸字符串 / 裸数字"：同一个 enum 的变体可能带不同载荷，
+        带 $v 的对象让"类型 → 表示"始终是满射，跨语言消费方不用猜。
+        """
+        L = [f"fn {name}__json(self: {name}) -> str {{",
+             "    let h = json_new(64)",
+             f"    {name}__json_into(self, h)",
+             "    return json_done(h)",
+             "}",
+             "",
+             f"fn {name}__json_into(self: {name}, h: int) -> int {{",
+             "    match self {"]
+        for vname, vfields in variants:
+            # 载荷绑定用位置名 _v0/_v1：字段名可能叫 h/d/n，与生成代码里的
+            # JSON 句柄、DOM 参数同名，直接用字段名会静默把 int 当句柄传
+            binds = ", ".join(f"_v{i}" for i in range(len(vfields)))
+            L.append(f"        {name}.{vname}"
+                     + (f"({binds})" if vfields else "") + " => {")
+            L.append("            json_begin_obj(h)")
+            L.append(f'            json_key_str(h, "$v", "{vname}")')
+            for i, (fname, fty) in enumerate(vfields):
+                L += self._json_emit_field(f"_v{i}", fname, fty, name, line,
+                                           "            ", f"{vname}_{i}")
+            L.append("            json_end_obj(h)")
+            L.append("        }")
+        L += ["    }", "    return 0", "}",
+              "",
+              f"fn {name}_from_json(s: str) -> {name} {{",
+              "    let d = json_parse(s)",
+              f'    assert(json_ok(d), "{name}_from_json: 非法 JSON")',
+              f"    return {name}__from_node(d, json_root(d))",
+              "}",
+              "",
+              f"fn {name}__from_node(d: int, n: int) -> {name} {{",
+              '    let tag = json_str(d, json_obj_get(d, n, "$v"))']
+        for vname, vfields in variants:
+            L.append(f'    if tag == "{vname}" {{')
+            if not vfields:
+                L.append(f"        return {name}.{vname}")
+            else:
+                args = []
+                for i, (fname, fty) in enumerate(vfields):
+                    pre, expr = self._json_read_expr(fname, fty, name, line,
+                                                     "        ", f"{vname}_{i}")
+                    L += pre
+                    args.append(f"{fname}: {expr}")
+                L.append(f"        return {name}.{vname}({', '.join(args)})")
+            L.append("    }")
+        L += [f'    assert(false, "{name}__from_node: 未知变体（$v 不是已知变体名）")',
+              f"    return {self._zero_lit(('named', name), name, line)}",
+              "}"]
+        return "\n".join(L)
+
+    def _eq_check(self, lhs, rhs, fty, owner, line, ind, idx):
+        """逐字段判等：不等就 `return false`。vec 展开成长度 + 逐元素。"""
+        k, info = self._derive_field_kind(fty, owner, line)
+        if k in ("int", "bool", "str", "f64"):
+            return [f"{ind}if {lhs} != {rhs} {{", f"{ind}    return false", f"{ind}}}"]
+        if k in ("struct", "enum"):
+            return [f"{ind}if !{info}__eq({lhs}, {rhs}) {{",
+                    f"{ind}    return false", f"{ind}}}"]
+        ek, einfo = info
+        L = [f"{ind}if {lhs}.len() != {rhs}.len() {{",
+             f"{ind}    return false", f"{ind}}}",
+             f"{ind}let mut i{idx} = 0",
+             f"{ind}while i{idx} < {lhs}.len() {{"]
+        if ek in ("int", "bool", "str", "f64"):
+            L.append(f"{ind}    if {lhs}.get(i{idx}) != {rhs}.get(i{idx}) {{")
+        else:
+            L.append(f"{ind}    if !{einfo}__eq({lhs}.get(i{idx}), {rhs}.get(i{idx})) {{")
+        L += [f"{ind}        return false", f"{ind}    }}",
+              f"{ind}    i{idx} = i{idx} + 1", f"{ind}}}"]
+        return L
 
     def _gen_eq(self, name, fields, line):
         """derive(Eq)：结构等价。
@@ -1610,33 +2282,40 @@ class Parser:
         """
         L = [f"fn {name}__eq(self: {name}, o: {name}) -> bool {{"]
         for i, (fname, fty) in enumerate(fields):
-            k, info = self._derive_field_kind(fty, name, line)
-            if k == "struct":
-                L.append(f"    if !{info}__eq(self.{fname}, o.{fname}) {{")
-                L.append("        return false")
-                L.append("    }")
-            elif k == "vec":
-                ek, einfo = info
-                L.append(f"    if self.{fname}.len() != o.{fname}.len() {{")
-                L.append("        return false")
-                L.append("    }")
-                L.append(f"    let mut i{i} = 0")
-                L.append(f"    while i{i} < self.{fname}.len() {{")
-                if ek == "struct":
-                    L.append(f"        if !{einfo}__eq(self.{fname}.get(i{i}), "
-                             f"o.{fname}.get(i{i})) {{")
-                else:
-                    L.append(f"        if self.{fname}.get(i{i}) != "
-                             f"o.{fname}.get(i{i}) {{")
-                L.append("            return false")
-                L.append("        }")
-                L.append(f"        i{i} = i{i} + 1")
-                L.append("    }")
-            else:
-                L.append(f"    if self.{fname} != o.{fname} {{")
-                L.append("        return false")
-                L.append("    }")
+            L += self._eq_check(f"self.{fname}", f"o.{fname}", fty, name, line,
+                                "    ", i)
         L += ["    return true", "}"]
+        return "\n".join(L)
+
+    def _gen_eq_enum(self, name, variants, line):
+        """enum 等价：先比变体（match 的两层），再比载荷。
+
+        等价定义（文档 §4.8.1 同款）：同一变体且载荷逐字段相等。不同变体
+        永远不等——不是"内存里前几个字相同"。
+        """
+        L = [f"fn {name}__eq(self: {name}, o: {name}) -> bool {{",
+             "    match self {"]
+        for vname, vfields in variants:
+            binds = ", ".join(f"_v{i}" for i in range(len(vfields)))
+            L.append(f"        {name}.{vname}" + (f"({binds})" if vfields else "")
+                     + " => {")
+            if not vfields:
+                L += [f"            match o {{",
+                      f"                {name}.{vname} => {{ return true }}",
+                      "                _ => { return false }",
+                      "            }"]
+            else:
+                obinds = ", ".join(f"_o{i}" for i in range(len(vfields)))
+                L += [f"            match o {{",
+                      f"                {name}.{vname}({obinds}) => {{"]
+                for i, (fname, fty) in enumerate(vfields):
+                    L += self._eq_check(f"_v{i}", f"_o{i}", fty, name, line,
+                                        "                    ", f"{vname}_{i}")
+                L += ["                    return true", "                }",
+                      "                _ => { return false }",
+                      "            }"]
+            L.append("        }")
+        L += ["    }", "    return false", "}"]
         return "\n".join(L)
 
     def _gen_show(self, name, fields, line):
@@ -1671,6 +2350,39 @@ class Parser:
         head = f"fn {name}__show(self: {name}) -> str {{"
         return "\n".join([head] + L + ["}"])
 
+    def _gen_show_enum(self, name, variants, line):
+        """enum 的 Show：`Circle(3)` / `Rect(3, 5)` / `Dot`（无载荷不带括号）。"""
+        L = [f"fn {name}__show(self: {name}) -> str {{",
+             "    match self {"]
+        for vname, vfields in variants:
+            binds = ", ".join(f"_v{i}" for i in range(len(vfields)))
+            L.append(f"        {name}.{vname}" + (f"({binds})" if vfields else "")
+                     + " => {")
+            if not vfields:
+                L.append(f'            return "{vname}"')
+            else:
+                parts, pre = [], []
+                for i, (fname, fty) in enumerate(vfields):
+                    k, info = self._derive_field_kind(fty, name, line)
+                    if k == "bool":
+                        # bool 的 to_str 在字段/绑定位置走整数路径，单独拼
+                        pre += [f'            let mut b{i} = "false"',
+                                f'            if _v{i} {{ b{i} = "true" }}']
+                        parts.append(f"b{i}")
+                    else:
+                        parts.append(self._show_expr(f"_v{i}", k, info))
+                L += pre
+                expr = f'"{vname}("'
+                for i, p in enumerate(parts):
+                    if i:
+                        expr += ' + ", "'
+                    expr += f" + {p}"
+                expr += ' + ")"'
+                L.append(f"            return {expr}")
+            L.append("        }")
+        L += ["    }", '    return ""', "}"]
+        return "\n".join(L)
+
     def _show_vec_into(self, fname, fty, idx, tname, line):
         k, info = self._derive_field_kind(fty, tname, line)
         ek, einfo = info
@@ -1694,6 +2406,8 @@ class Parser:
             return f"{expr}.to_str()"
         if kind == "str":
             return expr
+        if kind == "f64":
+            return f"{expr}.to_str()"
         return f"{info}__show({expr})"
 
     def _expand_derive(self, name, fields, kind, line, fns, imports):
@@ -1714,23 +2428,37 @@ class Parser:
             if it in seen:
                 raise SyntaxError(f"line {dline}: @derive 重复写了 {it}")
             seen.add(it)
-        if kind != "struct":
+        if kind == "struct":
+            if name in self.generic_structs:
+                raise SyntaxError(
+                    f"line {dline}: 泛型 struct {name} 不能直接 @derive——"
+                    "请对实例化后的类型派生，或在 impl 里手写")
+        elif kind == "enum":
+            if name in self.generic_enums:
+                raise SyntaxError(
+                    f"line {dline}: 泛型 enum {name} 不能直接 @derive——"
+                    "请对实例化后的类型派生（v1.96 边界）")
+        else:
             raise SyntaxError(
-                f"line {dline}: @derive 目前只支持 struct（{name} 是 {kind}）")
-        if name in self.generic_structs:
-            raise SyntaxError(
-                f"line {dline}: 泛型 struct {name} 不能直接 @derive——"
-                "请对实例化后的类型派生，或在 impl 里手写")
+                f"line {dline}: @derive 只支持 struct / enum（{name} 是 {kind}）")
+        # 枚举的"字段"是各变体的载荷：嵌套派生检查与 f64 判定都按展平后的表走
+        flat = fields if kind == "struct" else [f for _v, vf in fields for f in vf]
         parts = []
         for it in _DERIVE_ITEMS:
             if it in seen:
-                parts.append(getattr(self, "_gen_" + it.lower())(name, fields,
-                                                                 dline))
+                self._check_derive_nested(name, flat, it, dline)
+                suffix = "_enum" if kind == "enum" else ""
+                parts.append(getattr(self, "_gen_" + it.lower() + suffix)(
+                    name, fields, dline))
         src = "\n\n".join(parts)
         if "Json" in seen and "std.json" not in imports:
             # derive(Json) 的产物调用 std/json 的 builder/DOM API：
             # 自动补 import，用户不必知道派生实现依赖哪个模块。
             imports.append("std.json")
+        if "Json" in seen and self._derive_uses_f64(flat) \
+                and "std.f64" not in imports:
+            # f64 字段的编解码走 std/f64 的 f64_repr / f64_parse
+            imports.append("std.f64")
         sub = Parser(tokenize(src), consts=self.consts,
                      generic_fns=self.generic_fns)
         sub.structs, sub.enums = self.structs, self.enums
@@ -1755,17 +2483,22 @@ class Parser:
         tname = ty[1]
 
         def const_int(k=0):
+            """下标是编译期常量就返回它，否则返回 None（走运行时查表）。"""
             if len(args) <= k:
                 raise SyntaxError(f"line {line}: {what} 缺少下标实参")
             a = args[k]
-            if not (isinstance(a, tuple) and a[0] == "num"):
-                raise SyntaxError(
-                    f"line {line}: {what} 的下标必须是编译期整数常量"
-                    "（字面量或 const）")
-            return a[1]
+            if isinstance(a, tuple) and a[0] == "num":
+                return a[1]
+            return None
 
         if len(args) > 1:
             raise SyntaxError(f"line {line}: {what} 最多一个下标实参")
+        if args and isinstance(args[0], tuple) and args[0][0] == "str":
+            # 下标位写字符串字面量一定是笔误；变量位没法查（语言没有完整的
+            # 形参类型检查：str 传 int 形参也会静默编译）
+            raise SyntaxError(
+                f"line {line}: {what} 的下标必须是 int（得到字符串字面量 "
+                f"{args[0][1]!r}）")
         if what == "refl_type_name":
             if args:
                 raise SyntaxError(f"line {line}: refl_type_name 不接受实参")
@@ -1781,6 +2514,8 @@ class Parser:
                     raise SyntaxError(f"line {line}: refl_field_count 不接受实参")
                 return ("num", len(flds))
             i = const_int()
+            if i is None:
+                return self._refl_dynamic(what, tname, args[0], line)
             if not 0 <= i < len(flds):
                 raise SyntaxError(
                     f"line {line}: {what}[{tname}]({i}) 越界——"
@@ -1798,6 +2533,8 @@ class Parser:
                     raise SyntaxError(f"line {line}: refl_variant_count 不接受实参")
                 return ("num", len(vs))
             i = const_int()
+            if i is None:
+                return self._refl_dynamic(what, tname, args[0], line)
             if not 0 <= i < len(vs):
                 raise SyntaxError(
                     f"line {line}: {what}[{tname}]({i}) 越界——"
@@ -1806,8 +2543,44 @@ class Parser:
                 else ("num", len(vs[i][1]))
         raise SyntaxError(f"line {line}: 未知反射函数 {what}")
 
+    def _refl_dynamic(self, what, tname, idx_node, line):
+        """下标不是编译期常量：改写成按需生成的查表函数（v1.96）。
+
+        仍然没有元数据段——表是**代码**（if 链），不是数据：O(n) 分支、
+        常量内存、无动态派发。这样就能写"按下标遍历字段/变体"的循环，
+        而编译期常量下标仍折叠成字面量（零成本路径不变）。
+        """
+        key = (what, tname)
+        fname = self._refl_helpers.get(key)
+        if fname is None:
+            fname = f"__refl_{what}_{tname}"
+            self._refl_helpers[key] = fname
+            self._refl_pending.append((fname, what, tname, line))
+        return ("call", [fname], [idx_node])
+
+    def _refl_helper_src(self, fname, what, tname, line):
+        """生成查表函数的源码（与 @derive 同一条"生成源码再解析"路径）。"""
+        if what == "refl_field_name":
+            ret, vals = "str", [fn for fn, _ in self.structs[tname]]
+        elif what == "refl_field_type":
+            ret, vals = "str", [self._type_text(ft)
+                                for _, ft in self.structs[tname]]
+        elif what == "refl_variant_name":
+            ret, vals = "str", [vn for vn, _ in self.enums[tname]]
+        else:
+            ret, vals = "int", [len(vf) for _, vf in self.enums[tname]]
+        L = [f"fn {fname}(i: int) -> {ret} {{"]
+        for k, v in enumerate(vals):
+            lit = f'"{v}"' if ret == "str" else str(v)
+            L.append(f"    if i == {k} {{ return {lit} }}")
+        L.append(f'    assert(false, "{what}[{tname}]: 下标越界'
+                 f'（共 {len(vals)} 项）")')
+        L.append('    return ""' if ret == "str" else "    return 0")
+        L.append("}")
+        return "\n".join(L)
+
     def _refl_resolve(self, node):
-        """把 AST 里的 ("refl", ...) 节点整棵替换成常量字面量。"""
+        """把 AST 里的 ("refl", ...) 节点整棵替换成常量字面量 / 查表调用。"""
         if isinstance(node, tuple):
             if node and node[0] == "refl":
                 return self._refl_value(node)
@@ -1984,6 +2757,10 @@ class Parser:
         self._cur_tparams = saved_tp
         fd = {"name": name, "params": params, "ret": ret, "body": body,
               "line": fn_tok.line}
+        if self._doc_by_line:
+            doc = self._doc_by_line.get(fn_tok.line)
+            if doc:
+                fd["doc"] = doc          # doc comment（v1.92），只读不参与语义
         if tparams:
             fd["type_params"] = tparams
         if tbounds:
@@ -2152,7 +2929,8 @@ class Parser:
             imp, rest = self._match_import(tuple(path[:-1]))
             if imp is not None and len(rest) >= 1:
                 self.qrefs.add((imp, rest[0]))
-                path = list(rest) + [path[-1]]
+                # 保留模块段（v1.99）：load_program 按节点解析并可能 mangling
+                path = [qref(imp, rest[0])] + list(rest[1:]) + [path[-1]]
         binds = []
         if self.at("SYM", "("):
             self.next()
@@ -2402,7 +3180,7 @@ class Parser:
             imp, rest = self._match_import(tuple(e[1]))
             if imp is not None and rest:
                 self.qrefs.add((imp, rest[0]))
-                e = ("path", list(rest))
+                e = ("path", [qref(imp, rest[0])] + list(rest[1:]))
         return e
 
     def _postfix_inner(self):
@@ -2434,11 +3212,12 @@ class Parser:
                                     raise SyntaxError(
                                         f"line {line}: 限定枚举构造只支持位置实参"
                                         f"（字段表在被导入模块里，命名实参无法在此校验）")
-                                e = ("enumlit_pos", list(rest) + [name],
-                                     list(args))
+                                e = ("enumlit_pos",
+                                     [qref(imp, rest[0])] + list(rest[1:])
+                                     + [name], list(args))
                             else:
                                 self.qrefs.add((imp, name))
-                                e = ("call", [name], list(args))
+                                e = ("call", [qref(imp, name)], list(args))
                             continue
                     # `Shape.Circle(radius: 5)` -> 枚舉變體構造
                     if e[0] == "name" and self.enum_variant_of([e[1], name]):
@@ -2544,8 +3323,43 @@ class Parser:
             return True
         return len(path) > 1 and last[:1].isupper()
 
+    # ---- 闭包字面量（v1.95）----
+    def parse_lambda(self):
+        """`fn(x: int) -> int { ... }` —— 表达式位置的匿名函数（闭包）。
+
+        与顶层 `fn` 声明的区别只有两点：没有名字、捕获外层局部变量（按值，
+        创建时快照）。返回值类型必须写（`-> T`）；省略时按 void。
+        函数体必须是块；块内最后一条表达式语句即返回值（等价于 `return`），
+        也可显式 `return`。"""
+        t = self.eat("fn")
+        self.eat("SYM", "(")
+        params = []
+        while not self.at("SYM", ")"):
+            pname = self.eat("NAME").val
+            self.eat("SYM", ":")
+            params.append((pname, self.parse_type()))
+            if self.at("SYM", ","):
+                self.next()
+        self.eat("SYM", ")")
+        ret = ("named", "void")
+        if self.at("SYM", "->"):
+            self.next()
+            ret = self.parse_type()
+        if not self.at("SYM", "{"):
+            raise SyntaxError(
+                f"line {t.line}: 闭包字面量必须有函数体 {{ ... }}")
+        body = self.parse_block()
+        names = [n for n, _ in params]
+        if len(set(names)) != len(names):
+            raise SyntaxError(f"line {t.line}: 闭包形参重名：{names}")
+        return ("lambda", params, ret, body, t.line)
+
     def parse_primary(self):
         t = self.peek()
+        if t.kind == "fn":
+            # 闭包字面量（v1.95）：`fn` 只在顶层是声明关键字，在表达式位置
+            # 没有别的解释，因此无需前瞻即可判定。
+            return self.parse_lambda()
         if t.kind == "match":
             return self.parse_match()
         if t.kind == "select":
@@ -2830,9 +3644,15 @@ class Parser:
 # ---------------------------------------------------------------------------
 
 
-def parse_source(src):
-    """解析源码 -> (module, imports, fns, tests, structs, enums, decl_order)"""
-    return Parser(tokenize(src)).parse_program()
+def parse_source(src, with_docs=False):
+    """解析源码 -> (module, imports, fns, tests, structs, enums, decl_order)
+
+    doc comment（v1.92）：声明上的 `///` 会挂成 f["doc"]；`with_docs=True`
+    时再多返回 (type_docs, module_doc)，供 quelmara doc / 测试使用。
+    """
+    p = Parser(tokenize(src), src=src)
+    r = p.parse_program()
+    return r + (p.type_docs, p.module_doc) if with_docs else r
 
 
 def _import_candidates(imp, src_dir):
@@ -2930,21 +3750,25 @@ def _cap_desc(cap):
 
 
 # ---------------------------------------------------------------------------
-# 2e. 属性宏 @derive + 编译期反射（v1.71）
+# 2e. 属性宏 @derive + 编译期反射（v1.71）+ 通用 token 宏（v1.96）
 # ---------------------------------------------------------------------------
-# 语言没有运行时元数据段，也没有通用 token 宏。这一层给的是**纯编译期**能力：
+# 语言没有运行时元数据段。这一层给的是**纯编译期**能力：
 #
-#   * `@derive(Json, Eq, Show)` 作用在 struct 声明上，按**字段表**生成
+#   * `@derive(Json, Eq, Show)` 作用在 struct/enum 声明上，按**字段表**生成
 #     `<T>__json` / `<T>__json_into` / `<T>_from_json` / `<T>__eq` / `<T>__show`
 #     等普通函数——产物与手写字段表逐字等价（同一套 AST、同一套 Lower，
 #     零运行时元数据、零动态派发）。序列化从此不用再抄字段名。
-#   * `refl_*[T](i)` 在解析期折叠成 int / str 字面量：类型元数据只存在于
-#     编译期，运行时不占一个字节。
+#   * `macro 名字(形参) { 记号 }` 是**通用 token 宏**（v1.96）：语法分析之前
+#     按记号替换展开，任何语法位置都能用（语句、表达式、类型、甚至 @derive
+#     注解本身）。无卫生性，宏体与调用点同作用域。
+#   * `refl_*[T](i)` 在解析期折叠成 int / str 字面量；下标不是常量时改写成
+#     按需生成的查表函数（v1.96，仍无元数据段）。
 #
-# 边界（同步写在 docs/02-language.md §宏与反射）：
-#   * 只支持 struct；enum 与泛型 struct 模板 fail-fast（先实例化再派生）；
-#   * Json 支持 int 族 / bool / str / 嵌套 struct / vec[这些]；
-#     f64 暂不支持——缺 str→浮点解析原语（见 docs/07-gaps.md §7.10）。
+# 边界（同步写在 docs/02-language.md §4.8）：
+#   * 泛型 struct / 泛型 enum 模板不能直接派生（字段类型还是类型参数）；
+#   * Json 支持 int 族 / bool / str / f64 / 嵌套 struct·enum / vec[这些]；
+#   * 无卫生性：宏形参按记号替换，不加括号。
+_MACRO_MAX_DEPTH = 64
 _DERIVE_ITEMS = ("Json", "Eq", "Show")
 _DERIVE_INT_TYPES = {"int", "i64", "i32", "i16", "i8",
                      "u64", "u32", "u16", "u8", "byte"}
@@ -3132,6 +3956,9 @@ class _GenInfer:
             return env.get(e[1])
         if k == "structlit" and len(e[1]) == 1 and e[1][0] in self.structs:
             return ("named", e[1][0])
+        if k == "lambda":
+            # 闭包字面量（v1.95）：静态类型就是 `closure`（{code, env} 两字）。
+            return ("named", "closure")
         if k == "enumlit" and e[1] and e[1][0] in self.enums:
             return ("named", e[1][0])
         if k == "call" and len(e[1]) == 1 and e[1][0] not in env:
@@ -3310,6 +4137,10 @@ class _GenInfer:
         if not isinstance(s, tuple) or not s:
             return
         k = s[0]
+        if k == "lambda":
+            # 闭包体是**另一个作用域**（v1.95）：它的 let 不能污染外层推断表，
+            # 捕获由 Lower 按真实 env 处理。
+            return
         if k == "let":
             anno = (s[4][1] if len(s) > 4 and isinstance(s[4], tuple)
                     and s[4][0] == "as" else None)
@@ -3531,6 +4362,257 @@ def expand_generics(fns, generic_fns, structs, enums):
     return out
 
 
+_LINK_BUILTIN_TY = {"int", "i64", "i32", "i16", "i8", "u64", "u32", "u16",
+                     "u8", "bool", "str", "void", "byte", "float", "f64",
+                     "f32", "__self__"}
+
+
+def link_modules(files, imp_of, main_ap, ifaces):
+    """跨模块链接（v1.99）：per-module mangling + 限定引用解析。
+
+    `files` = [(label, ap, res, (pub_types, gens, qrefs))]，`res` 就地改写。
+
+    规则（`02-language.md` §1 是唯一事实来源）：
+
+    * **只在一个文件里声明的名字一个字节都不改**——既有程序走的是同一条
+      路径，输出逐字节不变（回归的全部用例都属于这一类）。
+    * 同一个名字在 ≥2 个文件里声明（**跨模块同名声明**）时：导入方的同名
+      声明加模块前缀 `<模块>__<名字>`；**主文件保留原名**（入口侧不用改）。
+      前缀取 import 串（`std.json` -> `std__json`），与源码里的写法同源。
+    * 限定引用 `lib.name` 解析到 lib 那个文件的最终名字（可能带前缀）；
+      未限定引用按"本文件 > 唯一外部声明 > 歧义报错"解析。
+    * 类型被 mangling 时，它的方法 / 派生函数（`T__m` / `T__json` …）跟着
+      换前缀——Lower 的派发按 `Type__method` 拼名字，两边必须一致。
+
+    返回新的 files（顺序不变）。
+    """
+    # ---- 模块前缀 ----
+    best_imp = {}
+    for (fap, imp), tap in imp_of.items():
+        cur = best_imp.get(tap)
+        if cur is None or len(imp) < len(cur):
+            best_imp[tap] = imp
+    key_of = {ap: imp.replace(".", "__") for ap, imp in best_imp.items()}
+    key_of[main_ap] = "main"
+    used = {}
+    for ap in list(key_of):
+        k = key_of[ap]
+        if k in used:
+            used[k] += 1
+            key_of[ap] = f"{k}_{used[k]}"
+        else:
+            used[k] = 1
+
+    # ---- 声明表 ----
+    fn_decls, ty_decls, pub_fn, pub_ty = {}, {}, {}, {}
+    for label, ap, res, pex in files:
+        fn_decls[ap] = {f["name"] for f in res[2]}
+        ty_decls[ap] = {k for k in list(res[4]) + list(res[5])
+                        if k not in ifaces and k != "closure"}
+        pub_fn[ap] = {f["name"] for f in res[2] if f.get("pub")}
+        pub_ty[ap] = set(pex[0])
+    label_of = {ap: label for label, ap, _r, _p in files}
+
+    def _owners(table):
+        out = {}
+        for ap, names in table.items():
+            for n in names:
+                out.setdefault(n, []).append(ap)
+        return out
+    fn_owners, ty_owners = _owners(fn_decls), _owners(ty_decls)
+
+    def _dups(owners):
+        return {n: aps for n, aps in owners.items() if len(aps) > 1}
+    fn_dup, ty_dup = _dups(fn_owners), _dups(ty_owners)
+    fn_dup.pop("main", None)
+
+    # ---- 改名表（主文件不动）----
+    ren = {ap: {} for ap in fn_decls}
+    for n, aps in list(fn_dup.items()) + list(ty_dup.items()):
+        for ap in aps:
+            if ap != main_ap:
+                ren[ap][n] = f"{key_of[ap]}__{n}"
+    if not fn_dup and not ty_dup:
+        # 没有跨模块同名：只需要解析限定引用（下面同一套代码走一遍）
+        pass
+
+    def _final(ap, name):
+        return ren[ap].get(name, name)
+
+    def _split_q(n):
+        return n.split(QSEP, 1) if QSEP in n else None
+
+    def _resolve(enc, ap, label, ns):
+        """限定引用 -> 目标文件的最终名字（并校验存在 + pub）。"""
+        q = _split_q(enc)
+        imp, name = q
+        tgt = imp_of.get((ap, imp))
+        if tgt is None:
+            raise SyntaxError(
+                f"{label}: 限定引用 {imp}.{name} 无法解析——"
+                f"{imp!r} 不是本文件的 import")
+        decls = fn_decls if ns == "fn" else ty_decls
+        if name not in decls.get(tgt, ()):
+            raise SyntaxError(
+                f"{label}: 限定引用 {imp}.{name} 无法解析——"
+                f"{label_of.get(tgt, imp)} 里没有声明 {name!r}")
+        pubs = pub_fn if ns == "fn" else pub_ty
+        if name not in pubs.get(tgt, ()):
+            raise SyntaxError(
+                f"{label}: 限定引用 {imp}.{name} —— {name!r} 在 "
+                f"{label_of.get(tgt, imp)} 里不是 pub（非 pub 声明跨模块不可见）")
+        return _final(tgt, name)
+
+    def _resolve_bare(name, ap, label, ns):
+        """未限定引用：本文件 > 唯一外部声明 > 歧义报错。"""
+        decls = fn_decls if ns == "fn" else ty_decls
+        if name in decls.get(ap, ()):
+            return _final(ap, name)
+        owners = (fn_owners if ns == "fn" else ty_owners).get(name, [])
+        if not owners:
+            return name                 # 内建 / 未定义：交给 Lower 报错
+        if len(owners) == 1:
+            return _final(owners[0], name)
+        where = "、".join(sorted(label_of.get(o, "?") for o in owners))
+        raise SyntaxError(
+            f"{label}: 名字 {name!r} 在多个模块里都有（{where}）——"
+            f"请用 lib.{name} 限定调用（per-module mangling 只在冲突时生效）")
+
+    def _ty(t, ap, label):
+        if not isinstance(t, tuple) or not t:
+            return t
+        k = t[0]
+        if k == "named" and len(t) > 1 and isinstance(t[1], str):
+            n = t[1]
+            if n in _LINK_BUILTIN_TY:
+                return t
+            if QSEP in n:
+                return ("named", _resolve(n, ap, label, "ty"))
+            return ("named", _resolve_bare(n, ap, label, "ty"))
+        if k in ("vec", "slice", "chan", "rc"):
+            return (k, _ty(t[1], ap, label))
+        if k == "map":
+            return (k, _ty(t[1], ap, label), _ty(t[2], ap, label))
+        if k == "array":
+            return (k, t[1], _ty(t[2], ap, label))
+        return t
+
+    def _nm(n, ap, label, ns):
+        if QSEP in n:
+            return _resolve(n, ap, label, ns)
+        return _resolve_bare(n, ap, label, ns)
+
+    def rn(node, ap, label, shadow):
+        """重写一棵 AST：声明名 / 类型位 / 引用位 / 限定引用。"""
+        if isinstance(node, tuple):
+            if not node:
+                return node
+            k = node[0]
+            if k == "name" and len(node) > 1 and isinstance(node[1], str):
+                n = node[1]
+                return node if n in shadow else ("name", _nm(n, ap, label, "fn"))
+            if k == "named":
+                return _ty(node, ap, label)
+            if k == "call" and len(node) > 1 and isinstance(node[1], list) \
+                    and node[1]:
+                path = node[1]
+                if len(path) == 1:
+                    path = [_nm(path[0], ap, label, "fn")]
+                return ("call", path, rn(node[2], ap, label, shadow))
+            if k in ("gcall", "gcall_infer") and len(node) > 1 \
+                    and isinstance(node[1], str):
+                head = [_nm(node[1], ap, label, "fn")]
+                rest = [rn(x, ap, label, shadow) for x in node[2:]]
+                return tuple([k] + head + rest)
+            if k in ("enumlit", "enumlit_pos", "structlit") and len(node) > 1 \
+                    and isinstance(node[1], list) and node[1]:
+                path = [_nm(node[1][0], ap, label, "ty")] + list(node[1][1:])
+                return tuple([k, path] + [rn(x, ap, label, shadow)
+                                          for x in node[2:]])
+            if k == "pat" and len(node) > 2 and isinstance(node[1], list) \
+                    and node[1]:
+                path = [_nm(node[1][0], ap, label, "ty")] + list(node[1][1:])
+                binds = node[2]
+                body_shadow = shadow | {b for b in (binds or []) if b}
+                return ("pat", path, binds)
+            if k == "path" and len(node) > 1 and isinstance(node[1], list) \
+                    and node[1]:
+                segs = node[1]
+                if QSEP in segs[0]:
+                    segs = [_nm(segs[0], ap, label, "ty")] + list(segs[1:])
+                elif segs[0] in ty_decls.get(ap, ()):
+                    segs = [_final(ap, segs[0])] + list(segs[1:])
+                return ("path", segs)
+            if k == "let" and len(node) > 2 and isinstance(node[2], str):
+                # 先走右值，再把名字算进遮蔽（`let x = x` 的右边是外层 x）
+                out = [node[0], node[1], node[2]] + [rn(x, ap, label, shadow)
+                                                     for x in node[3:]]
+                shadow.add(node[2])
+                return tuple(out)
+            if k in ("for", "parfor", "foreach") and len(node) > 1 \
+                    and isinstance(node[1], str):
+                out = [node[0], node[1]] + [rn(x, ap, label, shadow)
+                                            for x in node[2:]]
+                shadow.add(node[1])
+                return tuple(out)
+            return tuple(rn(x, ap, label, shadow) for x in node)
+        if isinstance(node, list):
+            return [rn(x, ap, label, shadow) for x in node]
+        if isinstance(node, dict):
+            return {kk: rn(v, ap, label, shadow) for kk, v in node.items()}
+        return node
+
+    out_files = []
+    for label, ap, res, pex in files:
+        mod, imports, fns, tests, structs, enums, decl_order = res[:7]
+        tmap = {t: n for t, n in ren[ap].items() if t in ty_decls[ap]}
+
+        def _mangle_method(nm):
+            for t, n in tmap.items():
+                if nm.startswith(t + "__"):
+                    return n + nm[len(t):]
+            return ren[ap].get(nm, nm)
+
+        new_fns = []
+        for f in fns:
+            f = dict(f)
+            f["name"] = _mangle_method(f["name"])
+            if f.get("self_type") in tmap:
+                f["self_type"] = tmap[f["self_type"]]
+            f["params"] = [(pn, _ty(pt, ap, label)) for pn, pt in f["params"]]
+            f["ret"] = _ty(f["ret"], ap, label)
+            body = f.get("body")
+            if body is not None:
+                shadow = {pn for pn, _pt in f["params"]}
+                f["body"] = rn(body, ap, label, shadow)
+            new_fns.append(f)
+
+        new_tests = []
+        for t in tests:
+            t = dict(t)
+            t["body"] = rn(t["body"], ap, label, set())
+            new_tests.append(t)
+
+        new_structs = {}
+        for k, fields in structs.items():
+            nk = tmap.get(k, k)
+            new_structs[nk] = [(fn_, _ty(ft, ap, label)) for fn_, ft in fields]
+        new_enums = {}
+        for k, variants in enums.items():
+            nk = tmap.get(k, k)
+            new_enums[nk] = [(vn, [(fn_, _ty(ft, ap, label)) for fn_, ft in vfs])
+                             for vn, vfs in variants]
+        new_order = []
+        for kind, n in decl_order:
+            new_order.append((kind, tmap.get(n, n)))
+
+        out_files.append((label, ap,
+                          (mod, imports, new_fns, new_tests, new_structs,
+                           new_enums, new_order),
+                          pex))
+    return out_files, ren
+
+
 def load_program(src_path, cfg=None):
     """带 import 的程序加载（v1.17：支持 [src] 三类资源布局）。
 
@@ -3557,16 +4639,19 @@ def load_program(src_path, cfg=None):
     order_aps = []             # 与 order 平行：绝对路径（defs_of/限定引用校验键）
     imp_of = {}                # (文件 ap, import 串) -> 目标文件 ap（限定引用校验）
 
-    def parse_file(path, consts=None, generic_fns=None):
+    def parse_file(path, consts=None, generic_fns=None, ifaces=None,
+                   lenient=False):
         with open(path, encoding="utf-8") as f:
-            p = Parser(tokenize(f.read()), consts=consts,
-                       generic_fns=generic_fns)
+            text = f.read()
+        p = Parser(tokenize(text), consts=consts,
+                   generic_fns=generic_fns, ifaces=ifaces,
+                   lenient_iface=lenient, src=text)
         res = p.parse_program()
         # 本文件新定义的泛型模板（种子里的不算）：pub 标记随 fdef["pub"]
         seed = set(generic_fns or {})
         gens = {k: bool(p.generic_fns[k].get("pub"))
                 for k in p.generic_fns if k not in seed}
-        return res, p.pub_types, gens, p.qrefs
+        return res, p.pub_types, gens, p.qrefs, (p.mod_version, p.import_reqs)
 
     main_dir = os.path.dirname(os.path.abspath(src_path))
     src_cfg = (cfg or {}).get("src", {}) if isinstance(cfg, dict) else {}
@@ -3603,8 +4688,11 @@ def load_program(src_path, cfg=None):
             raise SyntaxError(f"import 循环："
                               f"{' -> '.join(chain + [os.path.basename(path)])}")
         stack.append(ap)
-        res, pub_types, gens, qrefs = parse_file(ap)
+        # 第一遍只用来发现 import 链与收集 const/泛型/接口种子：
+        # 接口可能来自尚未扫到的模块，这一遍放宽（v1.81）
+        res, pub_types, gens, qrefs, _mv = parse_file(ap, lenient=True)
         stack.pop()
+        meta[ap] = {"version": _mv[0], "reqs": _mv[1]}
         seen[ap] = (res, pub_types, gens, qrefs)
         order.append(res)
         order_labels.append(os.path.basename(path))
@@ -3614,9 +4702,11 @@ def load_program(src_path, cfg=None):
             imp_of[(ap, imp)] = os.path.normpath(os.path.abspath(cand))
             load(cand, chain + [os.path.basename(path)])
 
-    main_res, main_pub_types, main_gens, main_qrefs = parse_file(src_path)
+    main_res, main_pub_types, main_gens, main_qrefs, _mm = parse_file(
+        src_path, lenient=True)
     main_label = os.path.basename(src_path)
     main_ap = os.path.normpath(os.path.abspath(src_path))
+    meta = {main_ap: {"version": _mm[0], "reqs": _mm[1]}}
     for imp in main_res[1]:
         cand = resolve_or_raise(imp, src_path)
         imp_of[(main_ap, imp)] = os.path.normpath(os.path.abspath(cand))
@@ -3629,14 +4719,22 @@ def load_program(src_path, cfg=None):
     # 解析期内联发生在各自文件，而 import 是扁平合并、解析顺序不保证。
     def _consts_of(path):
         with open(path, encoding="utf-8") as f:
-            p = Parser(tokenize(f.read()))
+            p = Parser(tokenize(f.read()), lenient_iface=True)
         p.parse_program()
-        return p.consts, p.generic_fns
+        # 宽松占位（`impl T : X` 里出现过、但本文件没声明的 X）**不进种子**：
+        # 它只是"扫描顺序"的产物，不是声明。放进种子会让"根本没声明"的
+        # 接口在第二遍被当成合法种子静默放行（v1.88）。
+        real_if = {k: v for k, v in p.interfaces.items()
+                   if k not in p.iface_provisional}
+        return p.consts, p.generic_fns, real_if, set(p.iface_provisional)
 
     acc = {}
     acc_gf = {}
+    acc_if = {}
+    prov_seen = False
     for path in [src_path] + list(seen.keys()):
-        cs, gf = _consts_of(path)
+        cs, gf, ifs, prov = _consts_of(path)
+        prov_seen = prov_seen or bool(prov)
         for k, v in cs.items():
             if k in acc and acc[k] != v:
                 raise SyntaxError(
@@ -3647,15 +4745,27 @@ def load_program(src_path, cfg=None):
                 raise SyntaxError(
                     f"泛型函数冲突：{k!r} 在多个模块中定义不同")
             acc_gf[k] = v
-    if acc or acc_gf:
+        for k, v in ifs.items():
+            # 跨文件接口（v1.81）：同名接口必须在所有模块里签名一致。
+            # 占位已被 _consts_of 滤掉，所以这里出现的都是**真声明**：
+            # 签名不同即冲突，签名相同即幂等（v1.88）。
+            if k in acc_if and acc_if[k] != v:
+                raise SyntaxError(
+                    f"接口冲突：{k!r} 在多个模块中声明不一致"
+                    f"（跨文件接口必须同名同签名）")
+            acc_if[k] = v
+    # prov_seen：有文件在 impl 里引用了"本文件没声明"的接口。这类程序
+    # 必须走第二遍严格校验（否则宽松期的占位会让它静默通过）——v1.88。
+    if acc or acc_gf or acc_if or prov_seen:
         seen2, order2, pex2, labels2, aps2 = {}, [], [], [], []
 
         def reload(path):
             ap = os.path.normpath(os.path.abspath(path))
             if ap in seen2:
                 return
-            res, pub_types, gens, qrefs = parse_file(
-                ap, consts=acc, generic_fns=acc_gf)
+            res, pub_types, gens, qrefs, _mv = parse_file(
+                ap, consts=acc, generic_fns=acc_gf, ifaces=acc_if)
+            meta[ap] = {"version": _mv[0], "reqs": _mv[1]}
             seen2[ap] = res
             order2.append(res)
             pex2.append((pub_types, gens, qrefs))
@@ -3666,8 +4776,9 @@ def load_program(src_path, cfg=None):
                 imp_of[(ap, imp)] = os.path.normpath(os.path.abspath(cand))
                 reload(resolve_or_raise(imp, path))
 
-        main_res, main_pub_types, main_gens, main_qrefs = parse_file(
-            src_path, consts=acc, generic_fns=acc_gf)
+        main_res, main_pub_types, main_gens, main_qrefs, _mm = parse_file(
+            src_path, consts=acc, generic_fns=acc_gf, ifaces=acc_if)
+        meta[main_ap] = {"version": _mm[0], "reqs": _mm[1]}
         for imp in main_res[1]:
             cand = resolve_or_raise(imp, src_path)
             imp_of[(main_ap, imp)] = os.path.normpath(os.path.abspath(cand))
@@ -3729,6 +4840,38 @@ def load_program(src_path, cfg=None):
     files = [(main_label, main_ap, main_res, main_pex)] + [
         (label, ap, res, pex)
         for label, (ap, (res, pex)) in zip(order_labels, zip(aps, zip(order, pex_list)))]
+
+    # ---- 模块版本检查（v1.99）----
+    # `module util "1.2.3"` 声明；`import util ">=1.2"` 要求。只挡"明显不兼容"
+    # 的导入（同 major 且 >= 要求），不做 semver 求解——依赖解析是 qpm 的活。
+    for (_ap, _imp), _tgt in imp_of.items():
+        _req = meta.get(_ap, {}).get("reqs", {}).get(_imp)
+        if _req is None:
+            continue
+        _ver = meta.get(_tgt, {}).get("version")
+        _req_s = ".".join(str(x) for x in _req)
+        _who = os.path.basename(_ap)
+        _what = os.path.basename(_tgt)
+        if _ver is None:
+            raise SyntaxError(
+                f"{_who}: import {_imp} 要求版本 >= {_req_s}，但 {_what} "
+                f"没有声明版本——请在它开头写 module <名字> \"x.y.z\"")
+        if _ver[0] != _req[0] or _ver < _req:
+            raise SyntaxError(
+                f"{_who}: import {_imp} 要求版本 >= {_req_s}（同 major "
+                f"{_req[0]}），实际是 {'.'.join(str(x) for x in _ver)}"
+                f"（{_what}）——版本不兼容")
+
+    # ---- 跨模块链接（v1.99）：per-module mangling + 限定引用解析 ----
+    # 没有跨模块同名、也没有限定引用时，这一步是恒等变换（既有程序零影响）。
+    files, link_ren = link_modules(files, imp_of, main_ap, acc_if)
+    main_res = files[0][2]
+    order = [f[2] for f in files[1:]]
+    for _ap, _m in link_ren.items():
+        for _old, _new in _m.items():
+            if _old in acc_gf:          # 泛型模板跟着改名（展开时按名查表）
+                acc_gf[_new] = acc_gf.pop(_old)
+
     defs_of = {}
     for _label, ap, res, (pub_types, gens, _qr) in files:
         fdefs = {f["name"]: bool(f.get("pub")) for f in res[2]}
@@ -3744,15 +4887,9 @@ def load_program(src_path, cfg=None):
             # 只兜 interface/泛型这类没有专属冲突检查的条目
             defs_of.setdefault(name, (ap, is_pub))
     for label, ap, res, (_pt, _gn, qrefs) in files:
-        # 限定引用指向校验（v1.44）：lib.name 的 name 必须定义在 lib 解析
-        # 到的那个文件里（扁平唯一性下，指错模块 = 该模块没有这个名字）
-        for imp, name in qrefs:
-            tgt = imp_of.get((ap, imp))
-            d = defs_of.get(name)
-            if tgt is None or d is None or d[0] != tgt:
-                raise SyntaxError(
-                    f"{label}: 限定引用 {imp}.{name} 无法解析——"
-                    f"{imp} 模块里没有声明 {name!r}")
+        # 限定引用的指向 / pub 校验已在 link_modules 里按**节点**做完
+        # （v1.99：同一个文件里 `f()` 与 `lib.f()` 必须是两个不同符号，
+        #  v1.44 的"集合式"校验无法区分，故整体挪到链接期）。
         refs, bound = set(), set()
         for f in res[2]:
             for pn, _pt in f["params"]:
@@ -3792,7 +4929,16 @@ def load_program(src_path, cfg=None):
             fn_names.add(f["name"])
         fns = fns + res[2]
         for k in res[4]:
+            if k == "closure":
+                # 闭包布局（v1.95）是内建类型：每个文件的 Parser 都自带一份
+                # 同构登记，跨文件合并时不算重名（与接口种子的处理同理）。
+                structs.setdefault(k, res[4][k])
+                continue
             if k in structs:
+                if k in acc_if:
+                    # 跨文件接口（v1.81）：两边 structs 里都有它——声明方是真身，
+                    # 引用方只是种子带来的 {data,vt} 布局，同名不算冲突。
+                    continue
                 raise SyntaxError(f"import 冲突：struct {k!r} 重名")
         structs.update(res[4])
         for k in res[5]:
@@ -3905,7 +5051,7 @@ def with_test_runner(fns_ast, tests):
 # 3. 类型推断（原型子集）
 # ---------------------------------------------------------------------------
 
-def global_dce(fns_ast):
+def global_dce(fns_ast, keep=None):
     """全局死代码消除（v1.17d）：从 main 的调用图可达性分析，删除不可达
     的用户函数——import 大库只链接用到的（库生态"不拉进无用代码"的核心）。
 
@@ -3969,6 +5115,10 @@ def global_dce(fns_ast):
             family.setdefault((ii, f.get("self_type")), []).append(f["name"])
 
     reach = {"main"}
+    if keep:
+        # v1.93：隐式调用的函数（析构）当额外根——AST 里没有 call 节点，
+        # 只从 main 走调用图找不到它，会被当死代码删掉。
+        reach |= set(keep)
     seen = set()
     methods = set()
     while True:
@@ -5354,6 +6504,12 @@ class Codegen:
     # ---- 表达式 ----
     def gen_expr(self, e, env):
         k = e[0]
+        if k == "lambda":
+            # 闭包需要"代码地址 + 捕获环境"两字值 + 隐藏 env 形参的调用约定，
+            # C 后端只做交叉验证，不复制这套 ABI —— 明确 fail-fast。
+            raise SyntaxError(
+                "C 后端不支持闭包字面量 fn(...) { ... }（v1.95 边界："
+                "只进自研后端）")
         if k == "interp":
             # 插值字符串的 C 侧要接 qlm_str_from_i64 / qlm_f64_to_str / 链式拼接，
             # 与原生后端的单次分配语义对不齐；C 只做交叉验证，直接 fail-fast。
@@ -5412,6 +6568,11 @@ class Codegen:
                 if len(e[2]) != 1:
                     raise SyntaxError("to_float(x) 需要且只需要一个实参")
                 acode, at = self.gen_expr(e[2][0], env)
+                if at == "const char *":
+                    raise SyntaxError(
+                        "to_float(str) 不做十进制解析——旧实现会把字符串指针"
+                        "当数值转，静默给出垃圾值（见 docs/07-gaps.md §7.10）。"
+                        "请用 std/f64 的 f64_parse(s)")
                 if is_float_env(at):
                     return f"(double)({acode})", "double"
                 return f"((double)({acode}))", "double"
@@ -6586,18 +7747,20 @@ class Codegen:
         if self.decl_order:
             lines.append("")
 
-        # @extern("C") 原型（非 static，链接期解析；v0.11）
+        # @extern("C") / @ffi 原型（非 static，链接期解析；v0.11 / v1.87）
+        # @ffi 在 C 后端退化成普通 extern 原型：DLL 名对 C 链接器没有意义，
+        # 由用户自己 -l 对应库（PE 导入表那条路只在自研后端成立）。
         for f in fns:
-            if not f.get("extern"):
+            if not (f.get("extern") or f.get("ffi")):
                 continue
             params = ", ".join(f"{self.ctype(t)} {n}" for n, t in f["params"]) or "void"
             lines.append(f"extern {self.ctype(f['ret'])} {f['name']}({params});")
-        if any(f.get("extern") for f in fns):
+        if any(f.get("extern") or f.get("ffi") for f in fns):
             lines.append("")
 
         # 前向声明
         for f in fns:
-            if f.get("extern"):
+            if f.get("extern") or f.get("ffi"):
                 continue
             params = ", ".join(f"{self.ctype(t)} {n}" for n, t in f["params"]) or "void"
             lines.append(f"static {self.ctype(f['ret'])} {f['name']}({params});")
@@ -6605,7 +7768,7 @@ class Codegen:
 
         bodies = []
         for f in fns:
-            if f.get("extern"):
+            if f.get("extern") or f.get("ffi"):
                 continue
             self.current_ret_t = f["ret"]
             env = {n: self.env_type(t) for n, t in f["params"]}
@@ -6786,6 +7949,14 @@ def transpile(src_path):
     mod, imports, fns_ast, tests, structs, enums, decl_order = load_program(src_path, cfg)
     PROGRAM = (mod, imports, fns_ast, tests)
     fns_ast = with_test_runner(fns_ast, tests)
+    # v1.93：Drop 是作用域退出时的**隐式**调用，C99 没有析构语义。静默不跑
+    # 清理就是语义分叉（资源泄漏/句柄不关），所以 fail-fast 拒绝——与 defer
+    # 同一口径：析构类测试只进 PE / A64 原生后端回归。
+    for f in fns_ast:
+        if f.get("impl_iface") == "Drop":
+            raise SyntaxError(
+                f"C 后端不支持 Drop（v1.93 边界：{f.get('self_type')}.drop 是"
+                "作用域退出时的隐式调用，C99 无析构语义；析构只进原生后端）")
     fns_ast = global_dce(fns_ast)          # 全局 DCE（v1.17d）
     # 用户 main 与 C main 区分：编译为 qlm_main
     for f in fns_ast:
