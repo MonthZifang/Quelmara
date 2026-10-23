@@ -1,0 +1,9 @@
+// 负向（v1.96）：泛型 enum 模板不能直接派生（载荷类型还是类型参数）
+module derive_genenum
+
+@derive(Json)
+enum Opt[T] { Some(v: T), None }
+
+fn main() {
+    print("x")
+}

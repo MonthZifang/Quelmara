@@ -1,0 +1,8 @@
+// 负向（v1.96）：宏实参个数必须与形参一致
+module macro_arity
+
+macro pair(a, b) { ((a) + (b)) }
+
+fn main() {
+    print(pair(1).to_str())
+}

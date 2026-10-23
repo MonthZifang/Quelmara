@@ -1,0 +1,57 @@
+// t125_refl_dyn.qma：运行时下标反射（v1.96）
+//
+// 覆盖：
+//   1) 常量下标仍折叠成字面量（零成本路径）
+//   2) 变量下标：按需生成查表函数，能写"遍历字段/变体"的循环
+//   3) 下标来自算术 / 函数参数 / 循环变量
+//   4) 类型名（refl_type_name）与计数（*_count）仍是纯常量
+module t125
+
+struct Point { x: int, y: str, z: f64 }
+
+enum Shape { Dot, Circle(r: int), Rect(w: int, h: int) }
+
+// 运行时下标来自函数参数
+fn field_name_at(i: int) -> str {
+    return refl_field_name[Point](i)
+}
+
+fn main() {
+    // 1) 常量下标
+    assert(refl_type_name[Point]() == "Point", "refl_type_name")
+    assert(refl_field_count[Point]() == 3, "refl_field_count")
+    assert(refl_field_name[Point](0) == "x", "常量下标折叠")
+    assert(refl_field_type[Point](2) == "f64", "常量下标的类型文本")
+    assert(refl_variant_arity[Shape](2) == 2, "变体载荷数")
+
+    // 2) 循环遍历字段（下标是循环变量 -> 运行时查表）
+    let n = refl_field_count[Point]()
+    let mut names = ""
+    let mut types = ""
+    let mut i = 0
+    while i < n {
+        names = names + refl_field_name[Point](i) + ","
+        types = types + refl_field_type[Point](i) + ","
+        i = i + 1
+    }
+    assert(names == "x,y,z,", "运行时下标遍历字段名")
+    assert(types == "int,str,f64,", "运行时下标遍历字段类型")
+
+    // 3) 遍历变体
+    let m = refl_variant_count[Shape]()
+    let mut vs = ""
+    let mut j = 0
+    while j < m {
+        vs = vs + refl_variant_name[Shape](j) + "/" +
+             refl_variant_arity[Shape](j).to_str() + ","
+        j = j + 1
+    }
+    assert(vs == "Dot/0,Circle/1,Rect/2,", "运行时下标遍历变体")
+
+    // 4) 下标来自函数参数 / 算术
+    assert(field_name_at(1) == "y", "下标来自形参")
+    let k = 1 + 1
+    assert(refl_field_name[Point](k) == "z", "下标来自算术")
+
+    print("ok t125")
+}

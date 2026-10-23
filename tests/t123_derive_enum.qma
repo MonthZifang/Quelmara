@@ -1,0 +1,131 @@
+// t123_derive_enum.qma：enum 派生 + f64 字段（v1.96）
+//
+// 覆盖：
+//   1) @derive(Json) 作用在 enum 上：{"$v":"变体", 载荷...} 约定
+//   2) @derive(Eq)：同变体且载荷逐字段相等；跨变体永远不等
+//   3) @derive(Show)：Dot / Circle(5) / Rect(3, 4)
+//   4) f64 字段：JSON 用 f64_repr（最短往返），解码用 f64_parse
+//   5) 嵌套 struct / enum 字段、vec[enum] 字段、enum 里装 enum
+//   6) 往返：json -> from_json -> eq
+//   7) 布尔载荷（bool 在 show 里是 true/false，不是 1/0）
+module t123
+
+@derive(Json, Eq, Show)
+struct Point { x: int, y: int }
+
+@derive(Json, Eq, Show)
+enum Shape {
+    Dot,
+    Circle(r: int),
+    Rect(w: int, h: int),
+    Tag(name: str, at: Point),
+    Weighed(kg: f64),
+    Flag(on: bool),
+    Nested(k: Kind),
+}
+
+@derive(Json, Eq, Show)
+enum Kind { A, B }
+
+@derive(Json, Eq, Show)
+struct Meas { id: u32, temp: f64, ok: bool, at: Point }
+
+@derive(Json, Eq, Show)
+struct Drawing { title: str, shapes: vec[Shape], main: Shape }
+
+// 13) 字段类型可以指向**后面**声明的 enum：派生展开统一在文件末尾做
+@derive(Json, Eq, Show)
+struct Late { id: int, k: LateKind }
+
+@derive(Json, Eq, Show)
+enum LateKind { A, B(n: int) }
+
+fn main() {
+    // 1) 无载荷变体
+    assert(Shape.Dot.json() == "{\"$v\":\"Dot\"}", "Dot 的 JSON 形态")
+    assert(Shape.Dot.show() == "Dot", "Dot 的 show")
+
+    // 2) 单载荷 / 双载荷
+    let c = Shape.Circle(r: 5)
+    assert(c.json() == "{\"$v\":\"Circle\",\"r\":5}", "Circle 的 JSON 形态")
+    assert(c.show() == "Circle(5)", "Circle 的 show")
+    let r = Shape.Rect(w: 3, h: 4)
+    assert(r.json() == "{\"$v\":\"Rect\",\"w\":3,\"h\":4}", "Rect 的 JSON 形态")
+    assert(r.show() == "Rect(3, 4)", "Rect 的 show（多载荷用逗号分隔）")
+
+    // 3) str 载荷（转义走 std/json 同一条路径）+ 嵌套 struct 载荷
+    let p = Point { x: 1, y: -2 }
+    let t = Shape.Tag(name: "a\"b", at: p)
+    assert(t.json() == "{\"$v\":\"Tag\",\"name\":\"a\\\"b\",\"at\":{\"x\":1,\"y\":-2}}",
+           "str 载荷转义 + 嵌套 struct 载荷")
+    assert(t.show() == "Tag(a\"b, Point { x: 1, y: -2 })", "嵌套 struct 的 show")
+
+    // 4) f64 载荷：最短往返（0.1 不写成 0.10000000000000001）
+    let w = Shape.Weighed(kg: 0.1)
+    assert(w.json() == "{\"$v\":\"Weighed\",\"kg\":0.1}", "f64 载荷的 JSON")
+    assert(Shape.Weighed(kg: 1.5).show() == "Weighed(1.5)", "f64 载荷的 show")
+
+    // 5) bool 载荷（show 走 true/false）
+    assert(Shape.Flag(on: true).json() == "{\"$v\":\"Flag\",\"on\":true}", "bool 载荷 JSON")
+    assert(Shape.Flag(on: false).show() == "Flag(false)", "bool 载荷 show")
+
+    // 6) enum 里装 enum（跨 enum 的嵌套派生）
+    let n = Shape.Nested(k: Kind.B)
+    assert(n.json() == "{\"$v\":\"Nested\",\"k\":{\"$v\":\"B\"}}",
+           "enum 嵌套 enum")
+    assert(n.show() == "Nested(B)", "嵌套 enum 的 show")
+
+    // 7) 往返：每个变体都要 json -> from_json -> eq
+    assert(Shape.Dot.eq(Shape_from_json(Shape.Dot.json())), "Dot 往返")
+    assert(c.eq(Shape_from_json(c.json())), "Circle 往返")
+    assert(r.eq(Shape_from_json(r.json())), "Rect 往返")
+    assert(t.eq(Shape_from_json(t.json())), "Tag 往返")
+    assert(w.eq(Shape_from_json(w.json())), "Weighed 往返")
+    assert(n.eq(Shape_from_json(n.json())), "Nested 往返")
+
+    // 8) 跨变体不等（载荷数值恰好相同也不等）
+    assert(!c.eq(r), "不同变体不等")
+    assert(!c.eq(Shape.Circle(r: 6)), "同变体不同载荷不等")
+    assert(c.eq(Shape.Circle(r: 5)), "同变体同载荷相等")
+
+    // 9) struct 里的 f64 字段
+    let m = Meas { id: 7, temp: 2.25, ok: true, at: p }
+    assert(m.json() == "{\"id\":7,\"temp\":2.25,\"ok\":true,\"at\":{\"x\":1,\"y\":-2}}",
+           "struct 的 f64 字段")
+    let m2 = Meas_from_json(m.json())
+    assert(m.eq(m2), "f64 字段往返")
+    assert(m2.temp == 2.25, "f64 字段值")
+
+    // 10) 精度：圆周率与 0.1 都要逐位往返
+    let pi = Meas { id: 1, temp: 3.141592653589793, ok: false, at: Point { x: 0, y: 0 } }
+    let pi2 = Meas_from_json(pi.json())
+    assert(pi2.temp == pi.temp, "17 位有效数字往返（3.141592653589793）")
+    let tenth = Meas { id: 2, temp: 0.1, ok: false, at: Point { x: 0, y: 0 } }
+    assert(Meas_from_json(tenth.json()).temp == 0.1, "0.1 往返")
+
+    // 11) vec[enum] 字段
+    let vs = vec[Shape].new(3)
+    vs.push(Shape.Dot)
+    vs.push(Shape.Circle(r: 9))
+    vs.push(Shape.Weighed(kg: -0.5))
+    let d = Drawing { title: "t", shapes: vs, main: Shape.Rect(w: 1, h: 2) }
+    assert(d.json() == "{\"title\":\"t\",\"shapes\":[{\"$v\":\"Dot\"}," +
+           "{\"$v\":\"Circle\",\"r\":9},{\"$v\":\"Weighed\",\"kg\":-0.5}]," +
+           "\"main\":{\"$v\":\"Rect\",\"w\":1,\"h\":2}}", "vec[enum] 编码")
+    let d2 = Drawing_from_json(d.json())
+    assert(d.eq(d2), "vec[enum] 往返")
+    assert(d.show() == "Drawing { title: t, shapes: [Dot, Circle(9), Weighed(-0.5)], " +
+           "main: Rect(1, 2) }", "vec[enum] 的 show")
+
+    // 12) 空字符串载荷
+    let e = Shape.Tag(name: "", at: Point { x: 0, y: 0 })
+    assert(e.eq(Shape_from_json(e.json())), "空串载荷往返")
+
+    // 13) 前向引用：字段类型在 struct 之后声明
+    let late = Late { id: 3, k: LateKind.B(n: 4) }
+    assert(late.json() == "{\"id\":3,\"k\":{\"$v\":\"B\",\"n\":4}}",
+           "前向声明的 enum 字段")
+    assert(late.eq(Late_from_json(late.json())), "前向声明往返")
+
+    print("ok t123")
+}

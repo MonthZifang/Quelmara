@@ -1,0 +1,8 @@
+// 负向（v1.96）：按值自包含的 enum 没有有限布局
+module enum_self
+
+enum E { Leaf, Node(inner: E) }
+
+fn main() {
+    print("x")
+}

@@ -1,0 +1,99 @@
+// t124_macro.qma：通用 token 宏（v1.96）
+//
+// 覆盖：
+//   1) 语句宏：宏体是多条语句
+//   2) 表达式宏：宏体自己带括号（无卫生性，括号要自己写）
+//   3) 宏调宏：展开是递归的
+//   4) 生成声明：宏体是 struct / fn 声明
+//   5) 前向引用：宏可以用在定义之前
+//   6) 宏生成 @derive 注解（宏展开先于注解扫描）
+//   7) 零形参宏
+//   8) 函数体内部使用宏
+module t124
+
+// 1) 语句宏
+macro require_range(v, lo, hi) {
+    assert((v) >= (lo) && (v) <= (hi), "out of range")
+}
+
+// 2) 表达式宏：整体带括号，调用点才能接 `.to_str()` 之类
+macro square(x) { ((x) * (x)) }
+
+// 3) 宏调宏（宏体里再调宏）
+macro square_sum(a, b) { (square(a) + square(b)) }
+
+// 4) 生成声明
+macro decl_point(name) {
+    struct name { x: int, y: int }
+}
+
+macro decl_double(fname) {
+    fn fname(v: int) -> int {
+        return v * 2
+    }
+}
+
+// 5) 零形参宏
+macro banner() {
+    print("--")
+}
+
+// 6) 宏生成 @derive 注解（_scan_macros 先于 _scan_derives 跑）
+macro decl_derived(name) {
+    @derive(Json, Eq, Show)
+    struct name { v: int }
+}
+
+// 7) 前向引用：调用点在宏定义之前（展开时会重新扫一遍，所以顺序无关）
+fwd_value(11)
+
+macro fwd_value(x) {
+    fn fwd_get() -> int {
+        return x
+    }
+}
+
+decl_point(Pt)
+decl_double(twice)
+decl_derived(Dv)
+
+fn main() {
+    // 1) 语句宏
+    require_range(5, 1, 10)
+    require_range(1, 1, 1)
+
+    // 2) 表达式宏
+    assert(square(7) == 49, "square(7)")
+    let s = square(3).to_str()
+    assert(s == "9", "表达式宏接方法调用")
+
+    // 3) 宏调宏
+    assert(square_sum(3, 4) == 25, "square_sum(3, 4)")
+
+    // 4) 宏生成的声明是普通声明
+    let p = Pt { x: 1, y: 2 }
+    assert(p.x + p.y == 3, "宏生成的 struct")
+    assert(twice(21) == 42, "宏生成的 fn")
+
+    // 5) 零形参宏
+    banner()
+
+    // 7) 前向引用
+    assert(fwd_get() == 11, "宏可以用在定义之前")
+
+    // 6) 宏生成 @derive：json/eq/show 都在
+    let d = Dv { v: 8 }
+    assert(d.json() == "{\"v\":8}", "宏生成 @derive(Json)")
+    assert(d.show() == "Dv { v: 8 }", "宏生成 @derive(Show)")
+    assert(d.eq(Dv { v: 8 }), "宏生成 @derive(Eq)")
+
+    // 8) 函数体内部使用宏
+    let mut i = 0
+    while i < 3 {
+        require_range(i, 0, 2)
+        i = i + 1
+    }
+    assert(i == 3, "循环里的宏")
+
+    print("ok t124")
+}

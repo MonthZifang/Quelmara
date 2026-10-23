@@ -1,4 +1,4 @@
-// 负向（v1.72）：字段是 enum 时无法派生 Json（enum 派生还没做）
+// 负向（v1.96）：字段类型是 enum 时，该 enum 也必须派生同一项
 module derive_field_enum
 
 enum Color { Red, Green }

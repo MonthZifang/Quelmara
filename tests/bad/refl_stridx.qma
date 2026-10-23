@@ -1,0 +1,8 @@
+// 负向（v1.96）：反射下标必须是 int（可以是运行时的 int，但不能是 str）
+module refl_stridx
+
+struct P { x: int, y: int }
+
+fn main() {
+    print(refl_field_name[P]("x"))
+}

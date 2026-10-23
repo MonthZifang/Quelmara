@@ -1,0 +1,8 @@
+// 负向（v1.96）：宏体自递归要在编译期拦下（不能无限展开）
+module macro_recursive
+
+macro loop(x) { loop(x) }
+
+fn main() {
+    print(loop(1).to_str())
+}

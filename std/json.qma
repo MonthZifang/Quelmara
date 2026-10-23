@@ -661,9 +661,9 @@ fn _parse_obj(d: int, depth: int) -> int {
 // 对外：解析与取值
 // ---------------------------------------------------------------------------
 
-// json_parse(s) -> doc 句柄。失败时 json_ok(doc) == false。
-// 句柄不自动回收（一个文档一个块）；长驻进程请 mem_free(doc, 72) 并在
-// 之前释放 pool/buf/kids（当前不提供 json_free，见 docs/GAPS.md）。
+/// json_parse(s) -> doc 句柄。失败时 json_ok(doc) == false。
+/// 句柄不自动回收（一个文档一个块）；长驻进程请 mem_free(doc, 72) 并在
+/// 之前释放 pool/buf/kids（当前不提供 json_free，见 docs/GAPS.md）。
 pub fn json_parse(s: str) -> int {
     let d = mem_alloc(136)
     mem_store64(d, JDOM_PBUF, mem_alloc(32 * 6 * 8))
@@ -692,6 +692,7 @@ pub fn json_parse(s: str) -> int {
     return d
 }
 
+/// 解析是否成功：err==0 且 root>=0；d==0 也返回 false。
 pub fn json_ok(d: int) -> bool {
     if d == 0 {
         return false
@@ -702,11 +703,12 @@ pub fn json_ok(d: int) -> bool {
     return mem_load64(d, JDOM_ROOT) >= 0
 }
 
-// 错误位置（1-based 字节偏移；0 = 无错）
+/// 错误位置（1-based 字节偏移；0 = 无错）
 pub fn json_error_pos(d: int) -> int {
     return mem_load64(d, JDOM_ERR)
 }
 
+/// 根节点索引；解析失败返回 -1。
 pub fn json_root(d: int) -> int {
     return mem_load64(d, JDOM_ROOT)
 }
@@ -715,6 +717,7 @@ fn json_type(d: int, node: int) -> int {
     return _tag(d, node)
 }
 
+/// 节点是否为 null。
 pub fn json_is_null(d: int, node: int) -> bool {
     return _tag(d, node) == JNULL
 }
@@ -731,10 +734,12 @@ fn json_is_str(d: int, node: int) -> bool {
     return _tag(d, node) == JSTR
 }
 
+/// 节点是否为数组（tag=4）。
 pub fn json_is_arr(d: int, node: int) -> bool {
     return _tag(d, node) == JARR
 }
 
+/// 节点是否为对象（tag=5）。
 pub fn json_is_obj(d: int, node: int) -> bool {
     return _tag(d, node) == JOBJ
 }
@@ -747,13 +752,14 @@ fn _buf_slice(d: int, start: int, n: int) -> str {
     return out
 }
 
+/// 取布尔值；节点不是 bool 时返回 false（不报错）。
 pub fn json_bool(d: int, node: int) -> bool {
     return _node_get(d, node, 1) == 1
 }
 
-// 整数部分：取小数点/指数之前的文本（"−2.75e2" -> -2），不四舍五入。
-// 实现上走 str 工具而不是自己扫 vec：v1.5 实测"局部量跨调用后读错槽位"
-// 的 codegen 问题会把这种循环算错（见 docs/GAPS.md 已知问题）。
+/// 整数部分：取小数点/指数之前的文本（"−2.75e2" -> -2），不四舍五入。
+/// 实现上走 str 工具而不是自己扫 vec：v1.5 实测"局部量跨调用后读错槽位"
+/// 的 codegen 问题会把这种循环算错（见 docs/GAPS.md 已知问题）。
 pub fn json_int(d: int, node: int) -> int {
     if _tag(d, node) != JNUM {
         return 0
@@ -778,7 +784,7 @@ pub fn json_int(d: int, node: int) -> int {
     return head.to_int()
 }
 
-// 原始数字文本（保留小数/指数，便于上层自己转 float）
+/// 原始数字文本（保留小数/指数，便于上层自己转 float）
 pub fn json_num_raw(d: int, node: int) -> str {
     if _tag(d, node) != JNUM {
         return ""
@@ -786,6 +792,8 @@ pub fn json_num_raw(d: int, node: int) -> str {
     return _buf_slice(d, _node_get(d, node, 1), _node_get(d, node, 2))
 }
 
+/// 取字符串值；节点不是 str 时返回空串。
+/// 返回值是 buf 的零拷贝切片——doc 句柄释放后失效。
 pub fn json_str(d: int, node: int) -> str {
     if _tag(d, node) != JSTR {
         return ""
@@ -793,6 +801,7 @@ pub fn json_str(d: int, node: int) -> str {
     return _buf_slice(d, _node_get(d, node, 1), _node_get(d, node, 2))
 }
 
+/// 数组元素个数；节点不是数组时返回 0。
 pub fn json_arr_len(d: int, node: int) -> int {
     if _tag(d, node) != JARR {
         return 0
@@ -800,6 +809,7 @@ pub fn json_arr_len(d: int, node: int) -> int {
     return _node_get(d, node, 2)
 }
 
+/// 第 i 个元素的节点索引；i 越界或节点不是数组返回 -1。
 pub fn json_arr_at(d: int, node: int, i: int) -> int {
     if _tag(d, node) != JARR {
         return -1
@@ -811,6 +821,7 @@ pub fn json_arr_at(d: int, node: int, i: int) -> int {
     return mem_load64(_kbuf(d), _node_get(d, node, 1) + i)
 }
 
+/// 对象键个数；节点不是对象时返回 0。
 pub fn json_obj_len(d: int, node: int) -> int {
     if _tag(d, node) != JOBJ {
         return 0
@@ -829,6 +840,7 @@ fn _obj_kid(d: int, node: int, i: int, which: int) -> int {
     return mem_load64(_kbuf(d), _node_get(d, node, 1) + i * 2 + which)
 }
 
+/// 第 i 个键名；越界或不是对象返回空串（内部走 json_str，节点为 -1 时即空串）。
 pub fn json_obj_key(d: int, node: int, i: int) -> str {
     return json_str(d, _obj_kid(d, node, i, 0))
 }
@@ -837,7 +849,7 @@ fn json_obj_val(d: int, node: int, i: int) -> int {
     return _obj_kid(d, node, i, 1)
 }
 
-// 按 key 取子节点（不存在返回 -1）
+/// 按 key 取子节点（不存在返回 -1）
 pub fn json_obj_get(d: int, node: int, key: str) -> int {
     let n = json_obj_len(d, node)
     let mut i = 0
@@ -861,6 +873,8 @@ pub fn json_obj_get(d: int, node: int, key: str) -> int {
 //   * value: 若 awaiting 则清标志（不写逗号），否则 count>0 写 ','，count++
 // ---------------------------------------------------------------------------
 
+/// 建序列化 builder，cap 是输出缓冲的初始容量（字节，可增长）。
+/// 配对用法：json_begin_obj → json_key_* → json_end_obj → json_done。
 pub fn json_new(cap: int) -> int {
     let h = mem_alloc(24)
     mem_store64(h, 0, vec[int].new(cap))
@@ -1003,6 +1017,7 @@ fn _push_level(h: int) -> int {
     return 0
 }
 
+/// 开一个对象（先按值位置补逗号，再写 `{` 并入栈）；恒返回 0。
 pub fn json_begin_obj(h: int) -> int {
     _pre_value(h)
     _put(h, 123)
@@ -1010,6 +1025,7 @@ pub fn json_begin_obj(h: int) -> int {
     return 0
 }
 
+/// 关对象：弹栈并写 `}`；栈空时只写 `}`（不报错）。
 pub fn json_end_obj(h: int) -> int {
     if _depth(h) > 0 {
         let st = _stack(h)
@@ -1020,6 +1036,7 @@ pub fn json_end_obj(h: int) -> int {
     return 0
 }
 
+/// 开一个数组（补逗号 + `[` + 入栈）；恒返回 0。
 pub fn json_begin_arr(h: int) -> int {
     _pre_value(h)
     _put(h, 91)
@@ -1027,6 +1044,7 @@ pub fn json_begin_arr(h: int) -> int {
     return 0
 }
 
+/// 关数组：弹栈并写 `]`。
 pub fn json_end_arr(h: int) -> int {
     if _depth(h) > 0 {
         let st = _stack(h)
@@ -1037,7 +1055,7 @@ pub fn json_end_arr(h: int) -> int {
     return 0
 }
 
-// key：写 "key":（逗号在此处决定）
+/// key：写 "key":（逗号在此处决定）
 pub fn json_key(h: int, k: str) -> int {
     let st = _stack(h)
     let dp = _depth(h)
@@ -1057,6 +1075,7 @@ pub fn json_key(h: int, k: str) -> int {
     return 0
 }
 
+/// 追加一个字符串值（自动加引号并转义 `"` `\\` 与控制字符）。
 pub fn json_val_str(h: int, v: str) -> int {
     _pre_value(h)
     _put(h, 34)
@@ -1065,6 +1084,7 @@ pub fn json_val_str(h: int, v: str) -> int {
     return 0
 }
 
+/// 追加一个整数值（to_str 后原样写入，不加引号）。
 pub fn json_val_int(h: int, v: int) -> int {
     _pre_value(h)
     let s = v.to_str()
@@ -1072,6 +1092,7 @@ pub fn json_val_int(h: int, v: int) -> int {
     return 0
 }
 
+/// 追加 true / false。
 pub fn json_val_bool(h: int, v: bool) -> int {
     _pre_value(h)
     if v {
@@ -1082,31 +1103,44 @@ pub fn json_val_bool(h: int, v: bool) -> int {
     return 0
 }
 
+/// 追加 null。
 pub fn json_val_null(h: int) -> int {
     _pre_value(h)
     _put_str(h, "null")
     return 0
 }
 
-// 原样插入（调用方保证是合法 JSON 片段；解析出的 num_raw 可用它回写）
-fn json_val_raw(h: int, raw: str) -> int {
+/// 原样插入（调用方保证是合法 JSON 片段；解析出的 num_raw 可用它回写）
+/// v1.96：改为 pub——@derive(Json) 的 f64 字段要用它写 f64_repr 的结果
+pub fn json_val_raw(h: int, raw: str) -> int {
     _pre_value(h)
     _put_str(h, raw)
     return 0
 }
 
+/// 写一个键值对，值是一段**原样的合法 JSON 片段**（`"k": raw`）；f64 字段走这里。
+/// 调用方负责保证 raw 合法（`json_num_raw` 取出的数字可以直接回写）。
+pub fn json_key_raw(h: int, k: str, raw: str) -> int {
+    json_key(h, k)
+    json_val_raw(h, raw)
+    return 0
+}
+
+/// 写一个键值对（字符串值），等价于 json_key + json_val_str。
 pub fn json_key_str(h: int, k: str, v: str) -> int {
     json_key(h, k)
     json_val_str(h, v)
     return 0
 }
 
+/// 写一个键值对（整数值）。
 pub fn json_key_int(h: int, k: str, v: int) -> int {
     json_key(h, k)
     json_val_int(h, v)
     return 0
 }
 
+/// 写一个键值对（布尔值）。
 pub fn json_key_bool(h: int, k: str, v: bool) -> int {
     json_key(h, k)
     json_val_bool(h, v)
@@ -1119,6 +1153,8 @@ fn json_key_null(h: int, k: str) -> int {
     return 0
 }
 
+/// 收尾并返回拼好的 JSON 文本。
+/// **不校验括号配平**：begin/end 不配对时原样输出半截 JSON，由调用方负责对称。
 pub fn json_done(h: int) -> str {
     return str_from_bytes(_out(h))
 }

@@ -1,0 +1,393 @@
+// std/f64.qma —— 十进制文本 ↔ f64（v1.96）
+//
+// 为什么需要它：语言内建只有 to_float(int)（整数 → 浮点）与 to_str（浮点 →
+// 文本），**没有** str → 浮点。此前 to_float("2.25") 会把字符串指针当位模式
+// 转成 double，静默给出 1.4e14 这种垃圾值（07-gaps §7.10）。v1.96 起
+// to_float(str) 在编译期被拒绝，十进制解析只走这里。
+//
+// 语义边界（写进文档，不做惊喜）：
+//   * 只认十进制：`[+-]?digits[.digits][(e|E)[+-]?digits]`，两端允许空格/制表符；
+//     `inf` / `nan` / 十六进制 / 下划线**不接受**（fail-fast，JSON 也无法表示）；
+//   * 舍入：≤15 位有效数字且 |十进制指数| ≤ 22 时走 Clinger 快路径
+//     （尾数 ≤ 2^53 精确、10^k 精确、单次乘除 = 单次舍入）→ 正确舍入；
+//     超出这个范围按两步乘除，可能差 1–2 ULP（grisu/ryu 未做，见 07-gaps §2）；
+//   * 超过 18 位有效数字的尾数按截断处理（多余位只用来进位指数，不参与舍入）；
+//   * 溢出 → ±inf，下溢 → ±0.0（与 IEEE754 默认舍入一致，不报错）。
+
+// 10^k 的精确值（k = 0..22，2^53 内 10^k 均可精确表示）
+fn _pow10(k: int) -> f64 {
+    if k == 0 { return 1.0 }
+    if k == 1 { return 1.0e1 }
+    if k == 2 { return 1.0e2 }
+    if k == 3 { return 1.0e3 }
+    if k == 4 { return 1.0e4 }
+    if k == 5 { return 1.0e5 }
+    if k == 6 { return 1.0e6 }
+    if k == 7 { return 1.0e7 }
+    if k == 8 { return 1.0e8 }
+    if k == 9 { return 1.0e9 }
+    if k == 10 { return 1.0e10 }
+    if k == 11 { return 1.0e11 }
+    if k == 12 { return 1.0e12 }
+    if k == 13 { return 1.0e13 }
+    if k == 14 { return 1.0e14 }
+    if k == 15 { return 1.0e15 }
+    if k == 16 { return 1.0e16 }
+    if k == 17 { return 1.0e17 }
+    if k == 18 { return 1.0e18 }
+    if k == 19 { return 1.0e19 }
+    if k == 20 { return 1.0e20 }
+    if k == 21 { return 1.0e21 }
+    return 1.0e22
+}
+
+fn _is_digit(c: int) -> bool {
+    return c >= 48 && c <= 57
+}
+
+fn _is_space(c: int) -> bool {
+    return c == 32 || c == 9
+}
+
+/// f64_parse(s) -> f64：十进制解析，非法输入直接 assert 失败（不返回 0）
+pub fn f64_parse(s: str) -> f64 {
+    let n = len(s)
+    let mut i = 0
+    while i < n && _is_space(s[i]) {
+        i = i + 1
+    }
+    let mut neg = false
+    if i < n && (s[i] == 45 || s[i] == 43) {
+        neg = s[i] == 45
+        i = i + 1
+    }
+    let mut mant = 0
+    let mut sig = 0            // 已收进尾数的有效数字个数（上限 18）
+    let mut exp10 = 0
+    let mut seen = false
+    // 整数部分
+    while i < n && _is_digit(s[i]) {
+        seen = true
+        if sig < 18 {
+            mant = mant * 10 + (s[i] - 48)
+            sig = sig + 1
+        } else {
+            exp10 = exp10 + 1        // 丢掉的整数位 = 指数 +1
+        }
+        i = i + 1
+    }
+    // 小数部分
+    if i < n && s[i] == 46 {
+        i = i + 1
+        while i < n && _is_digit(s[i]) {
+            seen = true
+            if sig < 18 {
+                mant = mant * 10 + (s[i] - 48)
+                sig = sig + 1
+                exp10 = exp10 - 1
+            }
+            i = i + 1
+        }
+    }
+    assert(seen, "f64_parse: 不是十进制数")
+    // 指数部分
+    if i < n && (s[i] == 101 || s[i] == 69) {
+        i = i + 1
+        let mut esign = 1
+        if i < n && (s[i] == 43 || s[i] == 45) {
+            if s[i] == 45 {
+                esign = 0 - 1
+            }
+            i = i + 1
+        }
+        let mut ev = 0
+        let mut edig = false
+        while i < n && _is_digit(s[i]) {
+            edig = true
+            ev = ev * 10 + (s[i] - 48)
+            i = i + 1
+        }
+        assert(edig, "f64_parse: 指数缺少数字")
+        exp10 = exp10 + esign * ev
+    }
+    while i < n && _is_space(s[i]) {
+        i = i + 1
+    }
+    assert(i == n, "f64_parse: 有多余字符")
+    if mant == 0 {
+        return 0.0              // ±0.0 的符号不保留（-0.0 == 0.0 成立，不影响判等）
+    }
+    let mut x = to_float(mant)
+    // 超出 10^22 的指数按 22 一段折叠（|x| 已不可能再精确，两步乘除）
+    while exp10 > 22 {
+        x = x * 1.0e22
+        exp10 = exp10 - 22
+    }
+    while exp10 < 0 - 22 {
+        x = x / 1.0e22
+        exp10 = exp10 + 22
+    }
+    if exp10 > 0 {
+        x = x * _pow10(exp10)
+    } else if exp10 < 0 {
+        x = x / _pow10(0 - exp10)
+    }
+    if neg {
+        x = 0.0 - x
+    }
+    return x
+}
+
+/// f64_finite(x) -> bool：不是 inf / nan（JSON 只能表示有限值）
+/// 用 x*0.0 == 0.0 判定：inf*0 = nan、nan*0 = nan，两者都不等于 0.0
+pub fn f64_finite(x: f64) -> bool {
+    return x * 0.0 == 0.0
+}
+
+// ---------------------------------------------------------------------------
+// f64 -> 十进制文本（最短往返）
+// ---------------------------------------------------------------------------
+// 为什么要自己写：内建 to_str 只输出 7 位有效数字（`3.141593`），写进 JSON
+// 就是静默丢精度。这里用**精确十进制展开**（尾数 m × 2^e，e<0 时乘 5^k 把
+// 二进制小数变成十进制整数）取前 15/16/17 位，再用 f64_parse 回读验证：
+// 第一个能回读相等的长度就是最短往返表示（与 Python repr / JS 的取值一致）。
+
+struct FDec { m: int, e: int }
+
+// x -> (m, e)，x = m * 2^e（m 是整数，|m| < 2^63）
+fn _decompose(x: f64) -> FDec {
+    let mut v = x
+    let mut e = 0
+    // 先除到 2^63 以下（除以 2 是精确的）
+    while v >= 9223372036854775808.0 {
+        v = v / 2.0
+        e = e + 1
+    }
+    // 再乘 2 直到没有小数部分（乘 2 也是精确的；上限 1074 步是次正规数的极限）
+    let mut guard = 0
+    while v != to_float(to_int(v)) {
+        v = v * 2.0
+        e = e - 1
+        guard = guard + 1
+        if guard > 1100 {
+            break
+        }
+    }
+    let mi = to_int(v)
+    return FDec { m: mi, e: e }
+}
+
+fn _big_from(m: int) -> vec[int] {
+    let v = vec[int].new(8)
+    let mut x = m
+    while x > 0 {
+        v.push(x % 1000000000)
+        x = x / 1000000000
+    }
+    if v.len() == 0 {
+        v.push(0)
+    }
+    return v
+}
+
+// 大数 × 小乘数（就地，base 1e9）；乘数须满足 limb*乘数+进位 < 2^63
+fn _big_mul(v: vec[int], mul: int) -> int {
+    let mut carry = 0
+    let mut i = 0
+    while i < v.len() {
+        let t = v.get(i) * mul + carry
+        v.set(i, t % 1000000000)
+        carry = t / 1000000000
+        i = i + 1
+    }
+    while carry > 0 {
+        v.push(carry % 1000000000)
+        carry = carry / 1000000000
+    }
+    return 0
+}
+
+fn _pad9(d: str) -> str {
+    let mut s = d
+    while len(s) < 9 {
+        s = "0" + s
+    }
+    return s
+}
+
+fn _big_digits(v: vec[int]) -> str {
+    let n = v.len()
+    let mut s = v.get(n - 1).to_str()
+    let mut i = n - 2
+    while i >= 0 {
+        s = s + _pad9(v.get(i).to_str())
+        i = i - 1
+    }
+    return s
+}
+
+// 精确十进制数字：返回 (数字串 D, 小数点后的位数 k)，值 = D × 10^-k
+struct FDigits { d: str, k: int }
+
+fn _exact_digits(x: f64) -> FDigits {
+    let fd = _decompose(x)
+    let mut big = _big_from(fd.m)
+    if fd.e >= 0 {
+        // 整数值：m * 2^e，按 2^29 一段乘
+        let mut left = fd.e
+        while left >= 29 {
+            _big_mul(big, 536870912)
+            left = left - 29
+        }
+        if left > 0 {
+            let mut mul = 1
+            let mut j = 0
+            while j < left {
+                mul = mul * 2
+                j = j + 1
+            }
+            _big_mul(big, mul)
+        }
+        let ds = _big_digits(big)
+        return FDigits { d: ds, k: 0 }
+    }
+    // 小数值：m * 5^k / 10^k，按 5^13 一段乘
+    let mut k = 0 - fd.e
+    let kk = k
+    while k >= 13 {
+        _big_mul(big, 1220703125)
+        k = k - 13
+    }
+    if k > 0 {
+        let mut mul = 1
+        let mut j = 0
+        while j < k {
+            mul = mul * 5
+            j = j + 1
+        }
+        _big_mul(big, mul)
+    }
+    let ds2 = _big_digits(big)
+    return FDigits { d: ds2, k: kk }
+}
+
+// 四舍五入到 sig 位有效数字（返回的数字串可能比 sig 多一位：999 -> 1000）
+fn _round_sig(d: str, sig: int) -> str {
+    let n = len(d)
+    if n <= sig {
+        return d
+    }
+    let mut b = vec[int].new(sig + 1)
+    let mut i = 0
+    while i < sig {
+        b.push(d[i] - 48)
+        i = i + 1
+    }
+    // 字节缓冲一次性成串：逐字符 `s = s + chr(...)` 是 O(n²) 次分配，
+    // 单次 7 µs 里有一半花在这上面
+    let mut out = vec[int].new(sig + 1)
+    if d[sig] - 48 >= 5 {
+        let mut j = sig - 1
+        let mut carry = 1
+        while j >= 0 && carry == 1 {
+            let dv = b.get(j) + 1
+            if dv == 10 {
+                b.set(j, 0)
+            } else {
+                b.set(j, dv)
+                carry = 0
+            }
+            j = j - 1
+        }
+        if carry == 1 {
+            out.push(49)
+        }
+    }
+    i = 0
+    while i < sig {
+        out.push(48 + b.get(i))
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+fn _zeros(n: int) -> str {
+    let mut b = vec[int].new(n)
+    let mut i = 0
+    while i < n {
+        b.push(48)
+        i = i + 1
+    }
+    return str_from_bytes(b)
+}
+
+fn _trim_zeros(d: str) -> str {
+    let mut n = len(d)
+    while n > 1 && d[n - 1] == 48 {
+        n = n - 1
+    }
+    return substr(d, 0, n)
+}
+
+// 数字串 + 小数点位置 -> 十进制文本（|dec_exp| 大时走科学计数）
+fn _render(p: str, pos: int, neg: bool) -> str {
+    let lp = len(p)
+    let dec_exp = pos - 1
+    let mut s = ""
+    if dec_exp < 0 - 7 || dec_exp >= 21 {
+        s = substr(p, 0, 1)
+        if lp > 1 {
+            s = s + "." + substr(p, 1, lp - 1)
+        }
+        s = s + "e"
+        if dec_exp < 0 {
+            s = s + "-" + (0 - dec_exp).to_str()
+        } else {
+            s = s + "+" + dec_exp.to_str()
+        }
+    } else if pos >= lp {
+        s = p + _zeros(pos - lp)
+    } else if pos > 0 {
+        s = substr(p, 0, pos) + "." + substr(p, pos, lp - pos)
+    } else {
+        s = "0." + _zeros(0 - pos) + p
+    }
+    if neg {
+        return "-" + s
+    }
+    return s
+}
+
+/// f64_repr(x) -> str：最短往返十进制文本（有限值；inf/nan 直接 assert 失败）
+pub fn f64_repr(x: f64) -> str {
+    assert(f64_finite(x), "f64_repr: inf/nan 无法写成 JSON 数字")
+    if x == 0.0 {
+        return "0"
+    }
+    let mut v = x
+    let mut neg = false
+    if v < 0.0 {
+        neg = true
+        v = 0.0 - v
+    }
+    let fd = _exact_digits(v)
+    let n = len(fd.d)
+    // 依次试 15 / 16 / 17 位有效数字：第一个能回读的即最短
+    let mut sig = 15
+    if sig > n {
+        sig = n
+    }
+    let mut cand = ""
+    while true {
+        let r = _round_sig(fd.d, sig)
+        // 小数点位置 = 舍入后位数 + (总位数 - 保留位数 - 小数位数)；
+        // 去尾零不改变小数点位置（只是把右侧的 0 换成等价的指数）
+        let pos = len(r) + (n - sig - fd.k)
+        cand = _render(_trim_zeros(r), pos, neg)
+        if f64_parse(cand) == x || sig >= 17 || sig >= n {
+            return cand
+        }
+        sig = sig + 1
+    }
+    return cand
+}

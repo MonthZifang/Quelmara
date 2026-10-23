@@ -1,0 +1,10 @@
+// 负向（v1.96）：f32 字段不参与派生（JSON 数字统一按 f64）
+module derive_f32
+
+@derive(Json)
+struct M { x: f32 }
+
+fn main() {
+    let m = M { x: 1.5 }
+    print(m.json())
+}

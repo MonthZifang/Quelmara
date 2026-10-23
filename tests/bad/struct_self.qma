@@ -1,0 +1,8 @@
+// 负向（v1.96）：按值自包含的 struct 没有有限布局
+module struct_self
+
+struct S { next: S }
+
+fn main() {
+    print("x")
+}

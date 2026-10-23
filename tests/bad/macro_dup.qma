@@ -1,0 +1,9 @@
+// 负向（v1.96）：同名宏不能重复定义
+module macro_dup
+
+macro m(x) { (x) }
+macro m(y) { (y) }
+
+fn main() {
+    print(m(1).to_str())
+}

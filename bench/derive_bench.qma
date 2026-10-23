@@ -1,4 +1,4 @@
-// derive_bench.qma：@derive 生成代码与手写字段表的成本对照（v1.72）
+// derive_bench.qma：@derive 生成代码与手写字段表的成本对照（v1.72 / v1.96）
 //
 // 四路做同一件事，只有"代码从哪来"不同：
 //   enc_derived —— r.json()，由 @derive(Json) 生成
@@ -6,14 +6,25 @@
 //   dec_derived —— Row_from_json(s)，由 @derive(Json) 生成
 //   dec_hand    —— 手写字段表解码
 //
-// 断言：四路结果必须逐字节一致（派生不是"近似等价"，是同一份代码）。
-// 输出：4 行 ns/次 ×1000（整数，避免小数打印）。
+// v1.96 追加两组：
+//   enum 的编解码（派生 vs 手写 match）
+//   f64 文本化：f64_repr（最短往返）vs to_str（7 位有效数字）
+//
+// 断言：派生与手写结果必须逐字节一致（派生不是"近似等价"，是同一份代码）。
+// 输出：每行一个标签 + 一个整数（ns/次 ×1000，避免小数打印）。
 module derive_bench
 
 import std.json
+import std.f64
 
 @derive(Json, Eq, Show)
 struct Row { id: int, score: int, name: str, tag: str }
+
+@derive(Json, Eq, Show)
+enum Ev { Ping, Move(dx: int, dy: int), Say(text: str) }
+
+@derive(Json, Eq, Show)
+struct FRow { a: f64, b: f64, id: int }
 
 // ---- 手写编码（与派生层产物逐行等价）----
 fn enc_hand(self: Row) -> str {
@@ -38,6 +49,44 @@ fn dec_hand(s: str) -> Row {
     out.name = json_str(d, json_obj_get(d, n, "name"))
     out.tag = json_str(d, json_obj_get(d, n, "tag"))
     return out
+}
+
+// ---- 手写 enum 编码（match + 同一个 builder）----
+fn enc_ev_hand(e: Ev) -> str {
+    let h = json_new(64)
+    json_begin_obj(h)
+    match e {
+        Ev.Ping => {
+            json_key_str(h, "$v", "Ping")
+        }
+        Ev.Move(dx, dy) => {
+            json_key_str(h, "$v", "Move")
+            json_key_int(h, "dx", dx)
+            json_key_int(h, "dy", dy)
+        }
+        Ev.Say(text) => {
+            json_key_str(h, "$v", "Say")
+            json_key_str(h, "text", text)
+        }
+    }
+    json_end_obj(h)
+    return json_done(h)
+}
+
+// ---- 手写 enum 解码 ----
+fn dec_ev_hand(s: str) -> Ev {
+    let d = json_parse(s)
+    assert(json_ok(d), "dec_ev_hand: 非法 JSON")
+    let n = json_root(d)
+    let tag = json_str(d, json_obj_get(d, n, "$v"))
+    if tag == "Ping" {
+        return Ev.Ping
+    }
+    if tag == "Move" {
+        return Ev.Move(dx: json_int(d, json_obj_get(d, n, "dx")),
+                       dy: json_int(d, json_obj_get(d, n, "dy")))
+    }
+    return Ev.Say(text: json_str(d, json_obj_get(d, n, "text")))
 }
 
 fn run_enc_derived(n: int, r: Row) -> int {
@@ -80,6 +129,92 @@ fn run_dec_hand(n: int, s: str) -> int {
     return acc
 }
 
+fn run_ev_enc_derived(n: int, e: Ev) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + len(e.json())
+        i = i + 1
+    }
+    return acc
+}
+
+fn run_ev_enc_hand(n: int, e: Ev) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + len(enc_ev_hand(e))
+        i = i + 1
+    }
+    return acc
+}
+
+fn run_ev_dec_derived(n: int, s: str) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        let e = Ev_from_json(s)
+        match e {
+            Ev.Move(dx, dy) => {
+                acc = acc + dx + dy
+            }
+            _ => {
+                acc = acc + 1
+            }
+        }
+        i = i + 1
+    }
+    return acc
+}
+
+fn run_ev_dec_hand(n: int, s: str) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        let e = dec_ev_hand(s)
+        match e {
+            Ev.Move(dx, dy) => {
+                acc = acc + dx + dy
+            }
+            _ => {
+                acc = acc + 1
+            }
+        }
+        i = i + 1
+    }
+    return acc
+}
+
+fn run_f64_repr(n: int, x: f64) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + len(f64_repr(x))
+        i = i + 1
+    }
+    return acc
+}
+
+fn run_f64_tostr(n: int, x: f64) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + len(x.to_str())
+        i = i + 1
+    }
+    return acc
+}
+
+fn run_frow_enc(n: int, r: FRow) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + len(r.json())
+        i = i + 1
+    }
+    return acc
+}
+
 fn main() {
     let r = Row { id: 42, score: -7, name: "quelmara", tag: "bench" }
     let s = r.json()
@@ -89,11 +224,40 @@ fn main() {
     assert(s == "{\"id\":42,\"score\":-7,\"name\":\"quelmara\",\"tag\":\"bench\"}",
            "JSON 形态")
 
-    let n = 20000
+    // enum 两路必须逐字节一致
+    let e = Ev.Move(dx: 3, dy: -4)
+    let es = e.json()
+    assert(es == enc_ev_hand(e), "enum 派生编码与手写编码一致")
+    assert(es == "{\"$v\":\"Move\",\"dx\":3,\"dy\":-4}", "enum JSON 形态")
+    assert(e.eq(Ev_from_json(es)), "enum 派生解码往返")
+    assert(dec_ev_hand(es).eq(e), "enum 手写解码往返")
+    assert(enc_ev_hand(Ev.Ping) == Ev.Ping.json(), "无载荷变体一致")
+    assert(enc_ev_hand(Ev.Say(text: "hi")) == Ev.Say(text: "hi").json(), "str 载荷一致")
+
+    // f64：最短往返必须能回读
+    let fx = 3.141592653589793
+    assert(f64_parse(f64_repr(fx)) == fx, "f64_repr 往返")
+    let fr = FRow { a: 1.5, b: 0.1, id: 9 }
+    assert(fr.json() == "{\"a\":1.5,\"b\":0.1,\"id\":9}", "f64 字段的 JSON 形态")
+    assert(FRow_from_json(fr.json()).eq(fr), "f64 字段往返")
+
+    // 三种规模：整型 struct 1 万次、enum 5 千次、f64（要跑精确十进制展开）1 千次。
+    // 次数压得比 v1.72 低，是因为一次进程的 512 MB 堆上限（Quelmara.toml）：
+    // 没有 GC，11 路 × 3 轮 × 每次一条字符串/DOM 会顶到上限。
+    let n = 10000
+    let nv = 5000
+    let nf = 1000
     let mut best_e1 = 0
     let mut best_e2 = 0
     let mut best_d1 = 0
     let mut best_d2 = 0
+    let mut best_v1 = 0
+    let mut best_v2 = 0
+    let mut best_v3 = 0
+    let mut best_v4 = 0
+    let mut best_f1 = 0
+    let mut best_f2 = 0
+    let mut best_f3 = 0
     let mut rep = 0
     while rep < 3 {
         let t0 = now_ns()
@@ -105,8 +269,24 @@ fn main() {
         let t3 = now_ns()
         let d = run_dec_hand(n, s)
         let t4 = now_ns()
+        let v1 = run_ev_enc_derived(nv, e)
+        let t5 = now_ns()
+        let v2 = run_ev_enc_hand(nv, e)
+        let t6 = now_ns()
+        let v3 = run_ev_dec_derived(nv, es)
+        let t7 = now_ns()
+        let v4 = run_ev_dec_hand(nv, es)
+        let t8 = now_ns()
+        let f1 = run_f64_repr(nf, fx)
+        let t9 = now_ns()
+        let f2 = run_f64_tostr(nf, fx)
+        let t10 = now_ns()
+        let f3 = run_frow_enc(nf, fr)
+        let t11 = now_ns()
         assert(a == b, "编码两路结果必须相同")
         assert(c == d, "解码两路结果必须相同")
+        assert(v1 == v2, "enum 编码两路结果必须相同")
+        assert(v3 == v4, "enum 解码两路结果必须相同")
         if rep == 0 || t1 - t0 < best_e1 {
             best_e1 = t1 - t0
         }
@@ -119,6 +299,28 @@ fn main() {
         if rep == 0 || t4 - t3 < best_d2 {
             best_d2 = t4 - t3
         }
+        if rep == 0 || t5 - t4 < best_v1 {
+            best_v1 = t5 - t4
+        }
+        if rep == 0 || t6 - t5 < best_v2 {
+            best_v2 = t6 - t5
+        }
+        if rep == 0 || t7 - t6 < best_v3 {
+            best_v3 = t7 - t6
+        }
+        if rep == 0 || t8 - t7 < best_v4 {
+            best_v4 = t8 - t7
+        }
+        if rep == 0 || t9 - t8 < best_f1 {
+            best_f1 = t9 - t8
+        }
+        if rep == 0 || t10 - t9 < best_f2 {
+            best_f2 = t10 - t9
+        }
+        if rep == 0 || t11 - t10 < best_f3 {
+            best_f3 = t11 - t10
+        }
+        // f1 / f2 是两条文本化路径的长度和，本来就不相等（7 位 vs 最短往返）
         rep = rep + 1
     }
     print("enc_derived")
@@ -129,4 +331,18 @@ fn main() {
     print(best_d1 * 1000 / n)
     print("dec_hand")
     print(best_d2 * 1000 / n)
+    print("ev_enc_derived")
+    print(best_v1 * 1000 / nv)
+    print("ev_enc_hand")
+    print(best_v2 * 1000 / nv)
+    print("ev_dec_derived")
+    print(best_v3 * 1000 / nv)
+    print("ev_dec_hand")
+    print(best_v4 * 1000 / nv)
+    print("f64_repr")
+    print(best_f1 * 1000 / nf)
+    print("f64_tostr")
+    print(best_f2 * 1000 / nf)
+    print("frow_enc")
+    print(best_f3 * 1000 / nf)
 }
