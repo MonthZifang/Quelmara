@@ -405,6 +405,12 @@ class Enc:
     def addsd(self, xd, xs):
         self.emit(b"\xf2", rex(r=xd, b=xs), b"\x0f\x58", modrm_reg(xd, xs))
 
+    def mulpd(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x59", modrm_reg(xd, xs))
+
+    def mulsd(self, xd, xs):
+        self.emit(b"\xf2", rex(r=xd, b=xs), b"\x0f\x59", modrm_reg(xd, xs))
+
     def movdqu_mr(self, base, index, scale, disp, x):
         """movdqu [base + index*2^scale + disp], xmm（非对齐存储）"""
         self.emit(b"\x66", rex(r=x, x=index, b=base), b"\x0f\x7f",
@@ -4132,6 +4138,8 @@ class Lower:
         """
         _, var, lo_e, hi_e, body = s
         rhs = acc = None
+        dot = False
+        arr2_e = None
         if len(body) == 1 and body[0][0] == "assign":
             b = body[0]
             if b[2] == "+=":
@@ -4142,19 +4150,44 @@ class Lower:
                     acc, rhs = b[1], r2
                 elif r2 == ("name", b[1]):
                     acc, rhs = b[1], lhs
-        if acc is None or rhs is None or rhs[0] != "index":
+        if acc is None or rhs is None:
             raise SyntaxError(
-                "@simd 只支持 `acc = acc + a[i]` / `acc += a[i]` 形式的整数归约"
-                "（见 docs/LANG.md §@simd）")
-        arr_e, idx_e = rhs[1], rhs[2]
-        if arr_e[0] != "name" or idx_e != ("name", var):
-            raise SyntaxError("@simd 要求下标正好是循环变量，数组是具名数组")
-        if acc not in env or arr_e[1] not in env:
+                "@simd 只支持 `acc = acc + a[i]` / `acc += a[i]` / "
+                "`acc += a[i] * b[i]`（点积）形式的归约（见 docs/LANG.md §@simd）")
+        if rhs[0] == "index":
+            arr_e, idx_e = rhs[1], rhs[2]
+            if arr_e[0] != "name" or idx_e != ("name", var):
+                raise SyntaxError("@simd 要求下标正好是循环变量，数组是具名数组")
+        elif rhs[0] == "binop" and rhs[1] == "*":
+            # 点积形状（v1.57）：acc += a[i] * b[i]，两个 [N]f64
+            la, lb = rhs[2], rhs[3]
+            if (la[0] != "index" or lb[0] != "index"
+                    or la[2] != ("name", var) or lb[2] != ("name", var)
+                    or la[1][0] != "name" or lb[1][0] != "name"):
+                raise SyntaxError(
+                    "@simd 点积要求 `a[i] * b[i]`：两个下标都正好是循环变量、数组具名")
+            arr_e, arr2_e, idx_e = la[1], lb[1], la[2]
+            dot = True
+        else:
+            raise SyntaxError(
+                "@simd 只支持 `acc = acc + a[i]` / `acc += a[i]` / "
+                "`acc += a[i] * b[i]`（点积）形式的归约（见 docs/LANG.md §@simd）")
+        if acc not in env or arr_e[1] not in env or (dot and arr2_e[1] not in env):
             raise SyntaxError("@simd 归约变量/数组未定义")
         base = env[arr_e[1]]
         n = self._arr_of(fn, base)
         if n is None:
             raise SyntaxError("@simd 目前只支持定长数组 [N]int（切片/vec 见 GAPS）")
+        if dot:
+            base2 = env[arr2_e[1]]
+            n2 = self._arr_of(fn, base2)
+            if n2 is None or n2 != n:
+                raise SyntaxError("@simd 点积要求两个数组是同长度定长数组")
+            if (self.arr_elem.get(base) != "f64"
+                    or self.arr_elem.get(base2) != "f64"
+                    or self._float_of(fn, env[acc]) != "f64"):
+                raise SyntaxError(
+                    "@simd 点积目前只支持 f64（int 点积需 SSE4.1 pmulld，未接）")
         lo = self.eval(lo_e, fn, env)
         hi = self.eval(hi_e, fn, env)
         # 静态越界：常量区间直接查
@@ -4167,7 +4200,15 @@ class Lower:
         fn.emit("bin", "shl", ptr, lo, ("imm", 3))
         fn.emit("bin", "add", ptr, ptr, base)
         cur = env[acc]
-        if self.arr_elem.get(base) == "f64" and self._float_of(fn, cur) == "f64":
+        if dot:
+            # f64 点积（v1.57）：两个基址各自偏移 lo*8
+            ptr2 = fn.new_v()
+            fn.emit("bin", "shl", ptr2, lo, ("imm", 3))
+            fn.emit("bin", "add", ptr2, ptr2, base2)
+            part = fn.new_v()
+            fn.emit("vdotd", part, ptr, ptr2, cnt)
+            self._mark_float(fn, part, "f64")
+        elif self.arr_elem.get(base) == "f64" and self._float_of(fn, cur) == "f64":
             # f64 归约（v1.16）：acc += a[i]，a 是 [N]f64（acc 的 float
             # 标记即契约——调用方保证数组元素类型一致）。
             part = fn.new_v()
@@ -8386,6 +8427,8 @@ def _map_ins(ins, f):
         return ("vsum", V(ins[1]), S(ins[2]), S(ins[3]))
     if op == "vsumd":
         return ("vsumd", V(ins[1]), S(ins[2]), S(ins[3]))
+    if op == "vdotd":
+        return ("vdotd", V(ins[1]), S(ins[2]), S(ins[3]), S(ins[4]))
     if op == "atomic":
         # ('atomic', sub, dst, addr, a[, b])：变长，cas 多一个操作数
         return tuple(["atomic", ins[1], V(ins[2]), S(ins[3]), S(ins[4])]
@@ -8952,6 +8995,53 @@ class Codegen:
             enc.alu_ri("add", RCX, 1)
             enc.jmp(Ls)
             enc.labels[Ld] = enc.pos()
+            self.commit(dst, ACC)
+            return
+        if op == "vdotd":
+            # f64 点积（v1.57）：movupd 非对齐读两路 + mulpd + addpd 两路累加
+            # + 标量尾（mulsd/addsd）。结构与 vsumd 同构；多一个 baseB：
+            # R11=baseA、R10=baseB、R8=count（push/pop 保护——R8 非池寄存器，
+            # 序列内无调用，按 cpuid 族纪律显式保护）、RCX=下标、RDX=临时。
+            # xmm0=累加器、xmm1/xmm2=两路加载。
+            _, dst, base_a, base_b, count = ins
+            seq = getattr(self, "_vdotd_seq", 0)
+            self._vdotd_seq = seq + 1
+            Lv, Lt, Ls, Ld = (f"__vdotd.v{seq}", f"__vdotd.t{seq}",
+                              f"__vdotd.s{seq}", f"__vdotd.d{seq}")
+            bpa = self.mat(SCRATCH, base_a)
+            bpb = self.mat(SCRATCH2, base_b)
+            enc.push(R8)
+            cnt = self.mat(R8, count)
+            enc.mov_ri(RCX, 0)
+            enc.pxor_x(0, 0)
+            enc.labels[Lv] = enc.pos()
+            enc.lea(RDX, RCX, 2)
+            enc.alu_rr("cmp", RDX, cnt)
+            enc.jcc("g", Lt)
+            enc.movupd_rm(1, bpa, RCX, 3, 0)
+            enc.movupd_rm(2, bpb, RCX, 3, 0)
+            enc.mulpd(1, 2)
+            enc.addpd(0, 1)
+            enc.alu_ri("add", RCX, 2)
+            enc.jmp(Lv)
+            enc.labels[Lt] = enc.pos()
+            enc.movhlps(1, 0)
+            enc.addsd(0, 1)
+            enc.movq_rx(ACC, 0)
+            enc.labels[Ls] = enc.pos()
+            enc.alu_rr("cmp", RCX, cnt)
+            enc.jcc("ge", Ld)
+            enc.mov_rm(RDX, bpa, RCX, 3, 0)
+            enc.movq_xr(1, RDX)
+            enc.mov_rm(RDX, bpb, RCX, 3, 0)
+            enc.movq_xr(2, RDX)
+            enc.mulsd(1, 2)
+            enc.addsd(0, 1)
+            enc.movq_rx(ACC, 0)
+            enc.alu_ri("add", RCX, 1)
+            enc.jmp(Ls)
+            enc.labels[Ld] = enc.pos()
+            enc.pop(R8)
             self.commit(dst, ACC)
             return
         if op in ("psrlw_i", "psllw_i", "psrlq_i", "psllq_i", "pslldq_i", "psrldq_i"):
