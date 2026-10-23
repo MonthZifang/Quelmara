@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-45 个模块，**312 个公开函数**（另有 458 个内部函数）
+46 个模块，**316 个公开函数**（另有 464 个内部函数）
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -93,6 +93,21 @@ fn b64_dec_max(s: str) -> int
 fn b64_decode_into(s: str, out: int) -> int
 fn b64url_encode(p: int, n: int) -> str
 fn b64url_decode_into(s: str, out: int) -> int
+```
+
+### `std/blake2b.qma`
+
+BLAKE2b（RFC 7693）密码学哈希 + keyed / 变长输出
+
+```quelmara
+/// BLAKE2b 摘要缓冲区（outlen 字节，大端，含 0 字节不能当 str；用完 mem_free(d, outlen)）
+fn blake2b_str(s: str, outlen: int) -> int
+/// BLAKE2b-512 十六进制（128 位小写）
+fn blake2b_hex(s: str) -> str
+/// BLAKE2b 变长输出十六进制（outlen 1..64）
+fn blake2b_hex_n(s: str, outlen: int) -> str
+/// keyed BLAKE2b-512 十六进制（key ≤ 64 字节）
+fn blake2b_keyed_hex(s: str, key: str) -> str
 ```
 
 ### `std/cli.qma`

@@ -24,6 +24,7 @@ END = "<!-- api:end -->"
 DESC = {
     "std/aes.qma": "AES-128-GCM：分组加密（AES-NI 快路径 + T-table 降级）+ GHASH + CTR",
     "std/b64.qma": "base64 编解码",
+    "std/blake2b.qma": "BLAKE2b（RFC 7693）密码学哈希 + keyed / 变长输出",
     "std/core.qma": "标量小工具",
     "std/crc64.qma": "CRC-64/XZ（ECMA-182 反射多项式，xz/zlib 容器的 64 位校验）",
     "std/cli.qma": "命令行 flag 解析（--k=v / --k v / -k v）",
