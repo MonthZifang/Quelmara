@@ -63,7 +63,7 @@
 | LSP / 补全 | ❌ | 无语义索引、跳转、重命名 |
 | 文档生成 | ❌ | 无 doc comment 语法 |
 | 库归档 `.qla` | 🚧 | 无目标文件格式 → 无法增量编译、无法分发二进制库 |
-| 包管理 | 🟡 | 有 qpm v0（path + git）；无 semver 区间、registry、发布流程、传递依赖冲突合并 |
+| 包管理 | 🟡 | 有 qpm（path + git + **semver 区间选 tag + 锁**，v1.45）；无 registry、发布流程、传递依赖冲突合并 |
 | 增量 / 并行编译 | ❌ | 每次全量 |
 | 性能回归门禁 | 🟡 | `bench --threshold` 可用，但未进 CI |
 | 覆盖率 / fuzz | ❌ | — |
@@ -129,7 +129,7 @@
 4. 函数值放宽：8 参、允许 struct 实参
 5. `defer`（接口装箱生命周期的前置）
 6. IPv6、TCP 批量收发
-7. 包管理 semver + registry
+7. 包管理 registry + 发布（~~semver 区间~~ ✅ v1.45）
 8. 自举主线：函数体 parser 收敛（当前分叉数见 `06-status.md`）
 
 ### P2 —— 生态
@@ -236,7 +236,11 @@ CSE 的 `_cse_key` 对 xmm 族返回 `None`（不参与）。
 3. **标准库（§2）**：红标剩余项——**MD5**（只差旧协议兼容）、HTTP 客户端封装
    （重定向/chunked/连接池）、路由/静态文件/MIME/cookie/session/multipart、
    多 member gzip + zlib 容器、正则、持久化（KV/SQLite）、`exp/log/sin/cos`
-4. **工具链（§3）**：`.qla`、semver/registry、增量编译、覆盖率
+4. **工具链（§3）**：`.qla`、registry/发布、增量编译、覆盖率（~~semver~~ ✅ v1.45）
+
+> 2026-10-23 起语言层与工具链**双轨并行**：语言层由另一会话负责（v1.44 命名空间
+> 限定语法即其成果），工具链从 v1.45（qpm semver）起推进。两轨共享连续版本号，
+> 改动文件面基本不重叠（编译器/parser ↔ 工具链脚本/文档）。
 
 > v1.29 已把 §2 的四条红标翻绿（UTF-8 / base64url / set / deque / FNV / CLI flag），
 > 剩下的红标按「撞到的场景有多近」排序，不按条数排序。
