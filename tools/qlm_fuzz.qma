@@ -1,0 +1,187 @@
+// tools/qlm_fuzz.qma —— 源码变异器（fuzz 语料生成，工具链，用 Quelmara 写）
+//
+// 分工：本程序只负责**造用例**（读种子源码 -> 变异 -> 写 N 个 .qma）；
+// 「编译每个用例、判断是不是崩溃」必须由 Python 驱动（要起子进程 / 限时），
+// 见 tools/stage0/qlm_fuzz.py。
+//
+// 为什么用 Quelmara 写：和 qlm_cov.qma 同一个理由——工具链里的"只读/只写
+// 变换"类工具都该能用自研语言写；变异器只需要 str 切片 + 文件读写，是最小样本。
+//
+// 用法：qlm_fuzz <seed.qma> <outdir> <cases> <seed>
+// 注意：substr(s, lo, cnt) 的第三参是**长度**不是结束下标（踩过一次）
+// 输出：<outdir>/case_0000.qma ...（确定性：同 seed 必得同一批用例）
+//
+// 变异算子（每例 1–4 处，LCG 决定）：
+//   0 删一个字节   1 复制一个字节  2 换一个字节  3 插一个字节
+//   4 截断         5 插一个语法 token  6 复制一行
+// 只用 ASCII 变异：非 UTF-8 字节会让编译器在读文件时抛 UnicodeDecodeError，
+// 那是"输入编码"问题不是"编译器健壮性"问题，混进来会淹掉真信号。
+
+module qlm_fuzz
+
+const MOD = 2147483647         // Lehmer LCG：48271 * 2^31 < 2^63，不会溢出回卷
+
+fn next_rand(st: vec[int], n: int) -> int {
+    let v = st.get(0) * 48271 % MOD
+    st.set(0, v)
+    if n <= 0 {
+        return 0
+    }
+    return v % n
+}
+
+// 语法字符权重高：变异要打在语法边界上才有意思（纯字母变异只会得到"未定义标识符"）
+fn alpha() -> str {
+    return "{}()[]<>;,:" + chr(34) + "@#!*+-/%&|^~= "
+        + chr(10) + chr(9) + "0123456789abcxyzABCXYZ"
+}
+
+fn tokens() -> vec[str] {
+    let t = vec[str].new(16)
+    t.push("fn ")
+    t.push("let ")
+    t.push("if ")
+    t.push("else ")
+    t.push("while ")
+    t.push("return ")
+    t.push("struct ")
+    t.push("enum ")
+    t.push("match ")
+    t.push("import ")
+    t.push("module ")
+    t.push("{")
+    t.push("}")
+    t.push("(")
+    t.push(")")
+    t.push("@derive(")
+    t.push("\"")
+    t.push("->")
+    t.push("=>")
+    t.push("::")
+    t.push("0x")
+    t.push("9999999999999999999999")
+    return t
+}
+
+fn line_start(s: str, i: int) -> int {
+    let mut k = i
+    while k > 0 && s[k - 1] != 10 {
+        k -= 1
+    }
+    return k
+}
+
+fn line_end(s: str, i: int) -> int {
+    let n = len(s)
+    let mut k = i
+    while k < n && s[k] != 10 {
+        k += 1
+    }
+    if k < n {
+        k += 1
+    }
+    return k
+}
+
+// 变异只落在 ASCII 字节上：删/插一个 ASCII 字节不会切断多字节 UTF-8 字符，
+// 用例因此始终是合法 UTF-8（否则每例都变成"编码错误"，淹掉真信号）。
+// 返回 >= from 的第一个 ASCII 字节位置；没有返回 -1。
+fn ascii_at(s: str, from: int) -> int {
+    let n = len(s)
+    let mut k = from
+    while k < n && s[k] >= 128 {
+        k += 1
+    }
+    if k >= n {
+        return -1
+    }
+    return k
+}
+
+fn one_byte(st: vec[int]) -> str {
+    let a = alpha()
+    let p = next_rand(st, len(a))
+    return substr(a, p, 1)
+}
+
+fn mutate_once(s: str, st: vec[int]) -> str {
+    let n = len(s)
+    if n == 0 {
+        return "fn main() {}\n"
+    }
+    let op = next_rand(st, 7)
+    let mut i = ascii_at(s, next_rand(st, n))
+    if i < 0 {
+        i = ascii_at(s, 0)
+    }
+    if i < 0 {
+        return s
+    }
+    if op == 0 {
+        return substr(s, 0, i) + substr(s, i + 1, n - i - 1)
+    }
+    if op == 1 {
+        return substr(s, 0, i) + substr(s, i, 1) + substr(s, i, n - i)
+    }
+    if op == 2 {
+        return substr(s, 0, i) + one_byte(st) + substr(s, i + 1, n - i - 1)
+    }
+    if op == 3 {
+        return substr(s, 0, i) + one_byte(st) + substr(s, i, n - i)
+    }
+    if op == 4 {
+        return substr(s, 0, i)
+    }
+    if op == 5 {
+        let tk = tokens()
+        let t = tk.get(next_rand(st, len(tk)))
+        return substr(s, 0, i) + t + substr(s, i, n - i)
+    }
+    let a = line_start(s, i)
+    let e = line_end(s, i)
+    return substr(s, 0, e) + substr(s, a, e - a) + substr(s, e, n - e)
+}
+
+fn mutate(src: str, st: vec[int]) -> str {
+    let mut s = src
+    let rounds = 1 + next_rand(st, 4)
+    let mut r = 0
+    while r < rounds {
+        s = mutate_once(s, st)
+        r += 1
+    }
+    return s
+}
+
+fn pad4(i: int) -> str {
+    let mut s = i.to_str()
+    while len(s) < 4 {
+        s = "0" + s
+    }
+    return s
+}
+
+fn main() -> int {
+    let a = args()
+    if len(a) < 4 {
+        print("用法: qlm_fuzz <seed.qma> <outdir> <cases> <seed>")
+        return 2
+    }
+    let src = read_text(a[0])
+    let dir = a[1]
+    let n = to_int(a[2])
+    let mut sd = to_int(a[3])
+    if sd <= 0 {
+        sd = 1
+    }
+    let st = vec[int].new(1)
+    st.push(sd % MOD)
+    let mut i = 0
+    while i < n {
+        let body = mutate(src, st)
+        write_text(dir + "/case_" + pad4(i) + ".qma", body)
+        i += 1
+    }
+    print("mutants=" + n.to_str() + " seed=" + sd.to_str() + " dir=" + dir)
+    return 0
+}

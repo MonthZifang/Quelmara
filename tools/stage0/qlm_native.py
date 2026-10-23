@@ -427,6 +427,15 @@ class Enc:
     def paddq(self, xd, xs):
         self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\xd4", modrm_reg(xd, xs))
 
+    def pmuludq(self, xd, xs):
+        """PMULUDQ xmm1, xmm2/m128（66 0F F4 /r，SSE2）。
+
+        取每个 64 位通道的**低 32 位**做无符号 32x32 -> 64 乘法，结果写回
+        同一 64 位通道（高 32 位通道 d1/d3 被忽略）。64 位整数乘法在
+        SSE2/SSE4.1 里没有单指令（pmulld 是 32x32->低32、pmuldq 只算
+        偶数 32 位通道），`vdot` 用三次本指令拼出 64x64->低64。"""
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\xf4", modrm_reg(xd, xs))
+
     def psrldq(self, x, imm):
         self.emit(b"\x66", rex(b=x), b"\x0f\x73", modrm_reg(3, x), bytes([imm & 0xFF]))
 
@@ -619,6 +628,12 @@ class Fn:
         self.frame_words = 0      # 结构体局部区占用的 8 字节字数
         self.structv = {}         # vreg -> 结构体名（该 vreg 持有结构体首地址）
         self.no_inline = False    # 禁止被内联（parfor worker 必须保留独立栈帧）
+        self.iface_fresh = set()  # 接口值槽：持有"新建装箱"的 rc=1（v1.81）
+        self.iface_own = set()    # 接口值槽：拥有一个计数（作用域尾释放）
+        # v1.95 闭包签名表：closure 值 vreg -> (形参表, 返回类型)。
+        # 只在"同一函数内由 lambda 字面量直接创建"的闭包上有值——跨函数传递
+        # 后签名不可知，调用点退回"按标量处理"（与 callr 同一口径）。
+        self.closig = {}
     def new_v(self):
         self.nv += 1
         return self.nv - 1
@@ -663,7 +678,7 @@ _XMM_BUILTINS = ("cpu_sha", "cpu_aes", "xmm_load", "xmm_store",
 class Lower:
     def __init__(self, fns_ast, cfg, arch="x86_64", structs=None, enums=None,
                  platform="linux", asset_root=None, dbg=False, dbg_main=None,
-                 dbg_src=None):
+                 dbg_src=None, drop_fns=None):
         self.fns_ast = {f["name"]: f for f in fns_ast}
         self.cfg = cfg
         self.arch = arch
@@ -681,6 +696,19 @@ class Lower:
         # v1.48 defer：每块一帧 {"slots": [登记标志], "entries": [(stmt, env, flag)], "cursor": n}
         # 标志位初始 0、执行到 defer 语句置 1，退出点按 LIFO 逐条"标志为 1 才执行"。
         self.defer_stack = []
+        # v1.93 Drop：类型名 -> 析构函数名（`impl T : Drop { fn drop(t: T) }`）。
+        # 与 defer_stack **同进同出**（都在 block() 里 push/pop），因此
+        # loop_stack 里记的 defer 深度可以同时当 drop 深度用。
+        # drop_fns 由 lower_and_optimize 在**全局 DCE 之前**算好传进来：
+        # DCE 只从 main 出发找可达函数，而析构是隐式调用（AST 里没有 call
+        # 节点），在 DCE 之后再算会把析构函数当死代码删掉。
+        self.drop_fns = dict(drop_fns) if drop_fns is not None \
+            else drop_table(fns_ast)
+        self.drop_stack = []       # 每块一帧 [(帧槽地址, 类型名)]，按绑定顺序
+        # v1.81 接口值所有权：语句临时槽（调用实参/返回槽）与作用域 owned 槽
+        self.iface_temps = []
+        self.iface_scope = []
+        self.uses_iface_rc = False
         self.out = []
         self.globals = []          # bytes 列表
         self.gid_of_str = {}
@@ -709,6 +737,14 @@ class Lower:
         self.uses_substr = False
         self.uses_str_cmp = False
         self.uses_vec = False
+        # v1.87 FFI：@ffi("dll"[, "Sym"]) 声明的函数表。
+        # name -> (dll, sym, [形参类], 返回类)；形参/返回类是 "int"/"bool"/
+        # "f64"/"f32"/"void"（解析期已白名单，见 qlm.py::Parser._bind_ffi）。
+        self.ffi_decls = {}
+        # v1.95 闭包：lambda 体在"外层函数降级完"之后统一降级（避免嵌套降级
+        # 覆盖 fn_ret_agg / loop_stack 等按函数保存的状态）；计数器给合成名。
+        self.pending_lambdas = []
+        self.lam_seq = 0
         # v1.5 内存/时间内建：按需发射（未用到的程序体积零变化）
         self.uses_memset = False
         self.uses_memcmp = False
@@ -718,6 +754,7 @@ class Lower:
         self.uses_realloc = False
         self.uses_free = False
         self.uses_now = False
+        self.uses_cpu = False
         # 命令行参数（args()）：argc 字数 + argv 指针，入口期或惰性初始化填入
         self.argc_gid = self.intern_array(1)
         self.argv_gid = self.intern_array(1)
@@ -1049,10 +1086,17 @@ class Lower:
             val = self.eval(fexpr, fn, env)
             if ftype and ftype[0] == "named" and self.is_agg(ftype[1]):
                 # 嵌套聚合字段：拷贝到 addr+off*8
+                if self._is_iface(ftype[1]):
+                    # 接口字段接受具体类型：先装箱（v1.83；此前按错宽度静默拷贝）
+                    sn = self._struct_of(fn, val)
+                    if sn is not None and sn != ftype[1]:
+                        val = self.box_iface(fn, val, sn, ftype[1])
                 sub = fn.new_v()
                 fn.emit("bin", "add", sub, addr, ("imm", off * 8))
                 self._mark_struct(fn, sub, ftype[1])
                 self.struct_copy(fn, sub, val, ftype[1])
+                if self._is_iface(ftype[1]):
+                    self._iface_share(fn, sub, val)
             elif ftype and ftype[0] == "slice":
                 # 切片字段（v1.39）：2 字 {ptr,len} 整体拷。
                 # 早期走 else 的 1 字 store——ptr 存了、len 丢了，静默错编。
@@ -1098,6 +1142,8 @@ class Lower:
                 fn.emit("bin", "add", sub, addr, ("imm", off * 8))
                 self._mark_struct(fn, sub, ftype[1])
                 self.struct_copy(fn, sub, val, ftype[1])
+                if self._is_iface(ftype[1]):
+                    self._iface_share(fn, sub, val)
                 off += self.agg_size(ftype[1])
             else:
                 val = self.conv_to(fn, val, self._float_of(fn, val), self._ty_float_w(ftype))
@@ -1161,6 +1207,16 @@ class Lower:
                                 # to_str/算术会按整数位模式处理（v1.65 修复）
                                 self._mark_float(
                                     fn, v, "f32" if ftype[1] == "f32" else "f64")
+                            elif ftype and ftype[0] == "vec":
+                                # v1.93：容器载荷的标签跟着绑定走。此前只打
+                                # str/bool/f64 标记，`E.A(buf, v)` 解出 buf 后
+                                # `buf.push(...)` 会报"方法 push 未定义"——
+                                # 枚举装缓冲区（错误对象、资源句柄）因此写不了。
+                                self._mark_vec(fn, v, self._vec_tag_of(ftype[1]))
+                            elif ftype and ftype[0] == "map":
+                                self._mark_map(fn, v, ftype[1][1], ftype[2][1])
+                            elif ftype and ftype[0] == "chan":
+                                self._mark_chan(fn, v)
                             env2[b] = v
                     off += self.field_words(ftype)
             if body[0] == "expr":
@@ -1348,10 +1404,19 @@ class Lower:
                 # 函数名作值：已知函数名 -> 代码地址操作数（fnaddr）。可作实参
                 # 传给间接调用目标（如网络回调），或 let 绑定（mov 走
                 # movabs + 回填；PE 下生成 DIR64 重定位，ASLR 安全）。
+                if e[1] in self.ffi_decls:
+                    # v1.87：@ffi 符号没有本地代码地址（它在 DLL 里），
+                    # 取地址只能得到空标签——明确拒绝，别让它在发射期炸。
+                    raise SyntaxError(
+                        f"{e[1]} 是 @ffi 声明，没有本地代码地址（符号在 DLL 里）；"
+                        f"要回调请先在语言里写一个 Win64 约定的包装函数"
+                        f"（当前未支持回调 thunk）")
                 if e[1] in self.fns_ast:
                     return ("fnaddr", e[1])
                 raise SyntaxError(f"未定义变量 {e[1]}")
             return env[e[1]]
+        if k == "lambda":
+            return self.lower_lambda(e, fn, env)
         if k == "call":
             return self.lower_call(e, fn, env)
         if k == "arraylit":
@@ -1584,6 +1649,16 @@ class Lower:
             # 见 docs/GAPS.md §2「interface」。
             sname = self._struct_of(fn, obj)
             if sname is not None:
+                amb = getattr(self, "method_ambig", {}).get((sname, e[2]))
+                if amb:
+                    # 同名方法跨接口（v1.81）：impl 已经能共存（按接口名
+                    # mangling），但静态调用 c.m() 没有消歧规则 -> fail-fast
+                    # 并给出可复制的写法，别让用户猜。
+                    raise SyntaxError(
+                        f"方法 {e[2]} 在类型 {sname} 上有 {len(amb)} 个实现"
+                        f"（接口 {' / '.join(amb)}），静态调用有歧义；"
+                        f"请先转成接口值再调用："
+                        f"let s: {amb[0]} = x; s.{e[2]}(...)")
                 mname = f"{sname}__{e[2]}"
                 if mname in self.fns_ast:
                     # ("vreg", n) 让已求值的接收者原样穿过 lower_call 的实参处理
@@ -2177,6 +2252,8 @@ class Lower:
                 sn = self._struct_of(fn, v)
                 if sn is not None and sn != elem[1]:
                     v = self.box_iface(fn, v, sn, elem[1])   # vec[Shape].push(Circle)
+                # 元素槽没有 Drop：push 之后元素永久持有这一箱（v1.81）
+                self._iface_share(fn, v, v)
             if isinstance(elem, tuple) and elem[0] == "agg":
                 fn.emit("call", None, "__vec_push_n", [obj, v])
             else:
@@ -2228,6 +2305,11 @@ class Lower:
             if nb is not None:
                 v = self.trunc_to(fn, v, nb)      # vec[u8] 等窄元素（v1.40）
             if isinstance(elem, tuple) and elem[0] == "agg":
+                if self._is_iface(elem[1]):
+                    sn = self._struct_of(fn, v)
+                    if sn is not None and sn != elem[1]:
+                        v = self.box_iface(fn, v, sn, elem[1])
+                    self._iface_share(fn, v, v)
                 fn.emit("call", None, "__vec_set_n", [obj, i, v])
             else:
                 fn.emit("call", None, "__vec_set", [obj, i, v])
@@ -2439,6 +2521,262 @@ class Lower:
         fn.emit("label", l_end)
         return d
 
+    # =====================================================================
+    # 闭包 / 捕获（v1.95）
+    # =====================================================================
+    # 设计（与既有聚合机制同构，不新增 ABI 概念）：
+    #   * 闭包值 = `closure` 聚合 {code, env} 两字（与接口值 {data, vt} 同构）；
+    #   * 捕获环境 = 堆上一段 n*8 字节，**创建时按值快照**；
+    #   * lambda 体 = 一个合成的顶层函数 `__lam_N`，形参表前面多一个
+    #     `__env__`（隐式），体内对捕获变量的引用降级为 `load __env__[i]`；
+    #   * 调用点：`f(args)` 在 f 的静态类型是 `closure` 时降级为
+    #     `code = f[0]; env = f[1]; callr code, [env, args...]`。
+    # 纯函数名（`foo`）仍是裸代码地址（int）走原路径——两种值互不干扰。
+
+    @staticmethod
+    def _lambda_bound(body, out):
+        """lambda 体内**新绑定**的名字：let / 循环变量 / match 绑定 /
+        嵌套 lambda 形参。这些名字一律不捕获（保守：宁可编译报"未定义变量"，
+        也不把外层同名变量错抓进来）。"""
+        def walk(x):
+            if isinstance(x, tuple):
+                if not x:
+                    return
+                k = x[0]
+                if k == "let" and len(x) > 2 and isinstance(x[2], str):
+                    out.add(x[2])
+                elif k in ("for", "parfor", "foreach") \
+                        and len(x) > 1 and isinstance(x[1], str):
+                    out.add(x[1])
+                elif k == "pat" and len(x) > 2:
+                    for b in x[2]:
+                        if b:
+                            out.add(b)
+                elif k == "lambda" and len(x) > 1:
+                    for n, _t in x[1]:
+                        out.add(n)
+                for y in x:
+                    walk(y)
+            elif isinstance(x, list):
+                for y in x:
+                    walk(y)
+            elif isinstance(x, dict):
+                for y in x.values():
+                    walk(y)
+        walk(body)
+
+    @staticmethod
+    def _lambda_uses(body, env):
+        """lambda 体内出现过的变量名（按首次出现顺序；`("name", s)` 才是
+        变量引用——`("field", e, s)` / `("method", e, s, ...)` 里的 s 不是）。
+        `("path", [head, ...])` 的 head 若在本层作用域可见，是 `v.x.y` 字段链
+        （不是枚举/类型路径），同样算一次引用。"""
+        used = []
+
+        def walk(x):
+            if isinstance(x, tuple):
+                if not x:
+                    return
+                if x[0] == "name" and len(x) > 1 and isinstance(x[1], str):
+                    used.append(x[1])
+                    return
+                if x[0] == "path" and len(x) > 1 and isinstance(x[1], list) \
+                        and x[1] and x[1][0] in env:
+                    used.append(x[1][0])
+                for y in x:
+                    walk(y)
+            elif isinstance(x, list):
+                for y in x:
+                    walk(y)
+            elif isinstance(x, dict):
+                for y in x.values():
+                    walk(y)
+        walk(body)
+        return used
+
+    @staticmethod
+    def _lambda_assigns(body):
+        """lambda 体内被赋值的名字（`x = ...`）。捕获变量不可写——写入只改
+        环境副本，会让调用方误以为原变量变了，所以编译期直接拒绝。"""
+        names = set()
+
+        def walk(x):
+            if isinstance(x, tuple):
+                if not x:
+                    return
+                if x[0] == "assign" and len(x) > 1 and isinstance(x[1], str):
+                    names.add(x[1])
+                for y in x:
+                    walk(y)
+            elif isinstance(x, list):
+                for y in x:
+                    walk(y)
+            elif isinstance(x, dict):
+                for y in x.values():
+                    walk(y)
+        walk(body)
+        return names
+
+    def _capture_tag(self, fn, v, name, line):
+        """捕获槽的类型标签（决定 lambda 体内 load 出来后怎么重新打标记）。
+
+        v1.95 边界：只捕获**一个槽**的值——标量 / str / f64 / vec·map·chan 句柄。
+        聚合（struct/enum）、切片、定长数组、rc 句柄捕获会失效或破坏所有权
+        （帧槽地址、视图生命周期、引用计数），一律编译期拒绝。"""
+        if (self._struct_of(fn, v) is not None or self._is_slice(fn, v)
+                or self._arr_of(fn, v) is not None or self._rc_of(fn, v) is not None):
+            raise SyntaxError(
+                f"line {line}: 闭包暂不支持捕获聚合/切片/数组/rc 变量 {name!r}"
+                f"（v1.95 边界：只捕获标量与 vec/map/chan 句柄）")
+        if self._is_str(fn, v):
+            return ("str",)
+        fw = self._float_of(fn, v)
+        if fw:
+            return ("float", fw)
+        if self._is_vec(fn, v):
+            return ("vec", self._vec_elem(fn, v))
+        mp = self._map_of(fn, v)
+        if mp is not None:
+            return ("map", mp[0], mp[1])
+        if self._is_chan(fn, v):
+            return ("chan",)
+        return ("int",)
+
+    def _apply_capture_tag(self, fn, v, tag):
+        """把捕获槽 load 出来的 vreg 重新打上类型标记（与创建点同源）。"""
+        k = tag[0]
+        if k == "str":
+            fn.strv.add(v)
+        elif k == "float":
+            self._mark_float(fn, v, tag[1])
+        elif k == "vec":
+            self._mark_vec(fn, v, tag[1])
+        elif k == "map":
+            self._mark_map(fn, v, tag[1], tag[2])
+        elif k == "chan":
+            self._mark_chan(fn, v)
+
+    def _lambda_captures(self, params, body, env, line, fn):
+        """自由变量 = 体内出现的名字 - 体内新绑定 - 形参，且**外层此刻可见**。
+        顺序按名字排序：环境布局与源码书写顺序无关，编译产物可复现。"""
+        bound = {n for n, _t in params}
+        self._lambda_bound(body, bound)
+        assigned = self._lambda_assigns(body)
+        caps, seen = [], set()
+        for name in self._lambda_uses(body, env):
+            if name in bound or name in seen or name not in env:
+                continue
+            seen.add(name)
+            caps.append(name)
+        caps.sort()
+        out = []
+        for name in caps:
+            if name in assigned:
+                raise SyntaxError(
+                    f"line {line}: 闭包内不能给捕获变量 {name!r} 赋值"
+                    f"（捕获按值快照，写入不会传回外层）")
+            v = env[name]
+            if not isinstance(v, int):
+                raise SyntaxError(
+                    f"line {line}: 闭包不能捕获编译期常量 {name!r}")
+            out.append((name, self._capture_tag(fn, v, name, line)))
+        return out
+
+    def lower_lambda(self, e, fn, env):
+        params, ret, body, line = e[1], e[2], e[3], e[4]
+        caps = self._lambda_captures(params, body, env, line, fn)
+        self.lam_seq += 1
+        lname = f"__lam_{self.lam_seq}"
+        self.pending_lambdas.append({
+            "name": lname, "params": list(params), "ret": ret, "body": body,
+            "captures": caps, "line": line})
+        dst = self.alloc_struct(fn, "closure")
+        code = fn.new_v()
+        fn.emit("mov", code, ("fnaddr", lname))
+        fn.emit("store", dst, ("imm", 0), code)
+        # 签名随值走（编译期表，不进产物）：调用点据此恢复返回值类型与实参转换
+        fn.closig[dst] = (tuple(params), ret)
+        if not caps:
+            fn.emit("store", dst, ("imm", 1), ("imm", 0))
+            return dst
+        raw = fn.new_v()
+        fn.emit("call", raw, "__alloc", [("imm", 8 * len(caps))])
+        for i, (cname, _tag) in enumerate(caps):
+            src = env[cname]
+            if not isinstance(src, int):
+                src = fn.new_v()
+                fn.emit("mov", src, env[cname])
+            fn.emit("store", raw, ("imm", i), src)
+        fn.emit("store", dst, ("imm", 1), raw)
+        return dst
+
+    def lower_pending_lambdas(self):
+        """外层函数全部降级完之后再降级 lambda 体：lambda 体本身可能再产生
+        lambda（嵌套捕获），所以用"边降边追加"的队列。"""
+        i = 0
+        while i < len(self.pending_lambdas):
+            lam = self.pending_lambdas[i]
+            i += 1
+            body = list(lam["body"])
+            # 块尾表达式即返回值（ret 非 void 时）：`fn(x: int) -> int { x + 1 }`
+            if lam["ret"] != ("named", "void") and body \
+                    and isinstance(body[-1], tuple) and body[-1][0] == "expr":
+                body[-1] = ("return", body[-1][1])
+            self.lower_fn({
+                "name": lam["name"],
+                "params": [("__env__", ("named", "int"))] + list(lam["params"]),
+                "ret": lam["ret"],
+                "body": body,
+                "captures": lam["captures"],
+                "line": lam["line"],
+            })
+
+    def lower_ffi(self, name, e, fn, env):
+        """@ffi 调用（v1.87）：把实参按 Win64 寄存器类分好，发射一条 'ffi'。
+
+        指令形态：('ffi', dst|None, dll, sym, kinds, ret, [args])
+          kinds: 每个实参一个 "i"（整数寄存器 RCX/RDX/R8/R9 -> 栈）或
+                 "f64"/"f32"（XMM0-3 -> 栈）；由**声明**的形参类型决定，
+                 不看实参推断——C 侧的寄存器类只由原型说了算。
+          ret:   "int"/"bool"（RAX）/ "f64"/"f32"（XMM0）/ "void"。
+
+        平台差异全部留在发射层（qlm_pe.WinCodegen.gen_ffi）；这里只做
+        语言层的三件事：类型对账、隐式整数->浮点转换、结果打标记。
+        """
+        dll, sym, ptypes, ret = self.ffi_decls[name]
+        if len(e[2]) != len(ptypes):
+            raise SyntaxError(
+                f"{name} 是 @ffi 声明，需要 {len(ptypes)} 个实参，"
+                f"得到 {len(e[2])}")
+        args, kinds = [], []
+        for i, a in enumerate(e[2]):
+            v = self.eval(a, fn, env)
+            pt = ptypes[i]
+            if self._is_str(fn, v) or a[0] == "str":
+                raise SyntaxError(
+                    f"{name} 的第 {i + 1} 个实参是 str——FFI 形参里没有 str"
+                    f"（长度前缀 ≠ NUL 结尾）；请用 cstr(s) 转成指针再传")
+            if pt in ("f64", "f32"):
+                # C 的隐式转换口径：整数实参自动拓宽成浮点
+                args.append(self.conv_to(fn, v, self._float_of(fn, v), pt))
+                kinds.append(pt)
+            else:
+                if self._float_of(fn, v):
+                    raise SyntaxError(
+                        f"{name} 的第 {i + 1} 个形参是 {pt}，浮点实参不能"
+                        f"隐式转整数；请显式 to_int(x)")
+                args.append(v)
+                kinds.append("i")
+        dst = fn.new_v() if ret != "void" else None
+        fn.emit("ffi", dst, dll, sym, tuple(kinds), ret, args)
+        if ret == "void":
+            return ("imm", 0)
+        if ret in ("f64", "f32"):
+            return self._mark_float(fn, dst, ret)
+        if ret == "bool":
+            return self._mark_bool(fn, dst)
+        return dst
+
     def lower_call(self, e, fn, env):
         name = e[1][-1]
         if name == "print":
@@ -2508,6 +2846,14 @@ class Lower:
                 d = fn.new_v()
                 fn.emit("call", d, "__str_to_int", [x])
                 return d
+            if name in ("to_float", "to_f32") and self._is_str(fn, x):
+                # v1.96：止血。旧实现把 str 的**指针**当数值转，得到地址量级的
+                # 垃圾值（07-gaps §7.10），不报错也不崩——典型静默错。
+                raise SyntaxError(
+                    f"{name}(str) 不做十进制解析——旧实现会把字符串指针当数值转，"
+                    "静默给出垃圾值（见 docs/07-gaps.md §7.10）。"
+                    "请用 std/f64 的 f64_parse(s)")
+
             wf = self._float_of(fn, x)
             if name == "to_int":
                 return self.conv_to(fn, x, wf, None)
@@ -2576,12 +2922,30 @@ class Lower:
             d = fn.new_v()
             fn.emit("call", d, "__free", [p, n])
             return d
+        if name == "mem_load_acq" and name not in self.fns_ast:
+            # mem_load_acq(addr) -> int：acquire 读（v1.98）。
+            # x86_64 的普通 mov 本身就是 acquire（TSO：读不会被提前），
+            # 所以这里是零成本；AArch64 发 LDAR。用于"先读标志、再读数据"
+            # 的发布-订阅读端。
+            if len(e[2]) != 1:
+                raise SyntaxError("mem_load_acq(addr) 需要一个实参")
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            d = fn.new_v()
+            fn.emit("ldar", d, vals[0])
+            return d
+        if name == "mem_store_rel" and name not in self.fns_ast:
+            # mem_store_rel(addr, v)：release 写（v1.98）。x86 普通 mov 已是
+            # release（写不会被推后），AArch64 发 STLR。互斥锁的解锁走它：
+            # 语义上要的是"之前的写对抢到锁的人可见"，不是全屏障。
+            if len(e[2]) != 2:
+                raise SyntaxError("mem_store_rel(addr, v) 需要两个实参")
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            fn.emit("stlr", vals[0], vals[1])
+            return ("imm", 0)
         if name == "mem_xchg" and name not in self.fns_ast:
-            # mem_xchg(addr, val) -> old：原子交换（x86_64 xchg 指令）。
-            # 协议库的多 io 线程自旋锁靠它实现；net_serve 只在 Windows PE
-            # 后端运行，故同样限定 x86_64。
-            if self.arch != "x86_64":
-                raise SyntaxError("mem_xchg 目前只在 x86_64 后端实现")
+            # mem_xchg(addr, val) -> old：原子交换。
+            # x86_64：`xchg [m], r`（隐含 LOCK）；AArch64：LDAXR/STLXR 重试（v1.98）。
+            # 协议库的多 io 线程自旋锁靠它实现。
             if len(e[2]) != 2:
                 raise SyntaxError("mem_xchg(addr, val) 需要两个实参")
             vals = [self.eval(a, fn, env) for a in e[2]]
@@ -2589,11 +2953,9 @@ class Lower:
             fn.emit("xchg", d, vals[0], vals[1])
             return d
         if name == "atomic_add" and name not in self.fns_ast:
-            # atomic_add(addr, v) -> old：*addr += v，返回**旧值**（lock xadd）。
-            # 无锁计数器 / MPMC 队列序号的地基。addr 须 8 字节对齐
-            # （mem_alloc 产物或 static_word 槽）。
-            if self.arch != "x86_64":
-                raise SyntaxError("atomic_add 目前只在 x86_64 后端实现")
+            # atomic_add(addr, v) -> old：*addr += v，返回**旧值**（x86 lock xadd /
+            # A64 LL-SC 循环）。无锁计数器 / MPMC 队列序号的地基。addr 须
+            # 8 字节对齐（mem_alloc 产物或 static_word 槽）。
             if len(e[2]) != 2:
                 raise SyntaxError("atomic_add(addr, v) 需要两个实参")
             vals = [self.eval(a, fn, env) for a in e[2]]
@@ -2602,10 +2964,9 @@ class Lower:
             return d
         if name == "atomic_cas" and name not in self.fns_ast:
             # atomic_cas(addr, expect, new) -> old：旧值==expect 时写 new。
-            # 返回旧值，调用方比较判断是否成功（cmpxchg 语义）。
+            # 返回旧值，调用方比较判断是否成功（cmpxchg 语义；A64 上是
+            # LDAXR + CMP + STLXR，不相等直接返回、不写）。
             # 自旋锁：while atomic_cas(p, 0, 1) != 0 { spin_hint() }
-            if self.arch != "x86_64":
-                raise SyntaxError("atomic_cas 目前只在 x86_64 后端实现")
             if len(e[2]) != 3:
                 raise SyntaxError("atomic_cas(addr, expect, new) 需要三个实参")
             vals = [self.eval(a, fn, env) for a in e[2]]
@@ -2613,10 +2974,8 @@ class Lower:
             fn.emit("atomic", "cas", d, vals[0], vals[1], vals[2])
             return d
         if name == "atomic_fence" and name not in self.fns_ast:
-            # atomic_fence()：全内存屏障（mfence）。发布-订阅模式里
-            # "先写数据、再置 ready 标志"的顺序保证。
-            if self.arch != "x86_64":
-                raise SyntaxError("atomic_fence 目前只在 x86_64 后端实现")
+            # atomic_fence()：全内存屏障（x86 mfence / A64 DMB ISH）。发布-订阅
+            # 模式里"先写数据、再置 ready 标志"的顺序保证。
             fn.emit("mfence")
             return ("imm", 0)
         if name == "spin_hint" and name not in self.fns_ast:
@@ -2624,13 +2983,11 @@ class Lower:
             fn.emit("pause")
             return ("imm", 0)
         if name == "now_cycle" and name not in self.fns_ast:
-            # now_cycle() -> int：rdtsc 周期计数（EDX:EAX 拼 64 位）。
-            # 程序内自计时的地基——本机进程冷启动 ~350ms（Hyper-V/VBS），
-            # 微基准必须排除它，这是 docs/PERF.md 的测量纪律。
+            # now_cycle() -> int：x86 rdtsc / A64 CNTVCT_EL0（v1.98 双后端）。
+            # 程序内自计时的地基——本机进程冷启动 ~426ms（Hyper-V/VBS），
+            # 微基准必须排除它，这是 docs/06-status.md 的测量纪律。
             # 纯读（无副作用），不进 _EFF：调度器挪它只影响测量精度，
             # 不影响正确性；跨测量段归一化由调用方做（读两次取差）。
-            if self.arch != "x86_64":
-                raise SyntaxError("now_cycle 目前只在 x86_64 后端实现")
             d = fn.new_v()
             fn.emit("rdtsc", d)
             return d
@@ -2846,6 +3203,75 @@ class Lower:
             d = fn.new_v()
             fn.emit("call", d, "__mem_to_str", vals)
             return self._mark_str(fn, d)
+        if name == "cstr" and name not in self.fns_ast:
+            # cstr(s) -> int：str -> NUL 结尾的 C 字符串指针（v1.87）。
+            # 语义：新分配一块 [n][bytes][NUL]（与 str_alloc 同一运行时
+            # __str_from_mem），把 s 的 n 字节拷进去，返回**数据指针**。
+            # 为什么必须显式调用：Quelmara 的 str 是长度前缀 ABI（[len][bytes]），
+            # 末尾没有 NUL——直接把它当 char* 传给 Win32 会让 API 读越界。
+            if len(e[2]) != 1:
+                raise SyntaxError("cstr(s) 需要且只需要一个 str 实参")
+            if self.arch != "x86_64":
+                raise SyntaxError("cstr 目前只在 x86_64 后端实现")
+            self.uses_strmem = True
+            sv = self.eval(e[2][0], fn, env)
+            n = self.str_len(fn, sv)
+            d = fn.new_v()
+            fn.emit("call", d, "__str_from_mem", [sv, n])
+            # 返回**纯 int 指针**（不打 str 标记）：FFI 形参是 int，
+            # 打上 str 标记反而会被 lower_ffi 当成"传了长度前缀串"拒掉。
+            # 布局仍是合法 str（[n][bytes][NUL]），要读回来用 cstr_read。
+            return d
+        if name == "cstr_read" and name not in self.fns_ast:
+            # cstr_read(p) -> str：C 字符串指针 -> str（v1.87，找首个 NUL）。
+            # 无上界保护：p 必须真的指向 NUL 结尾的缓冲区（Win32 返回值满足）。
+            if len(e[2]) != 1:
+                raise SyntaxError("cstr_read(p) 需要且只需要一个指针实参")
+            if self.arch != "x86_64":
+                raise SyntaxError("cstr_read 目前只在 x86_64 后端实现")
+            self.uses_strmem = True
+            p = self.eval(e[2][0], fn, env)
+            k = fn.new_v()
+            fn.emit("mov", k, ("imm", 0))
+            l_scan = fn.label("cstrs")
+            l_done = fn.label("cstrd")
+            fn.emit("label", l_scan)
+            ch = fn.new_v()
+            fn.emit("load8", ch, p, k)          # 字节偏移寻址（scale 0）
+            fn.emit("jz", ch, l_done)
+            fn.emit("bin", "add", k, k, ("imm", 1))
+            fn.emit("jmp", l_scan)
+            fn.emit("label", l_done)
+            d = fn.new_v()
+            fn.emit("call", d, "__str_from_mem", [p, k])
+            return self._mark_str(fn, d)
+        if name == "thread_yield" and name not in self.fns_ast:
+            # thread_yield()：让出当前时间片（v1.98）。Windows 走
+            # kernel32.SwitchToThread，Linux 走 sched_yield（x86 24 / A64 124）。
+            # 与 spin_hint 的分工：spin_hint 是"再等一会儿"（ns 级、不切线程），
+            # thread_yield 是"让别的线程先跑"（µs 级、会切上下文）。
+            # 退避等待（std/sync 的 wg_wait、mutex_lock 长等待）靠它把 CPU 还回去。
+            if len(e[2]) != 0:
+                raise SyntaxError("thread_yield() 不需要实参")
+            if self.platform == "windows":
+                fn.emit("winapi", None, "SwitchToThread", [])
+            else:
+                fn.emit("syscall", None, self.sc["yield"],
+                        [("imm", 0), ("imm", 0), ("imm", 0),
+                         ("imm", 0), ("imm", 0), ("imm", 0)])
+            return ("imm", 0)
+        if name == "cpu_ns" and name not in self.fns_ast:
+            # cpu_ns() -> int：**进程**累计 CPU 时间纳秒（v1.98）。与 now_ns
+            # （单调墙钟）配对使用：wall 远大于 cpu 说明在睡/等，wall≈cpu
+            # 说明在烧核——这是"自旋 vs 退避"唯一可测的判据。
+            # Windows：GetProcessTimes（内核+用户态，100ns 单位）；
+            # Linux：clock_gettime(CLOCK_PROCESS_CPUTIME_ID=2)。
+            if len(e[2]) != 0:
+                raise SyntaxError("cpu_ns() 不需要实参")
+            self.uses_cpu = True
+            d = fn.new_v()
+            fn.emit("call", d, "__cpu_ns", [])
+            return d
         if name == "sleep_ms" and name not in self.fns_ast:
             # sleep_ms(ms)：线程挂起指定毫秒（v1.16）。
             # Windows：kernel32.Sleep(ms)；Linux：nanosleep(timespec{ms/1000,
@@ -3305,6 +3731,10 @@ class Lower:
             if n is None:
                 raise SyntaxError("slice_of() 目前只支持定长数组变量（零拷贝转换）")
             return self.make_slice(fn, av, ("imm", n), elem=self.arr_elem.get(av))
+        if name in self.ffi_decls:
+            # v1.87：@ffi 声明的函数没有函数体——必须在这里截住，否则会走到
+            # 下面的用户函数路径，发射一条指向"从未发射过的标签"的 call。
+            return self.lower_ffi(name, e, fn, env)
         if name not in self.fns_ast:
             if len(e[1]) == 1 and name in env:
                 # 通过值调用：标识符是持有函数地址的局部变量（fnaddr 或 vreg）
@@ -3327,6 +3757,48 @@ class Lower:
                         self.struct_copy(fn, tmp, a, sname)
                         args[i] = tmp
                 d = fn.new_v()
+                if self._struct_of(fn, callee) == "closure":
+                    # 闭包调用（v1.95）：{code, env} 两字，env 作隐藏的第一实参
+                    # （lambda 体形参表前面就是 __env__，ABI 与直接调用一致）。
+                    # 同一函数内创建的闭包带签名 -> 恢复返回值类型、按形参转换
+                    # 实参；跨函数传进来的闭包无签名，退回"按标量处理"。
+                    sig = fn.closig.get(callee)
+                    if sig is not None:
+                        cps, cret = sig
+                        for i, a in enumerate(args):
+                            if i < len(cps):
+                                args[i] = self.conv_to(
+                                    fn, a, self._float_of(fn, a),
+                                    self._ty_float_w(cps[i][1]))
+                    code = fn.new_v()
+                    fn.emit("load", code, callee, ("imm", 0))
+                    envp = fn.new_v()
+                    fn.emit("load", envp, callee, ("imm", 1))
+                    cret = sig[1] if sig is not None else None
+                    if cret is not None and cret[0] == "slice":
+                        tmp = self.alloc_slice(fn)
+                        fn.emit("callr", None, code, [tmp, envp] + args)
+                        if cret[1][0] == "named":
+                            self._mark_slice(fn, tmp, cret[1][1])
+                        return tmp
+                    if cret is not None and cret[0] == "array":
+                        tmp = self.alloc_array(fn, cret[1])
+                        fn.emit("callr", None, code, [tmp, envp] + args)
+                        return tmp
+                    if cret is not None and cret[0] == "named" \
+                            and self.is_agg(cret[1]):
+                        tmp = self.alloc_struct(fn, cret[1])
+                        fn.emit("callr", None, code, [tmp, envp] + args)
+                        return tmp
+                    fn.emit("callr", d, code, [envp] + args)
+                    if cret is not None:
+                        if cret[0] == "named" and cret[1] == "str":
+                            fn.strv.add(d)
+                        elif cret[0] == "named" and cret[1] == "bool":
+                            self._mark_bool(fn, d)
+                        elif self._ty_float_w(cret):
+                            self._mark_float(fn, d, self._ty_float_w(cret))
+                    return d
                 fn.emit("callr", d, callee, args)
                 return d
             raise SyntaxError(f"未定义函数 {name}")
@@ -3365,6 +3837,14 @@ class Lower:
                     sname = params[i][1][1]
                 tmp = self.alloc_struct(fn, sname)
                 self.struct_copy(fn, tmp, a, sname)
+                if self._is_iface(sname):
+                    # 实参槽 = 语句级临时：fresh 移动，否则 retain；语句结束时
+                    # 释放（callee 只借用，不拥有）——v1.81
+                    if a in fn.iface_fresh:
+                        fn.iface_fresh.discard(a)
+                    else:
+                        self._iface_retain_slot(fn, tmp)
+                    self.iface_temps.append(tmp)
                 args[i] = tmp
         # 接口形参必须收到结构体（否则运行期 vt 是垃圾）
         for i, a in enumerate(args):
@@ -3374,6 +3854,15 @@ class Lower:
                 raise SyntaxError(
                     f"函数 {name} 的第 {i + 1} 个形参是接口 {params[i][1][1]}，"
                     f"实参不是结构体（需要传实现了该接口的类型）")
+        # 闭包形参必须收到闭包（v1.95）：裸函数名是代码地址（int），
+        # 按聚合传进去会让被调方从"地址的地址"读 code/env，必错。
+        for i, a in enumerate(args):
+            if (i < len(params) and params[i][1] == ("named", "closure")
+                    and self._struct_of(fn, a) != "closure"):
+                raise SyntaxError(
+                    f"函数 {name} 的第 {i + 1} 个形参是 closure，实参不是闭包"
+                    f"（裸函数名是代码地址，请用 fn(...) {{ ... }} 字面量，"
+                    f"或包一层 fn(x: int) -> int {{ return foo(x) }}）")
         # 标量实参按形参类型转换（浮点宽度 / 整数<->浮点，与 C 隐式转换一致）
         for i, a in enumerate(args):
             if i < len(params):
@@ -3396,6 +3885,9 @@ class Lower:
             # 聚合返回值：隐藏出参指针约定（调用方开帧槽，callee 拷入）
             tmp = self.alloc_struct(fn, ret[1])
             fn.emit("call", None, name, [tmp] + args)
+            if self._is_iface(ret[1]):
+                # callee 已把计数移进 tmp：tmp 是语句级临时，语句尾释放
+                self.iface_temps.append(tmp)
             return self._mark_struct(fn, tmp, ret[1])
         d = fn.new_v()
         fn.emit("call", d, name, args)
@@ -3416,9 +3908,25 @@ class Lower:
         return d
 
     # ---- 布尔条件跳转 ----
-    # ---- 所有权 / 借用检查（v1.8，作用于 rc[T] 句柄）----
-    # 只对 rc 句柄做线性检查：use-after-drop / double-drop / move-then-use。
-    # struct/数组/str 是值语义或 arena 借用，不在检查范围（文档里写明）。
+    # ---- 所有权 / 借用检查 ----
+    # v1.8：rc[T] 句柄的线性检查（use-after-drop / double-drop / move-then-use /
+    #       泄漏警告）。
+    # v1.84：扩到**视图**（切片 []T、str 切片）的**生命周期**与**别名**，外加
+    #       跨线程传递。四件事：
+    #   1) 视图基址分五类：本帧栈 / 堆 / 静态 / 形参（调用方所有）/ 返回值（未知）。
+    #      值语义形参（定长数组、struct）是**本帧副本** → 归"本帧栈"；
+    #      视图/句柄形参（[]T、str、vec/map/chan/rc）→ 归"调用方所有"。
+    #   2) 逃逸检查（错误）：本帧栈视图从 return / 堆容器（vec/map/chan 的
+    #      push·set·insert·send）/ spawn 逃出 → 悬垂。结构体字段里装了栈视图时
+    #      整个结构体标"含栈视图"并随拷贝传播，该结构体逃逸同样报错。
+    #   3) 写别名检查（错误）：同一基址上两个**独立创建**的视图范围可能重叠且都被
+    #      写入。由拷贝/赋值得到的视图继承同一"别名组"——切片零拷贝共享是本语言的
+    #      显式语义（02-language §3），同组写入不报；常量区间或同一界表达式
+    #      （`a[0..mid]` / `a[mid..n]`）可证不重叠，也放行。
+    #   4) 跨线程（错误）：spawn 实参里出现 rc 句柄（引用计数非原子，跨线程
+    #      clone/drop 必竞争）或本帧栈视图。
+    # 不查（如实登记在 02-language §8.3）：多线程同时写同一堆内存的数据竞争、
+    #   mem_str 裸指针的来源、跨函数的别名（被调方写 []T 形参，调用方看不到）。
     @staticmethod
     def _owned_names(stmts, state):
         """返回本块内"确定仍是活句柄"的名字集合（保守近似）"""
@@ -3433,6 +3941,385 @@ class Lower:
         elif isinstance(node, list):
             for x in node:
                 self._walk_names(x, out)
+        elif isinstance(node, dict):
+            for x in node.values():
+                self._walk_names(x, out)
+
+    def _iter_nodes(self, node):
+        """按源码顺序产出子树里的每个元组节点（语句 + 表达式）"""
+        if isinstance(node, tuple):
+            if node and isinstance(node[0], str):
+                yield node
+            for x in node:
+                if isinstance(x, (tuple, list, dict)):
+                    yield from self._iter_nodes(x)
+        elif isinstance(node, list):
+            for x in node:
+                yield from self._iter_nodes(x)
+        elif isinstance(node, dict):
+            for x in node.values():
+                yield from self._iter_nodes(x)
+
+    def _expr_text(self, e):
+        """表达式 -> 报错文案里的短写法"""
+        if isinstance(e, tuple) and e:
+            k = e[0]
+            if k == "name":
+                return e[1]
+            if k == "path":
+                return ".".join(str(x) for x in e[1])
+            if k == "field":
+                return self._expr_text(e[1]) + "." + str(e[2])
+            if k == "index":
+                return self._expr_text(e[1]) + "[…]"
+            if k == "sliceof":
+                return self._expr_text(e[1]) + "[..]"
+            if k == "call":
+                return str(e[1][-1]) + "(…)"
+            if k == "method":
+                return self._expr_text(e[1]) + "." + str(e[2]) + "(…)"
+            if k == "structlit":
+                return " ".join(str(x) for x in e[1]) + "{…}"
+        return "…"
+
+    def _root_name(self, e):
+        if not isinstance(e, tuple) or not e:
+            return None
+        k = e[0]
+        if k == "name":
+            return e[1]
+        if k == "path":
+            return e[1][0] if e[1] else None
+        if k in ("field", "index", "sliceof"):
+            return self._root_name(e[1])
+        return None
+
+    @staticmethod
+    def _bound(e):
+        """区间端点 -> int / ('var', 名字) / None（未知）"""
+        if isinstance(e, tuple) and e:
+            if e[0] == "num":
+                return e[1]
+            if e[0] == "name":
+                return ("var", e[1])
+        return None
+
+    def _own_parts(self, s):
+        """语句"自己"的表达式部分（不含已被 _flat_stmts 摊平的块体）
+
+        摊平后若还对整条复合语句走一遍子树，嵌套层数就是平方级的重复遍历。
+        """
+        k = s[0]
+        if k == "if":
+            return [s[1]]
+        if k == "while":
+            return [s[1]]
+        if k in ("for", "parfor"):
+            return [s[2], s[3]]
+        if k == "foreach":
+            return [s[2]]
+        if k in ("annot", "arena", "defer"):
+            return []
+        if k == "match_stmt" and isinstance(s[1], tuple) and s[1][0] == "match":
+            return [s[1][1]]
+        return [s]
+
+    def _flat_stmts(self, stmts, out):
+        """按源码顺序摊平语句（含嵌套块），用于别名/生命周期的顺序近似"""
+        for s in stmts or []:
+            if not isinstance(s, tuple) or not s:
+                continue
+            out.append(s)
+            k = s[0]
+            if k == "if":
+                self._flat_stmts(s[2], out)
+                if s[3]:
+                    self._flat_stmts(s[3], out)
+            elif k == "while":
+                self._flat_stmts(s[2], out)
+            elif k in ("for", "parfor"):
+                self._flat_stmts(s[4], out)
+            elif k == "foreach":
+                self._flat_stmts(s[3], out)
+            elif k == "annot":
+                self._flat_stmts([s[2]], out)
+            elif k == "arena":
+                self._flat_stmts(s[1], out)
+            elif k == "defer":
+                self._flat_stmts([s[1]], out)
+            elif k == "match_stmt" and isinstance(s[1], tuple) and s[1][0] == "match":
+                for arm in s[1][2]:
+                    b = arm[1]
+                    if isinstance(b, tuple) and b and b[0] == "block":
+                        self._flat_stmts(b[1], out)
+
+    def _place_view(self, e, views, arrays, agglocals):
+        """位置表达式 -> 它所指存储的 (kind, base, lo, hi)，追不到返回 None"""
+        if not isinstance(e, tuple) or not e:
+            return None
+        k = e[0]
+        if k == "name":
+            n = e[1]
+            if n in views:
+                return views[n][:4]
+            if n in arrays:
+                return ("stack", n, 0, arrays.get(n))
+            if n in agglocals:
+                return ("stack", n, 0, None)
+            return None
+        if k in ("path", "field"):
+            root = self._root_name(e)
+            if root is None:
+                return None
+            if root in views:
+                # 视图的字段（`[]T` 无字段，`str` 无字段）——按原基址处理
+                return views[root][:4]
+            if root in arrays or root in agglocals:
+                # 结构体/数组的字段：以 `h.f` 为独立基址（不同字段互不别名）
+                return ("stack", self._expr_text(e), 0, None)
+            return None
+        return None
+
+    @staticmethod
+    def _vw(kind, base, lo, hi):
+        """视图描述：kind/base/区间/别名组（None = 尚未分配组号）"""
+        return (kind, base, lo, hi, None)
+
+    def _view_of(self, e, views, arrays, agglocals):
+        """表达式 -> 视图描述 (kind, base, lo, hi, group)；不是视图返回 None
+
+        kind: stack（本帧栈）/ heap / static / param（调用方所有）/ ret（未知）
+        """
+        if not isinstance(e, tuple) or not e:
+            return None
+        k = e[0]
+        if k == "name":
+            return views.get(e[1])
+        if k == "str":
+            return self._vw("static", None, 0, None)
+        if k == "call":
+            fname = e[1][-1]
+            if fname == "slice_of" and len(e[2]) == 1:
+                b = self._place_view(e[2][0], views, arrays, agglocals)
+                return self._vw(b[0], b[1], b[2], b[3]) if b is not None else None
+            if fname in ("mem_str", "substr", "str_from_mem", "str_from_bytes",
+                         "str_alloc", "chr", "read_text", "read_asset"):
+                return self._vw("heap", None, None, None)
+            ret = (self.fns_ast.get(fname) or {}).get("ret")
+            if ret and (ret[0] == "slice" or
+                        (ret[0] == "named" and ret[1] == "str")):
+                # 被调方自己的逃逸检查已经拦住"返回本帧视图"，此处视为外部所有
+                return self._vw("ret", None, None, None)
+            return None
+        if k == "sliceof":
+            # 子切片：基址可以是视图，也可以是定长数组/结构体字段（值语义位置）
+            inner = self._place_view(e[1], views, arrays, agglocals)
+            if inner is None:
+                inner = self._view_of(e[1], views, arrays, agglocals)
+            if inner is None:
+                return None
+            lo, hi = self._bound(e[2]), self._bound(e[3])
+            blo = inner[2]
+            if isinstance(blo, int):
+                if blo:
+                    lo = self._shift_bound(blo, lo)
+                    hi = self._shift_bound(blo, hi)
+            else:
+                lo = hi = None       # 基址自身偏移未知，区间只能算"未知"
+            return self._vw(inner[0], inner[1], lo, hi)
+        return None
+
+    @staticmethod
+    def _shift_bound(k, x):
+        """区间端点平移 k（k 是基址偏移）"""
+        if x is None:
+            return None
+        if isinstance(x, int):
+            return k + x
+        return ("+", k, x)
+
+    @staticmethod
+    def _ranges_may_overlap(a, b):
+        """两个视图的区间是否可能重叠（左闭右开）；能证不重叠返回 False"""
+        l1, h1, l2, h2 = a[2], a[3], b[2], b[3]
+        if all(isinstance(x, int) for x in (l1, h1, l2, h2)):
+            return l1 < h2 and l2 < h1
+        # 同一界表达式：`a[0..mid]` 与 `a[mid..n]` 首尾相接，不重叠
+        if h1 is not None and l2 is not None and h1 == l2:
+            return False
+        if h2 is not None and l1 is not None and h2 == l1:
+            return False
+        return True
+
+    def _check_views(self, f, errs, warns):
+        """视图生命周期 / 写别名 / 跨线程（v1.84）"""
+        fname = f["name"]
+        flat = []
+        self._flat_stmts(f["body"], flat)
+        views = {}       # name -> (kind, base, lo, hi, group)
+        tainted = {}     # name -> 说明（哪个字段装了栈视图）
+        arrays = {}      # 本帧定长数组变量 -> 长度（未知为 None）
+        agglocals = set()  # 本帧 struct/enum 值（含值语义形参）
+        rcnames = set()  # rc 句柄名
+        gid = [0]
+
+        def new_group():
+            gid[0] += 1
+            return gid[0]
+
+        for (pn, pt) in f["params"]:
+            if not isinstance(pt, tuple) or not pt:
+                continue
+            if pt[0] == "slice":
+                views[pn] = ("param", None, None, None, -1)
+            elif pt[0] == "array":
+                # 值语义形参：调用方那份被拷进本帧，`slice_of` 指向本帧副本
+                arrays[pn] = pt[1] if len(pt) > 1 and isinstance(pt[1], int) else None
+            elif pt[0] == "named" and pt[1] == "str":
+                views[pn] = ("param", None, None, None, -1)
+            elif pt[0] == "named" and self.is_agg(pt[1]):
+                agglocals.add(pn)
+            elif pt[0] == "rc":
+                rcnames.add(pn)
+
+        # 名字最后出现的语句下标（近似活跃区间；写目标也算一次使用）
+        last = {}
+        for i, s in enumerate(flat):
+            names = []
+            for part in self._own_parts(s):
+                self._walk_names(part, names)
+            for n in names:
+                last[n] = i
+
+        seen = set()
+        alias_pairs = set()
+
+        def add_err(msg):
+            if msg not in seen:
+                seen.add(msg)
+                errs.append(msg)
+
+        def escape_one(e, where, what):
+            """把 e 交给"比本帧活得久"的地方 → 栈视图/含栈视图结构体即悬垂"""
+            v = self._view_of(e, views, arrays, agglocals)
+            if v is not None and v[0] == "stack":
+                add_err(f"{fname}: 把指向本帧栈存储的视图 `{self._expr_text(e)}` "
+                        f"交给 {where}（{v[1]} 在本帧退出后失效 → 悬垂）")
+            elif (isinstance(e, tuple) and e and e[0] == "name"
+                    and e[1] in tainted):
+                add_err(f"{fname}: 把含栈视图的结构体 `{e[1]}` 交给 {where}"
+                        f"（{tainted[e[1]]}；本帧退出后悬垂）")
+
+        for i, s in enumerate(flat):
+            k = s[0]
+            if k == "let":
+                name, expr = s[2], s[3]
+                anno = s[4][1] if len(s) > 4 and s[4][0] == "as" else None
+                if anno is not None:
+                    if anno[0] == "array":
+                        arrays[name] = (anno[1] if len(anno) > 1 and
+                                        isinstance(anno[1], int) else None)
+                    elif anno[0] == "named" and self.is_agg(anno[1]):
+                        agglocals.add(name)
+                    elif anno[0] == "rc":
+                        rcnames.add(name)
+                if isinstance(expr, tuple) and expr and expr[0] == "arraylit":
+                    arrays.setdefault(name, len(expr[1]))
+                v = self._view_of(expr, views, arrays, agglocals)
+                if v is not None:
+                    if v[4] is None:
+                        v = (v[0], v[1], v[2], v[3], new_group())
+                    views[name] = v
+                elif isinstance(expr, tuple) and expr and expr[0] == "structlit":
+                    for fld, fe in expr[2].items():
+                        fv = self._view_of(fe, views, arrays, agglocals)
+                        if fv is not None and fv[0] == "stack":
+                            tainted[name] = f"{name}.{fld} 装着指向 {fv[1]} 的视图"
+                            break
+                        if (isinstance(fe, tuple) and fe and fe[0] == "name"
+                                and fe[1] in tainted):
+                            tainted[name] = f"{name}.{fld} 来自含栈视图的 {fe[1]}"
+                            break
+                elif (isinstance(expr, tuple) and expr and expr[0] == "name"
+                        and expr[1] in tainted):
+                    tainted[name] = f"由含栈视图的 {expr[1]} 拷入"
+                elif (isinstance(expr, tuple) and expr and expr[0] == "call"
+                        and expr[1][-1] in ("rc_new", "rc_clone")):
+                    rcnames.add(name)
+            elif k == "assign" and s[2] == "=":
+                if s[1] in views:
+                    v = self._view_of(s[3], views, arrays, agglocals)
+                    if v is not None:
+                        views[s[1]] = v if v[4] is not None else \
+                            (v[0], v[1], v[2], v[3], new_group())
+                    else:
+                        views.pop(s[1], None)
+                if isinstance(s[3], tuple) and s[3] and s[3][0] == "call" \
+                        and s[3][1][-1] in ("rc_new", "rc_clone"):
+                    rcnames.add(s[1])
+            elif k == "assign_field":
+                root = self._root_name(s[1])
+                if root:
+                    fv = self._view_of(s[3], views, arrays, agglocals)
+                    if fv is not None and fv[0] == "stack":
+                        tainted[root] = \
+                            f"{self._expr_text(s[1])} 装着指向 {fv[1]} 的视图"
+                    elif (isinstance(s[3], tuple) and s[3] and s[3][0] == "name"
+                            and s[3][1] in tainted):
+                        tainted[root] = f"{self._expr_text(s[1])} 来自含栈视图的 {s[3][1]}"
+            elif k == "return":
+                e = s[1]
+                if e is not None:
+                    v = self._view_of(e, views, arrays, agglocals)
+                    if v is not None and v[0] == "stack":
+                        add_err(f"{fname}: 返回的视图 `{self._expr_text(e)}` 指向"
+                                f"本帧栈存储（{v[1]}）；函数返回后该存储失效 → 悬垂")
+                    elif (isinstance(e, tuple) and e and e[0] == "name"
+                            and e[1] in tainted):
+                        add_err(f"{fname}: 返回的结构体 `{e[1]}` 含指向本帧栈存储的"
+                                f"视图（{tainted[e[1]]}）；返回后即悬垂")
+
+            # 写别名：通过视图写元素时，看同基址上还有没有活着的独立视图
+            if k == "assign_index":
+                v = self._view_of(s[1], views, arrays, agglocals)
+                if v is not None and v[1] is not None:
+                    cname = self._expr_text(s[1])
+                    for other, ov in views.items():
+                        if other == cname or ov[4] == v[4]:
+                            continue      # 同一视图 / 同一别名组（拷贝而来）
+                        if ov[1] != v[1]:
+                            continue
+                        if last.get(other, -1) <= i:
+                            continue      # 该视图在本语句之后不再使用
+                        if not self._ranges_may_overlap(v, ov):
+                            continue
+                        pair = tuple(sorted((cname, other)))
+                        if pair in alias_pairs:
+                            break
+                        alias_pairs.add(pair)
+                        add_err(f"{fname}: 视图 `{pair[0]}` 与 `{pair[1]}` 指向同一底层"
+                                f"存储（{v[1]}），范围可能重叠且二者都被写入（别名写）")
+                        break
+
+            # 逃逸到堆容器 / 另一个线程
+            for part in self._own_parts(s):
+                for node in self._iter_nodes(part):
+                    nk = node[0]
+                    if nk == "method" and node[2] in ("push", "set", "insert", "send"):
+                        where = f"{self._expr_text(node[1])}.{node[2]}()"
+                        for a in node[3]:
+                            escape_one(a, where, "容器")
+                    elif nk == "spawn":
+                        tgt = node[1]
+                        if isinstance(tgt, tuple) and tgt[0] == "call":
+                            for a in tgt[2]:
+                                if (isinstance(a, tuple) and a and a[0] == "name"
+                                        and a[1] in rcnames):
+                                    add_err(
+                                        f"{fname}: spawn 把 rc 句柄 `{a[1]}` 传给了另一个"
+                                        f"线程（引用计数非原子，跨线程 clone/drop 会竞争）")
+                                else:
+                                    escape_one(a, "spawn（另一个线程）", "线程")
 
     def check_ownership(self, f):
         state = {}
@@ -3540,6 +4427,8 @@ class Lower:
             if st == "live":
                 warns.append(f"{f['name']}: rc 句柄 {n} 在函数结束时仍存活"
                              f"（泄漏；需要 rc_drop 或 return）")
+        # v1.84：视图生命周期 / 写别名 / 跨线程
+        self._check_views(f, errs, warns)
         for w in warns:
             print(f"[qlm] 警告：{w}", file=sys.stderr)
         if errs:
@@ -3554,6 +4443,7 @@ class Lower:
         self.iface_names = set()
         self.iface_m = {}      # iface -> {m: (slot, ret_ty, params)}
         self.vtables = {}      # (iface, type) -> [fn name per slot]
+        self.method_ambig = {}  # (type, m) -> [iface...]（同名方法跨接口，v1.81）
         impls = {}             # (iface) -> {type: {m: fn name}}
         for f in fns_ast:
             iname = f.get("impl_iface")
@@ -3564,8 +4454,18 @@ class Lower:
             for i, m in enumerate(f.get("iface_order") or []):
                 pt, rt = f.get("iface_sig", {}).get(m, ([], ("named", "void")))
                 slots.setdefault(m, (i, rt, pt))
-            impls.setdefault(iname, {}).setdefault(f["self_type"], {})[
-                f["impl_method"]] = f["name"]
+            bym = impls.setdefault(iname, {}).setdefault(f["self_type"], {})
+            # 同一类型 + 同名方法出现在不同接口里 -> 静态调用歧义。
+            # 注意不能按接口分组统计（每个接口一张新表），必须全局按
+            # (类型, 方法名) 记（v1.81）。
+            key = (f["self_type"], f["impl_method"])
+            amb = self.method_ambig.setdefault(key, [])
+            if iname not in amb:
+                amb.append(iname)
+            bym[f["impl_method"]] = f["name"]
+        # 只有真的来自 2 个以上接口才算歧义
+        self.method_ambig = {k: sorted(v) for k, v in self.method_ambig.items()
+                             if len(v) > 1}
         for iname, by_type in impls.items():
             order = [m for m, (_s, _r, _p) in
                      sorted(self.iface_m[iname].items(), key=lambda kv: kv[1][0])]
@@ -3576,7 +4476,15 @@ class Lower:
         return name in getattr(self, "iface_names", set())
 
     def box_iface(self, fn, spec, sname, iname):
-        """把具体结构体装箱成接口值；spec 已经是接口值则只复制。"""
+        """把具体结构体装箱成接口值；spec 已经是接口值则只复制。
+
+        装箱块布局（v1.81 引用计数）：
+            [rc][payload_bytes][payload ...]
+        `data` 指向 payload（= raw+16），因此 impl 方法的 self 依旧是
+        一个普通的聚合指针，既有方法体/ABI 零改动；rc 与字节数在
+        data-16 / data-8，由 __iface_release 读取。
+        新建的箱 rc=1（所有权归当前表达式），交给槽位时"移动"或"复制"，
+        见 _iface_take / _iface_retain_slot。"""
         if sname == iname:
             dst = self.alloc_struct(fn, iname)
             self.struct_copy(fn, dst, spec, iname)
@@ -3588,20 +4496,115 @@ class Lower:
         # 装箱宽度按聚合布局取（struct 或 enum）：此前只认 struct，
         # 把枚举装进接口值会报"未声明的结构体"（v1.65 修复）
         w = self.agg_size(sname)
+        self.uses_iface_rc = True
+        self.uses_free = True          # __iface_release 走 __free 尺寸类回收
         raw = fn.new_v()
-        fn.emit("call", raw, "__alloc", [("imm", 8 * w)])
+        fn.emit("call", raw, "__alloc", [("imm", 16 + 8 * w)])
+        fn.emit("store", raw, ("imm", 0), ("imm", 1))        # rc
+        fn.emit("store", raw, ("imm", 1), ("imm", 8 * w))    # payload 字节数
+        body = fn.new_v()
+        fn.emit("bin", "add", body, raw, ("imm", 16))
         i = 0
         while i < w:
             v = fn.new_v()
             fn.emit("load", v, spec, ("imm", i))
-            fn.emit("store", raw, ("imm", i), v)
+            fn.emit("store", body, ("imm", i), v)
             i = i + 1
         dst = self.alloc_struct(fn, iname)
-        fn.emit("store", dst, ("imm", 0), raw)
+        fn.emit("store", dst, ("imm", 0), body)
         vt = fn.new_v()
         fn.emit("mov", vt, ("fnaddr", f"__vt_{iname}__{sname}"))
         fn.emit("store", dst, ("imm", 1), vt)
-        return self._mark_struct(fn, dst, iname)
+        self._mark_struct(fn, dst, iname)
+        fn.iface_fresh.add(dst)        # 这个箱的 rc=1 归"当前表达式"
+        return dst
+
+    # ---- 接口值所有权（v1.81）----
+    # 规则（保守到"只会泄漏、不会悬垂"）：
+    #   * 箱由 box_iface 创建时 rc=1，所有权属于当前表达式（fresh）；
+    #   * 装进"会被释放的槽"（let 变量 / 语句临时槽）时：
+    #       fresh -> 移动（不增计数），否则 -> __iface_retain（复制一份计数）；
+    #   * 槽死亡（块尾 / 语句尾 / return 前 / break·continue 跳出）时
+    #       __iface_release，计数归零即 __free；
+    #   * 无法判定所有权的来源（vec.get / 字段 / 切片元素 / 形参）按"借用"
+    #     处理：不增计数也不释放 —— 计数只会偏大，不会提前回收；
+    #   * 进入容器元素 / struct 字段 / map 值的接口值一律 retain（容器本身
+    #     没有 Drop，元素随容器一起不释放，与语言其余部分一致）。
+    def _iface_data(self, fn, slot):
+        p = fn.new_v()
+        fn.emit("load", p, slot, ("imm", 0))
+        return p
+
+    def _iface_retain_slot(self, fn, slot):
+        self.uses_iface_rc = True
+        self.uses_free = True
+        p = self._iface_data(fn, slot)
+        l_skip = fn.label("ifacekeep")
+        fn.emit("jz", p, l_skip)       # 空接口值（data=0）不计数
+        fn.emit("call", None, "__iface_retain", [p])
+        fn.emit("label", l_skip)
+
+    def _iface_release_slot(self, fn, slot):
+        self.uses_iface_rc = True
+        self.uses_free = True
+        p = self._iface_data(fn, slot)
+        l_skip = fn.label("ifacedrop")
+        fn.emit("jz", p, l_skip)
+        fn.emit("call", None, "__iface_release", [p])
+        fn.emit("label", l_skip)
+
+    def _iface_take(self, fn, dst, src, rhs=None):
+        """把接口值 src 装进"会被释放的槽" dst：fresh 移动、否则 retain。
+        返回 True 表示 dst 从此拥有一个计数（已登记进当前作用域）。
+        返回 False = 按借用处理（不增计数、不释放——安全侧）。"""
+        fresh = getattr(fn, "iface_fresh", None)
+        if fresh and src in fresh:
+            fresh.discard(src)
+            fn.iface_own.add(dst)
+            self.iface_scope[-1].append(dst)
+            return True
+        if rhs is None or self._iface_rhs_owns(rhs):
+            self._iface_retain_slot(fn, dst)
+            fn.iface_own.add(dst)
+            self.iface_scope[-1].append(dst)
+            return True
+        return False
+
+    def _iface_rhs_owns(self, rhs):
+        """右侧表达式是否产生"我们拥有的一份计数"：
+        变量名（我们自己 retain 的那份）与返回接口值的用户函数调用。"""
+        if not isinstance(rhs, tuple):
+            return False
+        if rhs[0] == "name":
+            return True
+        if rhs[0] == "call" and isinstance(rhs[1], list) and rhs[1]:
+            f = self.fns_ast.get(rhs[1][-1])
+            if f is not None:
+                ret = f.get("ret") or ()
+                return (len(ret) == 2 and ret[0] == "named"
+                        and self._is_iface(ret[1]))
+        return False
+
+    def _iface_share(self, fn, slot, src):
+        """接口值进入不释放的位置（容器元素 / struct 字段 / map 值）：
+        fresh 直接移动，否则 retain（多留一份，绝不悬垂）。
+        retain 作用在"数据指针"上，因此借 src 或目标槽都等价。"""
+        fresh = getattr(fn, "iface_fresh", None)
+        if fresh and src in fresh:
+            fresh.discard(src)
+            return
+        self._iface_retain_slot(fn, slot)
+
+    def _iface_exit(self, fn, depth=0):
+        """控制流提前离开作用域（return / break / continue）时的释放：
+        先清语句临时槽，再由内向外释放 owned 槽。**不 pop 作用域帧**——
+        正常落到底的路径还要在块尾释放/弹出（两条路径互斥，不会重复）。"""
+        while len(self.iface_temps) > 0:
+            self._iface_release_slot(fn, self.iface_temps.pop())
+        for frame in reversed(self.iface_scope[depth:]):
+            for slot in reversed(frame):
+                self._iface_release_slot(fn, slot)
+
 
     def lower_iface_call(self, iname, obj, mname, arg_exprs, fn, env):
         info = self.iface_m.get(iname, {}).get(mname)
@@ -3622,6 +4625,8 @@ class Lower:
                 if (sname is not None and ptypes[i][0] == "named"
                     and self._is_iface(ptypes[i][1])):
                     args[i] = self.box_iface(fn, a, sname, ptypes[i][1])
+                    # 新装的箱直接当实参传（callee 借用）：语句尾释放 v1.81
+                    self.iface_temps.append(args[i])
         if ret[0] == "named" and ret[1] in ("void",):
             fn.emit("callr", None, fp, args)
             return ("imm", 0)
@@ -3630,6 +4635,9 @@ class Lower:
             tmp = (self.alloc_slice(fn) if ret[0] == "slice"
                    else self.alloc_struct(fn, ret[1]))
             fn.emit("callr", None, fp, [tmp] + args)
+            if ret[0] == "named" and self._is_iface(ret[1]):
+                self.iface_temps.append(tmp)      # 方法返回接口值：转移给调用方
+                return self._mark_struct(fn, tmp, ret[1])
             return tmp
         d = fn.new_v()
         fn.emit("callr", d, fp, args)
@@ -3783,6 +4791,17 @@ class Lower:
             fn.emit("dbgparam", name, v)
 
     def stmt(self, s, fn, env):
+        """语句包装：语句结束时释放本语句产生的接口临时槽（v1.81）。
+        临时槽来自"调用实参拷贝"与"返回接口值的调用结果"——它们的
+        所有权只覆盖一条语句；`return` 自己在 emit ret 之前先清空。"""
+        n0 = len(self.iface_temps)
+        self._stmt(s, fn, env)
+        if len(self.iface_temps) > n0:
+            for slot in self.iface_temps[n0:]:
+                self._iface_release_slot(fn, slot)
+            del self.iface_temps[n0:]
+
+    def _stmt(self, s, fn, env):
         k = s[0]
         # v1.62 调试信息：语句行号标记（qlm_dbinfo 的 parse_stmt 钩子追加的
         # ("__line__", n) 尾部元素）。只在 --dbg-info 构建发射。
@@ -3855,11 +4874,32 @@ class Lower:
                 if self.dbg:
                     self._dbg_bind(fn, s[2], env[s[2]])
                 return
+            if (len(s) > 4 and s[4][0] == "as"
+                    and s[4][1] == ("named", "closure")
+                    and self._struct_of(fn, spec) != "closure"):
+                # 注解是 closure 却拿到非闭包值（典型：裸函数名）——不能静默
+                # 存成代码地址，否则后续按两字聚合读 code/env 会读飞。
+                raise SyntaxError(
+                    f"let {s[2]}: closure 的初值不是闭包"
+                    f"（裸函数名是代码地址；请用 fn(...) {{ ... }} 字面量）")
             sname = self._struct_of(fn, spec)
             if sname is not None:
                 # 结构体：值语义 -> 拷贝到新的帧槽
                 dst = self.alloc_struct(fn, sname)
                 self.struct_copy(fn, dst, spec, sname)
+                if sname == "closure" and spec in fn.closig:
+                    fn.closig[dst] = fn.closig[spec]     # 闭包签名跟着值走
+                if self._is_iface(sname):
+                    # 接口值变量：登记所有权，块尾释放（v1.81）
+                    self._iface_take(fn, dst, spec, s[3])
+                elif self._has_drop(sname):
+                    # v1.93：析构绑定。`let b = a` 是**移动**——a 的析构
+                    # 责任随值转给 b（否则同一份资源析构两次）。
+                    if s[3][0] == "name":
+                        src = env.get(s[3][1])
+                        if isinstance(src, int):
+                            self._drop_forget(src)
+                    self._drop_register(dst, sname)
                 env[s[2]] = dst
                 if self.dbg:
                     self._dbg_bind(fn, s[2], env[s[2]])
@@ -3934,7 +4974,23 @@ class Lower:
                     spec = self.box_iface(fn, spec, src_n, sname)   # 装箱
                 elif self._struct_of(fn, spec) != sname:
                     raise SyntaxError("结构体赋值两侧类型不一致")
+                if self._is_iface(sname) and spec != cur:
+                    # 接口值赋值（v1.81）：先释放旧箱，再按 fresh/复制装新值。
+                    # 非 owned 的目标（形参/借用）只 retain 不释放——多留一份
+                    # 计数是泄漏，释放别人的计数才是悬垂。
+                    if cur in fn.iface_own:
+                        self._iface_release_slot(fn, cur)
+                    self.struct_copy(fn, cur, spec, sname)
+                    self._iface_take(fn, cur, spec, s[3])
+                    return
+                if self._has_drop(sname) and spec != cur:
+                    # v1.93：覆盖式赋值先析构旧值（右值已求值完），再拷入。
+                    # 目标不是 drop 绑定（形参/字段副本）时同样析构一次——
+                    # 与 C++ 赋值语义一致：被覆盖的那份值必须释放。
+                    self.emit_drop(fn, cur, sname)
                 self.struct_copy(fn, cur, spec, sname)
+                if sname == "closure" and spec in fn.closig:
+                    fn.closig[cur] = fn.closig[spec]
                 return
             spec = self.eval(s[3], fn, env)
             op = s[2]
@@ -3993,7 +5049,8 @@ class Lower:
             fn.emit("label", l_top)
             self.branch(s[1], fn, env, l_body := fn.label("wbody"), l_end)
             fn.emit("label", l_body)
-            self.loop_stack.append((l_top, l_end, len(self.defer_stack)))   # continue -> 重新判据
+            self.loop_stack.append((l_top, l_end, len(self.defer_stack),
+                                    len(self.iface_scope)))   # continue -> 重新判据
             self.block(s[2], fn, dict(env))
             self.loop_stack.pop()
             fn.emit("jmp", l_top)
@@ -4012,6 +5069,8 @@ class Lower:
                     raise SyntaxError("return 的数组长度与函数返回类型不一致")
                 self.array_copy(fn, self.fn_ret_target, spec, n)
                 self._emit_defers(fn)
+                self._emit_drops(fn)      # v1.93：返回前析构本帧 drop 绑定
+                self._iface_exit(fn)
                 fn.emit("ret", ("imm", 0))
                 return
             if self.fn_ret_agg or self.fn_ret_slice:
@@ -4032,12 +5091,31 @@ class Lower:
                             f"函数返回类型是 {self.fn_ret_agg}，return 的表达式类型不匹配")
                     # 值语义：拷进调用方提供的隐藏出参槽，再返回
                     self.struct_copy(fn, self.fn_ret_target, spec, self.fn_ret_agg)
+                    if self._is_iface(self.fn_ret_agg):
+                        # 接口返回值：所有权转给调用方（fresh 移动，否则
+                        # retain——本帧马上要释放自己的 owned 槽）
+                        if spec in fn.iface_fresh:
+                            fn.iface_fresh.discard(spec)
+                        else:
+                            self._iface_retain_slot(fn, self.fn_ret_target)
                 self._emit_defers(fn)
+                # v1.93：`return a` 把 a 的值移动出去（已拷进调用方出参槽），
+                # a 不再析构；其余 drop 绑定照常逆序析构。
+                self._return_moved(s[1], fn, env)
+                self._emit_drops(fn)
+                self._iface_exit(fn)      # v1.81：ret 之前释放本帧接口值
                 fn.emit("ret", ("imm", 0))
                 return
             if s[1] is None:
                 self._emit_defers(fn)
-                fn.emit("ret", None)
+                self._emit_drops(fn)
+                self._iface_exit(fn)
+                if self.fn_ret == ("named", "void"):
+                    # 空 return 也要把 RAX 清零（v1.101）：入口把 main 的 RAX 当退出码，
+                    # 否则 `if c { return }` 会带着上一次比较的结果退出（实测 rc=1）。
+                    fn.emit("ret", ("imm", 0))
+                else:
+                    fn.emit("ret", None)
             else:
                 v = self.eval(s[1], fn, env)
                 v = self.conv_to(fn, v, self._float_of(fn, v),
@@ -4053,6 +5131,9 @@ class Lower:
                     fn.emit("mov", snap, v)
                     v = snap
                 self._emit_defers(fn)
+                self._return_moved(s[1], fn, env)
+                self._emit_drops(fn)
+                self._iface_exit(fn)
                 fn.emit("ret", v)
             return
         if k == "defer":
@@ -4099,12 +5180,18 @@ class Lower:
             if not self.loop_stack:
                 raise SyntaxError("break 只能出现在循环内")
             self._emit_defers(fn, upto=self.loop_stack[-1][2])
+            # v1.93：跳出循环体时析构体内已绑定的 drop 变量
+            self._emit_drops(fn, upto=self.loop_stack[-1][2])
+            # v1.81：跳出循环体时释放块内接口值（否则每轮 break 泄漏一箱）
+            self._iface_exit(fn, self.loop_stack[-1][3])
             fn.emit("jmp", self.loop_stack[-1][1])
             return
         if k == "continue":
             if not self.loop_stack:
                 raise SyntaxError("continue 只能出现在循环内")
             self._emit_defers(fn, upto=self.loop_stack[-1][2])
+            self._emit_drops(fn, upto=self.loop_stack[-1][2])
+            self._iface_exit(fn, self.loop_stack[-1][3])
             fn.emit("jmp", self.loop_stack[-1][0])
             return
         if k == "block":
@@ -4131,12 +5218,18 @@ class Lower:
             if op != "=":
                 raise SyntaxError("结构体字段只支持 = 整体赋值")
             spec = self.eval(s[3], fn, env)
-            if self._struct_of(fn, spec) != ftype[1]:
+            sn = self._struct_of(fn, spec)
+            if self._is_iface(ftype[1]) and sn is not None and sn != ftype[1]:
+                spec = self.box_iface(fn, spec, sn, ftype[1])   # 隐式装箱（v1.83）
+            elif sn != ftype[1]:
                 raise SyntaxError("结构体赋值两侧类型不一致")
             sub = fn.new_v()
             fn.emit("bin", "add", sub, addr, ("imm", off * 8))
             self._mark_struct(fn, sub, ftype[1])
             self.struct_copy(fn, sub, spec, ftype[1])
+            if self._is_iface(ftype[1]):
+                # 接口字段没有 Drop：元素随结构体走，这里只保证不悬垂（v1.81）
+                self._iface_share(fn, sub, spec)
             return
         if ftype and ftype[0] == "slice":
             # 切片字段赋值（v1.39）：2 字整体拷；复合赋值（+= 等）无意义，拒绝
@@ -4225,6 +5318,54 @@ class Lower:
             self.stmt(dstmt, fn, denv)
             fn.emit("label", skip)
 
+    # ---- v1.93 Drop：作用域退出析构 ----
+    # 语义（与 02-language §8.7 对齐）：
+    #   * 只对 **let 绑定的聚合变量**（struct/enum 且 `impl T : Drop`）生效；
+    #     形参、容器元素、字段、临时值都不析构——宁可泄漏，不可悬垂。
+    #   * 退出点：块正常结束、return、break/continue 跳出该块；同块内**逆序**
+    #     （后绑定的先析构），并且**在 defer 之后**跑（defer 里可能还在用变量）。
+    #   * `let b = a` / `return a` 是**移动**：析构责任随值转移，a 不再析构。
+    #   * 析构函数直接收到**对象地址**（不经 lower_call 的值拷贝），因此
+    #     析构体里的写入（如 `f.fd = -1`）落在原对象上。
+    def _has_drop(self, sname):
+        return sname in self.drop_fns
+
+    def emit_drop(self, fn, slot, sname):
+        """发一次析构调用。直接 emit call（不走 lower_call）：聚合实参在
+        lower_call 里会被拷进临时槽，析构就只能改到副本。"""
+        fn.emit("call", None, self.drop_fns[sname], [slot])
+
+    def _emit_drops(self, fn, upto=None):
+        """upto=None 表示本帧所有块帧（return）；否则只跑 depth >= upto 的帧
+        （break/continue 只跑循环体内的）。"""
+        frames = self.drop_stack if upto is None else self.drop_stack[upto:]
+        for frame in reversed(frames):
+            for slot, sname in reversed(frame):
+                self.emit_drop(fn, slot, sname)
+
+    def _drop_register(self, slot, sname):
+        """let 绑定登记：块退出时按逆序析构。"""
+        if self.drop_stack:
+            self.drop_stack[-1].append((slot, sname))
+
+    def _drop_forget(self, slot):
+        """值被移动出去（`let b = a` / `return a`）：撤销 a 的析构责任。
+        找不到（a 本来就不是 drop 绑定）时静默返回。"""
+        for frame in self.drop_stack:
+            for i in range(len(frame) - 1, -1, -1):
+                if frame[i][0] == slot:
+                    del frame[i]
+                    return True
+        return False
+
+    def _return_moved(self, expr, fn, env):
+        """`return x`（x 是 drop 绑定）：值已拷进调用方出参槽/寄存器，
+        责任随值转移，本帧不再析构 x。"""
+        if isinstance(expr, tuple) and expr and expr[0] == "name":
+            slot = env.get(expr[1])
+            if isinstance(slot, int):
+                self._drop_forget(slot)
+
     def block(self, stmts, fn, env):
         """块：入口给块内每条 defer 分配"已登记"标志（初始 0），
         正常落到块尾时按 LIFO 逐条判断执行。"""
@@ -4235,10 +5376,19 @@ class Lower:
                 fn.emit("mov", flag, ("imm", 0))
                 frame["slots"].append(flag)
         self.defer_stack.append(frame)
+        self.drop_stack.append([])         # v1.93：与 defer 帧同进同出
+        self.iface_scope.append([])        # v1.81：块内 let 的接口槽
         for s in stmts:
             self.stmt(s, fn, env)
         self.defer_stack.pop()
         self._emit_frame(frame, fn)
+        # v1.93：块内 drop 绑定按逆序析构。位置在 defer 之后（defer 里可能
+        # 还在用这些变量），接口槽释放之前（析构体里可能还在用接口值）。
+        for slot, sname in reversed(self.drop_stack.pop()):
+            self.emit_drop(fn, slot, sname)
+        # 接口槽按 LIFO 释放（defer 之后：defer 里可能还在用这些变量）
+        for slot in reversed(self.iface_scope.pop()):
+            self._iface_release_slot(fn, slot)
 
     # ---- for / parfor ----
     def lower_foreach(self, s, fn, env):
@@ -4311,7 +5461,8 @@ class Lower:
             self._mark_map(fn, item, elem[1], elem[2])
         inner = dict(env)
         inner[var] = item
-        self.loop_stack.append((l_skip, l_end, len(self.defer_stack)))
+        self.loop_stack.append((l_skip, l_end, len(self.defer_stack),
+                                len(self.iface_scope)))
         self.block(body, fn, inner)
         self.loop_stack.pop()
         fn.emit("label", l_skip)
@@ -4320,19 +5471,22 @@ class Lower:
         fn.emit("label", l_end)
 
     def lower_simd_for(self, s, fn, env):
-        """@simd for i in lo..hi { acc = acc + a[i] } -> SSE2 paddq 归约。
+        """@simd for i in lo..hi { acc += a[i] } -> SSE2 paddq 归约。
 
         识别范围（故意窄，宁可报错也不静默降级）：
           * 累加形式 `acc = acc + a[i]` 或 `acc += a[i]`；
-          * a 是 `[N]int` 定长数组（连续 8 字节元素），下标就是循环变量；
+          * 点积形式 `acc += a[i] * b[i]`（v1.60 f64 / v1.81 int）；
+          * a 是 `[N]int` / `[N]f64` 定长数组（连续 8 字节元素），下标就是循环变量；
           * 循环体只有这一条语句。
         语义差异（写进 SPEC，必须知道）：
           * 逐元素越界检查被跳过 —— 调用方保证 lo/hi 落在 [0, len(a)]；
-          * 整数溢出按 64 位补码回绕（与标量版本一致）。
+          * 整数溢出按 64 位补码回绕（与标量版本一致）；
+          * 点积要求两数组同长、且与累加器同类型（全 int 或全 f64）。
         """
         _, var, lo_e, hi_e, body = s
         rhs = acc = None
         dot = False
+        dot_f = False
         arr2_e = None
         if len(body) == 1 and body[0][0] == "assign":
             b = body[0]
@@ -4377,11 +5531,15 @@ class Lower:
             n2 = self._arr_of(fn, base2)
             if n2 is None or n2 != n:
                 raise SyntaxError("@simd 点积要求两个数组是同长度定长数组")
-            if (self.arr_elem.get(base) != "f64"
-                    or self.arr_elem.get(base2) != "f64"
-                    or self._float_of(fn, env[acc]) != "f64"):
+            # 类型必须三者一致（全 f64 或全整数）：混着写说明用户以为会做
+            # 隐式转换，而 SIMD 段不做转换——静默按位相乘就是错的。
+            fa = self.arr_elem.get(base) == "f64"
+            fb = self.arr_elem.get(base2) == "f64"
+            facc = self._float_of(fn, env[acc]) == "f64"
+            if not (fa == fb == facc):
                 raise SyntaxError(
-                    "@simd 点积目前只支持 f64（int 点积需 SSE4.1 pmulld，未接）")
+                    "@simd 点积要求两个数组与累加器同类型（全 f64 或全整数）")
+            dot_f = fa
         lo = self.eval(lo_e, fn, env)
         hi = self.eval(hi_e, fn, env)
         # 静态越界：常量区间直接查
@@ -4395,13 +5553,14 @@ class Lower:
         fn.emit("bin", "add", ptr, ptr, base)
         cur = env[acc]
         if dot:
-            # f64 点积（v1.60）：两个基址各自偏移 lo*8
+            # 点积（v1.60 f64 / v1.81 int）：两个基址各自偏移 lo*8
             ptr2 = fn.new_v()
             fn.emit("bin", "shl", ptr2, lo, ("imm", 3))
             fn.emit("bin", "add", ptr2, ptr2, base2)
             part = fn.new_v()
-            fn.emit("vdotd", part, ptr, ptr2, cnt)
-            self._mark_float(fn, part, "f64")
+            fn.emit("vdotd" if dot_f else "vdot", part, ptr, ptr2, cnt)
+            if dot_f:
+                self._mark_float(fn, part, "f64")
         elif self.arr_elem.get(base) == "f64" and self._float_of(fn, cur) == "f64":
             # f64 归约（v1.16）：acc += a[i]，a 是 [N]f64（acc 的 float
             # 标记即契约——调用方保证数组元素类型一致）。
@@ -4440,7 +5599,8 @@ class Lower:
         fn.emit("label", l_body)
         env2 = dict(env)
         env2[var] = i
-        self.loop_stack.append((l_cont, l_end, len(self.defer_stack)))      # continue -> 自增步
+        self.loop_stack.append((l_cont, l_end, len(self.defer_stack),
+                                len(self.iface_scope)))      # continue -> 自增步
         self.block(body, fn, env2)
         self.loop_stack.pop()
         fn.emit("label", l_cont)
@@ -4466,7 +5626,8 @@ class Lower:
             fn.emit("jcc", "ge", i, hi_v, l_end)
             env2 = dict(env)
             env2[var] = i
-            self.loop_stack.append((l_cont, l_end, len(self.defer_stack)))
+            self.loop_stack.append((l_cont, l_end, len(self.defer_stack),
+                                len(self.iface_scope)))
             self.block(body, fn, env2)
             self.loop_stack.pop()
             fn.emit("label", l_cont)
@@ -4517,7 +5678,8 @@ class Lower:
         env2[var] = i
         for r in reds:
             env2[r] = accs[r]
-        self.loop_stack.append((l_cont, l_end, len(self.defer_stack)))
+        self.loop_stack.append((l_cont, l_end, len(self.defer_stack),
+                                len(self.iface_scope)))
         self.block(body, w, env2)
         self.loop_stack.pop()
         w.emit("label", l_cont)
@@ -4710,6 +5872,16 @@ class Lower:
                 # 聚合形参：实参侧传入的是【副本地址】，值语义成立
                 self._mark_struct(fn, params[i], ty[1])
         self.fn_ret = f["ret"]
+        # v1.95 闭包：捕获环境在 __env__（形参 0）里，按固定下标 load 回来
+        # 并重新打类型标记——此后体内对捕获名的处理与普通局部变量完全一致。
+        caps = f.get("captures") or []
+        if caps:
+            envp = params[0]
+            for i, (cname, ctag) in enumerate(caps):
+                v = fn.new_v()
+                fn.emit("load", v, envp, ("imm", i))
+                self._apply_capture_tag(fn, v, ctag)
+                env[cname] = v
         if self.dbg:
             # 形参绑定标记：入口处即可查看（数组形参 env 已指向拷贝后的槽）
             for name, _ty in f["params"]:
@@ -7727,6 +8899,44 @@ class Lower:
         if self.uses_free:
             self.out.append(f)
 
+        # ---- 接口装箱引用计数（v1.81）----
+        # 箱布局 [rc][payload_bytes][payload...]，data 指向 payload：
+        #   __iface_retain(p)   p[-16] += 1
+        #   __iface_release(p)  p[-16] -= 1；归零 -> __free(p-16, 16+bytes)
+        # 只发射真正用到的部分（不用接口的程序体积/行为零变化）。
+        if self.uses_iface_rc:
+            f = Fn("__iface_retain")
+            rp = f.new_v()
+            f.emit("args", [rp])
+            rc = f.new_v()
+            f.emit("load", rc, rp, ("imm", -2))
+            rc2 = f.new_v()
+            f.emit("bin", "add", rc2, rc, ("imm", 1))
+            f.emit("store", rp, ("imm", -2), rc2)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
+            f = Fn("__iface_release")
+            rp = f.new_v()
+            f.emit("args", [rp])
+            rc = f.new_v()
+            f.emit("load", rc, rp, ("imm", -2))
+            rc2 = f.new_v()
+            f.emit("bin", "sub", rc2, rc, ("imm", 1))
+            f.emit("store", rp, ("imm", -2), rc2)
+            l_end = f.label("ifre")
+            f.emit("jnz", rc2, l_end)
+            nb = f.new_v()
+            f.emit("load", nb, rp, ("imm", -1))     # payload 字节数
+            tot = f.new_v()
+            f.emit("bin", "add", tot, nb, ("imm", 16))
+            blk = f.new_v()
+            f.emit("bin", "sub", blk, rp, ("imm", 16))
+            f.emit("call", None, "__free", [blk, tot])
+            f.emit("label", l_end)
+            f.emit("ret", ("imm", 0))
+            self.out.append(f)
+
         # __now_ns() -> int：单调时钟纳秒。语言层此前完全没有计时内建
         # （性能报告 §8 指出的缺口），用户无法在自己的程序里做微基准。
         f = Fn("__now_ns")
@@ -7983,9 +9193,52 @@ class Lower:
             net_fail(f, lf, "udprecvfrom")             # fail 块在 ret 之后
             self.out.append(f)
 
+        if self.uses_cpu:
+            # __cpu_ns() -> int：进程累计 CPU 时间（内核 + 用户态）纳秒。
+            # 只用于测量：与 now_ns 的比值就是"这段时间有多少在真跑"。
+            # Windows：GetProcessTimes(GetCurrentProcess()=伪句柄 -1,
+            #   creation, exit, kernel, user) → 两个 FILETIME 各 8 字节，
+            #   100ns 单位；帧上开 4 个字接收四个输出。
+            # Linux：clock_gettime(CLOCK_PROCESS_CPUTIME_ID=2, timespec)。
+            f = Fn("__cpu_ns")
+            f.emit("args", [])
+            ts = f.new_struct_slot(4 if self.platform == "windows" else 2)
+            ta = f.new_v()
+            f.emit("frameaddr", ta, ts)
+            if self.platform == "windows":
+                p2 = f.new_v()
+                f.emit("bin", "add", p2, ta, ("imm", 8))
+                p3 = f.new_v()
+                f.emit("bin", "add", p3, ta, ("imm", 16))
+                p4 = f.new_v()
+                f.emit("bin", "add", p4, ta, ("imm", 24))
+                f.emit("winapi", None, "GetProcessTimes",
+                       [("imm", -1), ta, p2, p3, p4])
+                kern = f.new_v()
+                f.emit("load", kern, ta, ("imm", 2))
+                user = f.new_v()
+                f.emit("load", user, ta, ("imm", 3))
+                tot = f.new_v()
+                f.emit("bin", "add", tot, kern, user)
+                ns = f.new_v()
+                f.emit("bin", "mul", ns, tot, ("imm", 100))    # 100ns -> ns
+                f.emit("ret", ns)
+            else:
+                f.emit("syscall", None, self.sc["clock_gettime"],
+                       [("imm", 2), ta, ("imm", 0), ("imm", 0),
+                        ("imm", 0), ("imm", 0)])
+                sec = f.new_v()
+                f.emit("load", sec, ta, ("imm", 0))
+                nsec = f.new_v()
+                f.emit("load", nsec, ta, ("imm", 1))
+                ns = f.new_v()
+                f.emit("bin", "mul", ns, sec, ("imm", 1000000000))
+                f.emit("bin", "add", ns, ns, nsec)
+                f.emit("ret", ns)
+            self.out.append(f)
+
         if self.uses_wall:
-            # __wall_ms：Linux clock_gettime(CLOCK_REALTIME)；Windows
-            # GetSystemTimeAsFileTime（1601 epoch 100ns -> 1970 epoch 毫秒）
+            # __wall_ms：Linux clock_gettime(CLOCK_REALTIME)；Windows            # GetSystemTimeAsFileTime（1601 epoch 100ns -> 1970 epoch 毫秒）
             f = Fn("__wall_ms")
             if self.platform == "windows":
                 ft = f.new_v()
@@ -8519,21 +9772,41 @@ class Lower:
         # @extern("C") 声明只有函数原型、没有函数体：自研后端产出裸 ELF/PE，
         # 没有动态链接器可用，外部符号无处解析。这里必须给出明确诊断，
         # 而不是让 body=None 一路漏到 lowering 里炸成 Python traceback。
+        # v1.87：@ffi("dll"[, "Sym"]) 是另一条路——它带 DLL 名，能进 PE 导入表，
+        # 由加载器解析，**不需要**链接器；但那只在 Windows 上成立（ELF 后端产出
+        # 静态 ET_EXEC，没有 PT_INTERP/PT_DYNAMIC），所以按平台分流。
         for f in fns_ast:
             if f.get("extern"):
                 raise SyntaxError(
                     f'函数 {f["name"]} 声明为 @extern("C")：自研后端（Linux ELF / '
                     f"Windows PE）不链接外部符号，无法解析该声明；"
-                    f"请改用 --target c 由系统链接器接 libc")
-            if f.get("body") is None:
+                    f"Windows 上请改用 @ffi(\"dll\"[, \"Sym\"])，"
+                    f"或 --target c 由系统链接器接 libc")
+            if f.get("ffi"):
+                spec = f["ffi"]
+                if self.platform != "windows":
+                    raise SyntaxError(
+                        f'函数 {f["name"]} 声明为 @ffi("{spec["dll"]}", '
+                        f'"{spec["sym"]}")：@ffi 只在 Windows PE 后端实现——'
+                        f"ELF 后端产出静态可执行文件（单 RWX PT_LOAD，"
+                        f"无 PT_INTERP / 动态链接器），外部符号无处解析；"
+                        f"请用 --target win 构建，或改用 syscall/内建")
+                self.ffi_decls[f["name"]] = (
+                    spec["dll"], spec["sym"],
+                    [pt[1] for _pn, pt in f["params"]], f["ret"][1])
+            elif f.get("body") is None:
                 raise SyntaxError(
                     f"函数 {f['name']} 没有函数体：无函数体的声明必须带 "
-                    f'@extern("C") 注解')
+                    f'@extern("C") 或 @ffi("dll") 注解')
         self.build_iface_meta(fns_ast)
         # 先降级用户函数，再按需发射运行库：只把真正用到的
         # arena/join/chan 运行时塞进产物（省体积、省导入）。
         for f in fns_ast:
+            if f.get("body") is None:
+                continue          # @ffi 声明：符号在 DLL 里，无本地产物
             self.lower_fn(f)
+        # v1.95 闭包：lambda 体在外层函数之后降级（顺序无关，按名字引用）
+        self.lower_pending_lambdas()
         self.lower_runtime()
         return self.out
 
@@ -8606,6 +9879,10 @@ def _map_ins(ins, f):
         return ("syscall", V(ins[1]) if ins[1] is not None else None, ins[2], L(ins[3]))
     if op == "winapi":
         return ("winapi", V(ins[1]) if ins[1] is not None else None, ins[2], L(ins[3]))
+    if op == "ffi":
+        # ('ffi', dst, dll, sym, kinds, ret, args)：dll/sym/kinds/ret 是常量
+        return ("ffi", V(ins[1]) if ins[1] is not None else None,
+                ins[2], ins[3], ins[4], ins[5], L(ins[6]))
     if op == "cpuid_sha":
         return ("cpuid_sha", V(ins[1]))
     if op == "cpuid_aes":
@@ -8624,6 +9901,10 @@ def _map_ins(ins, f):
                      (f(v) if isinstance(v, int) else v) for v in ins)
     if op == "xchg":
         return ("xchg", V(ins[1]), S(ins[2]), S(ins[3]))
+    if op == "ldar":
+        return ("ldar", V(ins[1]), S(ins[2]))
+    if op == "stlr":
+        return ("stlr", S(ins[1]), S(ins[2]))
     if op == "args":
         return ("args", [V(x) for x in ins[1]])
     if op == "trunc":
@@ -8634,6 +9915,8 @@ def _map_ins(ins, f):
         return ("vsumd", V(ins[1]), S(ins[2]), S(ins[3]))
     if op == "vdotd":
         return ("vdotd", V(ins[1]), S(ins[2]), S(ins[3]), S(ins[4]))
+    if op == "vdot":
+        return ("vdot", V(ins[1]), S(ins[2]), S(ins[3]), S(ins[4]))
     if op == "atomic":
         # ('atomic', sub, dst, addr, a[, b])：变长，cas 多一个操作数
         return tuple(["atomic", ins[1], V(ins[2]), S(ins[3]), S(ins[4])]
@@ -8795,7 +10078,7 @@ def allocate(fn, pool=POOL, callee_saved=CALLEE_SAVED):
     last = [-1] * n
     call_sites = []
     for idx, ins in enumerate(fn.instrs):
-        if ins[0] in ("call", "syscall", "winapi", "callr"):
+        if ins[0] in ("call", "syscall", "winapi", "callr", "ffi"):
             call_sites.append(idx)
         defs, uses = vreg_mentions(ins)
         for v in defs + uses:
@@ -8939,10 +10222,23 @@ class Codegen:
     # ---- v1.62 调试信息收集 ----
     def _dbg_reset(self, fn):
         self._dbg = {"name": fn.name, "file": getattr(fn, "dbg_file", None),
-                     "rva": None, "push": 1, "lines": [], "vars": []}
+                     "rva": None, "push": 1, "lines": [], "vars": [],
+                     "branches": []}
+        self._dbg_cur = 0          # 当前源码行（分支表用它标"分支属于哪一行"）
 
     def _dbg_line(self, line):
         self._dbg["lines"].append([self.enc.pos(), line])
+        self._dbg_cur = line
+
+    def _dbg_branch(self, off, label, cc):
+        """v1.83 分支表：记 (jcc 偏移, 目标标签, 条件码, 源码行)。
+
+        标签在 gen_all 末尾统一解析成偏移——前向标签发射到这里时还没有位置。
+        「不跳」边的目标恒为 off+6：本编码器的 jcc 一律 rel32（6 字节），
+        所以不必再存一份。"""
+        if self._dbg is None:
+            return
+        self._dbg["branches"].append([off, label, cc, self._dbg_cur])
 
     def _dbg_var(self, ins):
         if ins[0] == "dbgparam":
@@ -9213,6 +10509,11 @@ class Codegen:
         if op == "dbgparam":
             self._dbg_var(ins)
             return
+        if op == "ffi":
+            # v1.87：'ffi' 只有 WinCodegen（PE 导入表）能发射。Lower 已按平台
+            # 拦截过，这里是二道闸——绝不静默生成一条指向空标签的调用。
+            raise SyntaxError(
+                "FFI（@ffi）只在 Windows PE 后端实现（需要导入表 + 加载器）")
         if op == "cpuid_pclmul":
             # PCLMULQDQ 特征探测：CPUID leaf 1（ECX=0）ECX[1]。
             _, dst = ins
@@ -9364,6 +10665,70 @@ class Codegen:
             enc.pop(R8)
             self.commit(dst, ACC)
             return
+        if op == "vdot":
+            # int 点积（v1.85）：SSE2 两路 + 3×pmuludq 拼 64x64->低64 + paddq。
+            #
+            # 为什么不是一条指令：x86 没有 64 位整数 SIMD 乘法（pmulld 是
+            # 32x32 低位、pmuldq 只算偶数 32 位通道且截断到 32 位输入，
+            # vpmullq 要 AVX-512DQ）。所以按 a*b = a_lo*b_lo +
+            # ((a_lo*b_hi + a_hi*b_lo) << 32) 拆成三次无符号 32x32->64：
+            # 低 64 位与有无符号无关，逐位等价于标量 imul。
+            #
+            # 寄存器：R11=baseA、R10=baseB（SCRATCH，不在分配池）、
+            # R8=count（push/pop）、R9=尾部乘数（push/pop）、RCX=下标、
+            # RDX=临时；xmm0=累加器、xmm1/2=两路加载、xmm3/4/5=中间量。
+            _, dst, base_a, base_b, count = ins
+            seq = getattr(self, "_vdot_seq", 0)
+            self._vdot_seq = seq + 1
+            Lv, Lt, Ls, Ld = (f"__vdot.v{seq}", f"__vdot.t{seq}",
+                              f"__vdot.s{seq}", f"__vdot.d{seq}")
+            bpa = self.mat(SCRATCH, base_a)
+            bpb = self.mat(SCRATCH2, base_b)
+            enc.push(R8)
+            enc.push(R9)
+            cnt = self.mat(R8, count)
+            enc.mov_ri(RCX, 0)
+            enc.pxor_x(0, 0)
+            enc.labels[Lv] = enc.pos()
+            enc.lea(RDX, RCX, 2)
+            enc.alu_rr("cmp", RDX, cnt)
+            enc.jcc("g", Lt)
+            enc.movdqu_rm(1, bpa, RCX, 3, 0)     # xmm1 = A[i], A[i+1]
+            enc.movdqu_rm(2, bpb, RCX, 3, 0)     # xmm2 = B[i], B[i+1]
+            # 高 32 位用 pshufd 取（Haswell 上 pshufd 走 p5，psrlq/psllq 走 p0；
+            # 三个 pmuludq 已占满 p0 的 3 拍，再用 psrlq 取高位就把这段变成
+            # p0 单口串行 —— 实测 3 拍/元素 vs 下面的 2 拍/元素）。
+            enc.pshufd(3, 1, 0xF5)               # xmm3 = A 每通道高 32 位（d0<-d1, d2<-d3）
+            enc.pshufd(4, 2, 0xF5)               # xmm4 = B 每通道高 32 位
+            enc.movdqa_rr(5, 1)
+            enc.pmuludq(5, 4)                    # xmm5 = a_lo*b_hi
+            enc.pmuludq(1, 2)                    # xmm1 = a_lo*b_lo
+            enc.pmuludq(3, 2)                    # xmm3 = a_hi*b_lo
+            enc.paddq(3, 5)                      # 交叉项相加（高 32 位溢出部分本就该丢）
+            enc.psllq_i(3, 32)
+            enc.paddq(3, 1)                      # + a_lo*b_lo = 64 位乘积低位
+            enc.paddq(0, 3)                      # 累加（64 位回绕）
+            enc.alu_ri("add", RCX, 2)
+            enc.jmp(Lv)
+            enc.labels[Lt] = enc.pos()
+            enc.movq_rx(ACC, 0)
+            enc.psrldq(0, 8)
+            enc.movq_rx(RDX, 0)
+            enc.alu_rr("add", ACC, RDX)          # 两通道水平相加
+            enc.labels[Ls] = enc.pos()
+            enc.alu_rr("cmp", RCX, cnt)
+            enc.jcc("ge", Ld)
+            enc.mov_rm(RDX, bpa, RCX, 3, 0)
+            enc.mov_rm(R9, bpb, RCX, 3, 0)
+            enc.imul_rr(RDX, R9)
+            enc.alu_rr("add", ACC, RDX)
+            enc.alu_ri("add", RCX, 1)
+            enc.jmp(Ls)
+            enc.labels[Ld] = enc.pos()
+            enc.pop(R9)
+            enc.pop(R8)
+            self.commit(dst, ACC)
+            return
         if op in ("psrlw_i", "psllw_i", "psrlq_i", "psllq_i", "pslldq_i", "psrldq_i"):
             # 单槽 + imm8：xmm 槽是负数编码，立即数原样
             _, x, imm = ins
@@ -9477,7 +10842,10 @@ class Codegen:
         elif op in ("jz", "jnz"):
             r = self.fetch(SCRATCH, ins[1])
             enc.test_rr(r, r)
-            enc.jcc("e" if op == "jz" else "ne", ins[2])
+            bcc = "e" if op == "jz" else "ne"
+            boff = enc.pos()
+            enc.jcc(bcc, ins[2])
+            self._dbg_branch(boff, ins[2], bcc)
         elif op == "jcc":
             cc, a, b, lbl = ins[1], ins[2], ins[3], ins[4]
             ra = self.fetch(SCRATCH2, a)
@@ -9486,7 +10854,9 @@ class Codegen:
             else:
                 rb = self.fetch(SCRATCH, b)
                 enc.alu_rr("cmp", ra, rb)
+            boff = enc.pos()
             enc.jcc(cc, lbl)
+            self._dbg_branch(boff, lbl, cc)
         elif op == "mov":
             self.parallel_move([(self.src_move(ins[2]), self.dst_move(ins[1]))])
         elif op == "bin":
@@ -9699,6 +11069,17 @@ class Codegen:
                     self.commit(dst, ACC)     # RAX = 内存旧值（ZF 指示是否交换）
             else:
                 raise SyntaxError(f"atomic 未知子操作 {sub}")
+        elif op == "ldar":
+            # acquire 读：x86 TSO 下读不会被提前，普通 mov 就是 acquire
+            # （v1.98）——所以这里与 load 同形，零额外指令。
+            ra = self.fetch(SCRATCH2, ins[2])
+            self.enc.mov_rm(ACC, ra, 4, 0, 0)
+            self.commit(ins[1], ACC)
+        elif op == "stlr":
+            # release 写：x86 TSO 下写不会被推后，普通 mov 就是 release。
+            ra = self.fetch(SCRATCH2, ins[1])
+            rv = self.fetch(ACC, ins[2])
+            self.enc.mov_mr(ra, 4, 0, 0, rv)
         elif op == "mfence":
             self.enc.mfence()
         elif op == "pause":
@@ -10008,10 +11389,34 @@ class Codegen:
                 self.code_fixups.append((enc.pos(), fname))
                 enc.emit(b"\x00" * 8)
 
+    def _dbg_resolve_branches(self):
+        """v1.83：把分支表的标签解析成 .text 内偏移，并**只留源码级分支**。
+
+        两条过滤规则（宁缺勿错——错的分支表会让覆盖率数字骗人）：
+
+        1. 解析不到标签、或退化成自环的条目丢弃；
+        2. 跳转目标必须是**语句入口**（行表里的某个偏移）。不是的话这条
+           jcc 属于编译器生成的机械跳转，不是源码里的 if/while/match：
+           `assert` 的失败块、定长数组越界检查的 panic 块、`args()` 展开的
+           拷贝循环、`@simd` 的内联循环——它们算进分母只会让"分支覆盖率"
+           变成编译器的体检报告，不是用户代码的。"""
+        for f in self.dbg["funcs"]:
+            entry = {off for off, _ln in f.get("lines", [])}
+            out = []
+            for off, label, cc, line in f.get("branches", []):
+                tgt = self.enc.labels.get(label)
+                if tgt is None or tgt < 0 or tgt == off:
+                    continue
+                if tgt not in entry:
+                    continue
+                out.append([off, tgt, cc, line])
+            f["branches"] = out
+
     def gen_all(self):
         self.gen_entry()
         self.gen_functions()
         self.gen_vtables()
+        self._dbg_resolve_branches()
         enc = self.enc
         enc.resolve()
         code = bytes(enc.buf)
@@ -10046,6 +11451,25 @@ def write_elf(path, blob):
     os.chmod(path, 0o755)
 
 
+def drop_table(fns_ast):
+    """v1.93：`impl T : Drop { fn drop(t: T) { ... } }` -> {T: 函数名}。
+
+    析构是**隐式调用**（AST 里没有 call 节点），所以这张表必须在全局 DCE
+    之前算——否则析构函数会被当成不可达代码删掉，程序静默少跑清理。
+    签名不合规（多参/有返回值）在这里 fail-fast，别等到发射期。"""
+    out = {}
+    for f in fns_ast:
+        if f.get("impl_iface") != "Drop" or f.get("impl_method") != "drop":
+            continue
+        params = f.get("params") or []
+        if len(params) != 1 or f.get("ret") != ("named", "void"):
+            raise SyntaxError(
+                f"{f.get('self_type')}.drop：析构函数必须是 "
+                f"`fn drop(t: {f.get('self_type')})`（一个接收者、无返回值）")
+        out[f["self_type"]] = f["name"]
+    return out
+
+
 def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
                   asset_root=None,
                        platform="linux", prog=None):
@@ -10062,15 +11486,20 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
         fns_ast, tests = prog["fns_ast"], prog["tests"]
         structs, enums = prog["structs"], prog["enums"]
     fns_ast = with_test_runner(fns_ast, tests)   # test "name" { } -> 测试入口
+    # v1.93：析构表必须在 DCE 之前算（隐式调用，DCE 看不到），并把析构
+    # 函数钉成 DCE 根——否则"定义了 drop 但只在作用域退出时被调用"的函数
+    # 会被当死代码删掉。
+    drops = drop_table(fns_ast)
     # 全局 DCE（v1.17d）：main 调用图可达性——import 大库只链接用到的。
     # 在测试合成之后（根含测试入口）、Lower 之前（AST 级，一次到位）
-    fns_ast = global_dce(fns_ast)
+    fns_ast = global_dce(fns_ast, keep=set(drops.values()))
     low = Lower(fns_ast, cfg, arch=arch, structs=structs, enums=enums,
                 asset_root=asset_root,
                 platform=platform,
                 dbg=prog is not None,
                 dbg_main=(prog.get("main_fns") if prog else None),
-                dbg_src=(src_path if prog else None))
+                dbg_src=(src_path if prog else None),
+                drop_fns=drops)
     fns = low.run(fns_ast)
     if optimize:
         # v0.2 管线：字符串求长外提 -> 内联 -> 逐函数收敛

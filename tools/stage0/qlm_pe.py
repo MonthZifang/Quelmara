@@ -30,7 +30,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from qlm_native import (Codegen, lower_and_optimize,  # noqa: E402
-                           ACC, RCX, RDX, R8, R9, RSP, SCRATCH)
+                           ACC, RCX, RDX, R8, R9, RSP, SCRATCH, SCRATCH2)
 
 # ---------------------------------------------------------------------------
 # PE 常量
@@ -69,12 +69,15 @@ class WinCodegen(Codegen):
     def __init__(self, fns, globals_bytes, low=None):
         super().__init__(fns, globals_bytes, base=IMAGE_BASE, entry_off=TEXT_RVA,
                          low=low)
-        self.api_fixups = []       # (patch_pos, api_name)
+        # (patch_pos, dll|None, api_name)：dll=None 表示"内置调用"，
+        # 由 _dll_groups 的白名单归组（kernel32 / ws2_32）；@ffi 声明的
+        # 调用带显式 DLL 名（v1.87）。
+        self.api_fixups = []
 
     # ---- 导入调用：call qword ptr [rip + disp32] ----
-    def _call_api(self, api):
+    def _call_api(self, api, dll=None):
         self.enc.emit(b"\xff\x15")
-        self.api_fixups.append((self.enc.pos(), api))
+        self.api_fixups.append((self.enc.pos(), dll, api))
         self.enc.emit(b"\x00\x00\x00\x00")
 
     def gen_entry(self):
@@ -85,6 +88,66 @@ class WinCodegen(Codegen):
         enc.alu_ri("sub", RSP, 32)       # Win64 shadow space（ExitProcess 不返回）
         enc.mov_rr(RCX, ACC)
         self._call_api("ExitProcess")
+
+    def gen_ffi(self, ins):
+        """('ffi', dst|None, dll, sym, kinds, ret, [args])：Win64 调用约定（v1.87）
+
+        Win64 与自研 ABI 的差异，全在这一个函数里：
+          1. 整数实参进 RCX/RDX/R8/R9（不是 RDI/RSI/RDX/RCX/R8/R9）；
+          2. **浮点实参单独计数**进 XMM0-3——第 5 个浮点实参才落栈，
+             与整数实参的序号互不影响（Win64 的独立寄存器类分配）；
+          3. 返回值：整数在 RAX、浮点在 XMM0；bool 按 32 位 BOOL 零扩展。
+
+        栈：始终预留 32 字节 shadow space；第 5+ 个同类实参落 [rsp+32+8k]
+        （k 是"落栈实参"的出现序号，整数与浮点混排时按出现顺序连续排）。
+        搬移顺序 = 栈实参 -> XMM -> 整数寄存器：XMM 装载读的是 GPR 位模式，
+        必须在整数搬移改写这些 GPR 之前完成。
+        """
+        _, dst, dll, sym, kinds, ret, args = ins
+        enc = self.enc
+        int_regs, xmm_regs, stack = [], [], []
+        n_int = n_flt = 0
+        for a, k in zip(args, kinds):
+            if k == "i":
+                if n_int < 4:
+                    int_regs.append((a, n_int))
+                else:
+                    stack.append(a)
+                n_int += 1
+            else:
+                if n_flt < 4:
+                    xmm_regs.append((a, n_flt, k))
+                else:
+                    stack.append(a)
+                n_flt += 1
+        extra = align(32 + 8 * len(stack), 16)
+        enc.alu_ri("sub", RSP, extra)
+        # 1) 栈实参（GPR 里就是位模式，直接存）
+        for j, a in enumerate(stack):
+            r = self.fetch(SCRATCH, a)
+            enc.mov_mr(RSP, 4, 0, 32 + 8 * j, r)
+        # 2) 浮点实参 -> XMM0-3（f64 走 movq，f32 走 movd）
+        for a, x, k in xmm_regs:
+            r = self.fetch(SCRATCH2, a)
+            if k == "f32":
+                enc.movd_xr(x, r)
+            else:
+                enc.movq_xr(x, r)
+        # 3) 整数实参 -> RCX/RDX/R8/R9（并行搬移处理环）
+        if int_regs:
+            self.parallel_move([(self.src_move(a), ("r", WIN_ARG[i]))
+                                for a, i in int_regs])
+        self._call_api(sym, dll)
+        enc.alu_ri("add", RSP, extra)
+        if dst is None:
+            return
+        if ret == "f64":
+            enc.movq_rx(ACC, 0)
+        elif ret == "f32":
+            enc.movd_rx(ACC, 0)
+        elif ret == "bool":
+            enc.trunc_reg(ACC, 32, False)      # BOOL 是 32 位，零扩展后当 bool
+        self.commit(dst, ACC)
 
     def gen_winapi(self, ins):
         """('winapi', dst|None, name, [args])：Win64 调用约定
@@ -113,6 +176,9 @@ class WinCodegen(Codegen):
         if ins[0] == "winapi":
             self.gen_winapi(ins)
             return
+        if ins[0] == "ffi":
+            self.gen_ffi(ins)
+            return
         if ins[0] == "winargs":
             # ThreadProc 形参来自 Win64 参数寄存器 RCX/RDX/R8/R9
             moves = [(("r", WIN_ARG[i]), self.dst_move(d))
@@ -128,6 +194,8 @@ class WinCodegen(Codegen):
         self.gen_entry()
         self.gen_functions()
         self.gen_vtables()
+        # v1.83：分支表的标签 -> .text 偏移（前向标签到这里才有位置）
+        self._dbg_resolve_branches()
         enc = self.enc
         enc.resolve()
         code = bytearray(enc.buf)
@@ -145,7 +213,10 @@ class WinCodegen(Codegen):
                              IMAGE_BASE + TEXT_RVA + enc.labels[label])
             relocs.append(patch)
 
-        imports = list(dict.fromkeys(api for _p, api in self.api_fixups))
+        # v1.87：导入项是 (dll|None, 符号) 二元组——@ffi 带显式 DLL 名，
+        # 内置 winapi 调用仍按白名单归组（dll=None）。
+        imports = list(dict.fromkeys(
+            (dll, api) for _p, dll, api in self.api_fixups))
         # v1.62：函数 RVA = TEXT_RVA + 标签偏移（enc.labels 在 gen_functions
         # 里逐个登记）。调试器按 "PC - base" 反查落在哪个函数。
         for fd in self.dbg["funcs"]:
@@ -165,21 +236,36 @@ WS2_32_FUNCS = {"WSAStartup", "WSACleanup", "socket", "bind", "listen",
                 "htons", "ntohs", "setsockopt", "ioctlsocket"}
 
 
+def _norm_dll(dll):
+    """DLL 名规范化：`user32` -> `user32.dll`（加载器其实也会补，但导入表里
+    写全名对 dumpbin/objdump 友好，且让"同一 DLL 两种写法"不会分成两组）。"""
+    if "." not in dll:
+        return dll + ".dll"
+    return dll
+
+
+def _resolve_dll(dll, name):
+    """(dll|None, 符号) -> 真实 DLL 名。dll=None 走内置白名单。"""
+    if dll:
+        return _norm_dll(dll)
+    return "ws2_32.dll" if name.startswith("WSA") or name in WS2_32_FUNCS \
+        else "kernel32.dll"
+
+
 def _dll_groups(imports):
-    """{dll 名: [函数名]}——保持 imports 首次出现顺序内的稳定分组。
+    """[(dll|None, 函数名)] -> {dll 名: [函数名]}（保持首次出现顺序）。
     WSA* 前缀一律 ws2_32（WSAGetLastError 曾被漏归 kernel32 导致
     0xC0000139 ENTRYPOINT_NOT_FOUND，进程起不来）。"""
     groups = {}
-    for name in imports:
-        dll = ("ws2_32.dll" if name.startswith("WSA") or name in WS2_32_FUNCS
-               else "kernel32.dll")
-        groups.setdefault(dll, []).append(name)
+    for dll, name in imports:
+        groups.setdefault(_resolve_dll(dll, name), []).append(name)
     return groups
 
 
 def build_idata(imports, rdata_rva):
     """多 DLL 导入表。每个 DLL 一个 {ILT, IAT} 对 + 结束哨兵描述符。
-    返回 (rdata 内容, 0, dir_size, {函数名: IAT 槽 RVA})"""
+    imports: [(dll|None, 符号名)]
+    返回 (rdata 内容, 0, dir_size, {(dll, 符号名): IAT 槽 RVA})"""
     groups = _dll_groups(imports)
     dlls = list(groups)
     desc_size = 20 * (len(dlls) + 1)
@@ -213,7 +299,7 @@ def build_idata(imports, rdata_rva):
             hn = hn_offs[(dll, name)]
             struct.pack_into("<Q", buf, ilt_offs[dll] + 8 * j, rdata_rva + hn)
             struct.pack_into("<Q", buf, iat_offs[dll] + 8 * j, rdata_rva + hn)
-            iat_map[name] = rdata_rva + iat_offs[dll] + 8 * j
+            iat_map[(dll, name)] = rdata_rva + iat_offs[dll] + 8 * j
             struct.pack_into("<H", buf, hn, 0)
             raw = name.encode("ascii")
             buf[hn + 2:hn + 2 + len(raw)] = raw
@@ -262,8 +348,8 @@ def build_pe(code, data, reloc_offsets, imports, api_fixups, dbg=None,
     reloc_rva = rdata_rva + align(len(rdata), SECT_ALIGN)
 
     # 回填 call [rip+disp32]：disp 相对下一条指令
-    for patch, api in api_fixups:
-        disp = iat[api] - (TEXT_RVA + patch + 4)
+    for patch, dll, api in api_fixups:
+        disp = iat[(_resolve_dll(dll, api), api)] - (TEXT_RVA + patch + 4)
         struct.pack_into("<i", code, patch, disp)
 
     reloc = build_reloc(reloc_offsets, TEXT_RVA) if reloc_offsets else b""
