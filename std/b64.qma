@@ -38,6 +38,8 @@ fn b64_val(b: int) -> int {
 }
 
 // b64_encode(ptr, n) -> str：编码 n 个字节，返回 NUL 结尾的字符串
+/// 把缓冲区 p 的前 n 字节编码为标准 Base64（字母表 A-Za-z0-9+/，带 `=` 填充）。
+/// 输出一次性分配，长度 = ⌈n/3⌉×4。
 pub fn b64_encode(p: int, n: int) -> str {
     let outn = ((n + 2) / 3) * 4
     let out = mem_alloc(outn + 1)
@@ -79,6 +81,8 @@ pub fn b64_encode(p: int, n: int) -> str {
 }
 
 // b64_dec_max(s) -> 解码后所需的最大字节数（调用方先 mem_alloc 这个大小）
+/// 真实长度看 b64_decode_into 的返回值，别按上界算。
+/// 解码输出缓冲区的**上界**字节数（⌈len/4⌉×3+1），用于 mem_alloc。
 pub fn b64_dec_max(s: str) -> int {
     let n = len(s)
     return ((n + 3) / 4) * 3 + 1
@@ -86,6 +90,8 @@ pub fn b64_dec_max(s: str) -> int {
 
 // b64_decode_into(s, out) -> int：解码写入 out，返回实际字节数
 // 无填充/非法字符一律跳过（容错解析，握手与 Basic 认证场景足够）。
+/// 把 Base64 文本解码进调用方缓冲区 out，返回写入的字节数。
+/// 非字母表字符（含 `=` 填充与空白）直接跳过；不做长度合法性校验。
 pub fn b64_decode_into(s: str, out: int) -> int {
     let n = len(s)
     let mut i = 0
@@ -134,6 +140,8 @@ fn b64url_val(b: int) -> int {
 }
 
 // b64url_encode(p, n) -> str：无填充编码
+/// Base64url 编码（`-` `_` 替代 `+` `/`，**无填充**），用于 JWT / URL 参数。
+/// 输出一次性分配，长度 = 4×⌊n/3⌋ + {0,2,3}。
 pub fn b64url_encode(p: int, n: int) -> str {
     let full = n / 3
     let rem = n - full * 3
@@ -176,6 +184,8 @@ pub fn b64url_encode(p: int, n: int) -> str {
 
 // b64url_decode_into(s, out) -> int：解码进调用方缓冲，返回字节数
 // 无填充、'=' 忽略、非法字符跳过（与 b64_decode_into 同一容错口径）
+/// Base64url 解码进调用方缓冲区 out，返回写入字节数；`-` `_` 与标准字母表都认。
+/// 非法字符跳过，填充可选（无填充是常态）。
 pub fn b64url_decode_into(s: str, out: int) -> int {
     let n = len(s)
     let mut i = 0

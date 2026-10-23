@@ -20,6 +20,8 @@ struct SessionStore {
     exp: map[str]int
 }
 
+/// 新建会话存储（两张 map：data 存 sid\x1fkey→值，exp 存 sid→过期时刻）。
+/// 按值传递，所以在同一处创建并使用，别复制后各改各的。
 pub fn session_new() -> SessionStore {
     return SessionStore {
         data: map[str]str.new(),
@@ -31,7 +33,7 @@ fn session_key(sid: str, key: str) -> str {
     return sid + "\x1f" + key
 }
 
-// 新建会话，返回 sid；ttl 单位秒（<=0 表示永不过期）
+/// 新建会话，返回 sid；ttl 单位秒（<=0 表示永不过期）
 pub fn session_create(st: SessionStore, ttl: int, now: int) -> str {
     // sid 用 exp 表的条目数 +1：exp 从不删条目（销毁只打墓碑），所以单调递增。
     // 注意不能把计数器放在 struct 里——struct 是值类型，按值传参改了不生效
@@ -45,6 +47,7 @@ pub fn session_create(st: SessionStore, ttl: int, now: int) -> str {
     return sid
 }
 
+/// 会话是否有效：sid 为空 / 不存在 / 已过期都返回 false；过期时刻 0 表示永不过期。
 pub fn session_alive(st: SessionStore, sid: str, now: int) -> bool {
     if len(sid) == 0 {
         return false
@@ -59,6 +62,7 @@ pub fn session_alive(st: SessionStore, sid: str, now: int) -> bool {
     return e > now
 }
 
+/// 取会话里某个键的值；会话无效或键不存在返回空串（与『存在但为空』不可区分）。
 pub fn session_get(st: SessionStore, sid: str, key: str, now: int) -> str {
     if !session_alive(st, sid, now) {
         return ""
@@ -70,7 +74,7 @@ pub fn session_get(st: SessionStore, sid: str, key: str, now: int) -> str {
     return st.data.get(k)
 }
 
-// 写入；会话不存在或已过期返回 false
+/// 写入；会话不存在或已过期返回 false
 pub fn session_set(st: SessionStore, sid: str, key: str, value: str,
                    now: int) -> bool {
     if !session_alive(st, sid, now) {
@@ -80,7 +84,7 @@ pub fn session_set(st: SessionStore, sid: str, key: str, value: str,
     return true
 }
 
-// 续期（滑动过期）；会话已死返回 false
+/// 续期（滑动过期）；会话已死返回 false
 pub fn session_touch(st: SessionStore, sid: str, ttl: int, now: int) -> bool {
     if !session_alive(st, sid, now) {
         return false
@@ -91,14 +95,14 @@ pub fn session_touch(st: SessionStore, sid: str, ttl: int, now: int) -> bool {
     return true
 }
 
-// 销毁：打墓碑（exp = -1），data 里的键无法枚举所以留在表里（见模块头注释）
+/// 销毁：打墓碑（exp = -1），data 里的键无法枚举所以留在表里（见模块头注释）
 pub fn session_destroy(st: SessionStore, sid: str) {
     if st.exp.has(sid) {
         st.exp.set(sid, -1)
     }
 }
 
-// 已创建的会话总数（含已销毁的墓碑）
+/// 已创建的会话总数（含已销毁的墓碑）
 pub fn session_count(st: SessionStore) -> int {
     return len(st.exp)
 }

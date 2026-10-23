@@ -13,7 +13,8 @@ import os
 import re
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "stage0"))
 import qlm_doc  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,6 +31,7 @@ DESC = {
     "std/cli.qma": "命令行 flag 解析（--k=v / --k v / -k v）",
     "std/csv.qma": "CSV 解析与生成（RFC 4180：引号包裹 / \"\" 转义 / 字段内换行 / CRLF 或 LF）",
     "std/deque.qma": "双端队列（两端 O(1) + 自动扩容）",
+    "std/f64.qma": "十进制文本 ↔ f64（严格十进制解析 + Clinger 快路径，非十进制 fail-fast）",
     "std/ds.qma": "环形缓冲与二叉最小堆",
     "std/gen.qma": "泛型算法库（min/max/clamp/dist/contains/index_of/reverse，调用点推导单态化）",
     "std/gzip.qma": "DEFLATE 编码 + gzip 包装 + CRC-32；v1.19 起含 inflate 解码",
@@ -47,6 +49,8 @@ DESC = {
     "std/multipart.qma": "multipart/form-data 解析（boundary 提取 / 表单字段与文件部分 / 头字段大小写不敏感）",
     "std/path.qma": "路径处理（join / clean / dir / base / ext / stem；'/' 与 '\\' 都认）",
     "std/uuid.qma": "UUID v4 生成 + nil + 校验/版本/变体位（随机源为 std/rand，非密码学）",
+    "std/fs.qma": "文件读写（open/read/write/seek/size/sync/close/rename；Windows PE，@ffi 直调 kernel32）",
+    "std/kv.qma": "持久化键值存储（追加日志 + 内存索引；重开重放 / 撕裂尾恢复 / 压缩；Windows PE）",
     "std/regex.qma": "正则引擎（回溯 VM）：字面/./字符类/转义类/量词 *+?{n,m}/交替/分组(?:)/锚点 ^$；compile+match/full/exec/find/replace[_all]，步数上限防病态回溯",
     "std/json.qma": "DOM 式 JSON 解析与 builder",
     "std/log.qma": "分级日志（stdout）+ 结构化字段 + 级别过滤",
@@ -93,13 +97,14 @@ def modules():
 
 
 def public_fns(path):
-    """公开函数签名列表（pub fn，显示剥 pub 前缀）。
+    """公开函数列表（pub fn，签名剥 pub 前缀）。
 
     v1.47 起经 qlm_doc.scan_file：v1.43 把 std 全库改成 pub fn 后，
     旧实现只认行首 `fn `，把 271 个 pub API 全部漏出、反把 195 个内部
-    函数列为"公开"——本轮修正（scan_file 的 /// 文档由 render 透出）。
+    函数列为"公开"——本轮修正。v1.92 起 scan_file 返回 Module，
+    公开面 = 顶层 pub 声明（含没写 `///` 的），文档由 render 透出。
     """
-    return [d for d in qlm_doc.scan_file(path) if d.kind == "fn"]
+    return [d for d in qlm_doc.scan_file(path).decls if d.kind == "fn"]
 
 
 def undocumented():
@@ -130,7 +135,7 @@ def render():
         parts.append("```quelmara")
         if fns:
             for d in fns:
-                # doc comment 原样透出为 ///（与源码写法一致）
+                # doc comment 原样透出为 ///（与源码写法一致）；没写就只出签名
                 for para in d.doc:
                     parts.extend("/// " + ln if ln else "///" for ln in para)
                 parts.append(d.signature)
@@ -143,12 +148,30 @@ def render():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="只检查，不写回")
+    ap.add_argument("--require-doc", action="store_true",
+                    help="公开声明缺 /// 文档即失败（门禁用，v1.92）")
     args = ap.parse_args()
 
     missing = undocumented()
     if missing:
         print("FAIL：以下 std 模块未在 DESC 登记，会被漏出文档：" + "、".join(missing))
         return 1
+
+    if args.require_doc:
+        # 文档覆盖率门禁（v1.92）：公开 API 面每一个声明都要有 /// 文档
+        gaps, orphans = [], []
+        for name, path in modules():
+            mod = qlm_doc.scan_file(path, name)
+            orphans += [(mod.path, ln, why) for ln, why in mod.orphans]
+            gaps += [(mod.path, d.line, d.name) for d in mod.decls if not d.doc]
+        for path, line, why in orphans:
+            print(f"  [orphan] {path}:{line}  {why}")
+        for path, line, name in gaps:
+            print(f"  [missing] {path}:{line}  {name}")
+        if gaps or orphans:
+            print(f"FAIL：{len(gaps)} 个公开声明没有 /// 文档，"
+                  f"{len(orphans)} 个 doc 块没挂上声明")
+            return 1
 
     raw = open(DOC, "rb").read()
     crlf = b"\r\n" in raw

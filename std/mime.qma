@@ -25,7 +25,7 @@ fn mime_cut_params(ctype: str) -> str {
     return str_lower(str_trim(ctype))
 }
 
-// 路径 -> 扩展名（不含点，小写）；没有扩展名返回空串
+/// 路径 -> 扩展名（不含点，小写）；没有扩展名返回空串
 pub fn mime_ext_of(path: str) -> str {
     let mut i = len(path) - 1
     while i >= 0 {
@@ -41,6 +41,8 @@ pub fn mime_ext_of(path: str) -> str {
     return ""
 }
 
+/// 按扩展名查 Content-Type（带 charset 参数，如 text/html; charset=utf-8）。
+/// 认不出返回 application/octet-stream；扩展名取最后一个点之后、大小写不敏感。
 pub fn mime_of(path: str) -> str {
     let e = mime_ext_of(path)
     if e == "html" || e == "htm" {
@@ -121,7 +123,7 @@ pub fn mime_of(path: str) -> str {
     return "application/octet-stream"
 }
 
-// Content-Type -> 扩展名（不带点）；认不出返回空串
+/// Content-Type -> 扩展名（不带点）；认不出返回空串
 pub fn mime_ext(ctype: str) -> str {
     let c = mime_cut_params(ctype)
     if c == "text/html" {
@@ -202,7 +204,7 @@ pub fn mime_ext(ctype: str) -> str {
     return ""
 }
 
-// 是否"人可读"的类型（决定要不要加 charset / 能不能按文本压缩）
+/// 是否"人可读"的类型（决定要不要加 charset / 能不能按文本压缩）
 pub fn mime_is_text(ctype: str) -> bool {
     let c = mime_cut_params(ctype)
     if str_starts_with(c, "text/") {

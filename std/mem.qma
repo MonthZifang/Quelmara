@@ -15,6 +15,8 @@
 //   槽位首字存 next（空闲时），因此业务数据从第 1 字起用。
 // ---------------------------------------------------------------------------
 
+/// 建固定槽位分配器：cap 个槽、每槽 slot_words 字，返回 4 字句柄 {data,cap,slot_words,free_head}。
+/// 一次大块分配 + 空闲链，槽位首字被链占用，**业务数据从第 1 字起用**。
 pub fn slab_new(cap: int, slot_words: int) -> int {
     let h = mem_alloc(32)
     let words = cap * slot_words
@@ -37,6 +39,7 @@ pub fn slab_new(cap: int, slot_words: int) -> int {
     return h
 }
 
+/// 取一个空闲槽，返回槽下标；槽用尽返回 -1。返回前把整槽 mem_zero（不残留上一次的数据）。
 pub fn slab_alloc(h: int) -> int {
     let head = mem_load64(h, 3)
     if head == 0 {
@@ -51,6 +54,7 @@ pub fn slab_alloc(h: int) -> int {
     return idx
 }
 
+/// 归还槽位（头插自由链）；idx<0 返回 -1。不校验重复归还——同一 idx 还两次会让链成环。
 pub fn slab_free(h: int, idx: int) -> int {
     if idx < 0 {
         return -1
@@ -63,12 +67,14 @@ pub fn slab_free(h: int, idx: int) -> int {
     return 0
 }
 
+/// 槽位首字的字节地址（业务数据从 +8 起）。调用方自己按槽内布局读写。
 pub fn slab_ptr(h: int, idx: int) -> int {
     let data = mem_load64(h, 0)
     let sw = mem_load64(h, 2)
     return data + idx * sw * 8
 }
 
+/// 槽位总数（建表时给定，不扩容）。
 pub fn slab_cap(h: int) -> int {
     return mem_load64(h, 1)
 }
@@ -84,6 +90,8 @@ fn slab_slot_words(h: int) -> int {
 //   cap 必须是 2 的幂；hash 用 splitmix 风格的 64 位混合，避免顺序 fd 聚簇。
 // ---------------------------------------------------------------------------
 
+/// 建 fd → 槽位表（开放寻址 + 线性探测，2 字/项），返回 4 字句柄。
+/// **cap 必须是 2 的幂**（用 &(cap-1) 代替取模），负载因子到 50% 就该扩容。
 pub fn fdtab_new(cap: int) -> int {
     let h = mem_alloc(32)
     let n = cap
@@ -107,6 +115,7 @@ fn fdtab_hash(k: int) -> int {
     return x
 }
 
+/// 插入或更新 fd 对应的槽位；表满（探测一圈没空位）返回 -1，调用方负责扩容。
 pub fn fdtab_put(h: int, fd: int, slot: int) -> int {
     let keys = mem_load64(h, 0)
     let vals = mem_load64(h, 1)
@@ -132,6 +141,7 @@ pub fn fdtab_put(h: int, fd: int, slot: int) -> int {
     return -1                              // 表满（调用方应扩容）
 }
 
+/// 查 fd 对应的槽位；不存在返回 -1。
 pub fn fdtab_get(h: int, fd: int) -> int {
     let keys = mem_load64(h, 0)
     let vals = mem_load64(h, 1)
@@ -153,8 +163,8 @@ pub fn fdtab_get(h: int, fd: int) -> int {
     return -1
 }
 
-// 删除用「后移填洞」：命中后把后续探测链上仍可前移的项前移，
-// 避免墓碑堆积（开放寻址 + 无墓碑 = 查找链不断裂）。
+/// 删除用「后移填洞」：命中后把后续探测链上仍可前移的项前移，
+/// 避免墓碑堆积（开放寻址 + 无墓碑 = 查找链不断裂）。
 pub fn fdtab_del(h: int, fd: int) -> int {
     let keys = mem_load64(h, 0)
     let vals = mem_load64(h, 1)
@@ -206,6 +216,7 @@ pub fn fdtab_del(h: int, fd: int) -> int {
     return 0
 }
 
+/// 当前项数（O(1)，存在句柄第 3 字）。
 pub fn fdtab_len(h: int) -> int {
     return mem_load64(h, 3)
 }
@@ -219,6 +230,7 @@ fn fdtab_cap(h: int) -> int {
 //   句柄 3 字：{ptr, cap, len}
 // ---------------------------------------------------------------------------
 
+/// 建定长字节缓冲区，句柄 3 字 {ptr,cap,len}；容量固定，**不自动扩容**。
 pub fn buf_new(cap: int) -> int {
     let h = mem_alloc(24)
     let p = mem_alloc(cap)
@@ -232,6 +244,7 @@ fn buf_ptr(h: int) -> int {
     return mem_load64(h, 0)
 }
 
+/// 已写入的字节数（读游标与写游标是同一个）。
 pub fn buf_len(h: int) -> int {
     return mem_load64(h, 2)
 }
@@ -265,6 +278,7 @@ fn buf_put(h: int, src: int, n: int) -> int {
     return 0
 }
 
+/// 把 str 的字节追加到缓冲末尾；剩余空间不足返回 -1（不截断、不扩容）。
 pub fn buf_put_str(h: int, s: str) -> int {
     let n = len(s)
     let len = mem_load64(h, 2)
@@ -281,11 +295,12 @@ pub fn buf_put_str(h: int, s: str) -> int {
     return 0
 }
 
+/// 把已写入部分包成 str（mem_str，零拷贝：与缓冲区共享内存，缓冲释放后失效）。
 pub fn buf_str(h: int) -> str {
     return mem_str(mem_load64(h, 0), mem_load64(h, 2))
 }
 
-// 在 [from, len) 里找 needle 的首个出现位置；找不到返回 -1
+/// 在 [from, len) 里找 needle 的首个出现位置；找不到返回 -1
 pub fn buf_find(h: int, from: int, needle: str) -> int {
     let p = mem_load64(h, 0)
     let len = mem_load64(h, 2)
@@ -318,7 +333,7 @@ pub fn buf_find(h: int, from: int, needle: str) -> int {
     return -1
 }
 
-// 找 "\r\n\r\n"（HTTP 头结束）—— 按 4 字节滑窗，避免逐字节 substr 分配
+/// 找 "\r\n\r\n"（HTTP 头结束）—— 按 4 字节滑窗，避免逐字节 substr 分配
 pub fn buf_find_head_end(h: int) -> int {
     let p = mem_load64(h, 0)
     let len = mem_load64(h, 2)
@@ -341,6 +356,8 @@ fn buf_lower8(b: int) -> int {
     return b
 }
 
+/// 在 [from, len) 里做**大小写不敏感**（仅 ASCII）查找，返回起点；找不到 -1。
+/// 用于 HTTP 头名 / WebSocket 头这类大小写不固定的场景。
 pub fn buf_find_ci(h: int, from: int, needle: str) -> int {
     let p = mem_load64(h, 0)
     let len = mem_load64(h, 2)
@@ -371,6 +388,8 @@ pub fn buf_find_ci(h: int, from: int, needle: str) -> int {
 // 的同尺寸对象（连接对象、粒子、消息帧）。O(1) 两端，零系统调用。
 // ---------------------------------------------------------------------------
 
+/// 建定长块池：capacity 块 × block_words 字，返回 3 字句柄。
+/// 适用高频 alloc/free 的同尺寸对象（连接、消息帧）；块首 8 字节存 freelist 的 next。
 pub fn pool_new(block_words: int, capacity: int) -> int {
     // 句柄 3 槽：0=freelist 头，1=block_words，2=块区基址
     let h = mem_alloc(3 * 8)
@@ -392,6 +411,7 @@ pub fn pool_new(block_words: int, capacity: int) -> int {
     return h
 }
 
+/// 取一块，返回块地址；池空返回 **0**（不是 -1）——调用方判 0 后扩容或降级。
 pub fn pool_alloc(h: int) -> int {
     let head = mem_load64(h, 0)
     if head == 0 {
@@ -402,6 +422,8 @@ pub fn pool_alloc(h: int) -> int {
     return head
 }
 
+/// 把块头插回 freelist；p 必须来自本池。
+/// **不查 double-free**：还两次会让 freelist 成环，后续 alloc 会重复发同一块。
 pub fn pool_free(h: int, p: int) -> int {
     // 头插回 freelist（p 必须来自本池；double-free 会成环——调试期
     // 可用 pool owns 校验，v0 不查）
@@ -411,6 +433,7 @@ pub fn pool_free(h: int, p: int) -> int {
     return 0
 }
 
+/// freelist 是否为空（= 池里没有可用块）。
 pub fn pool_empty(h: int) -> bool {
     return mem_load64(h, 0) == 0
 }

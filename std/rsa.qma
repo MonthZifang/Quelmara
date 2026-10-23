@@ -227,9 +227,9 @@ fn _rsa_powm(base: vec[int], e: int, n: vec[int], l: int) -> vec[int] {
     return _rsa_mont_mul(res, one, n, n0inv, l)
 }
 
-// PKCS#1 v1.5 + SHA-256 验签。
-// n：模数（大端、无前导 0）；e：指数；sig：签名字节；hash：32 字节摘要。
-// 返回 1 = 有效，0 = 无效。
+/// PKCS#1 v1.5 + SHA-256 验签。
+/// n：模数（大端、无前导 0）；e：指数；sig：签名字节；hash：32 字节摘要。
+/// 返回 1 = 有效，0 = 无效。
 pub fn rsa_verify_pkcs1_sha256(n: str, e: int, sig: str, hash: str) -> int {
     if len(hash) != 32 || len(sig) == 0 || len(n) == 0 || e <= 0 {
         return 0
@@ -304,7 +304,7 @@ fn _rsa_mgf1(seed: str, n: int) -> str {
     return str_from_bytes(out)
 }
 
-// RSASSA-PSS + SHA-256 验签（TLS 1.3 CertificateVerify 用，0x0804）
+/// RSASSA-PSS + SHA-256 验签（TLS 1.3 CertificateVerify 用，0x0804）
 pub fn rsa_verify_pss_sha256(n: str, e: int, sig: str, hash: str, salt_len: int) -> int {
     if len(hash) != 32 || len(sig) == 0 || len(n) == 0 || e <= 0 || salt_len < 0 {
         return 0

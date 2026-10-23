@@ -544,13 +544,13 @@ fn sha256_pad_and_hash(s: str) -> int {
     return out
 }
 
-// sha256_str(s) -> int：32 字节摘要缓冲区指针（大端序，含 0 字节，不能当 str）。
-// 调用方用完后 mem_free(dig, 32)。
+/// sha256_str(s) -> int：32 字节摘要缓冲区指针（大端序，含 0 字节，不能当 str）。
+/// 调用方用完后 mem_free(dig, 32)。
 pub fn sha256_str(s: str) -> int {
     return sha256_pad_and_hash(s)
 }
 
-// sha256_hex(s) -> str：64 位小写十六进制
+/// sha256_hex(s) -> str：64 位小写十六进制
 pub fn sha256_hex(s: str) -> str {
     let dig = sha256_str(s)
     let out = mem_alloc(65)
@@ -612,7 +612,7 @@ fn hmac_key_block(key: str, blk: int) -> int {
     return 0
 }
 
-// hmac_sha256_str(key, msg) -> int：32 字节摘要缓冲区（用完 mem_free(d, 32)）
+/// hmac_sha256_str(key, msg) -> int：32 字节摘要缓冲区（用完 mem_free(d, 32)）
 pub fn hmac_sha256_str(key: str, msg: str) -> int {
     let kb = mem_alloc(64)
     hmac_key_block(key, kb)
@@ -721,6 +721,8 @@ pub fn hmac_sha256_str(key: str, msg: str) -> int {
     return out
 }
 
+/// HMAC-SHA256 的十六进制形式（RFC 2104：ipad/opad 各 64 字节，密钥超长先哈希）。
+/// 返回 64 位小写十六进制；key 与 msg 都按字节处理。
 pub fn hmac_sha256_hex(key: str, msg: str) -> str {
     let dig = hmac_sha256_str(key, msg)
     let out = mem_alloc(65)

@@ -21,10 +21,12 @@
 // set[int]
 // ---------------------------------------------------------------------------
 
+/// 建一个 set[int]（底层 map[int]int，cap 是初始槽数，可被自动扩容覆盖）。
 pub fn iset_new(cap: int) -> map[int]int {
     return map[int]int.new(cap)
 }
 
+/// 加入元素，幂等：1=新增 / 0=已存在（调用方可直接累加算基数）。
 pub fn iset_add(s: map[int]int, v: int) -> int {
     if s.has(v) {
         return 0
@@ -33,10 +35,12 @@ pub fn iset_add(s: map[int]int, v: int) -> int {
     return 1
 }
 
+/// 成员判定，O(1)。
 pub fn iset_has(s: map[int]int, v: int) -> bool {
     return s.has(v)
 }
 
+/// 删除元素：1=删掉了 / 0=本来就没有（先 has 再 del，因为 map.del 无返回值）。
 pub fn iset_del(s: map[int]int, v: int) -> int {
     // map.del 没有返回值（运行时恒返回 0），所以先 has 再 del 才能报"删没删到"
     if !s.has(v) {
@@ -46,11 +50,12 @@ pub fn iset_del(s: map[int]int, v: int) -> int {
     return 1
 }
 
+/// 元素个数，O(1)（= len(map)）。
 pub fn iset_len(s: map[int]int) -> int {
     return len(s)
 }
 
-// iset_to_vec(s) -> vec[int]：导出成 vec（遍历顺序未定义，需要有序自行排序）
+/// iset_to_vec(s) -> vec[int]：导出成 vec（遍历顺序未定义，需要有序自行排序）
 pub fn iset_to_vec(s: map[int]int) -> vec[int] {
     let out = vec[int].new(len(s) + 1)
     for k in s {
@@ -59,7 +64,7 @@ pub fn iset_to_vec(s: map[int]int) -> vec[int] {
     return out
 }
 
-// iset_union_into(dst, src) -> int：把 src 并入 dst，返回新增个数
+/// iset_union_into(dst, src) -> int：把 src 并入 dst，返回新增个数
 pub fn iset_union_into(dst: map[int]int, src: map[int]int) -> int {
     let mut added = 0
     for k in src {
@@ -68,7 +73,7 @@ pub fn iset_union_into(dst: map[int]int, src: map[int]int) -> int {
     return added
 }
 
-// iset_isect(a, b) -> vec[int]：交集（结果无序）
+/// iset_isect(a, b) -> vec[int]：交集（结果无序）
 pub fn iset_isect(a: map[int]int, b: map[int]int) -> vec[int] {
     let out = vec[int].new(4)
     // 遍历较小的那个：命中率决定成本
@@ -88,7 +93,7 @@ pub fn iset_isect(a: map[int]int, b: map[int]int) -> vec[int] {
     return out
 }
 
-// iset_diff(a, b) -> vec[int]：差集 a - b（结果无序）
+/// iset_diff(a, b) -> vec[int]：差集 a - b（结果无序）
 pub fn iset_diff(a: map[int]int, b: map[int]int) -> vec[int] {
     let out = vec[int].new(4)
     for k in a {
@@ -103,10 +108,12 @@ pub fn iset_diff(a: map[int]int, b: map[int]int) -> vec[int] {
 // set[str]
 // ---------------------------------------------------------------------------
 
+/// 建一个 set[str]（底层 map[str]int），用于标签 / Header 名 / 路由段。
 pub fn sset_new(cap: int) -> map[str]int {
     return map[str]int.new(cap)
 }
 
+/// 加入字符串，幂等：1=新增 / 0=已存在。
 pub fn sset_add(s: map[str]int, v: str) -> int {
     if s.has(v) {
         return 0
@@ -115,10 +122,12 @@ pub fn sset_add(s: map[str]int, v: str) -> int {
     return 1
 }
 
+/// 字符串成员判定，O(1)。
 pub fn sset_has(s: map[str]int, v: str) -> bool {
     return s.has(v)
 }
 
+/// 删除字符串：1=删掉了 / 0=本来就没有。
 pub fn sset_del(s: map[str]int, v: str) -> int {
     if !s.has(v) {
         return 0
@@ -127,6 +136,7 @@ pub fn sset_del(s: map[str]int, v: str) -> int {
     return 1
 }
 
+/// 字符串元素个数，O(1)。
 pub fn sset_len(s: map[str]int) -> int {
     return len(s)
 }

@@ -34,6 +34,8 @@ fn csv_quote(f: str) -> str {
     return "\"" + str_replace(f, "\"", "\"\"") + "\""
 }
 
+/// 把 CSV 文本解析成行×列的 vec[vec[str]]（RFC 4180：引号包裹、"" 转义、字段内换行、CRLF/LF）。
+/// 末尾换行不会多出一行空记录。
 pub fn csv_parse(text: str) -> vec[vec[str]] {
     let rows = vec[vec[str]].new(8)
     let mut row = vec[str].new(8)
@@ -97,6 +99,7 @@ pub fn csv_parse(text: str) -> vec[vec[str]] {
     return rows
 }
 
+/// 把行×列拼成 CSV 文本（CRLF 分行）；需要时自动加引号并把 " 转义成 ""。
 pub fn csv_build(rows: vec[vec[str]]) -> str {
     let mut out = ""
     let mut r = 0
@@ -118,7 +121,7 @@ pub fn csv_build(rows: vec[vec[str]]) -> str {
     return out
 }
 
-// 取第 i 列（越界返回空串）
+/// 取第 i 列（越界返回空串）
 pub fn csv_col(row: vec[str], i: int) -> str {
     if i < 0 || i >= len(row) {
         return ""
@@ -126,7 +129,7 @@ pub fn csv_col(row: vec[str], i: int) -> str {
     return row.get(i)
 }
 
-// 在第 col 列里找第一个等于 value 的行号（找不到返回 -1）
+/// 在第 col 列里找第一个等于 value 的行号（找不到返回 -1）
 pub fn csv_find_row(rows: vec[vec[str]], col: int, value: str) -> int {
     let mut r = 0
     while r < len(rows) {

@@ -19,6 +19,7 @@ fn pth_is_sep(c: int) -> bool {
     return c == 47 || c == 92
 }
 
+/// 绝对路径判定：'/' 开头，或 `C:` 这种盘符开头；空串返回 false。
 pub fn path_is_abs(p: str) -> bool {
     if len(p) == 0 {
         return false
@@ -43,6 +44,8 @@ fn pth_with_sep(p: str) -> str {
     return p + "/"
 }
 
+/// 拼接两段路径：b 是绝对路径直接返回 b；接缝处只留一个 '/'。
+/// 任一段为空时返回另一段（不产生多余的 '/'）。
 pub fn path_join(a: str, b: str) -> str {
     if len(a) == 0 {
         return b
@@ -56,7 +59,7 @@ pub fn path_join(a: str, b: str) -> str {
     return pth_with_sep(a) + b
 }
 
-// 消解 . 与 ..
+/// 消解 . 与 ..
 pub fn path_clean(p: str) -> str {
     let abs = path_is_abs(p)
     let mut start = 0
@@ -103,7 +106,7 @@ pub fn path_clean(p: str) -> str {
     return out
 }
 
-// 最后一个分隔符之前的部分（根目录返回 "/"）
+/// 最后一个分隔符之前的部分（根目录返回 "/"）
 pub fn path_dir(p: str) -> str {
     let mut i = len(p) - 1
     while i >= 0 {
@@ -118,7 +121,7 @@ pub fn path_dir(p: str) -> str {
     return "."
 }
 
-// 最后一个分隔符之后的部分
+/// 最后一个分隔符之后的部分
 pub fn path_base(p: str) -> str {
     let mut i = len(p) - 1
     while i >= 0 {
@@ -130,7 +133,7 @@ pub fn path_base(p: str) -> str {
     return p
 }
 
-// 扩展名（不含点）；没有返回空串。以点开头的文件名（.gitignore）没有扩展名
+/// 扩展名（不含点）；没有返回空串。以点开头的文件名（.gitignore）没有扩展名
 pub fn path_ext(p: str) -> str {
     let b = path_base(p)
     let mut i = len(b) - 1
@@ -143,7 +146,7 @@ pub fn path_ext(p: str) -> str {
     return ""
 }
 
-// 去掉扩展名（含点）
+/// 去掉扩展名（含点）
 pub fn path_stem(p: str) -> str {
     let e = path_ext(p)
     if len(e) == 0 {

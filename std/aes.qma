@@ -134,6 +134,8 @@ fn _rcon(i: int) -> int {
     return v
 }
 
+/// AES-128 密钥扩展：key 16 字节 → rk 176 字节（11 轮 × 16）。
+/// rk 由调用方分配，后续加解密复用它。
 pub fn aes128_expand(key: str, rk: int) -> int {
     let mut i = 0
     while i < 16 {
@@ -291,6 +293,8 @@ fn _inv_mix_columns(st: int) -> int {
 // 分组加解密：in/out 都是 16 字节缓冲，rk 是 176 字节
 // ---------------------------------------------------------------------------
 
+/// 加密一个 16 字节分组（inp → out，rk 来自 aes128_expand）；恒返回 0。
+/// 软件路径（T-table），AES-NI 可用时内部走快路径。
 pub fn aes128_encrypt_block(inp: int, out: int, rk: int) -> int {
     let st = mem_alloc(16)
     let mut i = 0
@@ -319,8 +323,8 @@ pub fn aes128_encrypt_block(inp: int, out: int, rk: int) -> int {
     return 0
 }
 
-// T-table 加密（v1.28）：每轮 16 次 32 位查表 + 异或，替代逐字节 SubBytes/MixColumns。
-// 只用于 GCM 的 CTR 路径；解密仍走逐字节实现（GCM 不需要 AES 解密）。
+/// T-table 加密（v1.28）：每轮 16 次 32 位查表 + 异或，替代逐字节 SubBytes/MixColumns。
+/// 只用于 GCM 的 CTR 路径；解密仍走逐字节实现（GCM 不需要 AES 解密）。
 pub fn _aes128_encrypt_block_fast(inp: int, out: int, rk: int) -> int {
     let t = _tables()
     let mut s0 = _bswap32(mem_load32(inp, 0)) ^ _bswap32(mem_load32(rk, 0))
@@ -377,12 +381,12 @@ pub fn _aes128_encrypt_block_fast(inp: int, out: int, rk: int) -> int {
     return 0
 }
 
-// v1.31：AES-NI 单块加密（cpu_aes() == 1 时启用）。
-// 10 轮全是硬件指令（AESENC ×9 + AESENCLAST），没有查表——
-// 既快（一个块 ~10 个周期级操作）也没有 T-table 的缓存侧信道问题。
-// rk 是 aes128_expand 产出的 176 字节标准轮密钥表，AESENC 直接吃这个字节序
-// （软件路径要 _bswap32 是因为它按大端字读，硬件按字节读，不需要转换）。
-// xmm 槽 0/1 是固定协议：0 = 状态，1 = 轮密钥。
+/// v1.31：AES-NI 单块加密（cpu_aes() == 1 时启用）。
+/// 10 轮全是硬件指令（AESENC ×9 + AESENCLAST），没有查表——
+/// 既快（一个块 ~10 个周期级操作）也没有 T-table 的缓存侧信道问题。
+/// rk 是 aes128_expand 产出的 176 字节标准轮密钥表，AESENC 直接吃这个字节序
+/// （软件路径要 _bswap32 是因为它按大端字读，硬件按字节读，不需要转换）。
+/// xmm 槽 0/1 是固定协议：0 = 状态，1 = 轮密钥。
 pub fn _aes128_encrypt_block_ni(inp: int, out: int, rk: int) -> int {
     xmm_load(0, inp)
     xmm_load(1, rk)
@@ -421,6 +425,8 @@ fn _gcm_ctr_block_ni(inp: int, out: int, ctr: int, rk: int) -> int {
     return 0
 }
 
+/// 解密一个 16 字节分组（inp → out）；恒返回 0。
+/// **不用于 GCM**：GCM 只需加密方向，CTR 模式解密即加密。
 pub fn aes128_decrypt_block(inp: int, out: int, rk: int) -> int {
     let st = mem_alloc(16)
     let mut i = 0
@@ -473,8 +479,8 @@ fn _put_be64(p: int, w: int, v: int) -> int {
     return 0
 }
 
-// GHASH 的 128 位乘法：Z = X * H（X、H 都是 16 字节大端缓冲）
-// 逐位算法：Z 累加 V，V 每轮右移并在最低位为 1 时异或 R=0xE1<<120。
+/// GHASH 的 128 位乘法：Z = X * H（X、H 都是 16 字节大端缓冲）
+/// 逐位算法：Z 累加 V，V 每轮右移并在最低位为 1 时异或 R=0xE1<<120。
 pub fn _gf_mul(x: int, h: int, out: int) -> int {
     // 规范算法：V = X，按 H 的位（MSB 优先）决定是否累加；V 每轮右移并归约。
     let hh = _be64(h, 0)
@@ -533,6 +539,8 @@ fn _gf_xtime(src: int, dst: int) -> int {
     return 0
 }
 
+/// 由 H（16 字节）预计算 GHASH 用的 4-bit 表（t 缓冲 16×16 字节）。
+/// 表只需建一次，多次 GCM 复用；导出为 pub 是为了让基准/测试能单独测。
 pub fn _ghash_table(h: int, t: int) -> int {
     let hx = mem_alloc(64)
     let mut i = 0
@@ -589,12 +597,12 @@ pub fn _ghash_table(h: int, t: int) -> int {
     return 0
 }
 
-// 4-bit 表乘法：Y = X · H。
-// v1.32：改成**按 64 位字**累加，并且累加器留在两个局部变量里。
-// 旧实现每个 nibble 做 16 次 mem_load8 + 16 次 mem_store8（一块 1024 次
-// 字节操作），是 GCM 在 AES-NI 之后唯一的瓶颈；字级之后每 nibble 只剩
-// 2 次读 + 2 次异或，且 32 个 nibble 期间不碰内存。
-// 字节序不用管：表行就是 16 字节原样，字级异或 + 字级写回与字节级等价。
+/// 4-bit 表乘法：Y = X · H。
+/// v1.32：改成**按 64 位字**累加，并且累加器留在两个局部变量里。
+/// 旧实现每个 nibble 做 16 次 mem_load8 + 16 次 mem_store8（一块 1024 次
+/// 字节操作），是 GCM 在 AES-NI 之后唯一的瓶颈；字级之后每 nibble 只剩
+/// 2 次读 + 2 次异或，且 32 个 nibble 期间不碰内存。
+/// 字节序不用管：表行就是 16 字节原样，字级异或 + 字级写回与字节级等价。
 pub fn _gf_mul_t(x: int, t: int, out: int) -> int {
     let mut lo = 0
     let mut hi = 0
@@ -869,8 +877,8 @@ fn _ctr_xor(inp: int, n: int, out: int, ctr: int, rk: int) -> int {
 // 对外：AES-128-GCM
 // ---------------------------------------------------------------------------
 
-// gcm_encrypt(key, iv12, aad, plain) -> str
-//   返回密文 || 16 字节 tag（TLS 1.3 的 AEAD 布局）
+/// gcm_encrypt(key, iv12, aad, plain) -> str
+///   返回密文 || 16 字节 tag（TLS 1.3 的 AEAD 布局）
 pub fn gcm_encrypt(key: str, iv: str, aad: str, plain: str) -> str {
     let rk = mem_alloc(176)
     aes128_expand(key, rk)
@@ -967,8 +975,8 @@ pub fn gcm_encrypt(key: str, iv: str, aad: str, plain: str) -> str {
     return str_from_bytes(res)
 }
 
-// gcm_decrypt(key, iv, aad, sealed) -> str
-//   sealed = 密文 || tag；tag 不匹配返回 ""（调用方必须当作失败处理）
+/// gcm_decrypt(key, iv, aad, sealed) -> str
+///   sealed = 密文 || tag；tag 不匹配返回 ""（调用方必须当作失败处理）
 pub fn gcm_decrypt(key: str, iv: str, aad: str, sealed: str) -> str {
     let sn = len(sealed)
     if sn < 16 {

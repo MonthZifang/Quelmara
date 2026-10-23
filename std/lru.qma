@@ -75,7 +75,7 @@ fn _lru_snnext(st: vec[int], s: int, v: int) -> int {
     return 0
 }
 
-// lru_new(cap) -> vec[int]：建缓存，cap 是**最大条目数**（<2 按 2 算）
+/// lru_new(cap) -> vec[int]：建缓存，cap 是**最大条目数**（<2 按 2 算）
 pub fn lru_new(cap: int) -> vec[int] {
     if cap < 2 {
         cap = 2
@@ -114,10 +114,12 @@ pub fn lru_new(cap: int) -> vec[int] {
     return st
 }
 
+/// 容量上限（建表时给定，不扩容；满了淘汰 LRU）。
 pub fn lru_cap(st: vec[int]) -> int {
     return st.get(0)
 }
 
+/// 当前条目数（O(1)，存在状态表头部）。
 pub fn lru_len(st: vec[int]) -> int {
     return st.get(1)
 }
@@ -190,11 +192,12 @@ fn _lru_push_front(st: vec[int], s: int) -> int {
     return 0
 }
 
+/// 键是否在缓存里；**不刷新** LRU 顺序（要刷新用 lru_get）。
 pub fn lru_has(st: vec[int], k: int) -> bool {
     return _lru_tbl_find(st, k) >= 0
 }
 
-// lru_get(st, k) -> int：命中返回并刷新为 MRU；未命中 -1（值域有歧义，见文件头）
+/// lru_get(st, k) -> int：命中返回并刷新为 MRU；未命中 -1（值域有歧义，见文件头）
 pub fn lru_get(st: vec[int], k: int) -> int {
     let ti = _lru_tbl_find(st, k)
     if ti < 0 {
@@ -206,7 +209,7 @@ pub fn lru_get(st: vec[int], k: int) -> int {
     return _lru_nval(st, s)
 }
 
-// lru_get_or(st, k, def) -> int：命中返回值，未命中返回 def（不插入）
+/// lru_get_or(st, k, def) -> int：命中返回值，未命中返回 def（不插入）
 pub fn lru_get_or(st: vec[int], k: int, def: int) -> int {
     let ti = _lru_tbl_find(st, k)
     if ti < 0 {
@@ -218,7 +221,7 @@ pub fn lru_get_or(st: vec[int], k: int, def: int) -> int {
     return _lru_nval(st, s)
 }
 
-// lru_put(st, k, v) -> int：写入并置为 MRU；满了淘汰 tail。返回 1=新增 / 0=更新
+/// lru_put(st, k, v) -> int：写入并置为 MRU；满了淘汰 tail。返回 1=新增 / 0=更新
 pub fn lru_put(st: vec[int], k: int, v: int) -> int {
     let ti = _lru_tbl_find(st, k)
     if ti >= 0 {
@@ -252,7 +255,7 @@ pub fn lru_put(st: vec[int], k: int, v: int) -> int {
     return 1
 }
 
-// lru_del(st, k) -> int：1=删掉了 / 0=本来没有
+/// lru_del(st, k) -> int：1=删掉了 / 0=本来没有
 pub fn lru_del(st: vec[int], k: int) -> int {
     let ti = _lru_tbl_find(st, k)
     if ti < 0 {
@@ -267,7 +270,7 @@ pub fn lru_del(st: vec[int], k: int) -> int {
     return 1
 }
 
-// lru_order(st) -> vec[int]：按 MRU -> LRU 顺序导出 key（测试与观测用）
+/// lru_order(st) -> vec[int]：按 MRU -> LRU 顺序导出 key（测试与观测用）
 pub fn lru_order(st: vec[int]) -> vec[int] {
     let out = vec[int].new(st.get(1) + 1)
     let mut s = st.get(2)
@@ -278,7 +281,7 @@ pub fn lru_order(st: vec[int]) -> vec[int] {
     return out
 }
 
-// lru_peek(st, k) -> int：取值但**不**刷新使用顺序（观测/调试用）
+/// lru_peek(st, k) -> int：取值但**不**刷新使用顺序（观测/调试用）
 pub fn lru_peek(st: vec[int], k: int) -> int {
     let ti = _lru_tbl_find(st, k)
     if ti < 0 {

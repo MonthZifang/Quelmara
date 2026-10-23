@@ -10,7 +10,7 @@ const RAND_W = 8          // static_word(8) = 状态（0 = 未播种）
 
 const RAND_MUL = 2685821657736338717
 
-// rand_seed(s)：显式播种。s 经混合避免弱种子（如全 0）。
+/// rand_seed(s)：显式播种。s 经混合避免弱种子（如全 0）。
 pub fn rand_seed(s: int) {
     let x = s ^ (s >> 30)
     x = x * 0xBF58476D1CE4E5B9
@@ -41,7 +41,7 @@ fn _rand_state() -> int {
     return x
 }
 
-// rand_next() -> int：产出 64 位伪随机数（可能为负——int 是有符号 64 位）
+/// rand_next() -> int：产出 64 位伪随机数（可能为负——int 是有符号 64 位）
 pub fn rand_next() -> int {
     let st = static_word(RAND_W)
     let mut x = _rand_state()
@@ -52,8 +52,8 @@ pub fn rand_next() -> int {
     return x * RAND_MUL
 }
 
-// rand_below(n) -> int：[0, n) 的非负随机数（n > 0）。
-// 取 rand_next 的高位（低位质量差）并钳到非负。
+/// rand_below(n) -> int：[0, n) 的非负随机数（n > 0）。
+/// 取 rand_next 的高位（低位质量差）并钳到非负。
 pub fn rand_below(n: int) -> int {
     if n <= 0 {
         return 0
@@ -62,7 +62,7 @@ pub fn rand_below(n: int) -> int {
     return x % n
 }
 
-// rand_range(lo, hi) -> int：[lo, hi) 的随机数（hi > lo）
+/// rand_range(lo, hi) -> int：[lo, hi) 的随机数（hi > lo）
 pub fn rand_range(lo: int, hi: int) -> int {
     return lo + rand_below(hi - lo)
 }

@@ -208,7 +208,7 @@ fn hd_month_num(s: str) -> int {
     return -1
 }
 
-// UTC 秒 -> "Sun, 06 Nov 1994 08:49:37 GMT"
+/// UTC 秒 -> "Sun, 06 Nov 1994 08:49:37 GMT"
 pub fn httpdate_format(epoch: int) -> str {
     let mut e = epoch
     if e < 0 {
@@ -225,7 +225,7 @@ pub fn httpdate_format(epoch: int) -> str {
            hd_pad2(hh) + ":" + hd_pad2(mm) + ":" + hd_pad2(ss) + " GMT"
 }
 
-// "Sun, 06 Nov 1994 08:49:37 GMT" -> UTC 秒；格式不对返回 -1
+/// "Sun, 06 Nov 1994 08:49:37 GMT" -> UTC 秒；格式不对返回 -1
 pub fn httpdate_parse(s: str) -> int {
     if len(s) < 29 {
         return -1
@@ -247,7 +247,7 @@ pub fn httpdate_parse(s: str) -> int {
     return days * 86400 + hh * 3600 + mm * 60 + ss
 }
 
-// 资源 mtime <= 客户端持有的时间 -> 可以回 304
+/// 资源 mtime <= 客户端持有的时间 -> 可以回 304
 pub fn httpdate_not_modified(mtime: int, since: str) -> bool {
     let t = httpdate_parse(since)
     if t < 0 {

@@ -46,6 +46,8 @@ fn uu_byte_hex(b: int) -> str {
     return str_from_bytes(out)
 }
 
+/// 生成 v4 UUID（两次 rand_next 取 128 位，按 RFC 4122 打版本位与变体位）。
+/// 小写带连字符；随机源是 xorshift，**不是密码学安全**——标识可以，密钥不行。
 pub fn uuid_v4() -> str {
     let a = rand_next()
     let b = rand_next()
@@ -75,10 +77,12 @@ pub fn uuid_v4() -> str {
     return out
 }
 
+/// 全零 UUID（00000000-0000-0000-0000-000000000000）。
 pub fn uuid_nil() -> str {
     return "00000000-0000-0000-0000-000000000000"
 }
 
+/// 格式校验：长度 36、连字符在 8/13/18/23、其余为十六进制（大小写都收）；不校验版本/变体。
 pub fn uuid_valid(s: str) -> bool {
     if len(s) != 36 {
         return false
@@ -98,7 +102,7 @@ pub fn uuid_valid(s: str) -> bool {
     return true
 }
 
-// 版本号（1..5）；不是合法 UUID 返回 -1
+/// 版本号（1..5）；不是合法 UUID 返回 -1
 pub fn uuid_version(s: str) -> int {
     if !uuid_valid(s) {
         return -1
@@ -106,7 +110,7 @@ pub fn uuid_version(s: str) -> int {
     return uu_hexval(s[14])
 }
 
-// RFC 4122 变体位是否为 10xx（0x8 / 0x9 / 0xa / 0xb）
+/// RFC 4122 变体位是否为 10xx（0x8 / 0x9 / 0xa / 0xb）
 pub fn uuid_variant_ok(s: str) -> bool {
     if !uuid_valid(s) {
         return false

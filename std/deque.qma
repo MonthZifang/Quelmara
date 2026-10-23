@@ -42,7 +42,7 @@ fn _dq_block(cap: int) -> int {
     return st
 }
 
-// dq_new(cap) -> int：cap 是最小初始容量（<4 按 4 算）
+/// dq_new(cap) -> int：cap 是最小初始容量（<4 按 4 算）
 pub fn dq_new(cap: int) -> int {
     if cap < 4 {
         cap = 4
@@ -53,10 +53,12 @@ pub fn dq_new(cap: int) -> int {
     return cell
 }
 
+/// 当前元素个数（逻辑长度，不含空洞）。
 pub fn dq_len(d: int) -> int {
     return _dq_len_at(_dq_state(d))
 }
 
+/// 当前容量（槽数，不是字节）；扩容后翻倍，dq_free 才归还。
 pub fn dq_cap(d: int) -> int {
     return _dq_cap_at(_dq_state(d))
 }
@@ -88,6 +90,8 @@ fn _dq_grow(st: int) -> int {
     return ns
 }
 
+/// 尾部入队；满则 2 倍扩容并重排（句柄不变，不需要 `d = ...` 回写）。
+/// 恒返回 0（失败只可能是内存不足，直接崩）。
 pub fn dq_push_back(d: int, v: int) -> int {
     let mut st = _dq_state(d)
     let cap = _dq_cap_at(st)
@@ -101,6 +105,8 @@ pub fn dq_push_back(d: int, v: int) -> int {
     return 0
 }
 
+/// 头部入队；满则扩容。只改 head，两端都是 O(1)。
+/// 恒返回 0。
 pub fn dq_push_front(d: int, v: int) -> int {
     let mut st = _dq_state(d)
     let cap = _dq_cap_at(st)
@@ -117,6 +123,7 @@ pub fn dq_push_front(d: int, v: int) -> int {
     return 0
 }
 
+/// 头部出队并返回该值；空队列返回 -1（先用 dq_len 判别）。
 pub fn dq_pop_front(d: int) -> int {
     let st = _dq_state(d)
     let n = _dq_len_at(st)
@@ -131,6 +138,7 @@ pub fn dq_pop_front(d: int) -> int {
     return v
 }
 
+/// 尾部出队并返回该值；空队列返回 -1。
 pub fn dq_pop_back(d: int) -> int {
     let st = _dq_state(d)
     let n = _dq_len_at(st)
@@ -142,7 +150,7 @@ pub fn dq_pop_back(d: int) -> int {
     return v
 }
 
-// dq_peek_front / dq_peek_back：看但不弹（空返回 -1）
+/// dq_peek_front / dq_peek_back：看但不弹（空返回 -1）
 pub fn dq_peek_front(d: int) -> int {
     let st = _dq_state(d)
     if _dq_len_at(st) == 0 {
@@ -151,6 +159,7 @@ pub fn dq_peek_front(d: int) -> int {
     return mem_load64(st, _dq_slot(st, _dq_head_at(st)))
 }
 
+/// 看尾部元素但不弹出；空队列返回 -1。
 pub fn dq_peek_back(d: int) -> int {
     let st = _dq_state(d)
     let n = _dq_len_at(st)
@@ -160,6 +169,7 @@ pub fn dq_peek_back(d: int) -> int {
     return mem_load64(st, _dq_slot(st, _dq_phys(st, n - 1)))
 }
 
+/// 按逻辑下标 i（0 = 队头）取值；i<0 或 i>=len 返回 -1，不做 fail-fast。
 pub fn dq_get(d: int, i: int) -> int {
     let st = _dq_state(d)
     let n = _dq_len_at(st)
@@ -169,6 +179,7 @@ pub fn dq_get(d: int, i: int) -> int {
     return mem_load64(st, _dq_slot(st, _dq_phys(st, i)))
 }
 
+/// 按逻辑下标 i 赋值；越界返回 -1，成功返回 0。
 pub fn dq_set(d: int, i: int, v: int) -> int {
     let st = _dq_state(d)
     let n = _dq_len_at(st)
@@ -179,6 +190,7 @@ pub fn dq_set(d: int, i: int, v: int) -> int {
     return 0
 }
 
+/// 清空（len 与 head 归零），**不释放内存**——容量留给下次复用。
 pub fn dq_clear(d: int) -> int {
     let st = _dq_state(d)
     mem_store64(st, 1, 0)
@@ -186,7 +198,7 @@ pub fn dq_clear(d: int) -> int {
     return 0
 }
 
-// dq_free(d)：释放状态块与句柄盒（句柄之后不可再用）
+/// dq_free(d)：释放状态块与句柄盒（句柄之后不可再用）
 pub fn dq_free(d: int) -> int {
     let st = _dq_state(d)
     mem_free(st, 32 + _dq_cap_at(st) * 8)

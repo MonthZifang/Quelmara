@@ -28,6 +28,8 @@ import std.url
 // URL 拆分
 // ---------------------------------------------------------------------------
 
+/// URL 拆分的产物：scheme / host / port / path（含 query）+ ok。
+/// ok=1 表示 host 非空、可以发起连接；缺省 scheme=http、port=80/443、path="/"。
 pub struct HttpUrl {
     scheme: str          // "http" / "https"（小写；缺省 http）
     host: str
@@ -107,6 +109,8 @@ pub fn httpc_build_request(method: str, url: str, hdrs: vec[str], body: str) -> 
 // 响应解析
 // ---------------------------------------------------------------------------
 
+/// 响应解析的产物：status（-1=解析失败或头未收全）/ reason / head / body / complete / chunked。
+/// body 是解码后的（chunked 已拼合）；complete=1 才说明 body 完整。
 pub struct HttpResponse {
     status: int          // -1 = 解析失败 / 头未收全
     reason: str

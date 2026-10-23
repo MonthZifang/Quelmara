@@ -53,10 +53,12 @@ fn _cli_match(a: str, name: str) -> int {
     return 0
 }
 
+/// 参数总数（程序名之后的全部参数，按 args() 原样计数）。
 pub fn cli_count() -> int {
     return len(args())
 }
 
+/// 第 i 个原始参数；越界返回空串（不 assert）。
 pub fn cli_at(i: int) -> str {
     let a = args()
     if i < 0 || i >= len(a) {
@@ -65,7 +67,7 @@ pub fn cli_at(i: int) -> str {
     return a[i]
 }
 
-// cli_has(name) -> bool：flag 是否出现（三种写法都算）
+/// cli_has(name) -> bool：flag 是否出现（三种写法都算）
 pub fn cli_has(name: str) -> bool {
     let a = args()
     let n = len(a)
@@ -81,7 +83,7 @@ pub fn cli_has(name: str) -> bool {
     return false
 }
 
-// cli_str(name, def) -> str：取字符串值
+/// cli_str(name, def) -> str：取字符串值
 pub fn cli_str(name: str, def: str) -> str {
     let a = args()
     let n = len(a)
@@ -114,7 +116,7 @@ pub fn cli_str(name: str, def: str) -> str {
     return def
 }
 
-// cli_int(name, def) -> int：取整数值，解析失败回落默认值
+/// cli_int(name, def) -> int：取整数值，解析失败回落默认值
 pub fn cli_int(name: str, def: int) -> int {
     let s = cli_str(name, "")
     if len(s) == 0 {
@@ -137,11 +139,11 @@ pub fn cli_int(name: str, def: int) -> int {
     return s.to_int()
 }
 
-// cli_positionals() -> vec[str]：位置参数（保持原顺序）
-// 判定规则：不以 '-' 开头，且**不是前一个 flag 的值**。
-// "前一个 flag 的值"的启发式：上一个参数以 '-' 开头且不含 '='（`--out x` 形态）；
-// 含 '=' 的形态（`--out=x`）自身就带值，不吃下一个参数。
-// 这个启发式覆盖常见 CLI；如果某个 flag 的值恰好以 '-' 开头，请用 --name=value 形态。
+/// cli_positionals() -> vec[str]：位置参数（保持原顺序）
+/// 判定规则：不以 '-' 开头，且**不是前一个 flag 的值**。
+/// "前一个 flag 的值"的启发式：上一个参数以 '-' 开头且不含 '='（`--out x` 形态）；
+/// 含 '=' 的形态（`--out=x`）自身就带值，不吃下一个参数。
+/// 这个启发式覆盖常见 CLI；如果某个 flag 的值恰好以 '-' 开头，请用 --name=value 形态。
 pub fn cli_positionals() -> vec[str] {
     let a = args()
     let n = len(a)

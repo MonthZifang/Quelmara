@@ -337,7 +337,7 @@ fn _x_fe_to_u(a: vec[int]) -> str {
 // 公开 API
 // ---------------------------------------------------------------------------
 
-// 标量钳位：k[0] &= 248, k[31] &= 127, k[31] |= 64
+/// 标量钳位：k[0] &= 248, k[31] &= 127, k[31] |= 64
 pub fn x25519_clamp(k: str) -> str {
     if len(k) != 32 {
         assert(false, "x25519: 私钥必须是 32 字节")
@@ -353,7 +353,7 @@ pub fn x25519_clamp(k: str) -> str {
     return str_from_bytes(out)
 }
 
-// X25519(k, u)：32 字节标量 × 32 字节 u 坐标 → 32 字节共享值
+/// X25519(k, u)：32 字节标量 × 32 字节 u 坐标 → 32 字节共享值
 pub fn x25519(k: str, u: str) -> str {
     if len(k) != 32 || len(u) != 32 {
         assert(false, "x25519: 标量与 u 都必须是 32 字节")
@@ -397,7 +397,7 @@ pub fn x25519(k: str, u: str) -> str {
     return _x_fe_to_u(_x_fe_mul(x2, zi))
 }
 
-// 基点 9 上的标量乘：生成公钥（u = 9，小端：首字节 9，其余 0）
+/// 基点 9 上的标量乘：生成公钥（u = 9，小端：首字节 9，其余 0）
 pub fn x25519_base(k: str) -> str {
     let base = vec[int].new(33)
     base.push(9)

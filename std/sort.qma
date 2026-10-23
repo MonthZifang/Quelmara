@@ -4,7 +4,7 @@
 // 泛型 cmp 版等函数值放宽后加（GAPS §2）。
 // ---------------------------------------------------------------------------
 
-// sort_int(v)：就地升序排序 vec[int]。
+/// sort_int(v)：就地升序排序 vec[int]。
 pub fn sort_int(v: vec[int]) {
     _qsort(v, 0, len(v) - 1)
 }
@@ -67,7 +67,7 @@ fn _isort(v: vec[int], lo: int, hi: int) {
     }
 }
 
-// is_sorted(v) -> int：升序校验（1/0）
+/// is_sorted(v) -> int：升序校验（1/0）
 pub fn is_sorted(v: vec[int]) -> int {
     let n = len(v)
     let mut i = 1

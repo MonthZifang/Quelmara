@@ -141,6 +141,8 @@ fn sha1_str(s: str) -> int {
 }
 
 // sha1_hex(s) -> str：40 位小写十六进制（调试/ETag/签名用）
+/// 对 str 的 UTF-8 字节算 SHA-1，返回 40 位小写十六进制（WebSocket 握手用）。
+/// 按字节计算，不做任何归一；空串有定义（da39a3ee…）。
 pub fn sha1_hex(s: str) -> str {
     let dig = sha1_str(s)
     let out = mem_alloc(41)

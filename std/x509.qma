@@ -101,7 +101,7 @@ fn x509_root(cert: str) -> vec[int] {
     return t
 }
 
-// TBSCertificate 的原始 DER 字节（验签时对它做哈希）
+/// TBSCertificate 的原始 DER 字节（验签时对它做哈希）
 pub fn x509_tbs(cert: str) -> str {
     let root = x509_root(cert)
     if len(root) == 0 {
@@ -115,7 +115,7 @@ pub fn x509_tbs(cert: str) -> str {
     return substr(cert, start, tbs.get(4) - start)
 }
 
-// 签名算法 OID（原始字节，如 ecdsa-with-SHA256 = 1.2.840.10045.4.3.2）
+/// 签名算法 OID（原始字节，如 ecdsa-with-SHA256 = 1.2.840.10045.4.3.2）
 pub fn x509_sig_alg_oid(cert: str) -> str {
     let root = x509_root(cert)
     if len(root) == 0 {
@@ -136,7 +136,7 @@ pub fn x509_sig_alg_oid(cert: str) -> str {
     return substr(cert, oid.get(2), oid.get(3))
 }
 
-// SPKI 里的公钥算法 OID（第二个 OID，如 prime256v1）
+/// SPKI 里的公钥算法 OID（第二个 OID，如 prime256v1）
 pub fn x509_curve_oid(cert: str) -> str {
     let spki = x509_spki_tlv(cert)
     if len(spki) == 0 {
@@ -199,7 +199,7 @@ fn x509_spki_tlv(cert: str) -> vec[int] {
     return spki
 }
 
-// P-256 公钥：返回 64 字节 X||Y；非 P-256 或格式不对返回 ""
+/// P-256 公钥：返回 64 字节 X||Y；非 P-256 或格式不对返回 ""
 pub fn x509_pubkey(cert: str) -> str {
     let spki = x509_spki_tlv(cert)
     if len(spki) == 0 {
@@ -230,7 +230,7 @@ pub fn x509_pubkey(cert: str) -> str {
     return substr(cert, v + 2, 64)
 }
 
-// 签名值：返回 64 字节 r||s（各左补到 32 字节）；格式不对返回 ""
+/// 签名值：返回 64 字节 r||s（各左补到 32 字节）；格式不对返回 ""
 pub fn x509_sig(cert: str) -> str {
     let root = x509_root(cert)
     if len(root) == 0 {
@@ -309,8 +309,8 @@ fn _x509_pad_int(cert: str, t: vec[int], out: vec[int]) {
 // 组合：自签验证
 // ---------------------------------------------------------------------------
 
-// 用证书自己的公钥验证它自己的签名（根证书 / 自签测试）。
-// 返回 1 = 签名有效且是 P-256 证书。
+/// 用证书自己的公钥验证它自己的签名（根证书 / 自签测试）。
+/// 返回 1 = 签名有效且是 P-256 证书。
 pub fn x509_verify_self_p256(cert: str) -> int {
     let pub = x509_pubkey(cert)
     let tbs = x509_tbs(cert)
@@ -488,7 +488,7 @@ fn _x509_parse_time(cert: str, t: vec[int]) -> int {
     return _x509_days(y, mo, d) * 86400 + hh * 3600 + mm * 60 + ss
 }
 
-// 在 [not_before, not_after] 内返回 1
+/// 在 [not_before, not_after] 内返回 1
 pub fn x509_time_valid(cert: str, now: int) -> int {
     let v = x509_validity(cert)
     if len(v) != 2 {
@@ -638,6 +638,8 @@ fn _x509_host_match(pat: str, host: str) -> int {
     return 1
 }
 
+/// 证书是否覆盖该主机名：逐个 SAN 比对，`*.example.com` 只匹配一级子域；任一命中返回 1。
+/// 只看 SAN，不回退 CN。
 pub fn x509_host_ok(cert: str, host: str) -> int {
     let names = x509_san(cert)
     let mut i = 0
@@ -678,9 +680,9 @@ fn _x509_link(child: str, issuer: str, now: int) -> int {
     return 0
 }
 
-// 验证 leaf（可选 intermediates，按 leaf→root 顺序）到 anchor。
-// host 非空时额外校验 SAN；now 是 Unix 秒。
-// 返回 1 = 通过，0 = 失败。
+/// 验证 leaf（可选 intermediates，按 leaf→root 顺序）到 anchor。
+/// host 非空时额外校验 SAN；now 是 Unix 秒。
+/// 返回 1 = 通过，0 = 失败。
 pub fn x509_verify_chain(leaf: str, inter: vec[str], anchor: str, host: str, now: int) -> int {
     if x509_is_ca(anchor) != 1 {
         return 0
@@ -739,7 +741,7 @@ fn x509_sig_bits(cert: str) -> str {
     return substr(cert, v + 1, bits.get(3) - 1)
 }
 
-// RSA 模数（大端、去前导 0）；非 RSA 返回 ""
+/// RSA 模数（大端、去前导 0）；非 RSA 返回 ""
 pub fn x509_rsa_pub(cert: str) -> str {
     let spki = x509_spki_tlv(cert)
     if len(spki) == 0 {
@@ -776,7 +778,7 @@ pub fn x509_rsa_pub(cert: str) -> str {
     return substr(raw, off, len(raw) - off)
 }
 
-// RSA 公钥指数（通常 65537）
+/// RSA 公钥指数（通常 65537）
 pub fn x509_rsa_exp(cert: str) -> int {
     let spki = x509_spki_tlv(cert)
     if len(spki) == 0 {

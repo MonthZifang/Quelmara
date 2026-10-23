@@ -51,6 +51,8 @@ fn ck_hex_val(n: int) -> int {
     return 87 + n
 }
 
+/// 按 RFC 6265 对 cookie 值做百分号编码：unreserved 字符原样，其余 %XX 大写十六进制。
+/// 只编值，不编属性。
 pub fn cookie_value_encode(s: str) -> str {
     let out = vec[int].new(len(s) * 3 + 1)
     let mut i = 0
@@ -68,6 +70,7 @@ pub fn cookie_value_encode(s: str) -> str {
     return str_from_bytes(out)
 }
 
+/// 百分号解码；不含 '%' 时原样返回（不分配）。
 pub fn cookie_value_decode(s: str) -> str {
     if str_find(s, "%") < 0 {
         return s
@@ -91,7 +94,7 @@ pub fn cookie_value_decode(s: str) -> str {
     return str_from_bytes(out)
 }
 
-// 从 Cookie 头里取 name 的值；不存在返回空串
+/// 从 Cookie 头里取 name 的值；不存在返回空串
 pub fn cookie_get(header: str, name: str) -> str {
     let parts = str_split(header, ";")
     let mut i = 0
@@ -110,6 +113,7 @@ pub fn cookie_get(header: str, name: str) -> str {
     return ""
 }
 
+/// Cookie 头里是否存在该名字（按 ';' 分段、去空白后精确比名，不看值）。
 pub fn cookie_has(header: str, name: str) -> bool {
     let parts = str_split(header, ";")
     let mut i = 0
@@ -126,8 +130,8 @@ pub fn cookie_has(header: str, name: str) -> bool {
     return false
 }
 
-// 属性串：HttpOnly / Secure / SameSite（3 参，避开"第 7 个 str 参数"的 Lower 缺陷，
-// 见 07-gaps §7.8）
+/// 属性串：HttpOnly / Secure / SameSite（3 参，避开"第 7 个 str 参数"的 Lower 缺陷，
+/// 见 07-gaps §7.8）
 pub fn cookie_attrs(http_only: bool, secure: bool, same_site: str) -> str {
     let mut out = ""
     if len(same_site) > 0 {
@@ -142,9 +146,9 @@ pub fn cookie_attrs(http_only: bool, secure: bool, same_site: str) -> str {
     return out
 }
 
-// 拼 Set-Cookie 值（不含 "Set-Cookie: " 前缀）
-//   max_age <= 0 表示会话 cookie；值为空串时输出 Max-Age=0（删除的标准写法）
-//   attrs 直接拼在末尾，通常来自 cookie_attrs(...)
+/// 拼 Set-Cookie 值（不含 "Set-Cookie: " 前缀）
+///   max_age <= 0 表示会话 cookie；值为空串时输出 Max-Age=0（删除的标准写法）
+///   attrs 直接拼在末尾，通常来自 cookie_attrs(...)
 pub fn cookie_set(name: str, value: str, path: str, max_age: int,
                   attrs: str) -> str {
     let mut out = name + "=" + cookie_value_encode(value)

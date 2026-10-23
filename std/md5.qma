@@ -280,6 +280,8 @@ fn md5_str(s: str) -> int {
 }
 
 // md5_hex(s) -> str：32 位小写十六进制
+/// **不要**用于密码或抗碰撞场合（见模块头的定位纪律）；仅兼容旧接口 / ETag / 校验和。
+/// 对 str 的 UTF-8 字节算 MD5，返回 32 位小写十六进制。
 pub fn md5_hex(s: str) -> str {
     let dig = md5_str(s)
     let out = mem_alloc(33)

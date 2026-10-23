@@ -582,7 +582,7 @@ fn _p_mul_pt(p: vec[int], k: vec[int], m: vec[int], n0inv: int) -> vec[int] {
 // 公开 API
 // ---------------------------------------------------------------------------
 
-// 公钥是否在曲线上：y^2 == x^3 - 3x + b
+/// 公钥是否在曲线上：y^2 == x^3 - 3x + b
 pub fn p256_on_curve(pub_x: str, pub_y: str) -> int {
     let m = _p_vec_p()
     let x = _p_to_mont(_p_from_bytes(pub_x), 0, m, P_N0INV)
@@ -607,7 +607,7 @@ fn _p_vec_b() -> vec[int] {
     return v
 }
 
-// ECDSA P-256 验签：输入均 32 字节大端；返回 1 = 有效
+/// ECDSA P-256 验签：输入均 32 字节大端；返回 1 = 有效
 pub fn ecdsa_p256_verify(pub_x: str, pub_y: str, hash: str, r_sig: str, s_sig: str) -> int {
     if len(pub_x) != 32 || len(pub_y) != 32 || len(hash) != 32 ||
        len(r_sig) != 32 || len(s_sig) != 32 {

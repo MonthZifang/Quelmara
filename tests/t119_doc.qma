@@ -1,0 +1,37 @@
+//! t119_doc —— doc comment 语法夹具（v1.92）
+//!
+//! 这个文件同时是**可运行程序**：doc comment 不得改变任何语义，
+//! 下面的 test 块断言"带文档的声明行为与不带文档时一致"。
+
+//// 四个斜杠是普通注释，不产生文档（这是 `////` 与 `///` 的分界）
+
+/// 一个点（结构体文档：说明它表示什么）。
+pub struct Pt {
+    x: int
+    y: int
+}
+
+/// 两数相加。
+///
+/// a、b 都是 int，溢出按 64 位回绕（与普通 `+` 一致）。
+pub fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+/// 内部函数（非 pub）：前端会挂到 AST 上，但不进公开文档。
+fn answer() -> int {
+    return 42
+}
+
+/// 只读的全局答案（内部）。
+pub fn the_answer() -> int {
+    return answer()
+}
+
+test "doc" {
+    assert(add(2, 3) == 5, "add")
+    assert(answer() == 42, "answer")
+    assert(the_answer() == 42, "the_answer")
+    let p = Pt { x: 1, y: 2 }
+    assert(p.x + p.y == 3, "pt")
+}

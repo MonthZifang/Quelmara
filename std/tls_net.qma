@@ -42,7 +42,7 @@ fn tls_recv_exact(fd: int, n: int) -> str {
     return out
 }
 
-// 建连并完成握手；成功后 fd 有效，client_finished 已发送。
+/// 建连并完成握手；成功后 fd 有效，client_finished 已发送。
 pub fn tls_connect(host: str, port: int) -> TlsClientResult {
     let rnd = tls_random(64)
     let priv = substr(rnd, 0, 32)
@@ -88,14 +88,14 @@ pub fn tls_connect(host: str, port: int) -> TlsClientResult {
     return r
 }
 
-// 发一条应用数据记录（seq 从 0 开始）
+/// 发一条应用数据记录（seq 从 0 开始）
 pub fn tls_send_app(r: TlsClientResult, seq: int, data: str) -> int {
     let rec = tls_seal_record(r.c_ap_key, r.c_ap_iv, seq, TLS_CT_APPLICATION_DATA, data)
     return tcp_send(r.fd, rec)
 }
 
-// 收一条应用数据（跳过 NewSessionTicket / KeyUpdate 等握手消息）。
-// 对端关闭或解密失败返回空串。
+/// 收一条应用数据（跳过 NewSessionTicket / KeyUpdate 等握手消息）。
+/// 对端关闭或解密失败返回空串。
 pub fn tls_read_app(r: TlsClientResult, seq: int) -> str {
     let mut s = seq
     let mut k = 0

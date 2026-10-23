@@ -52,7 +52,7 @@ fn sf_hex(c: int) -> int {
     return -1
 }
 
-// 百分号解码；没有 '%' 时直接返回原串（快路径）
+/// 百分号解码；没有 '%' 时直接返回原串（快路径）
 pub fn static_url_decode(s: str) -> str {
     if str_find(s, "%") < 0 {
         return s
@@ -76,7 +76,7 @@ pub fn static_url_decode(s: str) -> str {
     return str_from_bytes(out)
 }
 
-// 解码后是否安全（无目录穿越、无反斜杠、无 NUL）
+/// 解码后是否安全（无目录穿越、无反斜杠、无 NUL）
 pub fn static_path_safe(url: str) -> bool {
     let d = static_url_decode(url)
     if len(d) == 0 {
@@ -104,7 +104,7 @@ pub fn static_path_safe(url: str) -> bool {
     return true
 }
 
-// URL -> 磁盘路径；不安全返回空串（调用方回 403/404）
+/// URL -> 磁盘路径；不安全返回空串（调用方回 403/404）
 pub fn static_resolve(root: str, url: str) -> str {
     if !static_path_safe(url) {
         return ""
@@ -124,7 +124,7 @@ pub fn static_resolve(root: str, url: str) -> str {
     return r + "/" + p
 }
 
-// 目录请求补 index.html（空路径也算目录）
+/// 目录请求补 index.html（空路径也算目录）
 pub fn static_index_for(path: str) -> str {
     if len(path) == 0 {
         return "index.html"
@@ -135,11 +135,12 @@ pub fn static_index_for(path: str) -> str {
     return path
 }
 
+/// 静态文件的 Content-Type（= mime_of(path)，认不出给 application/octet-stream）。
 pub fn static_content_type(path: str) -> str {
     return mime_of(path)
 }
 
-// HTML 不缓存（改一次立刻生效）；其余静态资源按一年长缓存
+/// HTML 不缓存（改一次立刻生效）；其余静态资源按一年长缓存
 pub fn static_cache_control(path: str) -> str {
     let ct = mime_of(path)
     if str_starts_with(ct, "text/html") {
@@ -148,11 +149,12 @@ pub fn static_cache_control(path: str) -> str {
     return "public, max-age=31536000, immutable"
 }
 
+/// 由 size 与 mtime 拼出弱 ETag（带引号的 `size-mtime`），不读文件内容。
 pub fn static_etag(size: int, mtime: int) -> str {
     return "\"" + size.to_str() + "-" + mtime.to_str() + "\""
 }
 
-// Range: bytes=... -> [start, end]；空 vec 表示"按全量处理"
+/// Range: bytes=... -> [start, end]；空 vec 表示"按全量处理"
 pub fn static_range(hdr: str, size: int) -> vec[int] {
     let out = vec[int].new(2)
     if size <= 0 {
@@ -232,10 +234,10 @@ fn sf_error(code: int, reason: str, msg: str) -> str {
     return head + msg
 }
 
-// 生成完整 HTTP/1.1 响应；调用方把返回串写给 fd 即可
-//   root  —— 站点根目录（磁盘路径）
-//   url   —— 请求路径（可带 query/fragment，内部会归一化）
-//   range —— 请求的 Range 头（没有就传空串）
+/// 生成完整 HTTP/1.1 响应；调用方把返回串写给 fd 即可
+///   root  —— 站点根目录（磁盘路径）
+///   url   —— 请求路径（可带 query/fragment，内部会归一化）
+///   range —— 请求的 Range 头（没有就传空串）
 pub fn static_serve(root: str, url: str, range: str) -> str {
     let p = static_resolve(root, url)
     if len(p) == 0 {

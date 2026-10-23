@@ -51,7 +51,7 @@ fn tls_zeros(n: int) -> str {
     return str_from_bytes(v)
 }
 
-// SHA-256 → 32 字节 str
+/// SHA-256 → 32 字节 str
 pub fn tls_hash(s: str) -> str {
     return mem_str(sha256_str(s), TLS_HASH_LEN)
 }
@@ -65,7 +65,7 @@ fn tls_hmac(key: str, msg: str) -> str {
 // HKDF（RFC 5869）
 // ---------------------------------------------------------------------------
 
-// HKDF-Extract：PRK = HMAC(salt, IKM)。salt 为空时按 RFC 用全零 32 字节。
+/// HKDF-Extract：PRK = HMAC(salt, IKM)。salt 为空时按 RFC 用全零 32 字节。
 pub fn hkdf_extract(salt: str, ikm: str) -> str {
     let s = salt
     if len(s) == 0 {
@@ -74,7 +74,7 @@ pub fn hkdf_extract(salt: str, ikm: str) -> str {
     return tls_hmac(s, ikm)
 }
 
-// HKDF-Expand：OKM = T(1) || T(2) || …，T(i) = HMAC(PRK, T(i-1) || info || i)
+/// HKDF-Expand：OKM = T(1) || T(2) || …，T(i) = HMAC(PRK, T(i-1) || info || i)
 pub fn hkdf_expand(prk: str, info: str, n: int) -> str {
     if n <= 0 || n > 255 * TLS_HASH_LEN {
         assert(false, "hkdf_expand: 长度非法")
@@ -125,8 +125,8 @@ fn hkdf_expand_label(secret: str, label: str, ctx: str, n: int) -> str {
     return hkdf_expand(secret, str_from_bytes(info), n)
 }
 
-// Derive-Secret(Secret, Label, Messages)
-//   = HKDF-Expand-Label(Secret, Label, Transcript-Hash(Messages), Hash.length)
+/// Derive-Secret(Secret, Label, Messages)
+///   = HKDF-Expand-Label(Secret, Label, Transcript-Hash(Messages), Hash.length)
 pub fn tls_derive_secret(secret: str, label: str, transcript_hash: str) -> str {
     return hkdf_expand_label(secret, label, transcript_hash, TLS_HASH_LEN)
 }
@@ -135,44 +135,45 @@ pub fn tls_derive_secret(secret: str, label: str, transcript_hash: str) -> str {
 // 密钥调度（RFC 8446 §7.1，无 PSK / 无 0-RTT）
 // ---------------------------------------------------------------------------
 
-// early_secret = HKDF-Extract(0, 0)
+/// early_secret = HKDF-Extract(0, 0)
 pub fn tls_early_secret() -> str {
     let z = tls_zeros(TLS_HASH_LEN)
     return hkdf_extract(z, z)
 }
 
-// 空 transcript 的哈希（SHA-256("")）
+/// 空 transcript 的哈希（SHA-256("")）
 pub fn tls_empty_hash() -> str {
     return tls_hash("")
 }
 
-// handshake_secret = HKDF-Extract(Derive-Secret(early, "derived", ""), ECDHE)
+/// handshake_secret = HKDF-Extract(Derive-Secret(early, "derived", ""), ECDHE)
 pub fn tls_handshake_secret(early: str, shared: str) -> str {
     let derived = tls_derive_secret(early, "derived", tls_empty_hash())
     return hkdf_extract(derived, shared)
 }
 
-// master_secret = HKDF-Extract(Derive-Secret(handshake, "derived", ""), 0…0)
+/// master_secret = HKDF-Extract(Derive-Secret(handshake, "derived", ""), 0…0)
 pub fn tls_master_secret(handshake: str) -> str {
     let derived = tls_derive_secret(handshake, "derived", tls_empty_hash())
     return hkdf_extract(derived, tls_zeros(TLS_HASH_LEN))
 }
 
-// 流量密钥 / IV（RFC 8446 §7.3）
+/// 流量密钥 / IV（RFC 8446 §7.3）
 pub fn tls_traffic_key(secret: str) -> str {
     return hkdf_expand_label(secret, "key", "", TLS_KEY_LEN)
 }
 
+/// 由流量密钥派生出 12 字节 IV（HKDF-Expand-Label 的 iv）；每代密钥一次。
 pub fn tls_traffic_iv(secret: str) -> str {
     return hkdf_expand_label(secret, "iv", "", TLS_IV_LEN)
 }
 
-// finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)
+/// finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)
 pub fn tls_finished_key(secret: str) -> str {
     return hkdf_expand_label(secret, "finished", "", TLS_HASH_LEN)
 }
 
-// Finished 的 verify_data = HMAC(finished_key, Transcript-Hash(handshake))
+/// Finished 的 verify_data = HMAC(finished_key, Transcript-Hash(handshake))
 pub fn tls_finished_verify_data(finished_key: str, transcript_hash: str) -> str {
     return tls_hmac(finished_key, transcript_hash)
 }
@@ -181,7 +182,7 @@ pub fn tls_finished_verify_data(finished_key: str, transcript_hash: str) -> str 
 // 记录层（RFC 8446 §5.2 / §5.3）
 // ---------------------------------------------------------------------------
 
-// nonce = IV XOR (seq 按大端放在最后 8 字节)
+/// nonce = IV XOR (seq 按大端放在最后 8 字节)
 pub fn tls_nonce(iv: str, seq: int) -> str {
     if len(iv) != TLS_IV_LEN {
         assert(false, "tls_nonce: IV 必须是 12 字节")
@@ -223,7 +224,7 @@ fn tls_open(key: str, nonce: str, aad: str, sealed: str) -> str {
     return gcm_decrypt(key, nonce, aad, sealed)
 }
 
-// 完整记录：type || 0x0303 || len || payload（明文记录，如 ClientHello）
+/// 完整记录：type || 0x0303 || len || payload（明文记录，如 ClientHello）
 pub fn tls_record(ctype: int, payload: str) -> str {
     let n = len(payload)
     if n > 16384 {
@@ -243,7 +244,7 @@ pub fn tls_record(ctype: int, payload: str) -> str {
     return str_from_bytes(out)
 }
 
-// 加密记录：type(23) || 0x0303 || len || (密文||tag)
+/// 加密记录：type(23) || 0x0303 || len || (密文||tag)
 pub fn tls_seal_record(key: str, iv: str, seq: int, ctype: int, plain: str) -> str {
     let inner = plain + chr(ctype)          // TLS 1.3 把真实类型放在明文末尾
     let nonce = tls_nonce(iv, seq)
@@ -252,7 +253,7 @@ pub fn tls_seal_record(key: str, iv: str, seq: int, ctype: int, plain: str) -> s
     return tls_record(TLS_CT_APPLICATION_DATA, sealed)
 }
 
-// 解密记录：payload 是去掉 5 字节记录头后的密文||tag
+/// 解密记录：payload 是去掉 5 字节记录头后的密文||tag
 pub fn tls_open_record(key: str, iv: str, seq: int, sealed: str) -> str {
     let nonce = tls_nonce(iv, seq)
     let inner = tls_open(key, nonce, tls_aad(TLS_CT_APPLICATION_DATA, len(sealed)), sealed)
@@ -263,14 +264,14 @@ pub fn tls_open_record(key: str, iv: str, seq: int, sealed: str) -> str {
     return substr(inner, 0, len(inner) - 1)
 }
 
-// 解密记录并保留末尾的内容类型字节（调用方可区分握手/应用数据/告警）。
-// 解密失败返回空串。
+/// 解密记录并保留末尾的内容类型字节（调用方可区分握手/应用数据/告警）。
+/// 解密失败返回空串。
 pub fn tls_open_record_raw(key: str, iv: str, seq: int, sealed: str) -> str {
     let nonce = tls_nonce(iv, seq)
     return tls_open(key, nonce, tls_aad(TLS_CT_APPLICATION_DATA, len(sealed)), sealed)
 }
 
-// 握手消息头：type || 3 字节长度
+/// 握手消息头：type || 3 字节长度
 pub fn tls_hs_msg(mtype: int, body: str) -> str {
     let n = len(body)
     let out = vec[int].new(n + 5)
@@ -286,7 +287,7 @@ pub fn tls_hs_msg(mtype: int, body: str) -> str {
     return str_from_bytes(out)
 }
 
-// 16 位大端整数（构造扩展、长度前缀时用）
+/// 16 位大端整数（构造扩展、长度前缀时用）
 pub fn tls_u16(v: int) -> str {
     let out = vec[int].new(3)
     out.push((v >> 8) & 0xFF)
@@ -294,7 +295,7 @@ pub fn tls_u16(v: int) -> str {
     return str_from_bytes(out)
 }
 
-// 24 位大端整数
+/// 24 位大端整数
 pub fn tls_u24(v: int) -> str {
     let out = vec[int].new(4)
     out.push((v >> 16) & 0xFF)
@@ -307,7 +308,7 @@ pub fn tls_u24(v: int) -> str {
 // 记录 / 握手消息解析（v1.24，握手状态机用）
 // ---------------------------------------------------------------------------
 
-// 解析记录头：返回 [ctype, hdr_len, payload_off, payload_len, next_off]；非法返回空 vec。
+/// 解析记录头：返回 [ctype, hdr_len, payload_off, payload_len, next_off]；非法返回空 vec。
 pub fn tls_record_parse(buf: str, pos: int) -> vec[int] {
     let out = vec[int].new(6)
     let n = len(buf)
@@ -328,7 +329,7 @@ pub fn tls_record_parse(buf: str, pos: int) -> vec[int] {
     return out
 }
 
-// 解析握手消息头：返回 [mtype, hdr_len, body_off, body_len, next_off]；非法返回空 vec。
+/// 解析握手消息头：返回 [mtype, hdr_len, body_off, body_len, next_off]；非法返回空 vec。
 pub fn tls_hs_parse(buf: str, pos: int) -> vec[int] {
     let out = vec[int].new(6)
     let n = len(buf)
@@ -349,7 +350,7 @@ pub fn tls_hs_parse(buf: str, pos: int) -> vec[int] {
     return out
 }
 
-// 构造扩展：type || len || body
+/// 构造扩展：type || len || body
 pub fn tls_ext(etype: int, body: str) -> str {
     return tls_u16(etype) + tls_u16(len(body)) + body
 }

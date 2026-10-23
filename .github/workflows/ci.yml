@@ -2,6 +2,7 @@
 #
 # Linux：门禁（改名/原创性）+ 自举对拍四件套 + 五套回归（gcc / 自研 ELF / io_uring）
 # Windows：门禁 + Windows PE 回归 + 词法/声明级对拍
+# perf：性能回归门禁（同机 A/B：base 分支 vs 本次改动；独立 job 免得抢 CPU）
 #
 # [7] 交叉验证（PE×ELF 逐字节）在 ubuntu runner 上有真实 WSL，可执行；
 #     本机沙箱被拦截时 run_win_tests.py 会自动 SKIP，不会假红。
@@ -29,6 +30,16 @@ jobs:
           python tools/dev/check_names.py
           python tools/dev/check_origin.py
           python tools/dev/check_docs.py
+
+      - name: 文档生成门禁（/// 覆盖 + 03-stdlib 与源码一致）
+        run: |
+          python tools/stage0/qlm_cli.py doc std --missing
+          python tools/dev/gen_stdlib_doc.py --check --require-doc
+
+      - name: 包管理 qpm（确定性打包 / registry 发布 / 传递依赖 / 锁）
+        run: |
+          python tests/qpm_semver_test.py
+          python tests/qpm_test.py
 
       - name: 自举对拍（词法 / 声明级 AST / QuIR 架构无关 / 发射层确定性）
         run: |
@@ -64,6 +75,11 @@ jobs:
           python tools/dev/check_origin.py
           python tools/dev/check_docs.py
 
+      - name: 文档生成门禁（/// 覆盖 + 03-stdlib 与源码一致）
+        run: |
+          python tools/stage0/qlm_cli.py doc std --missing
+          python tools/dev/gen_stdlib_doc.py --check --require-doc
+
       - name: Windows PE 回归（无 CRT / 多核 / chan / vec / fail-fast）
         run: python tests/run_win_tests.py
 
@@ -79,6 +95,11 @@ jobs:
       - name: X.509 证书链 / 有效期 / 域名验证（三级链）
         run: python tests/x509_chain_test.py
 
+      - name: 包管理 qpm（确定性打包 / registry 发布 / 传递依赖 / 锁 / 编译链路）
+        run: |
+          python tests/qpm_semver_test.py
+          python tests/qpm_test.py
+
       - name: 自举对拍（词法 / 声明级 AST）
         run: |
           python tests/lexdiff.py
@@ -86,3 +107,23 @@ jobs:
 
       - name: 多后端测试矩阵（test --targets all：win 执行级 + arm64 模拟器 + 输出比对）
         run: python tools/stage0/qlm_cli.py test tests/selftest.qma --targets all
+
+  # 性能门禁单独一个 job：它要跑两棵树（base 分支 + 本次改动）并交错计时，
+  # 混在功能回归里会互相抢 CPU，把噪声变成红。
+  perf:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # A/B 需要 base 分支的修订对象
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 门禁自测（门禁自己也要被门禁：伪造回归必须判失败）
+        run: python tests/bench_gate_test.py
+
+      - name: 性能回归门禁（同机 A/B：base 分支 vs 本次改动，阈值 20%）
+        run: python tools/dev/bench_gate.py --ab origin/${{ github.base_ref || 'master' }} --repeat 3 --threshold 20

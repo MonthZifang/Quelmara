@@ -93,12 +93,12 @@ fn _decode(s: str, plus_as_space: int) -> str {
     return w
 }
 
-// url_decode(s)：%XX 解码 + '+' -> 空格（application/x-www-form-urlencoded）
+/// url_decode(s)：%XX 解码 + '+' -> 空格（application/x-www-form-urlencoded）
 pub fn url_decode(s: str) -> str {
     return _decode(s, 1)
 }
 
-// url_decode_path(s)：只解 %XX，保留 '+'（路径语义）
+/// url_decode_path(s)：只解 %XX，保留 '+'（路径语义）
 pub fn url_decode_path(s: str) -> str {
     return _decode(s, 0)
 }
@@ -135,7 +135,7 @@ fn _hex_push(out: vec[int], b: int) -> int {
     return 0
 }
 
-// url_encode(s)：保留 unreserved，其余 %XX（空格 -> %20，不是 +）
+/// url_encode(s)：保留 unreserved，其余 %XX（空格 -> %20，不是 +）
 pub fn url_encode(s: str) -> str {
     let n = len(s)
     let out = vec[int].new(n * 3 + 1)
@@ -152,7 +152,7 @@ pub fn url_encode(s: str) -> str {
     return str_from_bytes(out)
 }
 
-// url_encode_query(s)：同 url_encode，但空格编成 '+'（表单提交语义）
+/// url_encode_query(s)：同 url_encode，但空格编成 '+'（表单提交语义）
 pub fn url_encode_query(s: str) -> str {
     let n = len(s)
     let out = vec[int].new(n * 3 + 1)
@@ -176,7 +176,7 @@ pub fn url_encode_query(s: str) -> str {
 //   例：https://user@example.com:8443/a/b?q=1#top
 // ---------------------------------------------------------------------------
 
-// scheme（小写化，: 之前）；无 scheme 返回 ""
+/// scheme（小写化，: 之前）；无 scheme 返回 ""
 pub fn url_scheme(u: str) -> str {
     let n = len(u)
     let mut i = 0
@@ -233,7 +233,7 @@ fn _authority_end(u: str, from: int) -> int {
     return n
 }
 
-// host（去掉 userinfo 与端口；IPv6 保留方括号）
+/// host（去掉 userinfo 与端口；IPv6 保留方括号）
 pub fn url_host(u: str) -> str {
     let start = _after_scheme(u)
     let end = _authority_end(u, start)
@@ -279,7 +279,7 @@ pub fn url_host(u: str) -> str {
     return substr(u, hs, end - hs)
 }
 
-// 端口；缺省返回 -1
+/// 端口；缺省返回 -1
 pub fn url_port(u: str) -> int {
     let start = _after_scheme(u)
     let end = _authority_end(u, start)
@@ -337,7 +337,7 @@ pub fn url_port(u: str) -> int {
     return digits.to_int()
 }
 
-// path（不含 query/fragment）；没有 path 返回 "/" 之外的空串
+/// path（不含 query/fragment）；没有 path 返回 "/" 之外的空串
 pub fn url_path(u: str) -> str {
     let n = len(u)
     let start = _after_scheme(u)
@@ -362,7 +362,7 @@ pub fn url_path(u: str) -> str {
     return substr(u, ps, i - ps)
 }
 
-// 原始 query（不含 '?' 与 '#')
+/// 原始 query（不含 '?' 与 '#')
 pub fn url_query(u: str) -> str {
     let n = len(u)
     let mut i = 0
@@ -383,6 +383,7 @@ pub fn url_query(u: str) -> str {
     return ""
 }
 
+/// 取 '#' 之后的片段（不含 '#'）；没有 '#' 返回空串。
 pub fn url_fragment(u: str) -> str {
     let n = len(u)
     let mut i = 0
@@ -395,8 +396,8 @@ pub fn url_fragment(u: str) -> str {
     return ""
 }
 
-// query 里取某个键（解码后返回）；不存在返回 ""
-// 语义：同名键取第一个；键值以 '&' 分隔，'=' 可省略（值按 ""）
+/// query 里取某个键（解码后返回）；不存在返回 ""
+/// 语义：同名键取第一个；键值以 '&' 分隔，'=' 可省略（值按 ""）
 pub fn url_query_get(u: str, key: str) -> str {
     let q = url_query(u)
     let n = len(q)
@@ -451,7 +452,7 @@ pub fn url_query_get(u: str, key: str) -> str {
     return ""
 }
 
-// 便捷：拼 query（已编码的 key/value）
+/// 便捷：拼 query（已编码的 key/value）
 pub fn url_join_query(base: str, key: str, val: str) -> str {
     let mut sep = "?"
     let n = len(base)

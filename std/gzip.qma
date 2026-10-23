@@ -63,6 +63,8 @@ fn _crc32_table() -> int {
     return all
 }
 
+/// CRC-32（IEEE 802.3，zlib 同款多项式），slice-by-4 表驱动，返回 32 位无符号值。
+/// 表在首次调用时惰性构建（4 张 × 256 项）。
 pub fn crc32(s: str) -> int {
     // slice-by-4（v1.17f，mem_load32 内建落地后重启）：4 张表 8KB，
     // 主循环每迭代吃 4 字节（一次 32 位读 + 4 次查表，替代 4 次
@@ -308,7 +310,7 @@ fn _hash3(s: str, i: int) -> int {
 // deflate 编码（固定 Huffman）
 // ---------------------------------------------------------------------------
 
-// deflate_raw(s) -> str：裸 DEFLATE 流（无 gzip/zlib 头）
+/// deflate_raw(s) -> str：裸 DEFLATE 流（无 gzip/zlib 头）
 pub fn deflate_raw(s: str) -> str {
     let n = len(s)
     let out = vec[int].new(n / 2 + 64)
@@ -446,6 +448,8 @@ pub fn deflate_raw(s: str) -> str {
 //   尾：CRC32 (LE) + ISIZE (LE)
 // ---------------------------------------------------------------------------
 
+/// deflate_raw + gzip 头尾（无 mtime、无文件名，尾 8 字节 = CRC32 + ISIZE）。
+/// 输出确定性：同一输入逐字节相同（可当缓存键）。
 pub fn gzip_encode(s: str) -> str {
     let body = deflate_raw(s)
     let n = len(body)
@@ -846,7 +850,7 @@ fn _inflate_at(s: str, start: int) -> str {
     return r
 }
 
-// raw deflate（RFC 1951，无外层封装）
+/// raw deflate（RFC 1951，无外层封装）
 pub fn inflate_raw(s: str) -> str {
     return _inflate_at(s, 0)
 }
@@ -904,7 +908,7 @@ fn _gzip_body_start(s: str, p0: int) -> int {
     return p
 }
 
-// gzip_decode(s) -> str：逐 member 解，结果按顺序拼接
+/// gzip_decode(s) -> str：逐 member 解，结果按顺序拼接
 pub fn gzip_decode(s: str) -> str {
     let n = len(s)
     if n < 18 {

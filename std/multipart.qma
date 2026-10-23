@@ -23,7 +23,7 @@ struct Part {
     data: str
 }
 
-// 从 Content-Type 头里取 boundary（去引号）
+/// 从 Content-Type 头里取 boundary（去引号）
 pub fn multipart_boundary(ctype: str) -> str {
     let low = str_lower(ctype)
     let i = str_find(low, "boundary=")
@@ -99,6 +99,8 @@ fn mp_attr(disp: str, attr: str) -> str {
     return ""
 }
 
+/// 按 boundary 把 multipart/form-data 正文切成 Part 列表（字段与文件都在里面，按 name 取）。
+/// boundary 为空或正文不含分隔符时返回空 vec。
 pub fn multipart_parse(body: str, boundary: str) -> vec[Part] {
     let out = vec[Part].new(4)
     if len(boundary) == 0 {
@@ -141,7 +143,7 @@ pub fn multipart_parse(body: str, boundary: str) -> vec[Part] {
     return out
 }
 
-// 取某个表单字段的值（同名取第一个）；没有返回空串
+/// 取某个表单字段的值（同名取第一个）；没有返回空串
 pub fn multipart_field(body: str, boundary: str, name: str) -> str {
     let parts = multipart_parse(body, boundary)
     let mut i = 0
@@ -155,7 +157,7 @@ pub fn multipart_field(body: str, boundary: str, name: str) -> str {
     return ""
 }
 
-// 取上传文件的正文（按 name 找带 filename 的 part）；没有返回空串
+/// 取上传文件的正文（按 name 找带 filename 的 part）；没有返回空串
 pub fn multipart_file(body: str, boundary: str, name: str) -> str {
     let parts = multipart_parse(body, boundary)
     let mut i = 0

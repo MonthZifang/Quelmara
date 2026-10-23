@@ -14,7 +14,7 @@
 
 import std.str
 
-// 归一化：去 query/fragment、去尾 '/'、去首 '/'
+/// 归一化：去 query/fragment、去尾 '/'、去首 '/'
 pub fn route_norm(target: str) -> str {
     let mut end = len(target)
     let mut i = 0
@@ -35,7 +35,7 @@ pub fn route_norm(target: str) -> str {
     return s
 }
 
-// 归一化后按 '/' 切段；空路径给 0 段
+/// 归一化后按 '/' 切段；空路径给 0 段
 pub fn route_segs(target: str) -> vec[str] {
     let s = route_norm(target)
     if len(s) == 0 {
@@ -44,6 +44,8 @@ pub fn route_segs(target: str) -> vec[str] {
     return str_split(s, "/")
 }
 
+/// 路径模板匹配：`/users/:id` 的 `:段` 匹配任意一段，尾部 `*` 匹配剩余（含零段）。
+/// 比较前两边都归一化（去 query、去尾斜杠）；段数不等且没有 `*` 则不匹配。
 pub fn route_match(pattern: str, path: str) -> bool {
     let ps = route_segs(pattern)
     let xs = route_segs(path)
@@ -66,7 +68,7 @@ pub fn route_match(pattern: str, path: str) -> bool {
     return i == len(xs)
 }
 
-// 捕获的参数（按出现顺序）；不匹配返回空 vec
+/// 捕获的参数（按出现顺序）；不匹配返回空 vec
 pub fn route_params(pattern: str, path: str) -> vec[str] {
     let out = vec[str].new(4)
     if !route_match(pattern, path) {
@@ -85,7 +87,7 @@ pub fn route_params(pattern: str, path: str) -> vec[str] {
     return out
 }
 
-// "GET,POST" 里是否允许 method（HTTP 方法区分大小写，按原样比）
+/// "GET,POST" 里是否允许 method（HTTP 方法区分大小写，按原样比）
 pub fn route_method_allowed(allowed: str, method: str) -> bool {
     let parts = str_split(allowed, ",")
     let mut i = 0
