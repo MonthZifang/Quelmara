@@ -1,0 +1,13 @@
+// 负向夹具：闭包捕获聚合（struct）必须编译期拒绝
+// 理由：捕获槽只有 1 个字。struct 值是"帧槽地址"，存进堆上的捕获环境后
+// 外层帧一返回就是悬垂指针；多字捕获需要变长环境布局，属 v1.95 之后的活。
+// fail-fast，不静默降级成"拷地址"。
+module closure_capture_struct
+
+struct P { x: int }
+
+fn main() {
+    let p = P { x: 1 }
+    let f = fn() -> int { p.x }
+    print(f())
+}

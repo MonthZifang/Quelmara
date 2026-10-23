@@ -1,0 +1,118 @@
+// t126_closure.qma —— 闭包 / 捕获（v1.95）
+// 覆盖：无捕获、单捕获、多捕获（int/str/f64）、闭包逃逸（返回）、
+//       快照语义、嵌套闭包、closure 形参、vec[closure]、聚合返回值/聚合形参、
+//       6/8 参（栈传参）、闭包作结构体字段。
+
+struct Point { x: int, y: int }
+struct Holder { cb: closure }
+
+fn apply(f: closure, x: int) -> int {
+    return f(x)
+}
+
+fn make_adder(n: int) -> closure {
+    return fn(x: int) -> int { x + n }
+}
+
+fn make_counter(start: int) -> closure {
+    // 捕获按值快照：外层变量之后怎么改都不影响已创建的闭包
+    let base = start
+    return fn(step: int) -> int { base + step }
+}
+
+fn manhattan(a: Point, b: Point) -> int {
+    return (a.x - b.x) + (a.y - b.y)
+}
+
+fn main() {
+    // 1) 无捕获
+    let twice = fn(x: int) -> int { x * 2 }
+    assert(twice(21) == 42)
+
+    // 2) 单捕获
+    let k = 7
+    let mul = fn(x: int) -> int { x * k }
+    assert(mul(6) == 42)
+
+    // 3) 多捕获：str + f64（形参与返回值都按签名转换/打标记；
+    //    这里不用 f"..." 插值，避免 t117 进 lexdiff 的 FSTR SKIP 名单）
+    let name = "qm"
+    let scale = 2.5
+    let describe = fn(n: int) -> str { name + ":" + n.to_str() }
+    assert(describe(3) == "qm:3")
+    let half = fn(x: f64) -> f64 { x / scale }
+    assert(half(5.0) == 2.0)
+    assert(apply(twice, 5) == 10)
+    assert(apply(mul, 6) == 42)
+
+    // 4) 闭包逃逸（环境在堆上，外层帧已销毁仍可调用）
+    let add10 = make_adder(10)
+    assert(add10(5) == 15)
+
+    // 5) 快照语义：创建时取值，之后改外层变量不影响
+    let c1 = make_counter(100)
+    let mut bump = 5
+    let c2 = make_counter(bump)
+    bump = 999
+    assert(c1(1) == 101)
+    assert(c2(1) == 6)
+
+    // 6) 嵌套闭包：内层捕获外层的捕获
+    let base = 1000
+    let outer = fn(a: int) -> int {
+        let inner = fn(b: int) -> int { a + b + base }
+        return inner(2)
+    }
+    assert(outer(3) == 1005)
+
+    // 7) 捕获 vec 句柄（句柄语义：共享同一份存储，不是快照）
+    let xs = vec[int].new(8)
+    xs.push(1)
+    xs.push(2)
+    let sum2 = fn() -> int { xs.get(0) + xs.get(1) }
+    assert(sum2() == 3)
+    xs.set(0, 40)
+    assert(sum2() == 42)
+
+    // 8) 循环里创建多个闭包：每个环境独立
+    let fs = vec[closure].new(4)
+    let i = 0
+    while i < 3 {
+        let n = i * 10
+        fs.push(fn() -> int { n })
+        i = i + 1
+    }
+    let g0 = fs.get(0)
+    let g1 = fs.get(1)
+    let g2 = fs.get(2)
+    assert(g0() == 0)
+    assert(g1() == 10)
+    assert(g2() == 20)
+
+    // 9) 聚合返回值 + 聚合形参
+    let mk = fn(x: int) -> Point { Point { x: x, y: x * 2 } }
+    let p = mk(3)
+    assert(p.x == 3)
+    assert(p.y == 6)
+    let sum_pt = fn(a: Point) -> int { a.x + a.y }
+    assert(sum_pt(p) == 9)
+    let diff = fn(a: Point, b: Point) -> int { manhattan(a, b) }
+    assert(diff(Point { x: 5, y: 5 }, Point { x: 1, y: 2 }) == 7)
+
+    // 10) 形参多到走栈（env 占第 1 个寄存器，6/8 参仍可）
+    let s6 = fn(a: int, b: int, c: int, d: int, e: int, f: int) -> int {
+        return a + b + c + d + e + f + k
+    }
+    assert(s6(1, 2, 3, 4, 5, 6) == 28)
+    let s8 = fn(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int) -> int {
+        return a + b + c + d + e + f + g + h
+    }
+    assert(s8(1, 2, 3, 4, 5, 6, 7, 8) == 36)
+
+    // 11) 闭包作结构体字段（两字聚合，与字段布局天然兼容）
+    let holder = Holder { cb: fn(x: int) -> int { x + 100 } }
+    let h = holder.cb
+    assert(h(1) == 101)
+
+    print("ok t126_closure")
+}

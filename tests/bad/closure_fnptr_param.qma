@@ -1,0 +1,17 @@
+// 负向夹具：把裸函数名当闭包传给 closure 形参必须编译期拒绝
+// 理由：裸函数名是**代码地址**（一个 int），闭包是 {code, env} 两字聚合。
+// 静默按聚合传，被调方会从"地址的地址"读 code/env——读飞，且不报错。
+// 想要闭包就写 fn(...) { ... } 字面量，或包一层转发函数。
+module closure_fnptr_param
+
+fn plain(x: int) -> int {
+    return x + 1
+}
+
+fn apply(f: closure, x: int) -> int {
+    return f(x)
+}
+
+fn main() {
+    print(apply(plain, 1))
+}

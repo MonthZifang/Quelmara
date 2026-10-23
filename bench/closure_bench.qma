@@ -1,0 +1,131 @@
+// closure_bench.qma：闭包 / 间接调用的成本（v1.95）
+//
+// 四份等价实现，都是"取一个值 +1"：
+//   direct —— plain(x)        直接调用（基线）
+//   fnptr  —— 函数名作值       裸代码地址 + callr（v1.42 路径）
+//   clos0  —— 闭包，零捕获     {code, env} + callr（env=0）
+//   clos1  —— 闭包，1 捕获     同前，但体内 load 一次环境槽
+// 另测"创建成本"：循环里造 10 万个闭包（堆分配 8B + 帧槽写入）。
+// 输出：四个结果（必须相等）+ ns/次 ×1000 + 创建 ns/次 ×1000
+module closure_bench
+
+fn plain(x: int) -> int {
+    return x + 1
+}
+
+fn run_direct(n: int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        s = s + plain(i)
+        i = i + 1
+    }
+    return s
+}
+
+fn run_fnptr(n: int) -> int {
+    let f = plain
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        s = s + f(i)
+        i = i + 1
+    }
+    return s
+}
+
+fn run_clos0(n: int) -> int {
+    let f = fn(x: int) -> int { x + 1 }
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        s = s + f(i)
+        i = i + 1
+    }
+    return s
+}
+
+fn run_clos1(n: int) -> int {
+    let one = 1
+    let f = fn(x: int) -> int { x + one }
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        s = s + f(i)
+        i = i + 1
+    }
+    return s
+}
+
+fn run_make(n: int) -> int {
+    // 创建成本：每个闭包一次 __alloc(8) + 一次 env 写入 + 两字闭包槽
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        let k = i
+        let f = fn(x: int) -> int { x + k }
+        acc = acc + f(0)
+        i = i + 1
+    }
+    return acc
+}
+
+fn main() {
+    let n = 10000000
+    // 预热（首轮含页提交）
+    let w = run_direct(100000) + run_fnptr(100000) + run_clos0(100000) + run_clos1(100000) + run_make(1000)
+
+    let mut best_d = 0
+    let mut best_p = 0
+    let mut best_c0 = 0
+    let mut best_c1 = 0
+    let mut r = 0
+    while r < 5 {
+        let t0 = now_ns()
+        let a = run_direct(n)
+        let t1 = now_ns()
+        let b = run_fnptr(n)
+        let t2 = now_ns()
+        let c = run_clos0(n)
+        let t3 = now_ns()
+        let d = run_clos1(n)
+        let t4 = now_ns()
+        assert(a == b && b == c && c == d, "四种调用结果必须相同")
+        if r == 0 || t1 - t0 < best_d {
+            best_d = t1 - t0
+        }
+        if r == 0 || t2 - t1 < best_p {
+            best_p = t2 - t1
+        }
+        if r == 0 || t3 - t2 < best_c0 {
+            best_c0 = t3 - t2
+        }
+        if r == 0 || t4 - t3 < best_c1 {
+            best_c1 = t4 - t3
+        }
+        r = r + 1
+    }
+
+    // 创建成本：10 万个闭包 ×5 轮取最小
+    let m = 100000
+    let mut best_mk = 0
+    let mut r2 = 0
+    while r2 < 5 {
+        let s0 = now_ns()
+        let got = run_make(m)
+        let s1 = now_ns()
+        assert(got == m * (m - 1) / 2, "创建成本用例结果不对")
+        if r2 == 0 || s1 - s0 < best_mk {
+            best_mk = s1 - s0
+        }
+        r2 = r2 + 1
+    }
+
+    print(w)
+    // ns/次 ×1000
+    print(best_d * 1000 / n)
+    print(best_p * 1000 / n)
+    print(best_c0 * 1000 / n)
+    print(best_c1 * 1000 / n)
+    print(best_mk * 1000 / m)
+}
