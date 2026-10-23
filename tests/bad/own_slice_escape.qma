@@ -1,0 +1,12 @@
+// 负向夹具：返回指向本帧栈存储的视图，必须编译失败（所有权检查 v2，v1.84）
+// 定长数组形参是**值语义副本**（调用方那份被拷进本帧），slice_of(a) 指进本帧，
+// 函数返回后该存储失效 → 悬垂。
+module own_slice_escape
+fn tail(a: [4]int) -> []int {
+    return slice_of(a)
+}
+fn main() {
+    let mut a: [4]int = [1, 2, 3, 4]
+    let s = tail(a)
+    print(s[0].to_str())
+}

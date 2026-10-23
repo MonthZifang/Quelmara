@@ -26,7 +26,11 @@ FOREIGN_MARKERS = [
     ("Go 语法", "func main("),
     ("Go 语法", "go:build"),
     ("Rust 语法", "use std::"),
-    ("Rust 语法", "fn main() ->"),
+    # 注意：`fn main() ->` 不能单独当 Rust 特征——Quelmara 自己的语法就是
+    # `fn main() -> int`（tests/doc_test.py 里就内嵌了这种源码串，v1.92 误报）。
+    # 只保留 Rust 特有返回类型，Quelmara 用 int/bool/str/f64，撞不上。
+    ("Rust 语法", "fn main() -> ()"),
+    ("Rust 语法", "fn main() -> Result<"),
     ("Rust 语法", "impl Drop for"),
     ("Java/C# 语法", "public static void main"),
     ("V8/Node 内部", "Isolate::New"),

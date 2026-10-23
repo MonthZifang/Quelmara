@@ -26,8 +26,11 @@ fn sum2(s: []int) -> int {
     return s[0] + s[1]
 }
 
-fn tail(a: [4]u8) -> []u8 {
-    return slice_of(a)
+// v1.84 修正：原来写成 `return slice_of(a)`（a 是 [4]u8 形参）——定长数组形参是
+// **值语义副本**，切片指进本帧，返回后即悬垂（所有权检查 v2 会拦）。改成从
+// `[]u8` 形参取子切片：基址是调用方存储，生命周期正确。
+fn tail(s: []u8) -> []u8 {
+    return s[0..4]
 }
 
 fn main() {
@@ -73,9 +76,10 @@ fn main() {
 
     // 7) 返回值路径：返回类型里的元素标签要跟着走
     let mut h: [4]u8 = [1, 2, 3, 4]
-    let sh = tail(h)
+    let sh = tail(slice_of(h))
     sh[0] = 300
     assert(sh[0] == 44, "returned slice keeps elem tag")
+    assert(h[0] == 44, "returned slice aliases caller storage")
 
     // 8) u16
     let mut g: [4]u16 = [0, 0, 0, 0]

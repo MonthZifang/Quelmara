@@ -1,0 +1,26 @@
+// 负向夹具：match 臂里的栈视图逃逸必须被拦（v1.84 所有权检查 v2）
+// 专门守 `_own_parts`：它只把 `match` 的**被匹配值**交给本轮扫描，臂体是
+// `_flat_stmts` 摊平后单独过的——两处任一处漏掉，这条就会静默通过。
+module own_nested_match
+
+enum K {
+    A
+    B
+}
+
+fn pick(k: K) -> []int {
+    let mut a: [4]int = [1, 2, 3, 4]
+    match k {
+        K.A => {
+            return slice_of(a)
+        }
+        K.B => {
+            return slice_of(a)
+        }
+    }
+}
+
+fn main() {
+    let s = pick(K.A)
+    print(s[0].to_str())
+}

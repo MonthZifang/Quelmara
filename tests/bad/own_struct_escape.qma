@@ -1,0 +1,13 @@
+// 负向夹具：结构体字段装着指向本帧栈的切片，随结构体返回 → 悬垂（所有权检查 v2）
+// 结构体是值语义，拷贝时切片字段只拷 {ptr,len} 两个字——指针仍指向 mk 的栈帧。
+module own_struct_escape
+struct Holder { s: []int, n: int }
+fn mk() -> Holder {
+    let a: [4]int = [1, 2, 3, 4]
+    let h = Holder { s: slice_of(a), n: 4 }
+    return h
+}
+fn main() {
+    let h = mk()
+    print(h.n.to_str())
+}

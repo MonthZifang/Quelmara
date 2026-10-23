@@ -1,0 +1,91 @@
+// t116_ownview.qma：所有权检查 v2（v1.84）——视图生命周期 / 写别名 / 跨线程的正例
+// 覆盖（每条都是"必须能编译且运行正确"的形态）：
+//   1) 局部数组切片写入，别名落回基址数组
+//   2) 切片拷贝 = 同一别名组：两处写入不算别名冲突（零拷贝共享是显式语义）
+//   3) 同基址两个区间由同一界变量分隔（a[0..mid] / a[mid..n]）→ 可证不重叠，放行
+//   4) 从 []T 形参取子切片返回（基址是调用方存储，生命周期正确）
+//   5) 堆上的 str 进 vec[str]（堆视图进堆容器，不是逃逸）
+//   6) 局部 struct 里装切片字段：只在帧内使用，不逃逸
+//   7) spawn 只传标量（rc 句柄跨线程会被拦，见 tests/bad/own_spawn_rc.qma）
+//   8) rc 单线程 clone/drop 的线性检查仍然生效
+module t116
+
+struct Holder { s: []int, n: int }
+struct P { x: int }
+
+// 4) 从视图形参取子切片：返回的是调用方存储的视图
+fn head2(s: []int) -> []int {
+    return s[0..2]
+}
+
+// 3) 同一界变量把区间切开：不重叠，两个都能写
+fn split_write(a: [8]int, mid: int) -> int {
+    let left = a[0..mid]
+    let right = a[mid..8]
+    left[0] = 11
+    right[0] = 22
+    return left[0] + right[0]
+}
+
+// 6) 局部 struct 装切片字段：帧内构造、帧内读，不返回
+fn local_holder() -> int {
+    let a: [4]int = [1, 2, 3, 4]
+    let h = Holder { s: slice_of(a), n: 4 }
+    h.s[1] = 20
+    return h.s[0] + h.s[1] + h.n
+}
+
+fn add_one(x: int) -> int {
+    return x + 1
+}
+
+fn main() {
+    // 1) 局部数组切片写入 → 别名落回基址
+    let mut a: [4]int = [1, 2, 3, 4]
+    let s = slice_of(a)
+    s[0] = 100
+    assert(a[0] == 100, "write through slice lands in base array")
+
+    // 2) 切片拷贝 = 同一别名组，两处写入不冲突
+    let t = s
+    t[1] = 200
+    s[2] = 300
+    assert(a[1] == 200, "copy writes base")
+    assert(a[2] == 300, "original writes base")
+
+    // 3) 不重叠的两段区间
+    let mut b: [8]int = [0, 0, 0, 0, 0, 0, 0, 0]
+    let mid = 4
+    assert(split_write(b, mid) == 33, "disjoint ranges both writable")
+
+    // 4) 返回子切片（基址 = 调用方存储）
+    let mut c: [4]int = [7, 8, 9, 10]
+    let h2 = head2(slice_of(c))
+    assert(len(h2) == 2, "returned subslice len")
+    h2[0] = 70
+    assert(c[0] == 70, "returned subslice aliases caller storage")
+
+    // 5) 堆 str 进 vec[str]
+    let v = vec[str].new(0)
+    v.push("a" + "b")
+    v.push("c".to_str())
+    assert(len(v) == 2, "vec[str] accepts heap strings")
+
+    // 6) 局部 struct 装切片字段（帧内）
+    assert(local_holder() == 1 + 20 + 4, "local struct with slice field")
+
+    // 7) spawn 只传标量
+    let n = 41
+    let j = spawn add_one(n)
+    assert(join(j) == 42, "spawn with scalar arg")
+
+    // 8) rc 单线程线性检查
+    let r = rc_new(P { x: 1 })
+    let r2 = rc_clone(r)
+    assert(rc_count(r) == 2, "rc count after clone")
+    rc_drop(r2)
+    assert(rc_count(r) == 1, "rc count after drop")
+    rc_drop(r)
+
+    print("ownview ok")
+}

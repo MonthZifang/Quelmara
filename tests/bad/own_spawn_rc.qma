@@ -1,0 +1,12 @@
+// 负向夹具：rc 句柄跨线程传递，必须编译失败（所有权检查 v2 的跨线程检查）
+// 引用计数是普通字（非原子），两个线程 clone/drop 同一个句柄必然丢计数或双重释放。
+module own_spawn_rc
+struct P { x: int }
+fn work(r: rc[P]) {
+    print(rc_count(r).to_str())
+}
+fn main() {
+    let r = rc_new(P { x: 1 })
+    spawn work(r).join()
+    rc_drop(r)
+}

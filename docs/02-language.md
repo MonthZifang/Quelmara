@@ -6,29 +6,51 @@
 ## 1. 源文件与模块
 
 ```quelmara
-module hello        // 每个文件一个模块名，仅作文档用途（不参与名字解析）
-import std.core     // 扁平合并：递归加载 std/ 与同目录 .qma
+module hello "1.2.0"   // 模块名 + 可选版本（只用于 import 的版本校验）
+import std.core        // 扁平合并：递归加载 std/ 与同目录 .qma
+import util ">=1.2"    // 可选版本要求（同 major 且 >= 要求）
 ```
 
 - 源码扩展名固定 `.qma`；`.ros` 已废弃，遇到会给出 `git mv` 迁移提示  <!-- legacy-ok -->
   （`tools/stage0/qlm.py:50` `require_source`）。
 - `import` 是**扁平合并**：顶层 `fn` / `struct` / `enum` / `test` 直接并入主 AST，
-  消费时直呼其名（没有限定语法 `lib.fn()`——它会被解析为方法调用）。
+  消费时直呼其名。
 - **`pub` 可见性（v1.43）**：顶层 `pub fn` / `pub struct` / `pub enum` 跨模块可见；
   非 pub 声明只在本模块内可用，跨模块引用**编译期报错**（一次报出全部违规，
   并指明定义文件）。`pub` 是上下文关键字——只在顶层声明位识别，函数内
-  `pub` 变量名不受影响。`const` 本就解析期内联全局共享，无需 pub；
-  interface/impl 仍限同源文件（既有边界）。命名空间与版本未做（`load_program`）。
-- **限定语法（v1.44）**：`lib.fn(...)` 限定调用、`lib.Color.Red(v)` 限定枚举
-  构造（只收位置实参）、模式 `lib.Color.Red =>`——头段必须匹配本文件
-  `import`（拼错模块名/漏 import 编译期报错），且目标必须 `pub` 并定义在
-  该 import 解析到的文件里。限定是纯语法糖 + 校验：生成的调用与扁平直呼
-  其名完全一致。**限定 struct 字面量不做**（用 pub 工厂函数）；跨模块
-  同名声明不允许（扁平唯一性），前缀约定仍用于避免撞名。
+  `pub` 变量名不受影响。`const` 本就解析期内联全局共享，无需 pub。
+- **限定语法（v1.44 / 链接期解析 v1.99）**：`lib.fn(...)` 限定调用、
+  `lib.Color.Red(v)` 限定枚举构造（只收位置实参）、模式 `lib.Color.Red =>`——
+  头段必须匹配本文件 `import`（拼错模块名/漏 import 编译期报错），且目标必须
+  `pub` 并定义在该 import 解析到的文件里。**限定 struct 字面量不做**
+  （用 pub 工厂函数）。
+  v1.99 起限定信息**保留到链接期**：解析期把"哪个模块"编进节点，链接期再
+  落到最终符号——这是下面 per-module mangling 的前提（旧做法"剥掉模块段 +
+  记一个集合"无法区分同一个文件里的 `helper()` 与 `lib.helper()`）。
+- **跨模块同名声明（v1.99）**：per-module mangling，**只在真的重名时才动名字**：
+
+  | 情形 | 结果 |
+  |---|---|
+  | 名字只在一个文件里声明 | 一个字节都不改（既有程序逐字节不变） |
+  | 主文件与 import 重名 | 主文件保留原名；导入方变 `<模块>__<名字>` |
+  | 两个 import 之间重名 | 两边都加前缀；未限定引用 = **歧义报错**（提示 `lib.name`） |
+  | 同名 struct / enum | 方法、派生函数跟着换前缀（`T__m` → `<模块>__T__m`） |
+  | 同名非 pub 私有函数 | 各归各的模块（前缀保证不撞） |
+
+  前缀取 import 串：`import std.json` → `std__json`。未限定引用的解析顺序是
+  **本文件声明 > 唯一外部声明 > 歧义报错**。
+- **模块版本（v1.99）**：`module util "1.2.3"` 声明，`import util ">=1.2"` 要求。
+  检查口径：**同 major 且实际 >= 要求**；不满足、或模块没声明版本，都编译期
+  报错（报错带实际版本与文件名）。版本号写法 `"1"` / `"1.2"` / `"1.2.3"`，
+  可带 `>=` / `^` / `=` 前缀（三者同义）。**不做 semver 求解**——依赖选择与
+  锁是 qpm 的事（`05-toolchain.md`）。
 - 查找顺序：主文件目录 → `std/` → `[src].lib` → `[src].ref` → `.qpm/deps`，
   **惰性解析**（import 什么加载什么）。布局规则见 [`05-toolchain.md`](05-toolchain.md)。
-- 名字冲突、循环 import、被导入文件定义 `main`，一律编译报错。
-- 顶层 `const` 两遍解析，可跨模块可见。
+- 仍然报错的情形：循环 import、被导入文件定义 `main`、未限定引用歧义、
+  限定引用指向不存在的名字或非 pub 声明、版本不兼容。
+- 顶层 `const` 两遍解析，可跨模块可见；同名 const 取值不同仍报错
+  （const 在解析期内联，不参与 mangling）。同名 `interface` 视为**同一份契约**：
+  签名一致即幂等，不一致报错。
 
 ## 2. 词法
 
@@ -90,13 +112,48 @@ f"p=({p.x},{p.y})"     // 字段访问也可以
 证据：`tests/t100_interp.qma`（21 条断言）、`bench/interp_bench.qma`、
 `tests/bad/interp_*.qma`（必须编译失败）。
 
-### 2.4 注释
+### 2.4 注释与 doc comment（v1.92）
 
 ```quelmara
-// 行注释
+// 行注释（编译期丢弃）
+/// 声明文档：紧贴其下的顶层声明
+//! 模块文档：只认文件头
+//// 四个及以上斜杠 = 普通注释
 ```
 
-只有行注释，没有块注释。
+只有行注释，没有块注释（`/* */` 不支持）。
+
+| 写法 | 位置 | 作用 |
+|---|---|---|
+| `///` | 紧贴顶层 `fn` / `struct` / `enum` / `interface` 的上一行 | 该声明的文档 |
+| `//!` | 文件开头、任何代码之前 | 模块文档 |
+| `////` | 任意 | 普通注释（不产生文档） |
+
+细节（每条都被 `tests/doc_test.py` 锁住）：
+
+- **一个空格被剥掉**：`/// 加法。` → `加法。`；`///` 独占一行 = 空串，在 Markdown 里当段落分隔。
+- **空行即脱离**：`///` 块与声明之间夹空行、`//` 注释或任何代码，文档就挂不上；
+  脱离的块被 `quelmara doc --missing` / `--check` 判为错误（防"写了文档却没人看到"）。
+- **顶层 `@注解` 不算脱离**：`///` + `@derive(Json)` + `pub struct` 合法。
+- **缩进的 `///` 不收**：函数体、`impl` 内部的 `///` 按普通注释处理。v1.92 只收顶层声明，
+  方法/impl 的文档没有做（`07-gaps.md` §3）。
+- **只有 `pub` 顶层声明进公开文档**；非 pub 声明的 `///` 仍挂到 AST 上，只是不导出。
+
+前端怎么认：doc comment **不进记号流**——词法上它仍是注释，`lexdiff` / `parsediff` 的
+对拍契约不变。解析每个文件时按行扫一遍，把文档挂到声明上：
+
+```python
+p = qlm.Parser(tokenize(src), src=src)   # 给 src= 才扫（快路径：没有 `///` 就整段跳过）
+fdef["doc"]                # fn 的文档行（list[str]，未分段）
+p.type_docs["Point"]       # struct / enum / interface 的文档
+p.module_doc               # //! 模块文档
+```
+
+`parse_source(src, with_docs=True)` 额外返回 `(type_docs, module_doc)`；不给 `with_docs`
+时返回值仍是原来的 7 元组（旧调用零改动）。
+
+产物无关：doc comment 不进 IR，同一程序带与不带文档编译出的 PE 逐字节相同
+（`tests/doc_test.py` 的"产物无关"一节）。生成文档用 `quelmara doc`，见 `05-toolchain.md` §1.2。
 
 ## 3. 类型系统
 
@@ -119,6 +176,7 @@ f"p=({p.x},{p.y})"     // 字段访问也可以
 | 引用计数 | `rc[T]` | `[refcount][payload]`，载荷仅具名 struct |
 | 接口 | `interface Shape { ... }` | 接口值 = `{data, vt}` 两字 |
 | 函数值 | 函数名直接作值 | `callr` 间接调用，8 参 + struct/slice 实参（v1.42；x86-64 第 7 参起走栈） |
+| 闭包 | `closure`（`fn(x: int) -> int { ... }`） | 值 = `{code, env}` 两字，创建时按值捕获（v1.95，§6.5） |
 
 嵌套容器：`vec[vec[T]]` 支持（任意深度）；`vec[map[K]V]` 支持（v1.37，
 map 句柄 1 字标量拷贝语义——vec 不持有 map 的所有权）。
@@ -260,8 +318,17 @@ print(s.area())                    // vt[slot] -> callr，运行期派发
 - 编译器校验：方法齐全、参数个数、返回类型；缺方法/签名不符 → 编译失败
   （`tests/bad/iface_missing.qma` 等）。
 - 隐式装箱四处：`let` 标注、函数实参、`vec[Shape].push`、`return`。
-- 装箱是**拷贝且不释放**（无 rc/drop）；热点循环里频繁装箱会涨堆。
-- 同一类型在两个接口里同名方法 → 编译错误（无消歧规则）。
+- 装箱块**带引用计数**（v1.83）：块尾 / 提前 `return` / `break`·`continue` /
+  赋值替换都会释放，进容器或 struct 字段时 retain——热点循环不再涨堆。
+  完整规则见 §8.4。
+- 同一类型在两个接口里同名方法（v1.83）：按接口名二次 mangling 共存，
+  vtable 各走各的槽位；此时**静态调用** `t.m()` 有歧义（编译报错），
+  先转成接口值再调。
+- 接口可以 `pub`，`impl` 也可以写在别的文件里（v1.83）；同名同签名重复声明幂等，
+  签名不一致报"接口冲突"（§8.4）。
+- `Drop` 是**内建接口**（不用自己声明）：`impl T : Drop { fn drop(t: T) { ... } }`
+  让 T 的 `let` 绑定在作用域退出时自动析构——语义与边界见 §8.7（v1.93）。
+- 同一 `(类型, 接口)` 只能有一个 `impl`（v1.93 起重复实现编译报错；此前是静默覆盖）。
 
 ### 4.5 用户泛型（单态化）
 
@@ -382,25 +449,40 @@ const EVEN = is_even(10)        // 返回 bool 的 const fn
 | `@simd` | 函数或 `for` 语句 | 触发 SSE2 归约（形状不匹配则静默回落标量） |
 | `@no_preempt` | 函数 | 不插入让出点 |
 | `@extern("C")` | 函数声明 | C 后端用；自研后端显式拒绝 |
-| `@derive(...)` | `struct` 声明前 | 按字段表生成序列化 / 等价 / 展示函数（见 §4.8） |
+| `@ffi("dll"[, "Sym"])` | 函数声明 | 声明外部 DLL 函数，自研 PE 后端写进导入表直接调用（v1.87，见 §4.9） |
+| `@derive(...)` | `struct` / `enum` 声明前 | 按字段表生成序列化 / 等价 / 展示函数（见 §4.8.1） |
 
-### 4.8 属性宏 `@derive` 与编译期反射（v1.77）
+### 4.8 宏与反射：`@derive` / `macro` / `refl_*`（v1.77 起，v1.96 收口）
 
-这两件事都是**纯编译期**的：没有运行时元数据段，也没有通用 token 宏。
-类型信息只存在于编译器里，产物是普通函数与常量字面量。
+三件事都是**纯编译期**的：没有运行时元数据段，没有动态派发。类型信息只存在于
+编译器里，产物是普通函数与常量字面量。
 
-#### 4.8.1 `@derive(Json, Eq, Show)`
+分工：
+
+| 形态 | 编译器是否理解语义 | 产物 |
+|---|---|---|
+| `@derive(...)` | 理解（按字段表生成） | 普通函数（`T__json` / `T__eq` / `T__show` …） |
+| `macro 名字(...) { 记号 }` | 不理解（只搬运记号） | 展开后的记号流，任何语法位置都能用 |
+| `refl_*[T](...)` | 理解（读类型表） | 常量字面量；非常量下标 → 按需生成的查表函数 |
+
+#### 4.8.1 属性宏 `@derive(Json, Eq, Show)`
 
 ```quelmara
 @derive(Json, Eq, Show)
 struct Point { x: int, y: int, label: str }
 
+@derive(Json, Eq, Show)
+enum Shape { Dot, Circle(r: int), Rect(w: int, h: int) }
+
 fn main() {
     let p = Point { x: 1, y: -2, label: "a\"b" }
     print(p.json())          // {"x":1,"y":-2,"label":"a\"b"}
     print(p.show())          // Point { x: 1, y: -2, label: a"b }
-    let q = Point_from_json(p.json())
-    assert(p.eq(q))          // 按值相等（原生 == 对聚合是地址比较）
+    assert(p.eq(Point_from_json(p.json())))   // 按值相等
+
+    print(Shape.Circle(r: 5).json())          // {"$v":"Circle","r":5}
+    print(Shape.Circle(r: 5).show())          // Circle(5)
+    assert(Shape.Dot.eq(Shape_from_json(Shape.Dot.json())))
 }
 ```
 
@@ -408,17 +490,33 @@ fn main() {
 
 | 派生项 | 生成的函数 | 说明 |
 |---|---|---|
-| `Json` | `<T>__json(self) -> str`、`<T>__json_into(self, h)`、`<T>_from_json(s) -> <T>`、`<T>__from_node(d, n)` | 编解码都走 `std/json` 的 builder / DOM；`@derive(Json)` 会自动补 `import std.json` |
-| `Eq` | `<T>__eq(self, o) -> bool` | 逐字段比较（str 按内容、嵌套 struct 递归、vec 逐元素） |
+| `Json` | `<T>__json(self) -> str`、`<T>__json_into(self, h)`、`<T>_from_json(s) -> <T>`、`<T>__from_node(d, n)` | 编解码都走 `std/json` 的 builder / DOM；`@derive(Json)` 会自动补 `import std.json`（有 `f64` 字段时再补 `import std.f64`） |
+| `Eq` | `<T>__eq(self, o) -> bool` | 逐字段比较（str 按内容、嵌套递归、vec 逐元素、enum 先比变体） |
 | `Show` | `<T>__show(self) -> str` | 人读文本；bool 输出 `true`/`false` |
 
-语义要点：
+struct 的语义要点：
 
 - **字段顺序 = 声明顺序**，JSON key 顺序稳定（可作对拍依据）。
-- 编码复用 `std/json` 的转义与数字格式，因此 `"` `\` `\n` 与 UTF-8 的处理和手写一致。
+- 编码复用 `std/json` 的转义与整数格式，因此 `"` `\` `\n` 与 UTF-8 的处理和手写一致。
 - 解码前先 `assert(json_ok(d))`：非法 JSON **fail-fast**，不返回半成品。
 - 只派生写到的项：`@derive(Json)` 不会生成 `show`/`eq`（调用即"方法未定义"）。
-- 派生函数是**普通函数**，可以被其他函数、泛型模板、`impl` 直接调用。
+- 派生函数是**普通函数**，可以被其他函数、泛型模板、`impl` 直接调用；`pub struct`
+  上的派生函数也继承 `pub`。
+
+enum 的 JSON 约定（v1.96，唯一事实来源）：
+
+| 形态 | 编码 |
+|---|---|
+| 无载荷变体 | `{"$v":"Dot"}` |
+| 单载荷 | `{"$v":"Circle","r":5}` |
+| 多载荷 | `{"$v":"Rect","w":3,"h":4}` |
+
+- `$v` 永远**第一个**键，载荷按声明顺序跟在后面。
+- 解码只认 `$v` 字面量；未知变体名 `assert` 失败（不猜、不给默认值）。
+- 为什么不用"裸字符串 / 裸数字"：同一个 enum 的不同变体载荷形状不同，带 `$v`
+  的对象让"类型 → 表示"始终是满射，跨语言消费方不用猜。
+- `Eq` 的定义是"同变体且载荷逐字段相等"——不同变体永远不等，**不是**比内存前缀。
+- `Show` 的形态是 `Dot` / `Circle(5)` / `Rect(3, 4)`。
 
 字段类型支持面（其余一律编译期报错，不静默跳过）：
 
@@ -426,12 +524,64 @@ fn main() {
 |---|---|---|---|
 | `int` / `i8`–`i64` / `u8`–`u64` / `byte` | ✅ | ✅ | ✅ |
 | `bool` / `str` | ✅ | ✅ | ✅ |
-| 本文件声明的 struct（自身也派生对应项） | ✅ 递归 | ✅ 递归 | ✅ 递归 |
-| `vec[上述标量或 struct]` | ✅ | ✅ 逐元素 | ✅ 逐元素 |
-| `f64` / `f32` | ❌ 缺 str→浮点解析原语（`07-gaps.md` §7.10） | — | — |
-| `enum` 字段 / `map` / 定长数组 / `rc` | ❌ | — | — |
+| `f64`（`float` 同义） | ✅ 最短往返（见下） | ✅ | ✅（`to_str`，7 位） |
+| 本文件声明的 struct / enum（自身也派生对应项） | ✅ 递归 | ✅ 递归 | ✅ 递归 |
+| `vec[上述标量 / struct / enum]` | ✅ | ✅ 逐元素 | ✅ 逐元素 |
+| `f32` / `map` / 定长数组 / `rc` / `vec[vec[...]]` | ❌ 编译期拒绝并说明原因 | — | — |
 
-#### 4.8.2 编译期反射 `refl_*[T](...)`
+`f64` 字段的编解码（v1.96）：
+
+- 编码走 `std/f64` 的 `f64_repr`——**精确十进制展开 + 15/16/17 位回读验证**，
+  产物是最短往返文本（`0.1` 就写 `0.1`，不会写成 `0.10000000000000001`）。
+  内建 `to_str` 只有 7 位有效数字，写进 JSON 就是静默丢精度，所以不走它。
+- 解码走 `f64_parse`（十进制解析，非法输入 fail-fast）。
+- 非有限值（`inf` / `nan`）在编码时 `assert` 失败：JSON 数字表示不了它们。
+- 代价：`f64_repr` 比 `to_str` 慢两个数量级（数字见 `06-status.md` §3.4e）；
+  整型 / 字符串字段不受影响。
+- 极端量级（`|x| > 1e22` 或 `< 1e-22`）受解析器两步运算限制，可能差 1 ULP
+  （与 §2 的 grisu/ryu 遗留同源，`06-status.md` 有口径）。
+
+#### 4.8.2 通用 token 宏 `macro`（v1.96）
+
+```quelmara
+// 语句宏：宏体是多条语句
+macro require_range(v, lo, hi) {
+    assert((v) >= (lo) && (v) <= (hi), "out of range")
+}
+
+// 表达式宏：整体带括号，调用点才能继续接 `.to_str()`
+macro square(x) { ((x) * (x)) }
+
+// 生成声明（含注解：宏展开先于 @derive 扫描）
+macro decl_point(name) {
+    @derive(Json, Eq, Show)
+    struct name { x: int, y: int }
+}
+
+decl_point(Pt)
+
+fn main() {
+    require_range(5, 1, 10)
+    assert(square(7) == 49)
+    let p = Pt { x: 1, y: 2 }
+    assert(p.json() == "{\"x\":1,\"y\":2}")
+}
+```
+
+规则与边界：
+
+- **只在顶层定义**；宏体里的花括号必须配平，空宏体报错。
+- 调用点必须是 `名字(`，且前一个记号不是 `.`（`x.macro(...)` 不展开）。
+- 实参按**顶层逗号**切分（括号 / 方括号 / 花括号里的逗号不算），个数必须与形参一致。
+- 展开是**递归**的（宏体里可以再调宏），上限 64 层；超过即编译期报错（抓自递归）。
+- **前向引用**：宏可以用在定义之前——先摘定义，再反复展开。
+- 展开在 `@derive` 扫描**之前**，所以宏可以生成 `@derive` 注解本身。
+- **无卫生性**（hygiene）：形参按记号替换，**不加括号、不改名**。因此宏体里的自由
+  名字与调用点同作用域，形参在宏体里出现几次就求值几次；表达式宏要自己写括号。
+- 没有记号拼接（`##`）：名字不能由两段拼出来；需要按名字生成声明时，把名字当形参。
+- 宏名不得与关键字同名；与函数 / 类型同名时**宏优先**（定义顺序无关）。
+
+#### 4.8.3 反射 `refl_*[T](...)`
 
 ```quelmara
 struct Point { x: int, y: int }
@@ -443,30 +593,114 @@ print(refl_field_name[Point](1))      // y
 print(refl_field_type[Point](1))      // int
 print(refl_variant_name[Shape](1))    // Circle
 print(refl_variant_arity[Shape](2))   // 2
+
+// v1.96：下标可以是运行时值——按需生成查表函数，于是能写"遍历字段"
+let mut i = 0
+while i < refl_field_count[Point]() {
+    print(refl_field_name[Point](i))
+    i = i + 1
+}
 ```
 
 | 函数 | 返回 | 适用 |
 |---|---|---|
 | `refl_type_name[T]()` | `str` | struct / enum |
 | `refl_field_count[T]()` | `int` | struct |
-| `refl_field_name[T](i)` | `str` | struct，`i` 编译期常量 |
-| `refl_field_type[T](i)` | `str`（`int` / `vec[str]` / `Point` 这类源码写法） | struct，`i` 编译期常量 |
+| `refl_field_name[T](i)` | `str` | struct，`i` 是 int（常量或运行时） |
+| `refl_field_type[T](i)` | `str`（`int` / `vec[str]` / `Point` 这类源码写法） | struct |
 | `refl_variant_count[E]()` | `int` | enum |
-| `refl_variant_name[E](i)` | `str` | enum，`i` 编译期常量 |
-| `refl_variant_arity[E](i)` | `int`（载荷字段数） | enum，`i` 编译期常量 |
+| `refl_variant_name[E](i)` | `str` | enum |
+| `refl_variant_arity[E](i)` | `int`（载荷字段数） | enum |
 
-边界（每一条都有负向夹具）：
+两种下标走两条路：
 
-- **下标必须是编译期常量**——没有运行时类型元数据，写不出"遍历字段"的循环
-  （`tests/bad/refl_dynidx.qma`）。
-- 越界、类型不是 struct/enum、未知反射函数，全部编译期报错。
+- **编译期常量**（字面量 / `const`）→ 折叠成字面量，零运行时成本。
+- **运行时值** → 改写成按需生成的查表函数（`if i == 0 { return "x" }` 这样的
+  if 链）。表是**代码**不是数据：O(n) 分支、常量内存、仍然没有元数据段。
+  同一个 `(函数, 类型)` 只生成一次；越界在运行时 `assert` 失败。
+
+边界（每条都有负向夹具）：
+
+- 越界（常量下标在编译期、运行时下标在运行期）、类型不是 struct / enum、
+  未知反射函数、下标写成字符串字面量，全部报错。
+- 反射**不能读字段的值**：字段类型不同，没有统一的返回类型；按值遍历请用 `@derive`。
 - `const` 右值暂不认 `refl_*`：const 求值器是独立的整数算术求值器，
   反射只能写在**表达式位置**（可作循环上界、可参与算术，因为它折叠成字面量）。
 - 反射可以写在使用点之前（类型在文件后面声明）——折叠发生在整个文件解析完之后。
+- 泛型 struct / 泛型 enum 模板不能直接 `@derive`（载荷类型还是类型参数）：
+  先实例化，或在 `impl` 里手写。`f32` 字段不参与派生。
+- 按值自包含的聚合（`struct S { s: S }`、`enum E { Node(inner: E) }`）在声明处
+  报错——没有有限布局。
 
-证据：`tests/t115_derive.qma`（39 条断言，含往返 / 嵌套 / 容器 / 反射 / 前向引用）；
-`tests/bad/derive_*.qma` 与 `tests/bad/refl_*.qma`（10 种必须编译失败的形态）；
-性能对照见 `bench/derive_bench.qma`（派生 vs 手写字段表，数字见 `06-status.md`）。
+证据：`tests/t115_derive.qma`（struct 派生 39 条断言）、`tests/t123_derive_enum.qma`
+（enum 派生 + f64 + vec[enum] + 往返）、`tests/t124_macro.qma`（token 宏）、
+`tests/t125_refl_dyn.qma`（运行时下标）；负向 12 个（`tests/bad/derive_*` /
+`refl_*` / `macro_*` / `struct_self` / `enum_self`）；
+性能对照见 `bench/derive_bench.qma`（派生 vs 手写，数字见 `06-status.md` §3.4e）。
+
+### 4.9 FFI：调用系统库（v1.87）
+
+`@extern("C")` 是给 C 后端用的原型（交给系统链接器）；自研后端不链接任何东西，
+所以另有 `@ffi`——**带 DLL 名**，编译器把它写进 PE 导入表，由加载器解析符号。
+没有动态链接器参与，也不需要 CRT。
+
+```quelmara
+// 符号名 = 函数名
+@ffi("kernel32.dll")
+fn GetTickCount64() -> int
+
+// 符号名与函数名不同时给第二个参数（大小写敏感，Win32 的 A/W 后缀在这里选）
+@ffi("user32.dll", "MessageBoxA")
+fn msg_box(hwnd: int, text: int, caption: int, flags: int) -> int
+
+@ffi("ntdll.dll", "RtlMoveMemory")
+fn rtl_move(dst: int, src: int, n: int)          // 返回 void
+
+@ffi("ucrtbase.dll", "sqrt")
+fn c_sqrt(x: f64) -> f64
+
+fn main() {
+    let t = GetTickCount64()
+    let buf = mem_alloc(16)
+    rtl_move(buf, cstr("hi"), 3)                 // str -> NUL 结尾的 char*
+    mem_store8(buf, 2, 0)
+    print(cstr_read(buf))                        // char* -> str
+    print(c_sqrt(2.0))                           // 1.414214
+    print(t > 0)
+}
+```
+
+| 项 | 规则 |
+|---|---|
+| 声明形态 | 无函数体（符号在 DLL 里）；带函数体编译期报错 |
+| 形参类型 | `int` / `bool` / `f64` / `f32`（`str`、struct、enum、容器、切片一律编译期拒绝） |
+| 返回类型 | `int` / `bool` / `f64` / `f32` / `void` |
+| 调用约定 | Win64：整数实参 `RCX RDX R8 R9`、浮点实参 `XMM0-3`（**两类独立计数**），第 5+ 个同类实参落 `[rsp+32+8k]`，32 字节 shadow space 恒留 |
+| 返回值 | 整数 `RAX`、浮点 `XMM0`；`bool` 按 32 位 BOOL 零扩展 |
+| 隐式转换 | 整数实参 → 浮点形参自动 `cvtsi2sd`（与 C 一致）；反向不隐式 |
+| 字符串 | 用 `cstr(s)` 得到 NUL 结尾指针、`cstr_read(p)` 读回；`str` 是长度前缀 ABI，直接当 `char*` 传会越界 |
+| 指针 | 一律 `int`；`mem_alloc` / `mem_ptr` / `mem_load*` / `mem_store*` 自己编组 |
+| 导入表 | 每个 DLL 一组 `{ILT, IAT}`；DLL 名不带扩展名时补 `.dll` |
+
+边界（都是"做不到"，不是"没试过"）：
+
+- **仅 Windows PE 后端**。ELF 后端产出静态可执行文件（单 RWX `PT_LOAD`，无
+  `PT_INTERP`/`PT_DYNAMIC`），外部符号无处解析——`@ffi` 在 `--target native`
+  下编译期 fail-fast 并给出这条原因。
+- **无变参**：`printf`/`wsprintfA` 这类可变参数函数没有 `AL`（向量寄存器个数）
+  约定，调用会静默错，所以不做；需要格式化就在语言里拼串。
+- **无按值结构体**：Win64 的"≤8 字节按整数、>8 字节按隐式指针"两套规则未实现，
+  形参只能是标量；传结构体请自己 `mem_alloc` + 逐字段写。
+- **无回调 thunk**：Quelmara 函数用的是自研 ABI（`RDI RSI RDX RCX R8 R9`），
+  与 Win64 不同；把函数地址传给 `EnumWindows` 这类 API 会被以错误的寄存器读参数。
+  回调需要编译器生成一层寄存器重排 thunk，未做。
+- **符号必须存在**：DLL 或符号名写错不是编译错误，是**加载期**错误
+  （`0xC0000135`/`0xC0000139`，进程直接起不来）。
+
+证据：`tests/t120_ffi.qma`（int/void/bool/f64/f32、栈传参 5 参与 7 参、
+三个 DLL、`cstr`/`cstr_read` 往返、自身 exe 的 `MZ` 魔数）；
+`tests/bad/ffi_str_param.qma`、`ffi_struct_param.qma`、`ffi_body.qma`（负向）；
+开销与吞吐见 `bench/ffi_bench.qma`（数字见 `06-status.md`）。
 
 
 ## 5. 语句
@@ -549,11 +783,55 @@ enum 布局本就是 1+最大载荷字，零新机制）。`?` 所在函数必�
 
 - 子切片：`a[lo..hi]`（左闭右开）。`str` 切片是拷贝，数组/切片是零拷贝视图。
 - 函数值：直接写函数名，经 `callr` 间接调用（v1.42：8 参、聚合/切片实参按值编组；
-  无捕获，闭包见下一条）。返回值按标量处理——聚合/切片返回的函数不可间接调用；
+  无捕获）。返回值按标量处理——聚合/切片返回的函数不可间接调用；
   间接调用无签名校验，聚合实参要求目标形参是聚合类型（与标量路径同信任级）。
+  **需要捕获外层变量时用闭包**（§6.5）。
 - 强制转换：`to_int(x)` / `to_float(x)` / `to_f32(x)`。
 
-## 7. 内建函数（67 个）
+### 6.5 闭包（v1.95）
+
+```quelmara
+let n = 10
+let add = fn(x: int) -> int { x + n }      // 捕获 n（创建时按值快照）
+assert(add(5) == 15)
+
+fn apply(f: closure, x: int) -> int { return f(x) }
+assert(apply(add, 1) == 11)
+
+fn make_adder(k: int) -> closure {          // 闭包逃逸：环境在堆上
+    return fn(x: int) -> int { x + k }
+}
+```
+
+| 项 | 规则 |
+|---|---|
+| 值表示 | `{code, env}` 两字聚合（与接口值 `{data, vt}` 同构），类型名 `closure` |
+| 捕获 | 自由变量按**值快照**拷进堆上环境；只支持 1 字值——`int`/`bool`/`f64`/`str` 与 `vec`/`map`/`chan` **句柄**（句柄语义：共享同一份存储） |
+| 赋值 | 体内给捕获变量赋值 = 编译期错误（快照写入传不回去，不能静默） |
+| 逃逸 | 环境在堆上：可作返回值、存 `vec[closure]`，外层帧销毁后仍可调用 |
+| 返回值 | `-> T` 非 void 时**块尾表达式即返回值**；显式 `return` 等价 |
+| 调用 | `f(args)` → `code = f[0]; env = f[1]; callr code, [env, args…]`，env 占第 1 个形参寄存器（因此最多 5 个普通形参走寄存器，其余走栈） |
+| 签名 | **同一函数内**创建的闭包带编译期签名：返回值按 `-> T` 打标记、实参按形参类型转换、聚合返回值自动开出参槽 |
+| 不捕获 | 全局函数名（`foo` 仍是裸代码地址 `int`）、顶层 `const`（解析期内联） |
+
+边界（都 fail-fast，不静默降级）：
+
+- 捕获聚合（struct/enum）、切片、定长数组、`rc[T]` → 编译期报错。捕获槽是 1 个字，
+  多字捕获需要变长环境布局。
+- **裸函数名不是闭包**：`let f: closure = foo` / `apply(foo, 1)` 编译期报错
+  （裸名是代码地址 `int`，闭包是两字聚合，按聚合读会读飞）。需要就包一层
+  `fn(x: int) -> int { return foo(x) }`。
+- 闭包不能递归（字面量没有自己的名字）；需要递归就写顶层 `fn` 再传名。
+- 跨函数传递后签名不可知（`closure` 形参、容器元素、返回值）：仍可调用，
+  但返回值按标量处理（`str`/`f64` 返回值请包一层有类型的 `fn`）。
+- `--target c` 不支持（C99 后端只做交叉验证）；`--target arm64` 走同一条 `callr` 路径。
+
+实现：每个 lambda 落成一个合成顶层函数 `__lam_N`（形参表前面多一个隐式 `__env__`），
+捕获引用降级成 `load __env__[i]`；**运行时零元数据**（没有 vtable、没有类型描述符）。
+回归 `tests/t126_closure.qma`（11 组）、负向 `tests/bad/closure_*.qma`（2 个）。
+性能见 [`06-status.md`](06-status.md) §3.4g。
+
+## 7. 内建函数（73 个）
 
 > 全部在 `tools/stage0/qlm_native.py` 的内建分派里；用户可用同名 `fn` 覆盖（分派处均有
 > `name not in self.fns_ast` 保护）。
@@ -593,24 +871,50 @@ enum 布局本就是 1+最大载荷字，零新机制）。`?` 所在函数必�
 | `pclmulqdq(d, s, imm8)` | 64×64 进位无乘法（GCM 的 GF(2^128) 乘法核心） |
 | `psrlw/psllw/psrlq/psllq/pslldq/psrldq`(d, imm8) | 字/双字/整寄存器移位 |
 | `mem_str(p, n)` | 内存转 str |
+| `cstr(s)` | str -> **NUL 结尾**的 C 字符串指针（新分配，返回 int；FFI 传 `char*` 用它，v1.87） |
+| `cstr_read(p)` | C 字符串指针 -> str（扫到首个 NUL，无上界保护，v1.87） |
 | `mem_load8/32/64(p)`、`mem_store8/64(p, v)` | 裸读写（8/32 是字节偏移，64 是槽索引 ×8） |
 | `mem_alloc(n)` / `mem_free(p)` | 裸分配/释放 |
 | `mem_xchg(p, v)` | 原子交换 |
 
 ### 7.3 并发 / 原子
 
-| 函数 | 说明 |
-|---|---|
-| `atomic_add(p, v)` / `atomic_cas(p, old, new)` / `atomic_fence()` | lock 前缀指令，返回旧值 |
-| `spin_hint()` | `pause` 指令 |
-| `now_cycle()` | `rdtsc` 周期计数 |
-| `static_word(n)` | 静态字槽（库内部用于惰性表） |
+| 函数 | x86-64 | AArch64 | 说明 |
+|---|---|---|---|
+| `atomic_add(p, v)` | `lock xadd` | `LDAXR`+`ADD`+`STLXR` 重试 | `*p += v`，**返回旧值** |
+| `atomic_cas(p, old, new)` | `lock cmpxchg` | `LDAXR`+`CMP`+`STLXR` 重试 | 相等才写，**返回旧值**（不相等不写） |
+| `mem_xchg(p, v)` | `xchg`（隐含 lock） | `LDAXR`+`STLXR` 重试 | 交换，返回旧值 |
+| `atomic_fence()` | `mfence` | `DMB ISH` | 全内存屏障 |
+| `mem_load_acq(p)` | `mov`（TSO 已含 acquire） | `LDAR` | acquire 读 |
+| `mem_store_rel(p, v)` | `mov`（TSO 已含 release） | `STLR` | release 写（解锁用这个，别用 fence） |
+| `spin_hint()` | `pause` | `YIELD` | 自旋提示（纳秒级、不切线程） |
+| `thread_yield()` | `SwitchToThread` | `sched_yield` | 让出时间片（微秒级、会切上下文） |
+| `now_cycle()` | `rdtsc` | `CNTVCT_EL0` | 单调计数器（**不保证 = 核心周期**） |
+| `static_word(n)` | — | — | 静态字槽（库内部用于惰性表） |
+
+边界（v1.86 起双后端）：
+
+- **AArch64 上没有单指令 RMW**（无 `lock` 前缀），三个读改写内建都编成 LL/SC
+  重试循环；用带 acquire/release 的 `LDAXR`/`STLXR` 变体，省掉循环外的 `DMB`。
+  `cas` 的不相等路径会 `CLREX` 放弃独占监视器。
+- **`now_cycle` 不是周期数**：A64 读的是虚拟计数器 `CNTVCT_EL0`（频率通常
+  24 MHz，与核心频率无关）。跨架构比较只能用"同一次运行内读两次取差"。
+- **`mem_store_rel` 是解锁的正确形态**：`atomic_fence()` 在 x86 是 `mfence`
+  （一次全屏障），而 x86 的普通写本来就满足 release，所以用 `mov` 就够；
+  只有 AArch64 需要真的发 `STLR`。
+- **AArch64 无线程**（`spawn`/`parfor` 未接），所以上面这些原语在 A64 上
+  只能单线程用；库层（`std/sync`）照样编译并给出正确结果（`tests/t122_syncport.qma`）。
+
+证据：`tests/t97_a64atomic.qma`（两个后端同一份语义用例）、
+`tests/t122_syncport.qma`（`std/sync` 在 A64 模拟器上执行）、
+`tests/t121_syncmpmc.qma`（x86 2 生产者 / 2 消费者压测）。
 
 ### 7.4 时间 / 文件 / 资源
 
 | 函数 | 说明 |
 |---|---|
-| `now_ns()` | 单调纳秒 |
+| `now_ns()` | 单调纳秒（墙钟时间，含等待） |
+| `cpu_ns()` | **进程累计 CPU 时间**纳秒（内核+用户态）；与 `now_ns` 的比值就是"这段时间有多少在真跑" |
 | `wall_ms()` | 墙钟 Unix epoch 毫秒 |
 | `sleep_ms(n)` | 睡眠 |
 | `read_text(path)` / `write_text(path, s)` | 文本读写 |
@@ -657,22 +961,33 @@ enum 布局本就是 1+最大载荷字，零新机制）。`?` 所在函数必�
 证据：`tests/t49_width.qma`（14 条断言）、`tests/t85_narrowstore.qma`（20 条断言，v1.40）、
 `tests/t94_slice_narrow.qma`（16 条断言，v1.56 切片别名写入）。
 
-### 8.2 `@simd`：三种形状，不是向量化器
+### 8.2 `@simd`：四种形状，不是向量化器
 
 | 形状 | 指令 | 要求 |
 |---|---|---|
 | `acc += a[i]`，`acc: int`，`a: [N]int` | SSE2 `paddq` 两路 | 循环体只有这一条语句 |
 | `acc += a[i]`，`acc: f64`，`a: [N]f64` | SSE2 `addpd` 两路 | 同上 |
 | `acc += a[i] * b[i]`，`acc: f64`，`a/b: [N]f64` | SSE2 `mulpd` 两路（v1.60） | 同上，两数组同长 |
+| `acc += a[i] * b[i]`，`acc: int`，`a/b: [N]int` | SSE2 `pshufd`×2 + `pmuludq`×3 + `paddq` 两路（v1.85） | 同上；64 位乘法由三次 32×32→64 拼出 |
 
 - 逐元素越界检查**被跳过**，调用方保证 `lo..hi ⊆ [0, len(a)]`。
 - f64 归约**改变求和顺序**，结果可能与标量版不逐位相等（2 的幂可逐位验证）。
 - 形状不匹配：函数级注解静默回落标量；语句级注解直接编译报错。
-- f64 点积已接（v1.60）：SSE2 `mulpd` 两路，求和顺序同样改变（测试值精确可表示时与标量逐位相等）。int 点积需 SSE4.1 `pmulld`（int64 无 SSE2 乘法）、AVX2 4 通道留待。
+- 点积要求两数组同长，且与累加器**同类型**（全 int 或全 f64）。混写在语句级注解下编译报错
+  （`tests/bad/simd_dot_mixed.qma`）——SIMD 段不做隐式类型转换。
+- f64 点积（v1.60）：`mulpd` 两路，求和顺序同样改变（测试值精确可表示时与标量逐位相等）。
+- int 点积（v1.85）：x86 没有 64 位整数 SIMD 乘法（`pmulld` 是 32×32 取低位、`pmuldq` 只算
+  偶数 32 位通道且截断到 32 位输入、`vpmullq` 要 AVX-512DQ），所以按
+  `a*b = a_lo*b_lo + ((a_lo*b_hi + a_hi*b_lo) << 32)` 拆成三次 `pmuludq`。
+  **低 64 位与有无符号无关**，与标量 `imul` 逐位等价（含 64 位回绕），不是近似。
+  高 32 位用 `pshufd` 取（`psrlq` 与 `pmuludq` 同抢 port 0，会把这段变成单口串行）。
 
-证据：`tests/t50_simd.qma`、`tests/t59_simdf64.qma`、`tests/t96_simddot.qma`；`bench/dot_bench.qma`（1024 f64 点积 4.6×）。
+证据：`tests/t50_simd.qma`、`tests/t59_simdf64.qma`、`tests/t96_simddot.qma`、
+`tests/t117_simdintdot.qma`；`bench/dot_bench.qma`、`bench/idot_bench.qma`（加速比见 `06-status.md`）。
 
-### 8.3 `rc[T]` 与所有权检查
+### 8.3 `rc[T]` 与所有权检查（v1.84）
+
+**引用计数句柄**
 
 ```quelmara
 struct Point { x: int, y: int }
@@ -684,29 +999,132 @@ rc_drop(c)               // count 1
 
 内存布局 `[refcount:8][payload]`；载荷仅具名 struct。
 
-所有权检查**只覆盖 rc 句柄**：use-after-drop / double-free / move-then-use 三类编译错误，
-外加泄漏警告。struct/数组/str 的别名与生命周期**不检查**，也不查数据竞争。
+**检查范围（全部编译期，运行时零成本）**
 
-证据：`tests/t51_rc.qma`、`tests/bad/own_*.qma`（必须编译失败）。
+纯 AST 遍历，不碰 IR：检查开与关的产物 PE 逐字节相同，占端到端编译 0.45–0.60%
+（证据见 `06-status.md` §3.9）。
+| # | 检查 | 结果 | 拦下的形态 |
+|---|---|---|---|
+| 1 | rc 线性 | **错误** | use-after-drop / double-drop / move-then-use |
+| 1′ | rc 泄漏 | 警告（stderr） | 函数结束时仍有活句柄 |
+| 2 | 视图生命周期（逃逸） | **错误** | 本帧栈视图从 `return` / 堆容器（`vec.push`·`vec.set`·`map.set`·`chan.send`）/ `spawn` 逃出 |
+| 3 | 视图写别名 | **错误** | 同一基址上两个**独立创建**的视图区间可能重叠、且都被写入 |
+| 4 | 跨线程 | **错误** | `spawn` 实参含 `rc[T]` 句柄（引用计数非原子）或本帧栈视图 |
 
-### 8.4 接口动态分发的边界
+"视图" = 切片 `[]T` 与 str 值（`{ptr,len}` / 长度前缀指针，都是**别名视图**，
+不像 struct/数组那样按值拷贝）。视图基址分五类：
 
-- 接口值 = `{data, vt}` 两字；`obj.m()` → `vt[slot]` 取函数指针 → `callr`。
-- 静态可判定时直接调用，零开销。
-- 装箱内存不回收（无 rc/drop）；`vec[Shape]` 异构容器可用。
-- 接口与 `impl` 必须**同源文件**。
-- AArch64 发射层未接 vtable → 编译期明确报错。
-- C 后端不支持 `interface`/`impl`。
+| 基址类别 | 来源 | 能否逃出本帧 |
+|---|---|---|
+| 本帧栈 | 局部定长数组、局部 struct 的数组字段、**值语义形参**（`[N]T` / struct 形参是拷贝） | ❌ 逃逸即报错 |
+| 堆 | vec 缓冲、`mem_alloc`、`read_text`、拼接 / `substr` / `to_str` | ✅ |
+| 静态 | 字符串字面量 | ✅ |
+| 调用方所有 | `[]T` / `str` 形参 | ✅（生命周期由调用方保证） |
+| 未知 | 函数返回值 | ✅（被调方自己的检查已拦住"返回本帧视图"） |
+
+**写别名的口径**：切片是**显式零拷贝共享**（§3），所以规则不是 Rust 的
+"独占借用"，而是：
+
+- `let t = s`（拷贝视图）算**同一别名组**，两处写入不报——共享本来就是语义；
+- 两次**独立创建**（`slice_of(a)` 与 `a[2..6]`）且区间可能重叠、又都被写入 → 报错；
+- 能证不重叠就放行：常量区间按 `[lo,hi)` 判交；变量界按"同一界表达式"
+  判首尾相接（`a[0..mid]` 与 `a[mid..8]`）。
+
+**如实登记的不查项**（不对外宣称"Rust 那套借用检查"）：
+
+- 多线程同时写同一堆内存的**数据竞争**（只拦 rc 句柄与栈视图跨线程）；
+- `mem_str(p, n)` 裸指针的来源（无静态信息）；
+- **跨函数别名**：被调方写 `[]T` 形参，调用方看不到（每函数独立检查）；
+- str 的别名本身：str 不可变，且只能来自字面量 / 堆 / 形参 / `mem_str`，
+  没有指向栈的路径；
+- `arena { }` 内的裸指针视图（同样只有 `mem_str` 一条路）。
+
+证据：`tests/t51_rc.qma`、`tests/t116_ownview.qma`（正例：8 类合法形态）、
+`tests/bad/own_use_after_drop.qma`、`tests/bad/own_move_use.qma`、
+`tests/bad/own_double_drop.qma`、`tests/bad/own_slice_escape.qma`、
+`tests/bad/own_struct_escape.qma`、`tests/bad/own_alias_write.qma`、
+`tests/bad/own_spawn_rc.qma`、`tests/bad/own_nested_match.qma`（负向，必须编译失败）。
+
+### 8.4 接口动态分发（v1.97 收口）
+
+```quelmara
+interface Shape {
+    fn area(self) -> int
+}
+struct Sq { n: int }
+impl Sq : Shape {
+    fn area(s: Sq) -> int { return s.n * s.n }
+}
+fn area_of(s: Shape) -> int { return s.area() }   // 接口形参：调用点装箱
+let s: Shape = Sq { n: 3 }                        // 接口变量：块尾释放
+print(area_of(Sq { n: 4 }).to_str())              // 静态可判定处直接调用
+```
+
+**值表示与派发**
+
+- 接口值 = `{data, vt}` 两字：`data` 指向堆上装箱的 payload，`vt` 是代码段里的
+  vtable 地址；`obj.m(...)` → `vt[slot]` 取函数指针 → 间接调用（x86-64 `call`，
+  AArch64 `BLR`）。槽位顺序 = 接口里方法的**声明顺序**。
+- 静态可判定（`let q = Sq{..}` 后调 `q.area()`）直接调用具体方法，零开销。
+- payload 宽度按 `agg_size` 取，struct 与 **enum** 都能装箱（enum 装箱 v1.65）。
+
+**装箱块的所有权（v1.83 起带引用计数）**
+
+块布局 `[rc:8][payload_bytes:8][payload...]`，`data` 指向 payload，所以 impl 方法的
+`self` 仍是普通聚合指针，方法体与 ABI 零改动。释放规则：
+
+| 场景 | 行为 |
+|---|---|
+| `let s: Shape = 具体值`（新建箱） | 所有权转给槽位；块尾 / 提前 `return` / `break`·`continue` 跳出时 `__iface_release` |
+| `let b: Shape = a`（复制） | `__iface_retain`（+1），两个槽各释放一次 |
+| `a = 新值`（赋值替换） | 先释放旧箱，再接管新箱 |
+| 接口形参（`area_of(Sq{..})`） | 调用点装箱，语句结束释放 |
+| 接口返回值 | 所有权转给调用方，调用方按上面三条处理 |
+| 进容器元素 / struct 字段 / map 值 | `retain`（容器没有 Drop，元素随容器走） |
+| 来源不可判定（`vec.get` / 字段读 / 形参） | 按**借用**处理：不增计数也不释放——计数只会偏大，不会提前回收 |
+
+计数归零走 `__free` 的尺寸类回收，所以热点循环不再线性涨堆：
+`tests/iface_lowheap`（1 MB 上限 / 19 MB 装箱量）与 `tests/iface_lowheap_a64`
+（A64 模拟器，1 MB 上限 / 1.14 MB 装箱 + 900 KB 探针）都是这条的回归。
+
+**跨接口同名方法与跨文件**
+
+- 同一类型在两个接口里有同名方法：impl 按接口名二次 mangling（`Type__Iface__m`）
+  共存，vtable 各走各的槽位；此时**静态调用** `t.m()` 有歧义 → 编译报错并提示先
+  转成接口值（`let s: Show = t`）。证据：`tests/t116_iface_multi.qma`、
+  `tests/bad/iface_dup_method.qma`。
+- 接口可以 `pub`，`impl` 写在**别的文件**里（v1.83）：接口名进跨文件种子，
+  接口值的 `{data, vt}` 布局随之可见。种子是**扁平合并**的一份声明，因此
+  同名同签名重复声明是幂等的，签名不一致报"接口冲突"。
+- v1.88 起，宽松第一遍扫描里"凭空登记"的接口占位**不进种子**——拼错接口名
+  （`impl R : Shappe`）会报"未声明的接口"，不会被当成空接口静默接受。
+  证据：`fixtures/ifacexfile/`（正向，含本侧重复声明）、
+  `tests/bad/iface_xfile_conflict/`、`tests/bad/iface_xfile_undecl/`（负向）。
+
+**平台与边界**
+
+- AArch64 发射层已接 vtable（v1.97）：代码段尾部一张 8 字节槽函数指针表，
+  收尾时按函数标签回填绝对地址；执行级回归 `tests/a64_iface_test.py`（7 个用例）。
+- C 后端不支持 `interface`/`impl`（fail-fast）。
+- 仍**不做**：装箱释放不调用 payload 的 `impl T : Drop`（`drop_table` 按具体类型
+  挂载，接口槽的静态类型是接口名）；接口值没有"弱引用/循环引用"处理。
 
 ### 8.5 并发模型
 
 | 设施 | 实现 | 边界 |
 |---|---|---|
-| `spawn` / `join` | Linux raw `clone()` + `wait4()`；Windows `CreateThread` | 工作线程栈 512 KB |
+| `spawn` / `join` | Linux raw `clone()` + `wait4()`；Windows `CreateThread` | 工作线程栈 512 KB；**AArch64 未接** |
 | `parfor` | 按核数切块 + 共享内存归约 | 归约算子只认 `+=` |
-| `chan[T]` | 有界 MPMC + 自旋锁 | `select` 声明序优先，无随机化 |
+| `chan[T]` | 有界 MPMC + 自旋锁（抢不到就 `thread_yield`） | `select` 声明序优先，无随机化；AArch64 未接 |
 | `arena { }` | bump 指针回卷 | 整块回收，无单对象释放 |
-| `atomic_*` | `lock xadd` / `lock cmpxchg` | AArch64 未接 |
+| `atomic_*` / `mem_xchg` | x86 `lock` 前缀；A64 `LDAXR`/`STLXR` 重试 | 双后端已通（§7.3） |
+| `mem_load_acq` / `mem_store_rel` | x86 普通 `mov`（TSO）；A64 `LDAR`/`STLR` | 双后端已通 |
+| `std/sync` | mutex / 栈 / WaitGroup（纯 Quelmara） | 栈 pop 取每栈消费者锁（消 ABA）；`wg_wait` 三段退避，非 futex |
+
+**chan 为什么不先自旋抢锁**（v1.98 实测）：把"抢不到就让出"改成"先 pause 32 次
+再让出"，双线程往返与多生产者争用两个场景都**没有可复现的收益**（区间大幅重叠）。
+自旋只对"持锁者一定在跑"成立，本机核数少于生产者数时这个前提不成立。
+测不出好处就不留这份复杂度，所以保留"抢不到就让出"。数字见 `06-status.md` §3.5c。
 
 ### 8.6 `defer`：块级清理（v1.48）
 
@@ -735,6 +1153,61 @@ fn use(log: vec[int]) {
 路径会误跑清理。`break`/`continue` 只跑到循环体帧，函数帧留到 `return`/函数尾。
 
 证据：`tests/t91_defer.qma`（13 组断言）、`tests/bad/defer_let.qma`（必须编译失败）。
+
+### 8.7 `Drop`：作用域退出析构（v1.93）
+
+`Drop` 是**内建接口**，不用自己声明。给类型写一个 `drop` 就把它变成"析构类型"：
+
+```quelmara
+struct Conn { fd: int }
+
+impl Conn : Drop {
+    fn drop(c: Conn) {
+        if c.fd >= 0 {          // 幂等：写完置空，重复析构不再动手
+            tcp_close(c.fd)
+            c.fd = -1
+        }
+    }
+}
+
+fn use() {
+    let fd = tcp_listen(8080)   // 先落局部变量：字面量里直接调函数是 §7.9 的已知缺陷
+    let c = Conn { fd: fd }
+    // ... 用 c
+}                               // 退出：自动 Conn__drop(c)，不用写 defer
+```
+
+| 项 | 语义 |
+|---|---|
+| 声明 | `impl T : Drop { fn drop(t: T) { ... } }`——恰好一个接收者、无返回值；多参/有返回值编译期报错 |
+| 生效对象 | **`let` 绑定的聚合变量**（struct / enum）；泛型 struct 的 `impl Box[T] : Drop` 按实例展开 |
+| 触发点 | 块正常结束、`return`、`break`/`continue` 跳出该块（与 `defer` 同一批退出点） |
+| 顺序 | 同块内**逆序**（后绑定的先析构）；内层块先于外层；**在 `defer` 之后**跑 |
+| 接收者 | 直接拿到**对象地址**（不经值拷贝），所以 `c.fd = -1` 写在原对象上 |
+| 移动 | `let b = a` / `return a` 是**移动**：析构责任随值转移，`a` 不再析构 |
+| 覆盖赋值 | `a = T { ... }` 先析构被覆盖的旧值，再装新值 |
+| 不析构 | **形参**、容器元素（`vec`/`map`/`chan`）、struct 字段、临时值——宁可泄漏，不可悬垂 |
+| 不跑 | `exit(code)` 直接结束进程（与 C++ `exit` 同）；C 后端整体不支持（fail-fast） |
+
+**为什么是"按绑定"而不是"按值唯一所有权"**：本语言的 struct 是值拷贝语义，
+`let b = a` 之外还有"传参 / 存进容器 / 读字段"三种拷贝路径。要让析构跟着**值**走，
+需要完整的移动语义与借用检查（那是另一件事，见 §8.3 的口径）。当前规则选了
+"只泄漏、不双重释放"这一侧：
+
+- `let b = a`、`return a` 这两条**最常见**的转移路径已经按移动处理；
+- 传参 / 存容器 / 字段读出的副本**不析构**——被调方或容器持有的是副本，析构它们
+  可能破坏调用方还在用的句柄；
+- 因此**需要唯一所有权的资源用 `rc[T]`**（§7.6，线性检查会盯住它），
+  `Drop` 适合"句柄关一次"这类幂等清理（fd / 锁 / 缓冲）。
+
+实现：`drop_table()` 在**全局 DCE 之前**收集 `impl T : Drop`（析构是隐式调用，
+AST 里没有 `call` 节点，DCE 之后算会把析构函数当死代码删掉），并把它钉成 DCE 根；
+降级时 `block()` 维护与 `defer_stack` 同进同出的 `drop_stack`，退出点逆序
+`emit_drop()`——**直接 `emit("call", ...)`**，不经 `lower_call` 的聚合实参拷贝。
+
+证据：`tests/t119_drop.qma`（12 组断言：逆序 / 嵌套块 / return / break / continue /
+defer 顺序 / 两种移动 / 覆盖赋值 / 枚举析构 / 析构体写字段 / 形参不析构）、
+`tests/bad/drop_arity.qma`、`tests/bad/drop_dupe.qma`（必须编译失败）。
 
 ## 9. 已知陷阱（写代码前先看）
 
