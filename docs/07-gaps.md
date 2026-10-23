@@ -15,19 +15,19 @@
 | `map[K]V` | ✅ v1.41 | V 支持 int/bool/str + 具名 struct/enum（值槽按 agg 布局 N 字，set/get 按值拷入拷出）；**键仍限标量**；复合容器（vec/map）作值不做（需 mapinner 标签链） | 配置表/符号表不再拆平行 map |
 | `vec[T]` | ✅ v1.37 | 标量/str/具名聚合/嵌套 vec（任意深度）/map 句柄全支持 | 元素即用即取，无扁平化成本 |
 | struct 内嵌套聚合 | ✅ v1.39 | 字段可装 vec/map/chan/slice/struct——vec/map/chan 按句柄 1 槽、slice 按 2 槽视图；方法/下标/派发全部可用 | 无（句柄语义即设计） |
-| 函数值 | ✅ v1.42 | `callr` 8 参 + struct/slice 实参（x86-64 第 7 参起走栈传参；A64 用满 X0-X7，>8 fail-fast）；**无捕获**（见下行"闭包 / 捕获"）；聚合返回值的目标不可间接调用 | 回调带聚合载荷可行；闭包是独立条目 |
-| 所有权检查 | 🟡 | **只查 `rc[T]` 句柄**；struct/数组/str 的别名与生命周期不查，并发竞争不查 | 不能对外宣称"Rust 那套借用检查" |
-| `interface` | 🟡 | 装箱不释放；同类型跨接口同名方法报错；接口与 impl 必须同源文件；AArch64 未接 vtable（enum 装箱 v1.65 起可用） | 热点循环装箱会涨堆 |
+| 函数值 | ✅ v1.42 | `callr` 8 参 + struct/slice 实参（x86-64 第 7 参起走栈传参；A64 用满 X0-X7，>8 fail-fast）；裸函数名**无捕获**（捕获用闭包，见下行）；聚合返回值的目标不可间接调用 | 回调带聚合载荷可行；闭包是独立条目（v1.95 已绿） |
+| 所有权检查 | ✅ v1.84 | rc 线性（use-after-drop / double-drop / move-then-use + 泄漏警告）+ **视图生命周期**（本帧栈视图从 return / 堆容器 / spawn 逃逸即报错，含结构体字段的污染传播）+ **写别名**（同基址独立视图区间可能重叠且都被写）+ **跨线程**（rc 句柄、栈视图进 spawn）。不查：多线程写同一堆内存的**数据竞争**、`mem_str` 裸指针来源、跨函数别名（被调方写 `[]T` 形参）。边界与口径见 `02-language.md` §8.3 | 切片/结构体字段的生命周期错误编译期拦下；仍**不是**"Rust 那套借用检查"（没有独占借用，切片零拷贝共享是显式语义） |
+| `interface` | ✅ v1.97 | **原四项边界全清**：① **装箱带引用计数**（v1.83，块布局 `[rc][字节数][payload]`；块尾 / 提前 `return` / `break`·`continue` / 赋值替换 / 容器元素各走各的 retain·release，1 MB 堆上限下跑完 19 MB 装箱量）；② **同类型跨接口同名方法共存**（按接口名二次 mangling `Type__Iface__m`，两套槽位各走各的；静态调用 `t.m()` 报歧义并指引转接口值）；③ **接口与 impl 不必同源文件**（`pub interface` + 跨文件种子；同名同签名重复声明幂等，签名不一致报冲突，v1.88 起宽松占位不再冒充声明）；④ **AArch64 vtable 已接**（v1.97，代码段尾部一张 8 字节槽函数指针表 + `BLR` 派发，模拟器执行级 7 用例）。边界：接口值的静态类型是接口名，`impl T : Drop` 不会在装箱释放时被调用（`drop_table` 按具体类型挂载，v1.86 那条线）；热点循环每次装箱仍有 ~20 ns 分配成本（见 `06-status.md` §3.4j） | 热点循环装箱不再涨堆；每轮装箱约 20 ns、vtable 派发比静态调用慢约 0.6 ns |
 | 错误处理 | ✅ v1.38 | result/option 载荷支持具名 struct/enum——库层可把 errno+上下文装入 Err（std 库尚未批量改造为富错误，属标准库工作） | 错误对象成为可能 |
-| 模块系统 | 🟡 | **`pub` 可见性 ✅ v1.43** + **限定语法 ✅ v1.44**（`lib.fn()` / `lib.Enum.Variant` / 限定模式——头段须匹配本文件 import，指向 + pub 双重校验）；仍无**跨模块同名声明**（放开需 per-module mangling）、无版本 | 调用点自带来源信息；第三方库仍靠前缀约定共存 |
+| 模块系统 | ✅ v1.99 | 四件齐：① **`pub` 可见性**（v1.43）；② **限定语法**（v1.44，`lib.fn()` / `lib.Enum.Variant` / 限定模式）；③ **跨模块同名声明**（v1.99，per-module mangling：只在真重名时给导入方加 `<模块>__` 前缀，主文件保留原名；未限定引用按"本文件 > 唯一外部 > 歧义报错"解析；同名类型的方法与派生函数跟着换前缀）；④ **模块版本**（v1.99，`module util "1.2.3"` 声明 + `import util ">=1.2"` 要求，同 major 且 >=，不做 semver 求解——那是 qpm 的活）。边界：const 在解析期内联不参与 mangling（同名不同值仍报错）；同名 interface 视为同一份契约（签名一致即幂等）；限定 struct 字面量仍不做（用 pub 工厂函数） | 库层不用再靠 `http_`/`ws_` 前缀避免撞名；第三方库可以同名共存并按模块限定调用；导入方能声明"我要的版本" |
 | 整数宽度 | ✅ v1.40/v1.56 | **语义全覆盖**：窄值在所有存储点截断（let / 形参 / 返回值 / 赋值 / struct 字段 / enum 载荷 / vec 元素 / 定长数组 / **切片别名写入**）；表达式内部按 C 提升不截断。`vec[u8]` 槽仍 8 字节属**内存打包**，已移到 §5 性能专项 | 不用再自己 mask；二进制格式读写窄值安全 |
-| `@simd` | 🟡 | 归约两种形状（int / f64）+ **f64 点积** `a[i]*b[i]`（v1.60，SSE2 `mulpd` 两路，实测 3.5×）；int 点积需 SSE4.1 `pmulld`、AVX2 4 通道留待 | 不是向量化器 |
-| 并发 | 🟡 | `chan` 单消费者栈 pop 有 ABA；WaitGroup 自旋等待；AArch64 未接 atomic | 高竞争场景要自己加保护 |
+| `@simd` | ✅ v1.85 | **四种形状全接**：int 归约（`paddq`）/ f64 归约（`addpd`）/ **f64 点积** `a[i]*b[i]`（v1.60，`mulpd` 两路）/ **int 点积**（v1.85）。int 点积没有 `pmulld` 可用（x86 无 64 位整数 SIMD 乘法），改用 3×`pmuludq` 拼 64×64→低 64，与标量 `imul` 逐位等价（含回绕）。点积要求两数组与累加器同类型，混写编译期报错。**仍不是向量化器**：只认这四种语句形状，其余循环原样走标量；4 通道与 32 位元素特化是性能问题，已转 §5 | 归约/点积不用手写；通用循环自动向量化仍没有 |
+| 并发 | ✅ v1.98 | **原子原语双后端**（x86 `lock` 前缀 / A64 `LDAXR`+`STLXR` 重试）：`atomic_add`·`atomic_cas`·`mem_xchg`·`atomic_fence`·`now_cycle` 都能在 A64 上发射并执行；新增 `mem_load_acq`/`mem_store_rel`（x86 零成本 mov、A64 LDAR/STLR）、`thread_yield()`、`cpu_ns()`。**栈 pop 的 ABA 结构性消除**：pop 先取每栈消费者锁再 CAS head，正确性不再依赖"节点地址永不复用"这条隐含前提（单消费者走 `stack_pop_single` 快路径）。**WaitGroup 不再烧核**：三段退避（64 次 `pause` → 1024 次让出 → 1 ms 睡眠）。边界：A64 仍无线程（`spawn`/`parfor`），那里的并发原语只能单线程用；`wg_wait` 不是 futex park，长等待唤醒粒度 = 一个 `sleep_ms(1)`（本机实测见 `06-status.md` §3.5b） | 高竞争场景不必再加保护；要更低唤醒延迟仍需 futex/WaitOnAddress（见 §5） |
 | 编译期求值 | ✅ v1.58 | `const` 右值：整型算术 + const 引用 + **const fn 调用**；`const fn` 支持 int/bool 形参与返回值、let/赋值/if/while/return、算术/比较/逻辑/位运算、递归（≤64 层），按有符号 64 位回卷（与运行时逐位一致）。仍无：str/浮点求值、泛型 const fn、跨文件 const fn 种子 | 常量表/尺寸计算/位掩码可在编译期算完，且与运行时同值 |
-| 闭包 / 捕获 | ❌ | — | 只能传函数名 |
-| FFI（自研后端） | ❌ | 无动态链接器；`@extern` 只有 C 后端原型 | 无法调用系统库 |
-| `defer` / RAII / `Drop` | 🟡 v1.48 | **`defer` 语句 ✅**：块级作用域、LIFO、执行到才登记（`break` 早于 defer 的路径不跑）、取退出时的值；形态限表达式/赋值（`defer let` 编译期拒绝）；C 后端不支持（fail-fast）。仍无 `Drop`/析构——清理必须显式写 | fd/锁/缓冲释放可写清理；资源生命周期仍靠约定 |
-| 宏 / 反射 | 🟡 v1.77 | **属性宏 `@derive(Json, Eq, Show)` ✅**：按字段表生成编解码 / 逐字段等价 / 展示文本，产物是普通函数（无运行时元数据、无动态派发）；**编译期反射 `refl_*[T](i)` ✅**：字段数/名/类型、枚举变体数/名/载荷数，解析期折叠成字面量。仍无：通用 token 宏（`macro` 声明）、enum 的派生、`f64` 字段（§7.10）、运行时反射（按下标遍历字段做不到，下标必须编译期常量） | 序列化不再手抄字段表；聚合可按值判等（原生 `==` 仍是地址比较，§7.6） |
+| 闭包 / 捕获 | ✅ v1.95 | 语法 `fn(x: int) -> int { ... }`（表达式位置）；值 = `{code, env}` 两字聚合；创建时按值捕获**1 字值**（int/bool/f64/str + vec/map/chan 句柄）；环境在堆上可逃逸（返回 / 存 `vec[closure]`）；同一函数内创建的闭包带编译期签名（返回值打标记、实参转换、聚合返回值开出参槽）。边界：捕获聚合/切片/数组/rc、体内写捕获变量、裸函数名当闭包传——三者编译期拒绝；递归与跨函数签名不支持（后者退回"按标量处理"）；C 后端 fail-fast | 回调不再需要把上下文塞进全局或结构体；`std` 的回调式 API 可以改成带捕获的写法 |
+| FFI（自研后端） | ✅ v1.87 | **`@ffi("dll"[, "Sym"])`**：任意 DLL + 符号名直接进 PE 导入表，Win64 寄存器类（整数 `RCX/RDX/R8/R9`、浮点 `XMM0-3` **独立计数**）+ 第 5+ 个同类实参落栈 + `cstr`/`cstr_read` 字符串编组；返回值 `RAX`/`XMM0`，`bool` 按 32 位 BOOL 零扩展。边界：**仅 Windows PE**（ELF 后端是静态 ET_EXEC，无 `PT_INTERP`，编译期 fail-fast）；无变参（`printf` 族的 `AL` 约定）；无按值结构体；无回调 thunk（自研 ABI ≠ Win64，函数地址传给 `EnumWindows` 会被错位读参）；DLL/符号名写错是**加载期**错误 | user32/ntdll/ucrtbase/第三方 DLL 都能直接调；回调与变参仍需编译器侧改造 |
+| `defer` / RAII / `Drop` | ✅ v1.93 | **`defer` 语句 ✅ v1.48**：块级作用域、LIFO、执行到才登记、取退出时的值；形态限表达式/赋值；C 后端 fail-fast。**`Drop` ✅ v1.93**：`impl T : Drop { fn drop(t: T) }`（内建接口，不用声明）→ `let` 绑定的聚合变量在块尾 / `return` / `break` / `continue` **逆序**析构，跑在 `defer` 之后，析构体收到**原对象地址**（`c.fd = -1` 落在原对象上）；`let b = a` 与 `return a` 按移动处理（不双重析构）。边界：**按绑定**析构——形参 / 容器元素 / 字段副本不析构（只泄漏不悬垂，要唯一所有权用 `rc[T]`）；无字段 drop glue；`exit()` 不跑析构；C 后端不支持 | 资源生命周期从"约定"变成"语法"：fd/锁/缓冲在作用域退出自动释放 |
+| 宏 / 反射 | ✅ v1.96 | **三件套齐**：① 属性宏 `@derive(Json, Eq, Show)` 作用于 **struct 和 enum**（enum 的 JSON 是 `{"$v":"变体", 载荷...}`，见 `02-language.md` §4.8.1）；② **通用 token 宏** `macro 名字(形参) { 记号 }`——语法分析前按记号替换，能生成声明 / 表达式 / 注解本身；③ **反射** `refl_*[T](i)`：常量下标折叠成字面量，**运行时下标改写成按需生成的 if 链**（能写"遍历字段"的循环）。字段类型：int 族 / bool / str / **f64** / 本文件 struct·enum / vec[这些]。边界：泛型 struct·enum 模板不能直接派生（先实例化）、`f32` 字段不支持、宏无卫生性且不能拼接记号、运行时反射是 O(n) 分支不是 O(1) 表、反射不能读字段值 | 序列化 / 判等 / 展示不用手抄字段表；聚合可按值判等（原生 `==` 仍是地址比较，§7.6） |
 | 字符串插值 / `format` | ✅ v1.61 | **插值字符串 ✅**（`f"n={n}"`：int/bool/f64/str，段内任意表达式，`{{`/`}}` 转义，单次分配；比手写 `+` 链快约 10%）；`format(fmt, ...)` 变参仍无——插值已覆盖该用途 | 拼接不再冗长；`+` 链已被 v1.3 融合成单次分配，不存在 O(n²) |
 | `switch` | — | 用 `match` 代替（设计选择） | — |
 
@@ -50,7 +50,7 @@
 | 数学 | ✅ v1.47：`exp`/`log`/`log2`/`log10`/`pow`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`hypot` + 常数助手（Cody–Waite 双字归约；sin/cos 误差随 |x|·1.1e-16 增长，多字 π 归约未做） | 图形、统计、复利 |
 | 哈希 | ✅ v1.35：SHA-1 / SHA-256 / FNV-1a 32/64 / MD5（仅兼容用途）；✅ v1.53：**SHA-512 / SHA-384 + HMAC-SHA512** + **CRC-64/XZ**（FIPS 180-4 / RFC 4231 / ECMA-182 向量全过） | ✅ v1.55：**BLAKE2b**（RFC 7693，含 keyed 与变长输出）；仍无 SHA-512/224、SHA-3 |
 | 数据结构 | ✅ v1.29/30：RingBuf / MinHeap / **set[int]·set[str]** / **deque** / **LRU**（自建开放寻址表 + 双向链表，单句柄） | LRU 的 key 只有 int（字符串先 `fnv1a64`）；无 TTL / 无容量自适应 |
-| 持久化 | 无 SQLite / KV / 序列化格式（`std/serialize` 只是编码原语） | 任何要存数据的应用 |
+| 持久化 | ✅ v1.102：**`std/fs`**（open / read / write / seek / size / sync / close / rename，`@ffi` 直调 kernel32）+ **`std/kv`**（追加日志 + 内存索引：put / get / del / has / len / compact / sync，重开重放，**撕裂尾与垃圾尾都能恢复**，压缩把覆盖写后的日志压回一半）。边界：**Windows PE**（ELF 后端无动态链接器，`@ffi` 编译期 fail-fast）；值全量驻留内存（内存 ≈ 数据集大小）；无 SQL / 事务 / 并发写保护；写路径被文件 I/O 支配（约 26 µs/条）；**语言内建仍只有元数据操作**（`file_exists`/`file_size`/`fs_mkdir`/`fs_remove`），读写走 `@ffi` 是当前方案，内建 `file_*` 要同时改 x86 与 A64 两个发射层，未做 | 配置 / 会话 / 计数 / 缓存元数据都能落盘；SQL 与大于内存的数据集还要 mmap 视图 + 页缓存 |
 | 正则 | 无 | 文本清洗、路由匹配 |
 | CLI | ✅ v1.29：`std/cli`（`--k=v` / `--k v` / `-k v` / 布尔 / 位置参数）；无子命令与自动 usage | 子命令要自己 switch |
 | 国际化 | 无 locale、无 Unicode 分类、无大小写折叠 | 多语言输出 |
@@ -60,13 +60,13 @@
 | 项 | 状态 | 缺什么 |
 |---|---|---|
 | 调试器 | ✅ v1.79 / v1.80 | **两种调试信息一份数据源**：`.qlmdbg`（自研 JSON，带 `bind`/`last` 活跃区间，调试器读它）+ **标准 DWARF v4**（`.debug_abbrev`/`info`/`line`/`loc`，外部工具读它，地址用 RVA）。`quelmara debug` 源码断点（`break 文件:行` / `break 函数`）/ `step` / `next` / `finish` / `print a.b.c` / `locals` / `bt` / `list`（Windows 调试 API，int3 软断点 + RBP 帧链，零外部依赖）。边界：仅 Windows PE（ELF 后端未接节写出）；**不发 PDB**（无 MSVC 工具链可验证）；库函数帧无行号（`<library>`）；调试构建默认不内联（否则源码断点静默不命中）；变量只在"最后一次使用之前"可见；`print` 限变量与字段路径。测试 `tests/debugger_test.py` + `tests/dbg_test.py` + `tests/dwarf_test.py` |
-| LSP / 补全 | ❌ | 无语义索引、跳转、重命名 |
-| 文档生成 | ❌ | 无 doc comment 语法 |
-| 库归档 `.qla` | 🚧 | 无目标文件格式 → 无法增量编译、无法分发二进制库 |
-| 包管理 | 🟡 | 有 qpm（path + git + **semver 区间选 tag + 锁**，v1.45）；无 registry、发布流程、传递依赖冲突合并 |
-| 增量 / 并行编译 | ❌ | 每次全量 |
-| 性能回归门禁 | 🟡 | `bench --threshold` 可用，但未进 CI |
-| 覆盖率 / fuzz | ❌ | — |
+| LSP / 补全 | ✅ v1.91 | **语义索引 + 补全/跳转/引用/重命名/悬停/大纲/全局符号**（`quelmara lsp`，stdio LSP 3.17 子集，零依赖）。索引是**容错**的（不经过编译器前端，一个语法错误不会让整篇符号消失），词法另有位置信息并与 `qlm.tokenize` 全仓库对拍。边界见 `05-toolchain.md` §1.4：**诊断只到词法/结构层**（不做类型检查）、`didChange` 整篇重建（无增量索引）、成员解析靠语法推断（推不出就退化为本文件成员）、重命名只改解析得到的引用。编辑器里从此能补全、能跳转、能改名 |
+| 文档生成 | ✅ v1.92 | **`///` 是语言层语法**（`02-language.md` §2.4）：紧贴顶层声明、`//!` 模块文档、空行即脱离、`////` 不算、缩进不收；前端按行挂到声明上（`f["doc"]` / `type_docs` / `module_doc`），**不进记号流**（lexdiff/parsediff 契约不变）。工具链 `quelmara doc`：Markdown/JSON、`--check` 漂移、`--missing` 覆盖门禁；std 全库 387 个公开声明 100% 覆盖，`03-stdlib.md` 与源码同源。边界：只收顶层声明（`impl` 内方法文档未做）、不做交叉引用/链接校验、不渲染 Markdown、全量不增量 | API 文档从源码长出来；门禁拦『写了文档却挂不上』与『声明没文档』 |
+| 库归档 `.qla` | 🚧 | 无目标文件格式 → 无法**函数级**增量编译（单元级增量已由 v1.100 的缓存提供，见上一行）、无法分发二进制库 |
+| 包管理 | ✅ v1.99 | **qpm 全链路**：三种来源（path / git / **registry**）+ **sparse 索引**（每包一个 JSON，解析不下载包体）+ **确定性 `.qpk`**（同源码同字节，sha256 即身份）+ `publish` / `yank`（同版本不可覆盖，撤回不删历史）+ **传递依赖**（读每个包自己的 `[deps]`，同名区间取交集选最大版本，git 归一化 rev，跨来源直接报冲突，环可安装并提示）+ 锁 v2（`--locked` 可复现、`verify` 锁/清单/磁盘三方校验、`tree`）。边界：**一个项目只从一个 registry 解析**、无签名/公信链、无多租户权限（只有 Bearer token）、无构建钩子、无增量（每次重解析重落地）。细节见 `05-toolchain.md` §4 |
+| 增量 / 并行编译 | ✅ v1.100 | **单元级增量**（内容寻址缓存：编译器指纹 + 主文件 + **精确 import 闭包** + 源根目录清单 + `QLM_*` 环境快照，任一不符即重编；产物 sha256 校验，半截/损坏的条目不会交出去）+ **单元级并行**（`build -j` 多源、`test -j` 多文件，进程池，输出顺序与串行一致）。边界：**不是目标文件格式**——没有 `.qla` 就没有函数级增量，也做不到「只重编变了的模块再链接」；单文件内部不并行；并行收益受进程创建成本限制。见 `05-toolchain.md` §1.7、实测 `06-status.md` §3.14、回归 `tests/cache_test.py` |
+| 性能回归门禁 | ✅ v1.88 | **`tools/dev/bench_gate.py`**：`bench/gate_bench.qma`（**Quelmara 写**，输出 `QLMBENCH`/`QLMCAL`/`QLMDIGEST`）+ 校准归一化（换机器仍可比）+ 噪声闸 + 双模式（本机基线 `--check` / CI 同机交错 A/B `--ab REV`）+ 校验和与体积硬判；CI 独立 `perf` job。边界：基线按 CPU 型号分 key（换机器 SKIP，不误判）；不做统计显著性检验（min-of-N + 离散度）；不是微架构计数器（无 cycles / 分支失败率）；`quelmara bench` 的进程墙钟口径保留，两者分工见 `05-toolchain.md` §1.3 |
+| 覆盖率 / fuzz | ✅ v1.83 | **行 + 分支覆盖**：`quelmara cov` = 调试器逐行/逐 `jcc` 断点采集 + `tools/qlm_cov.qma`（**用 Quelmara 写**，自己读 PE 节表 + `.qlmdbg` JSON）汇总；行/分支/函数/文件四级，`--min`/`--min-branch` 双门禁，`--append` 多次运行累加。分支判定用 EFLAGS 不单步；只收"目标为语句入口"的源码级分支（`assert` 失败块/越界 panic 块/`args()` 展开不计入）。**fuzz ✅**：`quelmara fuzz` = `tools/qlm_fuzz.qma`（Quelmara 写的变异器，确定性 LCG）+ `qlm_fuzz.py` 判定（built/rejected/deep/bug/slow 五分类，`bug` 退出码 1）。边界：不采条件级 MC/DC（`&&` 子条件按各自 `jcc` 自然计数）；采集靠断点，大文件线性慢；fuzz 默认只跑前端；非 UTF-8 源文件抛 `UnicodeDecodeError`（§7.11） |
 | 对拍脚本耗时 | ✅ | `irdiff` 并行后 60 s（原 5 min 41 s）；`emitdiff` 10 s 内 |
 | `version` 口径 | ✅ | `tools/stage0/qlm_cli.py` 的 `VERSION` 与最新 `docs/versions/vX.Y/` 一致（v1.24 起 1.24.0，由 `check_docs.py` 校验） |
 
@@ -77,7 +77,7 @@
 | Windows PE32+ | ✅ 主平台 | — |
 | Linux ELF64 | ✅ 构建级（CI 执行） | 本机无 gcc/WSL |
 | Linux io_uring | ✅ | 5.1+ 内核 |
-| AArch64 | 🟡 模拟器执行级 | 需补 chan/map/spawn/vtable/atomic/SHA |
+| AArch64 | 🟡 模拟器执行级 | 需补 chan/map/spawn/SHA（**atomic/acquire-release 已接**，v1.98）；~~vtable~~ ✅ v1.97（`tests/a64_iface_test.py` 执行级 7 用例） |
 | macOS Mach-O + kqueue | ❌ | 新后端 + 新事件层 |
 | wasm32/64 | ❌ | 新后端 + 线性内存模型 |
 | Android | ❌ | 依赖 AArch64 + NDK 链路 |
@@ -101,7 +101,9 @@
 | ~~JSON memchr 化~~ | ❌ **已验证不可行**（v1.35）：1.35 MB 负载 29 ms → 62 ms（**慢 2 倍**） | JSON 字符串普遍 <32 字节，SWAR 每次调用的固定开销（参数搬运 + 调用 + 三次独立扫描）远大于逐字节循环（循环体 4 条指令）。结论：**8 字节扫描只在长串且单字节目标时划算** |
 | ~~gzip 编码提速~~ | ✅ v1.30 已做：**25–27 ms → 16 ms（1.6×）**，输出字节不变 | 走的是「mem_diff 批量比对 + 插入/滚动合并」，不是 lazy matching——lazy 只会更慢、压缩率更好 |
 | **gzip lazy matching** | 压缩率 -3~8%（时间 +20~30%） | 若要更好压缩率再做；与上面的提速是两个目标，别混 |
-| **AVX2 点积** | 新形状 | 需 `vpmullq`（SSE2 64 位乘语义不一致） |
+| **int 点积加宽（4 通道 / 32 位元素）** | v1.85 的 int 点积是 2 通道 + 3×`pmuludq`，4 拍/2 元素打满 port 0。32 位元素可走单条 `pmulld`（2 元素/条），AVX2 4 通道可望再快 2× | ① 本机（Haswell-EP）**无 AVX2**，要先写 Python mini-emulator 验语义；② AVX2 也没有 `vpmullq`（64 位乘要 AVX-512DQ），4 通道只对 32 位元素成立；③ 32 位元素要求槽压缩——`[N]i32` 现在也是 8 字节槽，见下一条 |
+| ~~chan 抢锁先自旋~~ | ❌ **已验证无收益**（v1.98）：双线程往返与 4 生产者争用两个场景，自旋版与让出版的中位数差异都落在噪声里（区间大幅重叠） | 自旋只对"持锁者一定在跑"成立；本机核数少于生产者数时这个前提不成立，收益被"抢到锁的概率"抵消。结论：**测不出好处就不留这份复杂度**，保留"抢不到就让出"；想同时要低延迟与低 CPU 只能上 futex/WaitOnAddress（见下条）。数字见 `06-status.md` §3.5c |
+| **futex / WaitOnAddress park** | `wg_wait`/`mutex_lock` 的唤醒延迟从 25 ms 降到 µs 级，CPU 仍然归零 | Linux 要发 `futex(FUTEX_WAIT/WAKE)`（syscall 202，参数 6 个、含超时结构）；Windows 的 `WaitOnAddress`/`WakeByAddressAll` 在 KernelBase 而非 kernel32，PE 导入表要加第二个 DLL；还要处理"唤醒丢失"（park 前重查谓词）。数字见 `06-status.md` §3.5b |
 | **vec 窄元素槽压缩** | `vec[u8]`/`vec[u16]`/`vec[u32]` 的槽从 8 字节压到 1/2/4：小元素容器内存 4–8×（1 MB 字节缓冲 8 MB → 1 MB），缓存命中率随之上升 | 运行时现在按 `ew` 字寻址（`ln*ew*8`），压缩要改成字节寻址 + 有符号扩展加载；push/get/set/pop/foreach/grow 全套 + A64 同步 + C 后端对齐；**改动面大，单开一版做，别和语义修复混** |
 
 > 性能实验两条铁律（两次回滚换来的）：
@@ -124,21 +126,24 @@
 ### P1 —— 让"语言能撑住中型程序"
 
 1. ~~泛型推导 + 多类型参数（`f[int]` → 能推就推）~~ ✅ v1.36：多参 + 调用点推导
-2. 命名空间 / `pub` 可见性（~~可见性~~ ✅ v1.43；~~限定语法~~ ✅ v1.44；
-   止住 `http_`/`ws_` 前缀膨胀还差跨模块同名声明——per-module mangling）
+2. ~~命名空间 / 模块系统~~ ✅ v1.99（可见性 v1.43 / 限定语法 v1.44 /
+   跨模块同名声明 + 模块版本 v1.99，见 §1）
 3. `map[str]Struct`（~~`vec[map]`~~ ✅ v1.37）
 4. 函数值放宽：8 参、允许 struct 实参
-5. `defer`（接口装箱生命周期的前置）
+5. ~~`defer` / `Drop`~~（✅ v1.48 / v1.93：资源生命周期进语法）
 6. IPv6、TCP 批量收发
-7. 包管理 registry + 发布（~~semver 区间~~ ✅ v1.45）
+7. ~~包管理 registry + 发布~~ ✅ v1.99（~~semver 区间~~ v1.45 → registry/发布/传递依赖）
 8. 自举主线：函数体 parser 收敛（当前分叉数见 `06-status.md`）
 
 ### P2 —— 生态
 
-1. ~~宏 / 反射~~ 🟡 v1.77：派生宏 + 编译期反射已落地（§1）；剩余 **enum 派生**、**通用 token 宏**、`f64` 字段（§7.10）、运行时反射
-2. 所有权/借用检查扩到 vec 与引用
-3. FFI：PE 导入表已有白名单机制，推广到"用户声明库 + 符号白名单"
-4. ~~DWARF~~ ✅ v1.80 → PDB（可选，需 MSVC 链路验证）→ LSP → 文档生成
+1. ~~宏 / 反射~~ ✅ v1.96：派生宏（struct + enum）/ 通用 token 宏 / 编译期与运行时反射全部落地（§1）
+2. ~~所有权/借用检查扩到视图~~ ✅ v1.84（切片/str 的生命周期与写别名；vec/map/chan 仍是句柄语义，不做线性检查）
+3. ~~FFI：PE 导入表已有白名单机制，推广到"用户声明库 + 符号白名单"~~ ✅ v1.87
+   （`@ffi("dll"[, "Sym"])`，任意 DLL + 符号名；剩余 **变参**、**按值结构体**、
+   **回调 thunk** 三项，见 §1 该行的边界栏）
+4. ~~DWARF~~ ✅ v1.80 → ~~LSP~~ ✅ v1.91 → ~~文档生成~~ ✅ v1.92 → PDB（可选，需 MSVC 链路验证）
+   → 增量索引（大文件 100 ms 级，见 `06-status.md` §3.10）
 5. 自举 **9/9**（目标）+ 三轮固定点闭环
 6. macOS Mach-O + kqueue、wasm
 
@@ -301,7 +306,7 @@ fn build(x: str) -> P {
 - 下一步：看 `lower_struct_lit` 里 `self.fns_ast` 的可见性——大概率是字面量降级时
   函数表还没填充（或用了另一份作用域）。改动在 `qlm_native.py`。
 
-### 7.10 待查：`to_float(str)` 返回垃圾值（v1.77 发现）
+### 7.10 已修（v1.96）：`to_float(str)` 返回垃圾值（v1.77 发现）
 
 写 `@derive(Json)` 的 f64 字段解码时撞到——语言里**没有** str→浮点的解析原语，
 而 `to_float` 看起来像：
@@ -315,8 +320,67 @@ print(g.to_str())        // 实测 1.407002e+14（不是 2.25）
   得到的是地址量级的值，不报错、不崩——典型静默错。
 - 影响面：`@derive(Json)` 因此对 `f64`/`f32` 字段显式 fail-fast
   （`tests/bad/derive_f64.qma`），JSON 里的浮点目前只能取 `json_num_raw` 原文本。
-- 下一步：要么把 `to_float(str)` 实现成真正的十进制解析（含指数、符号、inf/nan），
-  要么在类型检查阶段直接拒绝 str 实参——**先选后者止血**，再补解析器。
+- **v1.96 已修**（两步都做了）：
+  1. **止血**：`to_float(str)` / `to_f32(str)` 在编译期直接拒绝（自研后端与 C 后端
+     各一处），报错信息指向替代方案，不再静默把指针当数值转；
+  2. **补解析器**：`std/f64` 的 `f64_parse(s)` 做真正的十进制解析（符号 / 小数点 /
+     指数 / 两端空白；`inf` / `nan` / 十六进制一律拒绝）。舍入口径见该文件头：
+     ≤15 位有效数字且 |指数| ≤ 22 走 Clinger 快路径（正确舍入），其余可能差 1–2 ULP。
+     反向的 `f64_repr(x)` 给最短往返文本（精确十进制展开 + 回读验证），
+     `@derive(Json)` 的 `f64` 字段用的就是这两个。
+- 回归：`tests/t123_derive_enum.qma`（f64 字段往返 / 精度）、`tests/bad/derive_f32.qma`；
+  负向 `to_float(str)` 的形态由 `tests/bad/` 之外的编译器检查保证（见 §7.10 上方代码）。
+
+### 7.11 待查：非 UTF-8 源文件抛 `UnicodeDecodeError`（v1.83 fuzz 发现）
+
+写模糊测试时撞到的**既有**问题（与 fuzz 无关，任何 `quelmara build` 都一样）：
+
+```bash
+# 一个 GBK 编码的源文件（或任何非 UTF-8 字节）
+python tools/stage0/qlm_cli.py build gbk.qma --target win
+# 实测：Python 回溯 UnicodeDecodeError: 'utf-8' codec can't decode byte 0xe5 ...
+# 期望：一行干净诊断（"不是合法 UTF-8 源码 @ 字节 N"）+ 退出码 2
+```
+
+- 根因：`qlm.py` 的 `parse_file()` / `_consts_of()` 用
+  `open(path, encoding="utf-8")` 直接读，解码异常没转成项目统一的 fail-fast
+  （`SyntaxError` + 中文提示）。
+- 影响面：Windows 上编辑器默认存 GBK 的用户第一次编译就会看到 Python 回溯；
+  工具链侧也无法把"编码错"和"编译器崩了"分开统计——`qlm_fuzz.py` 目前把
+  `UnicodeDecodeError` 归到 `bug`，变异器主动只改 ASCII 字节来避开它。
+- 下一步：加一个 `read_source_text(path)` 把 `UnicodeDecodeError` 转成
+  `SyntaxError`（与 `require_source()` 同风格），三处读源码的点都换过去；
+  之后 fuzz 分类器可以把"编码错"单列一类。
+- 为什么没顺手修：这三处读点在语言轨正在改的文件里（`qlm.py`），
+  本版只做工具链，不制造合并冲突。
+
+### 7.12 已修（v1.102）：void 函数里的空 `return` 污染进程退出码
+
+写 `std/kv` 的夹具时撞到的**既有**缺陷（与持久化无关，v1.100 及以前同样存在）：
+
+```quelmara
+fn main() {
+    let a = 1
+    if a == 1 {
+        print("in if")
+        return
+    }
+}
+// 实测：打印 in if，但**退出码 1**（期望 0）
+```
+
+- 根因：`main` 是 void 函数，入口 `gen_entry` 把 **RAX** 当 `ExitProcess` 的参数；
+  而 `return` 无值那条路径发的是 `ret None`（不动 RAX），于是进程带着上一次
+  比较/算术的残留值退出。函数体末尾的**兜底返回**早就写的是 `ret 0`，只有显式
+  `return` 漏了——又一处「两条路径实现不一致」。
+- 修法：`Lower._stmt` 的 `return` 分支在 `fn_ret == ("named", "void")` 时发
+  `ret ("imm", 0)`。**不是**在入口清零 RAX——那样 `fn main() -> int` 的退出码
+  语义就没了。
+- 影响面：任何「main 里早退」的程序（`if 参数不对 { print(用法); return }` 是最常见写法）
+  在脚本/CI 里都会被判成失败；库函数早退不受影响（调用方不看 RAX），
+  但同一个缺陷在「把 void 函数返回值当值用」的路径上也会露出。
+- 回归：`tests/t128_mainret.qma`（if / while / 被调 void 函数三条早退路径），
+  由 `run_win_tests.py` 的 `case_output` 检查**退出码 0**——只测输出测不出来。
 
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
@@ -329,13 +393,16 @@ print(g.to_str())        // 实测 1.407002e+14（不是 2.25）
    ~~result struct 载荷~~（v1.38）→ ~~struct 内嵌套聚合~~（v1.39）→
    ~~窄值存储截断全覆盖~~（v1.40）→ ~~切片别名写入截断~~（v1.56，整数宽度行翻绿；槽压缩转 §5）→
    ~~`map[K]Struct` 值扩容~~（v1.41）→ ~~函数值放宽（8 参 + 聚合实参）~~（v1.42）→
-   ~~`pub` 可见性~~（v1.43）→ ~~限定语法 lib.fn()~~（v1.44）→ ~~`defer`~~（v1.48）→
-   黄标逐项（`@simd` 形状、并发原语、接口装箱、所有权范围 …）→
-   红标逐项 红→黄→绿（~~泛型 struct~~ 黄 v1.59；~~类型约束~~ ✅ v1.61；~~泛型方法~~ ✅ v1.62；~~泛型 enum~~ ✅ v1.63）
+   ~~`pub` 可见性~~（v1.43）→ ~~限定语法 lib.fn()~~（v1.44）→ ~~`defer`~~（v1.48）→ ~~`Drop`/RAII~~（v1.93，本行翻绿）→
+   黄标逐项（~~`@simd` 形状~~ ✅ v1.85、~~并发原语~~ ✅ v1.98、~~接口装箱~~ ✅ v1.97、~~所有权范围~~ ✅ v1.84 …）→
+   红标逐项 红→黄→绿（~~泛型 struct~~ 黄 v1.59；~~类型约束~~ ✅ v1.61；~~泛型方法~~ ✅ v1.62；
+   ~~泛型 enum~~ ✅ v1.63；~~FFI~~ ✅ v1.87）
 3. **标准库（§2）**：红标剩余项——**MD5**（只差旧协议兼容）、HTTP 客户端封装
    （重定向/chunked/连接池）、路由/静态文件/MIME/cookie/session/multipart、
-   多 member gzip + zlib 容器、正则、持久化（KV/SQLite）、`exp/log/sin/cos`
-4. **工具链（§3）**：~~调试器~~ ✅ v1.79/v1.80 → `.qla`、registry/发布、增量编译、覆盖率
+   多 member gzip + zlib 容器、正则、~~持久化（KV）~~ ✅ v1.102（SQL 仍未做）、`exp/log/sin/cos`
+4. **工具链（§3）**：~~调试器~~ ✅ v1.79/v1.80 → ~~覆盖率（行/分支/函数/文件/合并）~~ ✅ v1.83 → ~~fuzz~~ ✅ v1.83 → ~~性能回归门禁~~ ✅ v1.88
+   → ~~LSP / 补全~~ ✅ v1.91 → ~~包管理（registry / 发布 / 传递依赖）~~ ✅ v1.99
+   → ~~增量 / 并行编译~~ ✅ v1.100（单元级；函数级要等 `.qla`）→ `.qla`
 
 > 2026-10-23 起语言层与工具链**双轨并行**：语言层由另一会话负责（v1.44 命名空间
 > 限定语法即其成果），工具链从 v1.45（qpm semver）起推进。两轨共享连续版本号，

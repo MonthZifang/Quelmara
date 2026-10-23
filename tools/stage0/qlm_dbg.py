@@ -164,6 +164,55 @@ REG_NAMES = ["Rax", "Rcx", "Rdx", "Rbx", "Rsp", "Rbp", "Rsi", "Rdi",
 TF_FLAG = 0x100          # EFlags 陷阱标志（单步）
 MAX_STEPS = 200000       # 单次继续里允许的单步上限（防在库里逐指令爬死）
 TEXT_RVA = 0x1000        # 与 qlm_pe.TEXT_RVA 同源：.qlmdbg 的偏移是 .text 相对的
+JCC_LEN = 6              # jcc rel32 的编码长度（0F 8x + rel32）：不跳边 = off+6
+
+# EFLAGS 位（x86-64）
+CF_BIT, PF_BIT, ZF_BIT, SF_BIT, OF_BIT = 0x1, 0x4, 0x40, 0x80, 0x800
+
+
+def cc_taken(cc, eflags):
+    """条件码 + EFLAGS -> 这条 jcc 跳不跳。
+
+    覆盖采集把断点打在 jcc 首字节上：int3 不改标志位，所以命中时读到的
+    EFLAGS 就是这条 jcc 将要判定的那份。浮点比较在 Lower 已经折成
+    fcmpset 的 0/1 结果（jz/jnz 判 ZF），不在这里出现。"""
+    zf = bool(eflags & ZF_BIT)
+    sf = bool(eflags & SF_BIT)
+    cf = bool(eflags & CF_BIT)
+    of = bool(eflags & OF_BIT)
+    if cc == "e":
+        return zf
+    if cc == "ne":
+        return not zf
+    if cc == "l":
+        return sf != of
+    if cc == "ge":
+        return sf == of
+    if cc == "le":
+        return zf or (sf != of)
+    if cc == "g":
+        return (not zf) and (sf == of)
+    if cc == "b":
+        return cf
+    if cc == "ae":
+        return not cf
+    if cc == "be":
+        return cf or zf
+    if cc == "a":
+        return (not cf) and (not zf)
+    if cc == "s":
+        return sf
+    if cc == "ns":
+        return not sf
+    if cc == "o":
+        return of
+    if cc == "no":
+        return not of
+    if cc == "p":
+        return bool(eflags & PF_BIT)
+    if cc == "np":
+        return not (eflags & PF_BIT)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +460,7 @@ class Debugger:
             self.out(f"stopped: rva 0x{rva:x}（无调试信息）")
 
     # ---- 断点 ----
-    def set_bp(self, rva, desc, temp=False, silent=False):
+    def set_bp(self, rva, desc, temp=False, silent=False, quiet=False):
         """下断点。temp=True 是内部临时断点（next/finish 用），命中后自动摘除；
         silent=True 表示命中时不停下（用于"跳过整个被调函数"）。"""
         if rva in self.bps:
@@ -425,7 +474,7 @@ class Debugger:
         self.bp_seq += 1
         self.bps[rva] = {"orig": orig[0], "hits": 0, "n": self.bp_seq,
                          "desc": desc, "temp": temp, "silent": silent}
-        if not temp:
+        if not temp and not quiet:
             self.out(f"breakpoint {self.bp_seq}: {desc} -> rva 0x{rva:x}")
         return True
 
@@ -1080,6 +1129,69 @@ class Debugger:
             k32.CloseHandle(h)
         self._threads = {}
 
+    def coverage(self, out_path, branches=True):
+        """行 + 分支覆盖采集：源码行入口 / 条件跳转各下一个断点，跑到退出。
+
+        日志格式 v2（纯文本——消费方 `tools/qlm_cov.qma` 只用 `str_split` /
+        `to_int`，不引 JSON）：
+
+          # qlm_cov hits v2
+          L <rva> <hits>                       行入口命中
+          E <branch_rva> <target_rva> <hits>   分支边命中（taken / fall 各一条）
+
+        **分支判定不单步**：断点打在 jcc 指令首字节上，命中时 EFLAGS 还是
+        上一条指令留下的那份（int3 不改标志位），直接按条件码算出「跳没跳」。
+        比"命中后再单步一条看 RIP"省一半事件（每边 1 个事件 vs 2 个）。"""
+        self.start()
+        nline = sum(len(f["lines"]) for f in self.funcs if f.get("file"))
+        nbr = sum(len(f.get("branches") or [])
+                  for f in self.funcs if f.get("file"))
+        self.out(f"exe={os.path.basename(self.exe)} lines={nline} "
+                 f"branches={nbr}")
+        self.startup()
+        # 一个 rva 可能同时是"行入口"和"分支"（if 那行的第一条指令就是 jcc）
+        # ——合成一个断点，命中时两件事都记，不重复下断点也不重复计事件。
+        sites = {}
+        for fn in self.funcs:
+            if not fn.get("file"):
+                continue
+            for off, line in fn["lines"]:
+                sites.setdefault(TEXT_RVA + off, {"line": line, "br": None})
+            if not branches:
+                continue
+            for ent in (fn.get("branches") or []):
+                rva = TEXT_RVA + ent[0]
+                sites.setdefault(rva, {"line": None, "br": None})["br"] = (
+                    ent[2], TEXT_RVA + ent[1], rva + JCC_LEN)
+        n = 0
+        for rva in sorted(sites):
+            if rva in self.bps:
+                continue
+            if self.set_bp(rva, "<cov>", quiet=True):
+                n += 1
+        self.out(f"breakpoints={n}")
+        edges = {}
+        while self.running:
+            if self.resume(None) == "exit":
+                break
+            site = sites.get(self.stop_rva)
+            if site is None or site["br"] is None:
+                continue
+            cc, tgt, fall = site["br"]
+            ctx = self.get_context(self.tid)
+            to_rva = tgt if cc_taken(cc, ctx.EFlags) else fall
+            key = (self.stop_rva, to_rva)
+            edges[key] = edges.get(key, 0) + 1
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write("# qlm_cov hits v2（qlm_dbg --cov 产出）\n")
+            for rva in sorted(self.bps):
+                f.write(f"L {rva} {self.bps[rva]['hits']}\n")
+            for key in sorted(edges):
+                f.write(f"E {key[0]} {key[1]} {edges[key]}\n")
+        self.out(f"hits -> {out_path}")
+        self.cleanup()
+        return 0
+
     def repl(self):
         self.start()
         self.out(f"exe={os.path.basename(self.exe)} funcs={len(self.funcs)} "
@@ -1120,8 +1232,16 @@ def main(argv=None):
     ap.add_argument("exe", help="带 .qlmdbg 调试节的 PE（--dbg-info 构建）")
     ap.add_argument("--script", default=None,
                     help="命令脚本文件（每行一条命令，# 注释；测试用）")
+    ap.add_argument("--cov", default=None, metavar="TSV",
+                    help="覆盖率采集：源码行入口 + 条件跳转各下一个断点，跑到"
+                         "退出，命中日志写进 TSV（由 tools/qlm_cov.qma 汇总）")
+    ap.add_argument("--cov-lines-only", action="store_true",
+                    help="只采集行覆盖（不下分支断点；分支覆盖率会显示 0/0）")
     ap.add_argument("prog_args", nargs="*", help="传给被调试程序的参数")
     args = ap.parse_args(argv)
+    if args.cov:
+        return Debugger(args.exe, args.prog_args, None).coverage(
+            args.cov, branches=not args.cov_lines_only)
     script = None
     if args.script:
         with open(args.script, encoding="utf-8") as f:

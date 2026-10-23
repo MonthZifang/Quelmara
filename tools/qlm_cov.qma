@@ -1,0 +1,448 @@
+// tools/qlm_cov.qma —— 行 / 分支覆盖率统计（工具链，用 Quelmara 写）
+//
+// 为什么用 Quelmara 写：这是工具链自举的一步——工具本身吃的是二进制
+// （PE 节表）和 JSON（.qlmdbg），正是"自研语言能不能干工具链的活"的检验。
+// 全程只用语言内建 + std/json + std/str + std/sort，没有 Python 参与。
+//
+// 输入：<带 .qlmdbg 的 PE> <命中日志...> [--min N] [--min-branch N] [--merge-out P]
+//       命中日志 v2（qlm_dbg.py --cov 产出）：
+//         # 注释
+//         L <rva> <hits>                        行入口命中
+//         E <branch_rva> <target_rva> <hits>    分支边命中
+//       旧格式 `rva<TAB>hits` 仍然接受（v1.82 的历史日志可继续合并）。
+//       多个日志文件按 rva / 边 求和 —— 这就是"多次运行的增量累计"。
+// 输出：整体行/分支覆盖 + 未覆盖行/分支 + 函数级 + 文件级 + 门禁结论
+// 退出码：0 正常 / 1 低于阈值 / 2 用法或输入错误
+//
+// 口径（写清楚，避免"覆盖率 100%"的假象）：
+//   * 行分母 = .qlmdbg 行表里的**唯一行号**（空行/注释/纯声明不在表里）
+//   * 行分子 = 该行任一指令入口被命中过（同一行多入口只算一次）
+//   * 分支分母 = 每条 jcc 的两条边（跳 / 不跳），共 2 × 分支数
+//   * 分支分子 = 该边命中过（边 = 分支指令 rva + 去向 rva）
+//   * 只统计主文件（.qlmdbg 只收主文件；库函数行号属于别的文件）
+
+module qlm_cov
+
+import std.json
+import std.str
+import std.sort
+
+const TEXT_RVA = 4096          // 与 qlm_pe.TEXT_RVA 同源
+const DEFAULT_MIN = 80         // 行覆盖率默认阈值（百分比）
+const JCC_LEN = 6              // jcc rel32 的编码长度：不跳边 = 分支 rva + 6
+const EDGE_SHIFT = 67108864    // 2^26：边键 = 分支 rva * 2^26 + 去向 rva
+
+fn u16(b: str, o: int) -> int {
+    return b[o] + b[o + 1] * 256
+}
+
+fn u32(b: str, o: int) -> int {
+    return b[o] + b[o + 1] * 256 + b[o + 2] * 65536 + b[o + 3] * 16777216
+}
+
+// 返回节头的文件偏移；找不到返回 -1
+fn sec_hdr(b: str, want: str) -> int {
+    let e = u32(b, 60)
+    let coff = e + 4
+    let n = u16(b, coff + 2)
+    let opt = u16(b, coff + 16)
+    let base = coff + 20 + opt
+    let mut i = 0
+    while i < n {
+        let o = base + 40 * i
+        let nm = substr(b, o, 8)
+        let mut k = 0
+        while k < len(nm) && nm[k] != 0 {
+            k += 1
+        }
+        if substr(nm, 0, k) == want {
+            return o
+        }
+        i += 1
+    }
+    return -1
+}
+
+// Windows 文本文件的行尾是 \r\n：切完 \n 还剩 \r，to_int 会 fail-fast
+fn chomp(s: str) -> str {
+    if len(s) > 0 && s[len(s) - 1] == 13 {
+        return substr(s, 0, len(s) - 1)
+    }
+    return s
+}
+
+fn get_or0(m: map[int]int, k: int) -> int {
+    if m.has(k) {
+        return m.get(k)
+    }
+    return 0
+}
+
+fn note_key(m: map[int]int, keys: vec[int], k: int) {
+    if !m.has(k) {
+        keys.push(k)
+    }
+}
+
+fn pct(a: int, b: int) -> str {
+    if b <= 0 {
+        return "0.0%"
+    }
+    let x = (a * 1000 + b / 2) / b        // 四舍五入到 0.1%
+    return (x / 10).to_str() + "." + (x % 10).to_str() + "%"
+}
+
+// 分母为 0 不是 0%，是"没有可覆盖对象"——用 — 区分，别让空函数看起来像失败
+fn pct_dash(a: int, b: int) -> str {
+    if b <= 0 {
+        return "—"
+    }
+    return pct(a, b)
+}
+
+fn pad(s: str, w: int) -> str {
+    let mut out = s
+    while len(out) < w {
+        out += " "
+    }
+    return out
+}
+
+fn join_ints(v: vec[int]) -> str {
+    let mut s = ""
+    let mut i = 0
+    while i < len(v) {
+        if i > 0 {
+            s += ", "
+        }
+        s += v.get(i).to_str()
+        i += 1
+    }
+    return s
+}
+
+// 行表里"覆盖 off 的那一行"：最大的 lo <= off（行表按 off 升序）
+fn line_at(offs: vec[int], lns: vec[int], off: int) -> int {
+    let mut best = 0
+    let mut i = 0
+    while i < len(offs) {
+        if offs.get(i) <= off {
+            best = lns.get(i)
+        } else {
+            break
+        }
+        i += 1
+    }
+    return best
+}
+
+fn usage() {
+    print("用法: qlm_cov <exe> <hits.tsv> [<hits2.tsv>...] "
+          + "[--min N] [--min-branch N] [--merge-out PATH]")
+}
+
+fn main() -> int {
+    let a = args()
+    if len(a) < 2 {
+        usage()
+        return 2
+    }
+    let mut floor_pct = DEFAULT_MIN
+    let mut floor_br = 0
+    let mut no_branch = false
+    let mut merge_out = ""
+    let mut hit_files = vec[str].new(4)
+    let mut i = 1
+    while i < len(a) {
+        let t = a[i]
+        if t == "--min" && i + 1 < len(a) {
+            floor_pct = to_int(a[i + 1])
+            i += 2
+        } else if t == "--min-branch" && i + 1 < len(a) {
+            floor_br = to_int(a[i + 1])
+            i += 2
+        } else if t == "--merge-out" && i + 1 < len(a) {
+            merge_out = a[i + 1]
+            i += 2
+        } else if t == "--no-branch" {
+            no_branch = true
+            i += 1
+        } else {
+            hit_files.push(t)
+            i += 1
+        }
+    }
+    if len(hit_files) == 0 {
+        usage()
+        return 2
+    }
+
+    let b = read_text(a[0])
+    if len(b) < 64 || b[0] != 77 || b[1] != 90 {      // "MZ"
+        print("不是 PE 文件: " + a[0])
+        return 2
+    }
+    let hdr = sec_hdr(b, ".qlmdbg")
+    if hdr < 0 {
+        print("没有 .qlmdbg 节：请用 --dbg-info 构建")
+        return 2
+    }
+    let js = substr(b, u32(b, hdr + 20), u32(b, hdr + 8))
+    let d = json_parse(js)
+    if !json_ok(d) {
+        print(".qlmdbg 解析失败 @" + json_error_pos(d).to_str())
+        return 2
+    }
+
+    // ---- 命中日志：多文件求和（增量累计） ----
+    let lh = map[int]int.new(256)
+    let eh = map[int]int.new(256)
+    let lkeys = vec[int].new(64)
+    let ekeys = vec[int].new(64)
+    let mut bad_lines = 0
+    let mut fi = 0
+    while fi < len(hit_files) {
+        bad_lines += load_hits(hit_files.get(fi), lh, lkeys, eh, ekeys)
+        fi += 1
+    }
+
+    let root = json_root(d)
+    let funcs = json_obj_get(d, root, "funcs")
+    let nf = json_arr_len(d, funcs)
+
+    let mut file = ""
+    let mut total = 0
+    let mut covered = 0
+    let mut edges = 0
+    let mut edge_hit = 0
+    let mut miss = vec[int].new(8)
+    let mut miss_br = vec[str].new(8)
+    let mut rows = vec[str].new(8)
+    // 文件级聚合：同名文件累加（.qlmdbg 目前只收主文件，多文件时自动分组）
+    let fsum = map[str]int.new(16)
+    let fseen = map[str]int.new(4)
+    let forder = vec[str].new(4)
+
+    let mut i2 = 0
+    while i2 < nf {
+        let f = json_arr_at(d, funcs, i2)
+        i2 += 1
+        let fname = json_str(d, json_obj_get(d, f, "file"))
+        if len(fname) == 0 {
+            continue          // 库函数：没有源码行号，不参与分母
+        }
+        file = fname
+        if !fseen.has(fname) {
+            fseen.set(fname, 1)
+            forder.push(fname)
+        }
+        let nm = json_str(d, json_obj_get(d, f, "name"))
+
+        // 行表：按 off 升序（codegen 已排序），同时拆成两个平行数组供 line_at
+        let lines = json_obj_get(d, f, "lines")
+        let nl = json_arr_len(d, lines)
+        let offs = vec[int].new(nl)
+        let lns = vec[int].new(nl)
+        let mut j = 0
+        while j < nl {
+            let e = json_arr_at(d, lines, j)
+            offs.push(json_int(d, json_arr_at(d, e, 0)))
+            lns.push(json_int(d, json_arr_at(d, e, 1)))
+            j += 1
+        }
+
+        // 行覆盖：同一行号只算一次
+        let seen = map[int]int.new(16)
+        let mut ft = 0
+        let mut fc = 0
+        j = 0
+        while j < nl {
+            let ln = lns.get(j)
+            if !seen.has(ln) {
+                seen.set(ln, 1)
+                ft += 1
+                let rva = TEXT_RVA + offs.get(j)
+                if get_or0(lh, rva) > 0 {
+                    fc += 1
+                } else {
+                    miss.push(ln)
+                }
+            }
+            j += 1
+        }
+
+        // 分支覆盖：每条 jcc 两条边
+        let brs = json_obj_get(d, f, "branches")
+        let mut nb = json_arr_len(d, brs)
+        if no_branch {
+            nb = 0
+        }
+        let mut bt = 0
+        let mut bc = 0
+        j = 0
+        while j < nb {
+            let e = json_arr_at(d, brs, j)
+            let boff = json_int(d, json_arr_at(d, e, 0))
+            let btg = json_int(d, json_arr_at(d, e, 1))
+            let bline = json_int(d, json_arr_at(d, e, 3))
+            let from_rva = TEXT_RVA + boff
+            let taken_rva = TEXT_RVA + btg
+            let fall_rva = from_rva + JCC_LEN
+            bt += 2
+            if get_or0(eh, from_rva * EDGE_SHIFT + taken_rva) > 0 {
+                bc += 1
+            } else {
+                miss_br.push(bline.to_str() + "->"
+                             + line_at(offs, lns, btg).to_str())
+            }
+            if get_or0(eh, from_rva * EDGE_SHIFT + fall_rva) > 0 {
+                bc += 1
+            } else {
+                // 不跳边的落点是同一条语句的后续指令，行号还是本行——
+                // 报行号只会看到 "7->7"，所以直接写"不跳"
+                miss_br.push(bline.to_str() + "->不跳")
+            }
+            j += 1
+        }
+
+        total += ft
+        covered += fc
+        edges += bt
+        edge_hit += bc
+        rows.push("    " + pad(nm, 12)
+                  + "行 " + fc.to_str() + "/" + ft.to_str()
+                  + " (" + pct(fc, ft) + ")  分支 "
+                  + bc.to_str() + "/" + bt.to_str()
+                  + " (" + pct_dash(bc, bt) + ")")
+        fsum.set(fname + "\tT", get_or0(fsum, fname + "\tT") + ft)
+        fsum.set(fname + "\tC", get_or0(fsum, fname + "\tC") + fc)
+        fsum.set(fname + "\tE", get_or0(fsum, fname + "\tE") + bt)
+        fsum.set(fname + "\tH", get_or0(fsum, fname + "\tH") + bc)
+    }
+
+    print("qlm_cov — 覆盖率报告（Quelmara 工具链）")
+    print("  文件: " + file)
+    print("  行:   " + covered.to_str() + "/" + total.to_str()
+          + " (" + pct(covered, total) + ")")
+    print("  分支: " + edge_hit.to_str() + "/" + edges.to_str()
+          + " (" + pct_dash(edge_hit, edges) + ")")
+    if len(miss) > 0 {
+        print("  未覆盖行: " + join_ints(miss))
+    } else {
+        print("  未覆盖行: （无）")
+    }
+    if len(miss_br) > 0 {
+        print("  未覆盖分支: " + str_join(miss_br, ", "))
+    } else if edges > 0 {
+        print("  未覆盖分支: （无）")
+    }
+    if len(rows) > 0 {
+        print("  函数:")
+        let mut r = 0
+        while r < len(rows) {
+            print(rows.get(r))
+            r += 1
+        }
+    }
+    if len(forder) > 1 {
+        print("  文件汇总:")
+        let mut q = 0
+        while q < len(forder) {
+            let fn2 = forder.get(q)
+            print("    " + pad(fn2, 28)
+                  + "行 " + get_or0(fsum, fn2 + "\tC").to_str() + "/"
+                  + get_or0(fsum, fn2 + "\tT").to_str() + "  分支 "
+                  + get_or0(fsum, fn2 + "\tH").to_str() + "/"
+                  + get_or0(fsum, fn2 + "\tE").to_str())
+            q += 1
+        }
+    }
+    if bad_lines > 0 {
+        print("  警告: 命中日志里有 " + bad_lines.to_str() + " 行无法识别")
+    }
+    if merge_out != "" {
+        write_merged(merge_out, lh, lkeys, eh, ekeys)
+        print("  合并: " + merge_out + "（" + len(lkeys).to_str() + " 行 + "
+              + len(ekeys).to_str() + " 边）")
+    }
+    if total == 0 {
+        print("  警告: 行表为空——构建时是否漏了 --dbg-info？")
+        return 2
+    }
+    if covered * 100 < total * floor_pct {
+        print("  结果: 低于阈值 " + floor_pct.to_str() + "%（行）")
+        return 1
+    }
+    if floor_br > 0 && edges > 0 && edge_hit * 100 < edges * floor_br {
+        print("  结果: 低于分支阈值 " + floor_br.to_str() + "%")
+        return 1
+    }
+    print("  结果: 达标（行阈值 " + floor_pct.to_str() + "%，分支阈值 "
+          + floor_br.to_str() + "%）")
+    return 0
+}
+
+// 读一份命中日志，累加进 (lh, eh)；返回无法识别的行数
+fn load_hits(path: str, lh: map[int]int, lkeys: vec[int],
+             eh: map[int]int, ekeys: vec[int]) -> int {
+    let txt = read_text(path)
+    let lines = str_split(txt, "\n")
+    let mut i = 0
+    let mut bad = 0
+    while i < len(lines) {
+        let ln = chomp(lines.get(i))
+        i += 1
+        if len(ln) == 0 || ln[0] == 35 {          // 空行 / # 注释
+            continue
+        }
+        if str_contains(ln, "\t") {
+            // 旧格式 rva<TAB>hits（v1.82 日志）
+            let p = str_split(ln, "\t")
+            if len(p) >= 2 {
+                let rva = to_int(p.get(0))
+                note_key(lh, lkeys, rva)
+                lh.set(rva, get_or0(lh, rva) + to_int(p.get(1)))
+            } else {
+                bad += 1
+            }
+            continue
+        }
+        let p = str_split(ln, " ")
+        let tag = p.get(0)
+        if len(tag) == 1 && tag[0] == 76 && len(p) >= 3 {          // 'L'
+            let rva = to_int(p.get(1))
+            note_key(lh, lkeys, rva)
+            lh.set(rva, get_or0(lh, rva) + to_int(p.get(2)))
+        } else if len(tag) == 1 && tag[0] == 69 && len(p) >= 4 {    // 'E'
+            let k = to_int(p.get(1)) * EDGE_SHIFT + to_int(p.get(2))
+            note_key(eh, ekeys, k)
+            eh.set(k, get_or0(eh, k) + to_int(p.get(3)))
+        } else {
+            bad += 1
+        }
+    }
+    return bad
+}
+
+// 写累计后的命中日志（多次运行合并的结果，可继续喂回本工具）
+fn write_merged(path: str, lh: map[int]int, lkeys: vec[int],
+                eh: map[int]int, ekeys: vec[int]) {
+    sort_int(lkeys)
+    sort_int(ekeys)
+    let mut out = "# qlm_cov merged v2（多次运行累计）\n"
+    let mut i = 0
+    while i < len(lkeys) {
+        out += "L " + lkeys.get(i).to_str() + " "
+            + get_or0(lh, lkeys.get(i)).to_str() + "\n"
+        i += 1
+    }
+    i = 0
+    while i < len(ekeys) {
+        let k = ekeys.get(i)
+        out += "E " + (k / EDGE_SHIFT).to_str() + " "
+            + (k % EDGE_SHIFT).to_str() + " "
+            + get_or0(eh, k).to_str() + "\n"
+        i += 1
+    }
+    write_text(path, out)
+}

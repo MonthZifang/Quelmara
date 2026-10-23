@@ -13,6 +13,8 @@ Quelmara Windows PE/COFF 后端回归（自研，无 CRT）
   [5] 单核降级：Quelmara.toml multicore=false（同结果）
   [6] 失败路径：assert 退出码 1 + stderr 消息
   [7] 交叉验证：与 Linux 自研 ELF 后端输出逐字节比对（需要 WSL；无则 SKIP）
+  [8] 调试链路：DWARF 互操作 / 调试器端到端 / 行覆盖率（仅 Windows）
+  [9] AArch64 接口 vtable：ELF 构建 + 模拟器执行（跨平台，7 个接口用例）
 """
 
 import os
@@ -258,6 +260,22 @@ def test_arena():
         else bad(f"无 arena 未 OOM rc={rc} stderr={stderr[:120]!r}")
 
 
+def test_iface_rc():
+    """接口装箱引用计数：1MB 上限下跑 20 万轮 × 3 次装箱（≥19MB 装箱量）。
+    装箱不释放时会在中途 fail-fast；能跑完即证明 __iface_release 生效。"""
+    out = os.path.join(ROOT, "build", "win_iface_rc.exe")
+    build(os.path.join(ROOT, "tests/iface_lowheap/iface_rc.qma"), out)
+    r = run(out, timeout=300)
+    if r is None:
+        skip("iface_rc：非 Windows 平台，跳过执行")
+        return
+    rc, stdout, stderr = r
+    ok("iface_rc：1MB 上限下 19MB 装箱量跑完（引用计数回收）") if rc == 0 \
+        else bad(f"iface_rc rc={rc} stderr={stderr[-160:]!r}")
+    ok("iface_rc 输出正确") if stdout == b"iface rc ok\n" \
+        else bad(f"iface_rc 输出 {stdout!r}")
+
+
 def test_assert_fail():
     out = os.path.join(ROOT, "build", "win_assert.exe")
     build(os.path.join(ROOT, "tests/win_assert.qma"), out)
@@ -376,6 +394,84 @@ def test_str_failfast():
         bad("@extern 在自研后端竟然编译成功（不链接外部符号不该成功）")
 
 
+def import_table(path):
+    """PE 导入表 -> {dll: [符号]}（v1.87 起可能多 DLL，@ffi 带显式 DLL 名）"""
+    p, _pe, _m, _ns, _mg, _e, _s, secs = pe_info(path)
+    imp_rva, _sz = struct.unpack_from("<II", p, _pe + 24 + 112 + 8)
+    off = rva2off(secs, imp_rva)
+    out = {}
+    if off is None:
+        return out
+
+    def cstr(rva):
+        o = rva2off(secs, rva)
+        e = p.index(b"\x00", o)
+        return p[o:e]
+
+    cur = off
+    while True:
+        ilt, _ts, _fc, name, iat = struct.unpack_from("<IIIII", p, cur)
+        if name == 0:
+            break
+        dll = cstr(name).decode("ascii")
+        names = []
+        e = rva2off(secs, ilt if ilt else iat)
+        j = 0
+        while True:
+            v = struct.unpack_from("<Q", p, e + 8 * j)[0]
+            if v == 0:
+                break
+            names.append(cstr(v + 2).decode("ascii"))
+            j += 1
+        out[dll] = names
+        cur += 20
+    return out
+
+
+def test_ffi():
+    """[3i2] FFI（v1.87）：@ffi 调用系统库——多 DLL 导入表 + Win64 寄存器类。
+
+    覆盖点：
+      1. t120_ffi 自校验（int/void/bool/f64/f32、栈传参、cstr 往返）；
+      2. 导入表里真的出现 ucrtbase.dll / ntdll.dll（用户声明的 DLL，
+         不再是 kernel32 白名单）；
+      3. Linux ELF 后端对 @ffi 必须 fail-fast（静态 ET_EXEC 无动态链接器）。
+    """
+    out = os.path.join(ROOT, "build", "win_t120_ffi.exe")
+    build(os.path.join(ROOT, "tests/t120_ffi.qma"), out)
+    r = run(out)
+    if r is None:
+        skip("FFI：非 Windows 平台，跳过执行")
+    else:
+        rc, stdout, stderr = r
+        ok("FFI：t120_ffi 自校验通过（断言全过）") if rc == 0 \
+            else bad(f"t120_ffi rc={rc} stderr={stderr[-200:]!r}")
+        ok("FFI：输出 ffi ok") if stdout == b"ffi ok\n" else bad(f"t120_ffi 输出 {stdout!r}")
+
+    imp = import_table(out)
+    ok(f"FFI：导入表含 {len(imp)} 个 DLL（{', '.join(sorted(imp))}）") \
+        if {"kernel32.dll", "ucrtbase.dll", "ntdll.dll"} <= set(imp) \
+        else bad(f"FFI：导入 DLL 不全：{sorted(imp)}")
+    ok("FFI：ucrtbase 只带被声明的 3 个符号") \
+        if sorted(imp.get("ucrtbase.dll", [])) == ["pow", "sqrt", "sqrtf"] \
+        else bad(f"ucrtbase 符号 {imp.get('ucrtbase.dll')!r}")
+    ok("FFI：ntdll 只带 RtlMoveMemory") \
+        if imp.get("ntdll.dll") == ["RtlMoveMemory"] \
+        else bad(f"ntdll 符号 {imp.get('ntdll.dll')!r}")
+
+    # Linux ELF：静态 ET_EXEC 没有 PT_INTERP，外部符号无处解析——必须明确报错
+    import qlm_native
+    try:
+        qlm_native.transpile_native(os.path.join(ROOT, "tests/t120_ffi.qma"))
+    except SyntaxError as ex:
+        ok("FFI：Linux ELF 目标给出明确诊断（无动态链接器）") \
+            if "只在 Windows PE 后端实现" in str(ex) else bad(f"ELF 诊断不符：{ex}")
+    except Exception as ex:                                    # noqa: BLE001
+        bad(f"FFI：ELF 目标抛了非 SyntaxError：{type(ex).__name__}: {ex}")
+    else:
+        bad("FFI：ELF 目标竟然编译通过（静态产物解析不了外部符号）")
+
+
 def test_net_reactor():
     """[3j] 高并发网络：IOCP reactor（v1.4）
 
@@ -466,12 +562,19 @@ def test_debug_chain():
 
     dwarf_test：独立 DWARF 读取器对照 .qlmdbg（行表/变量位置/结构体布局）
     dbg_test  ：qlm_dbg 跑完整命令链（断点/求值/单步/bt/退出码）
+    cov_test   ：行 + 分支覆盖率（含增量合并与两种阈值门禁）
+    fuzz_test  ：编译器前端模糊测试（Quelmara 变异器 + 崩溃分类）
+    cache_test ：增量缓存（命中/失效/损坏/串行=并行）
     """
     if not IS_WIN:
         skip("调试链路：仅 Windows（Windows 调试 API）")
         return
     for name, script in (("DWARF 互操作", "tests/dwarf_test.py"),
-                         ("调试器端到端", "tests/dbg_test.py")):
+                         ("调试器端到端", "tests/dbg_test.py"),
+                         ("行+分支覆盖率", "tests/cov_test.py"),
+                         ("模糊测试", "tests/fuzz_test.py"),
+                         ("增量缓存", "tests/cache_test.py"),
+                         ("持久化 KV", "tests/kv_test.py")):
         try:
             r = subprocess.run([sys.executable,
                                 os.path.join(ROOT, script)],
@@ -485,6 +588,48 @@ def test_debug_chain():
             ok(f"{name}：{tail[0]}")
         else:
             bad(f"{name}：{tail[0]}  {r.stdout[-400:]}{r.stderr[-300:]}")
+
+
+def test_a64_iface():
+    """v1.90：AArch64 接口 vtable 的**执行级**回归。
+
+    irdiff 只证明两个后端产出同一份 IR，证明不了 A64 发射层把 vtable 表项
+    填对、BLR 跳对了方法。这里编译成 AArch64 ELF 后用 tests/a64_emu.py 真跑
+    7 个接口用例（装箱 / 异构容器 / 跨接口同名方法 / 所有权 / 跨文件 /
+    泛型 enum 载荷 / 1 MB 堆上限下的引用计数回收）。
+
+    纯 Python 模拟器，整套约 70 s；`--quick` 可跳过最慢的低堆用例。
+    """
+    r = subprocess.run([sys.executable, os.path.join(ROOT,
+                                                    "tests/a64_iface_test.py")],
+                       cwd=ROOT, capture_output=True, text=True, timeout=900)
+    tail = (r.stdout or "").strip().splitlines()[-1:] or [""]
+    if r.returncode == 0:
+        ok(f"AArch64 接口 vtable 执行级：{tail[0]}")
+    else:
+        bad(f"AArch64 接口 vtable 执行级：{tail[0]}  "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
+def test_lsp():
+    """v1.91：语言服务器整链（脚本内部逐条断言，全平台可跑）。
+
+    子进程跑 `tests/lsp_test.py`：词法对拍 + 容错索引 + 索引语义 +
+    真 JSON-RPC 协议 + 性能阈值，本项只汇总一条结果。
+    """
+    try:
+        r = subprocess.run([sys.executable,
+                            os.path.join(ROOT, "tests", "lsp_test.py")],
+                           cwd=ROOT, capture_output=True, text=True,
+                           timeout=900)
+    except subprocess.TimeoutExpired:
+        bad("语言服务器：超时")
+        return
+    tail = (r.stdout or "").strip().splitlines()[-1:] or [""]
+    if r.returncode == 0:
+        ok(f"语言服务器：{tail[0]}")
+    else:
+        bad(f"语言服务器：{tail[0]}  {r.stdout[-500:]}{r.stderr[-300:]}")
 
 
 def main():
@@ -606,7 +751,16 @@ def main():
     case_selfcheck("t52_iface", "tests/t52_iface.qma")
     case_selfcheck("t53_regress", "tests/t53_regress.qma")
     case_selfcheck("t54_iface_dyn", "tests/t54_iface_dyn.qma")
+    # v1.83：跨接口同名方法共存 + 跨文件 interface（fixtures/ifacexfile）
+    case_selfcheck("t116_iface_multi", "tests/t116_iface_multi.qma")
+    case_selfcheck("iface_xfile", "fixtures/ifacexfile/main.qma")
     case_selfcheck("t55_sync", "tests/t55_sync.qma")
+    # v1.86：MPMC 栈（2 生产者 / 2 消费者）+ WaitGroup 退避等待
+    case_selfcheck("t121_syncmpmc", "tests/t121_syncmpmc.qma")
+    # v1.86：atomic 内建语义（x86 lock 前缀 / A64 LL-SC 同一份用例）
+    case_selfcheck("t97_atomic", "tests/t97_a64atomic.qma")
+    # v1.86：std/sync 双后端可移植性（无 spawn 的无争用路径）
+    case_selfcheck("t122_syncport", "tests/t122_syncport.qma")
     case_selfcheck("t56_generic", "tests/t56_generic.qma")
     case_selfcheck("t57_vecnest", "tests/t57_vecnest.qma")
     case_selfcheck("t58_stdmin", "tests/t58_stdmin.qma")
@@ -638,7 +792,9 @@ def main():
     case_selfcheck("t85_narrowstore", "tests/t85_narrowstore.qma")
     case_selfcheck("t86_mapstruct", "tests/t86_mapstruct.qma")
     case_selfcheck("t87_callrelax", "tests/t87_callrelax.qma")
+    case_selfcheck("t126_closure", "tests/t126_closure.qma")
     case_selfcheck("t91_defer", "tests/t91_defer.qma")
+    case_selfcheck("t119_drop", "tests/t119_drop.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),
@@ -647,8 +803,12 @@ def main():
             ("iface_missing", "impl 缺方法", "缺少方法"),
             ("iface_rettype", "impl 返回类型不符", "返回类型与接口声明不一致"),
             ("iface_no_impl", "类型未实现接口", "没有实现接口"),
-            ("iface_dup_method", "跨接口同名方法", "同名方法跨接口暂不支持"),
+            # v1.83：impl 共存了，静态调用才是歧义（走接口值就没有歧义）
+            ("iface_dup_method", "跨接口同名方法的静态调用歧义", "静态调用有歧义"),
             ("defer_let", "defer 跟带作用域的语句", "defer 只支持"),
+            # Drop（v1.86）：签名与重复实现
+            ("drop_arity", "析构函数多一个形参", "接口要求 1 个参数"),
+            ("drop_dupe", "同一类型两次 impl Drop", "重复实现"),
             ("neg_str", "对 str 取负", "一元 - 不能用于 str"),
             ("constfn_str", "const fn 用 str 形参", "只支持 int / bool"),
             ("constfn_call", "const 右值调普通函数", "只能调用 const fn"),
@@ -680,21 +840,58 @@ def main():
             ("genumimpl_missing", "enum 模板 impl 缺方法", "缺少方法"),
             # 属性宏 @derive + 编译期反射（v1.77）：十种违反形态
             ("derive_unknown", "未知派生项", "未知派生项"),
-            ("derive_enum", "enum 上派生", "只支持 struct"),
             ("derive_generic", "泛型 struct 上派生", "不能直接 @derive"),
-            ("derive_f64", "f64 字段派生", "暂无 str→浮点解析原语"),
+            ("derive_genenum", "泛型 enum 上派生", "不能直接 @derive"),
             ("derive_orphan", "@derive 后面不是声明", "只能用于紧随其后"),
-            ("derive_field_enum", "enum 字段派生", "enum 字段暂不支持"),
+            ("derive_field_enum", "enum 字段没派生", "没有派生 Json"),
+            ("derive_f32", "f32 字段派生", "f32 不参与派生"),
             ("derive_partial", "未派生项不生成", "方法 show 未定义"),
             ("refl_oob", "反射下标越界", "越界"),
             ("refl_notstruct", "对 enum 做字段反射", "不是 struct"),
-            ("refl_dynidx", "反射下标不是常量", "编译期整数常量")):
+            ("refl_stridx", "反射下标写成字符串", "下标必须是 int"),
+            # 通用 token 宏（v1.96）
+            ("macro_arity", "宏实参个数不符", "需要 2 个实参"),
+            ("macro_recursive", "宏体自递归", "宏展开超过"),
+            ("macro_dup", "宏重复定义", "重复定义"),
+            # 按值自包含的聚合（v1.88）：没有有限布局
+            ("struct_self", "struct 按值自包含", "不能按值包含自身"),
+            ("enum_self", "enum 按值自包含", "不能按值包含自身"),
+            # @simd 点积（v1.85）：两数组/累加器类型不一致必须拦下
+            ("simd_dot_mixed", "@simd 点积 int/f64 混用", "同类型"),
+            # 所有权检查 v2（v1.84）：视图生命周期 / 写别名 / 跨线程四类违反
+            ("own_slice_escape", "返回指向本帧栈的切片", "悬垂"),
+            ("own_struct_escape", "含栈视图的结构体逃逸", "悬垂"),
+            ("own_alias_write", "同基址重叠视图都写", "别名写"),
+            ("own_spawn_rc", "rc 句柄跨线程", "跨线程"),
+            ("own_nested_match", "match 臂里的栈视图逃逸（守 _own_parts）", "悬垂"),
+            # FFI（v1.87）：形参/返回只接受标量；声明不能带函数体
+            ("ffi_str_param", "@ffi 形参写 str", "FFI 只接受"),
+            ("ffi_struct_param", "@ffi 形参写 struct", "FFI 只接受"),
+            ("ffi_body", "@ffi 声明带函数体", "不能带函数体"),
+            # 闭包（v1.95）：捕获槽只有 1 字；聚合捕获、写捕获变量、把裸函数名
+            # 当闭包传（代码地址 vs 两字聚合）三种形态必须拦下
+            ("closure_capture_struct", "闭包捕获 struct", "暂不支持捕获聚合"),
+            ("closure_assign_capture", "闭包内写捕获变量", "不能给捕获变量"),
+            ("closure_fnptr_param", "裸函数名当闭包传", "实参不是闭包")):
         try:
             build(os.path.join(ROOT, f"tests/bad/{nm}.qma"),
                   os.path.join(ROOT, "build", f"bad_{nm}.exe"))
         except SyntaxError as ex:
             ok(f"编译期拦下 {why}") if needle in str(ex) \
                 else bad(f"{nm} 报错但信息不符（期望含 {needle!r}）：{ex}")
+        else:
+            bad(f"{nm} 应当编译失败却通过了")
+    # 跨模块同名 / 模块版本负向（v1.99，多文件）
+    for nm, needles in (
+            ("modsame_ambig", ("在多个模块里都有",)),
+            ("modver_major", ("版本不兼容",)),
+            ("modver_nodecl", ("没有声明版本",))):
+        try:
+            build(os.path.join(ROOT, f"tests/bad/{nm}/main.qma"),
+                  os.path.join(ROOT, "build", f"bad_{nm}.exe"))
+        except SyntaxError as ex:
+            ok(f"跨模块负例拦下 {nm}") if any(n in str(ex) for n in needles) \
+                else bad(f"{nm} 报错但信息不符（期望含 {needles!r}）：{ex}")
         else:
             bad(f"{nm} 应当编译失败却通过了")
     # pub 可见性负向（v1.43，多文件）：跨模块引用非 pub 声明必须编译期拦下
@@ -708,6 +905,20 @@ def main():
         bad("pub_hidden 应当编译失败却通过了")
     # pub 正例（v1.43，多文件）：pub 声明跨模块可用
     case_selfcheck("t88_pubvis", "fixtures/pubvis/main.qma")
+    # 跨文件接口负向（v1.90，多文件）：两种违反形态
+    #   ① 同名接口在两个模块里签名不一致 -> 接口冲突
+    #   ② impl 引用了根本没声明的接口 -> 未声明的接口（宽松期占位不算声明）
+    for nm, why, needle in (
+            ("iface_xfile_conflict", "跨文件同名接口签名不一致", "接口冲突"),
+            ("iface_xfile_undecl", "impl 引用未声明接口", "未声明的接口")):
+        try:
+            build(os.path.join(ROOT, f"tests/bad/{nm}/main.qma"),
+                  os.path.join(ROOT, "build", f"bad_{nm}.exe"))
+        except SyntaxError as ex:
+            ok(f"编译期拦下 {why}") if needle in str(ex) \
+                else bad(f"{nm} 报错但信息不符（期望含 {needle!r}）：{ex}")
+        else:
+            bad(f"{nm} 应当编译失败却通过了")
     # 限定语法正例（v1.44，多文件）：lib.fn()/lib.Enum.Variant/限定模式
     case_selfcheck("t89_qualified", "fixtures/qualified/main.qma")
     case_selfcheck("t90_mathfn", "tests/t90_mathfn.qma")
@@ -717,6 +928,8 @@ def main():
     case_selfcheck("t95_hash512", "tests/t95_hash512.qma")
     # @simd f64 点积（v1.60）：acc += a[i] * b[i]，SSE2 mulpd 两路
     case_selfcheck("t96_simddot", "tests/t96_simddot.qma")
+    # @simd int 点积（v1.83）：SSE2 3×pmuludq 拼 64x64->低 64 + paddq 两路
+    case_selfcheck("t117_simdintdot", "tests/t117_simdintdot.qma")
     case_selfcheck("t98_constfn", "tests/t98_constfn.qma")
     case_selfcheck("t99_generic_struct", "tests/t99_generic_struct.qma")
     case_selfcheck("t100_interp", "tests/t100_interp.qma")
@@ -742,6 +955,14 @@ def main():
     case_selfcheck("t115_derive", "tests/t115_derive.qma")
     # 跨模块派生（v1.73）：pub struct 的派生函数必须继承 pub
     case_selfcheck("derivepub", "fixtures/derivepub/dpub_main.qma")
+    # 跨模块同名声明 + 模块版本（v1.99）：per-module mangling 正例
+    case_selfcheck("modsame", "fixtures/modsame/main.qma")
+    # enum 派生 + f64 字段（v1.88）：{"$v":...} 约定 / 往返 / 精度
+    case_selfcheck("t123_derive_enum", "tests/t123_derive_enum.qma")
+    # 通用 token 宏（v1.96）：语句 / 表达式 / 生成声明 / 宏调宏 / 前向引用
+    case_selfcheck("t124_macro", "tests/t124_macro.qma")
+    # 运行时下标反射（v1.88）：常量折叠 + 按需查表
+    case_selfcheck("t125_refl_dyn", "tests/t125_refl_dyn.qma")
     # 会话存储（v1.71）：TTL / 惰性过期 / 墓碑销毁
     case_selfcheck("t110_session", "tests/t110_session.qma")
     # multipart 解析（v1.72）：boundary / 字段与文件 / CRLF 正文
@@ -754,7 +975,12 @@ def main():
     case_selfcheck("t114_path", "tests/t114_path.qma")
     # UUID（v1.77）：v4 生成 / 校验 / 版本与变体位
     case_selfcheck("t115_uuid", "tests/t115_uuid.qma")
+    # 所有权检查 v2（v1.84）：视图生命周期 / 写别名 / 跨线程的正例
+    case_selfcheck("t116_ownview", "tests/t116_ownview.qma")
     case_selfcheck("t99_regex", "tests/t99_regex.qma")
+
+    print("== [3i2] FFI：@ffi 调用系统库（v1.87） ==")
+    test_ffi()
     # pub + 限定语法负向（多文件）：非 pub 跨模块引用必须编译失败
     # （限定调用可能先被通用 pub 检查或指向校验拦下，两种消息都算对）
     for nm, needles in (("pub_hidden", ("非 pub",)),
@@ -775,6 +1001,11 @@ def main():
            % sum(1 for ln in r.stdout.splitlines() if "[PASS]" in ln))
     else:
         bad(f"gzip zlib 互操作失败：{r.stdout[-300:]}{r.stderr[-200:]}")
+
+    print("== [3i3] 持久化：std/fs + std/kv（v1.102） ==")
+    # t127 在单进程内校验 API 语义；t128 钉住"void 早退不能污染退出码"
+    case_selfcheck("kv", "tests/t127_kv.qma")
+    case_output("mainret", "tests/t128_mainret.qma", ["mainret ok"])
 
     print("== [3j] 高并发网络：IOCP reactor + 回调（v1.4） ==")
     test_net_reactor()
@@ -803,6 +1034,9 @@ def main():
     print("== [5b] arena 帧级回收（1MB 堆上限 / 4MB 分配量） ==")
     test_arena()
 
+    print("== [5c] 接口装箱引用计数（1MB 堆上限 / 19MB 装箱量） ==")
+    test_iface_rc()
+
     print("== [6] 失败路径（assert） ==")
     test_assert_fail()
 
@@ -811,6 +1045,12 @@ def main():
 
     print("== [8] 调试链路（--dbg-info / DWARF / qlm_dbg） ==")
     test_debug_chain()
+
+    print("== [9] AArch64 接口 vtable（ELF + 模拟器执行级） ==")
+    test_a64_iface()
+
+    print("== [10] 语言服务器（索引对拍 / 补全 / 跳转 / 重命名 / 协议） ==")
+    test_lsp()
 
     print("-" * 52)
     print(f"PASS={PASS} FAIL={FAIL} SKIP={SKIP}")

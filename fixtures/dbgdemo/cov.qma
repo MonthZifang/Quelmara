@@ -1,0 +1,17 @@
+// dbgdemo/cov.qma：覆盖率工具固定靶（v1.81）
+// pick() 的两个分支里只走 else 那条：`return 1` 那一行**永远不会执行**，
+// 覆盖率工具必须把它列进"未覆盖行"，否则就是假绿。
+// 本文件是工具链测试夹具，不进 parser 对拍语料（fixtures/ 不被收集）。
+module dbgdemo_cov
+
+fn pick(n: int) -> int {
+    if n > 10 {
+        return 1
+    }
+    return 2
+}
+
+fn main() {
+    let a = pick(3)
+    print(a.to_str())
+}
