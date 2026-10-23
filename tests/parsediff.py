@@ -34,9 +34,23 @@ PARSE1_PENDING = {"t52_iface.qma", "t54_iface_dyn.qma", "t56_generic.qma",
                   # 不做单态化，约束与 impl 模板在解析期就被擦除，dump 对不上
                   "t101_bounds.qma", "t102_generic_impl.qma",
                   "t103_generic_enum.qma", "t104_generic_enum_impl.qma",
-                  # 属性宏 @derive（v1.77）：stage-1 不认 @derive，也不生成派生
-                  # 函数——声明级 dump 天然对不上（oracle 侧会多出 5 个函数）
-                  "t115_derive.qma", "dpub_main.qma", "dpub_model.qma"}
+                  # interface / impl 家族的新文件（v1.82 并行轨新增）：
+                  # 含 impl 的方法名会被 stage-0 改成 Type__method，stage-1
+                  # 还不认 interface/impl，先按同一口径记账
+                  "iface_rc.qma", "t116_iface_multi.qma",
+                  # v1.97：A64 低堆夹具与接口所有权夹具同属 impl 家族
+                  # （stage-1 不认 `impl T : Iface`，方法名对不上）
+                  "iface_rc_a64.qma", "t118_iface_own.qma",
+                  # Drop（v1.93）：`impl T : Drop` 是 impl 家族，与上面同口径
+                  "t119_drop.qma",
+                  # 属性宏 @derive（v1.77 落地 / v1.81 移植到 stage-1）：
+                  # t115_derive / dpub_* 已从跳过清单移除——bootstrap parser
+                  # 现在按同一顺序产出派生函数签名与自动补的 import std.json
+                  # v1.96：enum 派生（{"$v":...} 约定）/ 通用 token 宏 /
+                  # 运行时下标反射都还没移植到 bootstrap parser
+                  "t123_derive_enum.qma", "t124_macro.qma",
+                  "t125_refl_dyn.qma",
+                  }
 
 
 def collect():
