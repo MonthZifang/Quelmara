@@ -1,0 +1,238 @@
+// bench/gate_bench.qma —— 性能回归门禁的固定靶（机器可读输出）
+//
+// 与 gbench / p0_bench 的区别：那两个是"人看的报告"，这个是"门禁吃的数字"。
+// 输出协议（tools/dev/bench_gate.py 解析，改协议要同时改两边）：
+//
+//   QLMBENCH|<名字>|<迭代数>|<总纳秒>     每个形状一行，进程内 now_ns，min of 3
+//   QLMCAL|<迭代数>|<总纳秒>              校准形状：只跟 CPU 主频/流水有关
+//   QLMDIGEST|<十进制校验和>              所有形状结果折进一个数，用来查"算错了"
+//
+// 为什么要有 QLMCAL：门禁要在**不同机器**上比较（开发机 / CI runner），
+// 绝对纳秒不可比。用同一进程里跑一段固定的依赖链做分母，得到
+// "这个形状相对一段标量整数运算有多贵"——主频差异被约掉，剩下的才是
+// 代码生成质量的差异。校准量本身也进基线，跑飞了会先在这里报出来。
+//
+// 为什么要有 QLMDIGEST：性能门禁最怕"变快了，因为算错了"。每个形状的
+// 结果都折进校验和，和基线不一致就直接判失败，不看时间。
+//
+// 形状选择原则：只用**稳定**的语言特性（整数运算 / 字符串 / map / 内存读写 /
+// SHA-256），不碰正在改的语法；每个形状的迭代数固定，跑一遍 ~0.3 s。
+module gate_bench
+
+import std.core
+import std.str
+import std.sha256
+
+// ---------------------------------------------------------------------------
+// 1. arith：整数依赖链（乘-移位-异或），延迟受限，最能反映基础代码生成
+// ---------------------------------------------------------------------------
+
+fn arith(n: int) -> int {
+    let mut x = 12345
+    let mut i = 0
+    while i < n {
+        x = x * 6364136223846793005 + 1442695040888963407
+        x = (x >> 13) ^ x
+        x = x * 0x2545F4914F6CDD1D
+        x = (x >> 7) ^ x
+        i += 1
+    }
+    return x
+}
+
+// ---------------------------------------------------------------------------
+// 2. branch：数据相关分支（小状态机），测分支预测失败与跳转密度
+// ---------------------------------------------------------------------------
+
+fn branch(n: int) -> int {
+    let mut state = 0
+    let mut x = 7
+    let mut i = 0
+    while i < n {
+        let c = i & 7
+        if state == 0 {
+            x += c
+            if x % 5 == 0 {
+                state = 1
+            }
+        } else {
+            if state == 1 {
+                x ^= c
+                if x % 3 == 0 {
+                    state = 2
+                } else {
+                    state = 0
+                }
+            } else {
+                x = (x + c) % 1000003
+                state = 0
+            }
+        }
+        i += 1
+    }
+    return x + state
+}
+
+// ---------------------------------------------------------------------------
+// 3. memscan：1 MiB 缓冲逐字节扫描（mem_load8 循环），测内存吞吐与循环开销
+// ---------------------------------------------------------------------------
+
+const PAT = "pattern!"
+
+fn memscan(n: int) -> int {
+    let buf = mem_alloc(n)
+    mem_zero(buf, n)
+    let mut off = 0
+    while off + 8 <= n {
+        let mut j = 0
+        while j < 8 {
+            mem_store8(buf, off + j, PAT[j])
+            j += 1
+        }
+        off += 64
+    }
+    let mut hits = 0
+    let mut i = 0
+    while i + 8 <= n {
+        if mem_load8(buf, i) == 112 && mem_load8(buf, i + 1) == 97
+                && mem_load8(buf, i + 2) == 116 && mem_load8(buf, i + 3) == 116 {
+            hits += 1
+            i += 8
+        } else {
+            i += 1
+        }
+    }
+    mem_free(buf, n)
+    return hits
+}
+
+// ---------------------------------------------------------------------------
+// 4. strbuild：日志行组装（拼接 + 整数转字符串），测分配与字符串化路径
+// ---------------------------------------------------------------------------
+
+fn strbuild(rows: int) -> int {
+    let mut total = 0
+    let mut r = 0
+    while r < rows {
+        let line = "level=info ts=" + (1700000000 + r).to_str()
+                   + " id=" + (r % 9973).to_str()
+                   + " dur_ms=" + (r % 89).to_str()
+                   + " status=" + (200 + (r & 3)).to_str()
+                   + " user=\"u" + (r % 331).to_str() + "\""
+        total += len(line)
+        r += 1
+    }
+    return total
+}
+
+// ---------------------------------------------------------------------------
+// 5. mapstr：map[str]int 插入 + 全量查找，测字符串哈希表路径
+// ---------------------------------------------------------------------------
+
+fn mapstr(n: int) -> int {
+    let mut m = map[str]int.new(n * 2)
+    let mut i = 0
+    while i < n {
+        m.set("key_" + i.to_str(), i)
+        i += 1
+    }
+    let mut hits = 0
+    i = 0
+    while i < n {
+        if m.get("key_" + i.to_str()) == i {
+            hits += 1
+        }
+        i += 1
+    }
+    return hits
+}
+
+// ---------------------------------------------------------------------------
+// 6. sha256：256 KiB 单遍，测标准库热路径（轮函数 / 消息调度）
+// ---------------------------------------------------------------------------
+
+fn sha256_cost(n: int) -> int {
+    let unit = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    let reps = n / 64
+    let big = str_repeat(unit, reps)
+    let hex = sha256_hex(big)
+    return len(hex) + len(big)
+}
+
+// ---------------------------------------------------------------------------
+// 7. cal：校准形状——纯标量整数依赖链，跟编译器优化无关的"机器速度"标尺
+// ---------------------------------------------------------------------------
+
+fn cal(n: int) -> int {
+    let mut x = 0x9E3779B97F4A7C15
+    let mut i = 0
+    while i < n {
+        x = x * 3 + 7
+        x = (x ^ (x >> 11)) + 1
+        i += 1
+    }
+    return x
+}
+
+// ---------------------------------------------------------------------------
+// 计时：min of 3，扣掉第一次的冷缓存
+// ---------------------------------------------------------------------------
+
+fn time3(iters: int, f: int) -> int {
+    let mut best = 0 - 1
+    let mut r = 0
+    let mut k = 0
+    while k < 3 {
+        let t0 = now_ns()
+        r = f(iters)
+        let t1 = now_ns()
+        let dt = t1 - t0
+        if best < 0 || dt < best {
+            best = dt
+        }
+        k += 1
+    }
+    // 结果必须在计时循环里用一次，否则整段可能被 DCE 掉
+    if r == 123456789 {
+        print("unreachable")
+    }
+    return best
+}
+
+fn emit(name: str, iters: int, ns: int) {
+    print("QLMBENCH|" + name + "|" + iters.to_str() + "|" + ns.to_str())
+}
+
+fn fold(d: int, v: int) -> int {
+    return (d * 1000003 + (v & 0xFFFFFFF)) % 1000000007
+}
+
+fn main() {
+    // 结果先算出来（同时供校验和），再各自计时——保证计时的是同一段代码
+    let v_arith = arith(8000000)
+    let v_branch = branch(8000000)
+    let v_scan = memscan(1048576)
+    let v_str = strbuild(2000)
+    let v_map = mapstr(5000)
+    let v_sha = sha256_cost(262144)
+    let v_cal = cal(16000000)
+
+    emit("arith", 8000000, time3(8000000, arith))
+    emit("branch", 8000000, time3(8000000, branch))
+    emit("memscan", 1048576, time3(1048576, memscan))
+    emit("strbuild", 2000, time3(2000, strbuild))
+    emit("mapstr", 5000, time3(5000, mapstr))
+    emit("sha256", 262144, time3(262144, sha256_cost))
+    print("QLMCAL|16000000|" + time3(16000000, cal).to_str())
+
+    let mut d = 0
+    d = fold(d, v_arith)
+    d = fold(d, v_branch)
+    d = fold(d, v_scan)
+    d = fold(d, v_str)
+    d = fold(d, v_map)
+    d = fold(d, v_sha)
+    d = fold(d, v_cal)
+    print("QLMDIGEST|" + d.to_str())
+    eprint("gate_bench done")
+}

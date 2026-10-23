@@ -1,0 +1,79 @@
+{
+  "entries": {
+    "windows/amd64/intel64-family-6-model-63-st/win": {
+      "cal": {
+        "iters": 16000000,
+        "ns": 47726700
+      },
+      "digest": "668567131",
+      "metrics": {
+        "arith": {
+          "iters": 8000000,
+          "ns": 38038900
+        },
+        "branch": {
+          "iters": 8000000,
+          "ns": 60496800
+        },
+        "mapstr": {
+          "iters": 5000,
+          "ns": 2972500
+        },
+        "memscan": {
+          "iters": 1048576,
+          "ns": 3086400
+        },
+        "sha256": {
+          "iters": 262144,
+          "ns": 18034000
+        },
+        "strbuild": {
+          "iters": 2000,
+          "ns": 2545100
+        }
+      },
+      "qlm": "1.92.0",
+      "runs": 3,
+      "size": 80896,
+      "ts": "2026-10-24T01:05:36"
+    },
+    "windows/amd64/win": {
+      "cal": {
+        "iters": 16000000,
+        "ns": 43673100
+      },
+      "digest": "668567131",
+      "metrics": {
+        "arith": {
+          "iters": 8000000,
+          "ns": 39861900
+        },
+        "branch": {
+          "iters": 8000000,
+          "ns": 58494500
+        },
+        "mapstr": {
+          "iters": 5000,
+          "ns": 2993800
+        },
+        "memscan": {
+          "iters": 1048576,
+          "ns": 3116400
+        },
+        "sha256": {
+          "iters": 262144,
+          "ns": 18745100
+        },
+        "strbuild": {
+          "iters": 2000,
+          "ns": 2487900
+        }
+      },
+      "qlm": "1.90.0",
+      "runs": 3,
+      "size": 80896,
+      "ts": "2026-10-24T00:38:33"
+    }
+  },
+  "version": 1
+}
