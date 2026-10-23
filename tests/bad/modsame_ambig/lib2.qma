@@ -1,0 +1,5 @@
+module lib2
+
+pub fn helper() -> str {
+    return "2"
+}

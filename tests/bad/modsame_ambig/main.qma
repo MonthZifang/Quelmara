@@ -1,0 +1,9 @@
+// 负向（v1.99）：两个 import 都有 helper，主文件也没声明 —— 未限定引用是歧义
+module modsame_ambig
+
+import lib1
+import lib2
+
+fn main() {
+    print(helper())
+}

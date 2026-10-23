@@ -1,0 +1,36 @@
+// 跨模块同名声明夹具 A（v1.99）：与 util_b / 主文件都重名
+module util_a "1.3.0"
+
+// 私有的同名辅助函数：两个模块都有，各自 mangling 成 util_a__private_tag
+fn private_tag() -> str {
+    return "a-private"
+}
+
+pub fn helper() -> str {
+    return "a"
+}
+
+pub fn twice(n: int) -> int {
+    return n * 2
+}
+
+pub fn tag() -> str {
+    return private_tag()
+}
+
+pub struct Item { v: int }
+
+// 同名类型 + 同名方法：方法符号会跟着类型一起 mangling（util_a__Item__describe）
+pub interface Describe {
+    fn describe(self: Item) -> str
+}
+
+impl Item : Describe {
+    fn describe(self: Item) -> str {
+        return "a:" + self.v.to_str()
+    }
+}
+
+pub fn make(v: int) -> Item {
+    return Item { v: v }
+}

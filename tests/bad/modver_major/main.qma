@@ -1,0 +1,8 @@
+// 负向（v1.99）：import 要求 major 2，模块声明的是 1.4.0
+module modver_major
+
+import lib ">=2.0"
+
+fn main() {
+    print(f().to_str())
+}

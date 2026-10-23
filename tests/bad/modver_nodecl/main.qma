@@ -1,0 +1,8 @@
+// 负向（v1.99）：import 要求版本，但模块没有声明 module "x.y.z"
+module modver_nodecl
+
+import lib ">=1.0"
+
+fn main() {
+    print(f().to_str())
+}

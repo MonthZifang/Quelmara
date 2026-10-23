@@ -1,0 +1,51 @@
+// t126_modsame：跨模块同名声明（v1.99）——per-module mangling 正例
+//
+// 覆盖：
+//   1) 主文件与两个 import 都有 helper()：未限定调用走本文件，限定调用各走各的
+//   2) 两个 import 之间同名（helper / twice / tag / Item）各自独立
+//   3) 非 pub 的同名私有函数（private_tag）也各归各的模块
+//   4) 同名 struct 的字段表不同：a.Item{v} 与 b.Item{tag} 是两个类型
+//   5) 模块版本：module X "1.3.0" 声明 + import X ">=1.2" 要求（同 major）
+//   6) 同名类型的方法（impl Item : Describe）：方法符号跟着类型换前缀
+module modsame "0.9.0"
+
+import util_a ">=1.2"     // 要求同 major 1 且 >= 1.2 -> 1.3.0 满足
+import util_b ">=2.0.0"   // 要求同 major 2 -> 2.0.0 满足
+
+// 与两个 import 都同名（未 pub：只在本文件可见）
+fn helper() -> str {
+    return "main"
+}
+
+struct Item { k: int }
+
+fn main() {
+    // 1) 未限定 -> 本文件；限定 -> 各模块
+    assert(helper() == "main", "未限定调用走本文件")
+    assert(util_a.helper() == "a", "util_a.helper")
+    assert(util_b.helper() == "b", "util_b.helper")
+
+    // 2) 两个 import 之间的同名
+    assert(util_a.twice(21) == 42, "util_a.twice")
+    assert(util_b.twice(21) == 42, "util_b.twice")
+
+    // 3) 私有同名函数各归各的模块
+    assert(util_a.tag() == "a-private", "util_a 的私有 private_tag")
+    assert(util_b.tag() == "b-private", "util_b 的私有 private_tag")
+
+    // 4) 同名 struct 的字段表不同
+    let p = util_a.make(7)
+    assert(p.v == 7, "util_a.Item 的字段 v")
+    let q = util_b.make(1)
+    assert(q.tag == "b", "util_b.Item 的字段 tag")
+
+    // 5) 同名类型的方法：符号跟着类型 mangling，静态派发各走各的
+    assert(p.describe() == "a:7", "util_a.Item.describe")
+    assert(q.describe() == "b:b", "util_b.Item.describe")
+
+    // 本文件自己的同名 struct 不受影响
+    let own = Item { k: 3 }
+    assert(own.k == 3, "主文件的 Item")
+
+    print("modsame ok")
+}

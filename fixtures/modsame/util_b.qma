@@ -1,0 +1,35 @@
+// 跨模块同名声明夹具 B（v1.99）：helper / twice / tag / Item 全与 A 同名
+module util_b "2.0.0"
+
+fn private_tag() -> str {
+    return "b-private"
+}
+
+pub fn helper() -> str {
+    return "b"
+}
+
+pub fn twice(n: int) -> int {
+    return n * 2
+}
+
+pub fn tag() -> str {
+    return private_tag()
+}
+
+// 与 util_a.Item 同名但字段表不同：两个类型必须各自独立
+pub struct Item { tag: str }
+
+pub interface Describe {
+    fn describe(self: Item) -> str
+}
+
+impl Item : Describe {
+    fn describe(self: Item) -> str {
+        return "b:" + self.tag
+    }
+}
+
+pub fn make(n: int) -> Item {
+    return Item { tag: "b" }
+}

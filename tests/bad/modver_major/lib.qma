@@ -1,0 +1,5 @@
+module lib "1.4.0"
+
+pub fn f() -> int {
+    return 1
+}
