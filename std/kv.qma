@@ -1,0 +1,279 @@
+// std/kv.qma —— 嵌入式键值存储（Windows PE，v1.101）
+//
+// 定位：一个进程内可用、**重启后还在**的 key → value 表。不是数据库：
+// 没有 SQL、没有事务、没有并发写保护。它是"追加日志 + 内存索引"的最小可用
+// 形态，够写配置、会话、计数、缓存元数据这类东西。
+//
+// ## 磁盘格式（一行 ASCII 头 + 裸正文，正文按长度取，二进制安全）
+//
+//     KV1 <klen> <vlen> <hash>\n<key><val>
+//
+//   * `klen` / `vlen` 是十进制字节数；`vlen = -1` 表示**墓碑**（删除标记）。
+//   * `hash` 是 `fnv1a64(key + val)` 的十进制（墓碑对空值算）。
+//   * 头部是 ASCII：hexdump 能直接看懂；正文不做转义，key/value 里可以有
+//     换行、`\0`、任意字节。
+//   * 不用 CRC-32 是因为标准库的 `crc32` 在 `std/gzip` 里——为一条 4 字节
+//     校验把整个 gzip（30 KB）拖进依赖不划算。FNV-1a 64 对"截断的尾巴"和
+//     "写坏的字节"同样敏感，代价是 8 字节而不是 4。
+//
+// ## 语义（写代码时别猜）
+//
+//   * **追加写**：put/del 只往文件尾追加一条记录，从不原地改。
+//   * **内存索引 + 值驻留**：`map[str]str` 保存全部键值，get 是纯内存操作。
+//     内存占用 ≈ 数据集大小（这是本版的边界，见 `07-gaps.md` §2）。
+//   * **崩溃安全**：`WriteFile` 进内核后进程崩溃不丢；**掉电**要 `kv_sync`。
+//     重放时遇到半截记录（长度不够 / hash 不符）就停在那儿，下一次追加从最后
+//     一个完好字节处覆盖——撕裂的尾巴不会污染后续记录。
+//   * `kv_compact` 把活记录重写进 `<path>.tmp` 再原子改名，压缩后句柄仍可用。
+//   * **句柄是值类型**（与 `std/session` 同形）：`Kv` 里装一个 vec 单元 + 一张
+//     map 句柄 + 路径，按值传参，内部句柄共享，所以函数里改的对外可见。
+//     失败时 `kv_ok(db) == 0`，不需要另外的错误码。
+
+import std.fs
+import std.hash
+import std.str
+
+const _MAGIC = "KV1"
+
+/// 一个打开中的库。`cell[0]` 是文件句柄（-1 = 已关闭）。
+pub struct Kv {
+    cell: vec[int]
+    m: map[str]str
+    path: str
+}
+
+// ---------------------------------------------------------------------------
+// 内部：记录编码 / 解码
+// ---------------------------------------------------------------------------
+
+fn _rec(key: str, val: str, tomb: int) -> str {
+    let mut vlen = len(val)
+    let mut hsrc = key + val
+    if tomb == 1 {
+        vlen = -1
+        hsrc = key
+    }
+    return _MAGIC + " " + len(key).to_str() + " " + vlen.to_str() + " " +
+        fnv1a64(hsrc).to_str() + "\n" + key + val
+}
+
+// 清空一张 map（先收键再删——边遍历边删会破坏探测链）
+fn _clear(m: map[str]str) {
+    let ks = vec[str].new(8)
+    for k in m {
+        ks.push(k)
+    }
+    for k in ks {
+        m.del(k)
+    }
+}
+
+fn _apply(m: map[str]str, key: str, val: str, tomb: int) {
+    if tomb == 1 {
+        m.del(key)
+    } else {
+        m.set(key, val)
+    }
+}
+
+// 重放整份日志：返回最后一条完好记录的结束偏移（撕裂的尾巴从这里被覆盖）。
+fn _replay(buf: str, m: map[str]str) -> int {
+    let n = len(buf)
+    let mut pos = 0
+    let mut good = 0
+    while pos < n {
+        let nl = str_find_from(buf, pos, "\n")
+        if nl < 0 {
+            break
+        }
+        let parts = str_split(substr(buf, pos, nl - pos), " ")
+        if len(parts) != 4 {
+            break
+        }
+        if parts.get(0) != _MAGIC {
+            break
+        }
+        let klen = to_int(parts.get(1))
+        let vlen = to_int(parts.get(2))
+        let want = to_int(parts.get(3))
+        if klen < 0 {
+            break
+        }
+        let mut vn = 0
+        if vlen > 0 {
+            vn = vlen
+        }
+        let body = nl + 1
+        if body + klen + vn > n {
+            break
+        }
+        let key = substr(buf, body, klen)
+        let mut val = ""
+        if vn > 0 {
+            val = substr(buf, body + klen, vn)
+        }
+        let mut hsrc = key
+        if vlen != -1 {
+            hsrc = key + val
+        }
+        if fnv1a64(hsrc) != want {
+            break
+        }
+        _apply(m, key, val, vlen == -1)
+        pos = body + klen + vn
+        good = pos
+    }
+    return good
+}
+
+// ---------------------------------------------------------------------------
+// 对外接口
+// ---------------------------------------------------------------------------
+
+/// 打开（不存在则新建）一个库，返回句柄；失败时 `kv_ok(db) == 0`。
+/// 打开时重放整份日志重建索引，并把写位置定位到最后一条完好记录之后。
+pub fn kv_open(path: str) -> Kv {
+    let cell = vec[int].new(1)
+    let m = map[str]str.new(8)
+    let fd = fs_open(path, "a")
+    cell.push(fd)
+    if fd == -1 {
+        return Kv { cell: cell, m: m, path: path }
+    }
+    let size = fs_size(fd)
+    let mut buf = ""
+    if size > 0 {
+        fs_seek(fd, 0)
+        buf = fs_read(fd, size)
+    }
+    let good = _replay(buf, m)
+    fs_seek(fd, good)
+    return Kv { cell: cell, m: m, path: path }
+}
+
+/// 句柄是否可用：1 / 0（`kv_open` 失败、或已经 `kv_close`）。
+pub fn kv_ok(db: Kv) -> int {
+    if db.cell.get(0) == -1 {
+        return 0
+    }
+    return 1
+}
+
+/// 写入一个键（覆盖旧值）：0 成功 / -1 失败。空键被拒绝。
+pub fn kv_put(db: Kv, key: str, val: str) -> int {
+    let fd = db.cell.get(0)
+    if fd == -1 || len(key) == 0 {
+        return -1
+    }
+    if fs_write(fd, _rec(key, val, 0)) < 0 {
+        return -1
+    }
+    db.m.set(key, val)
+    return 0
+}
+
+/// 读一个键；不存在（或已删除）返回空串。用 `kv_has` 区分"空值"与"没有"。
+pub fn kv_get(db: Kv, key: str) -> str {
+    if db.cell.get(0) == -1 || !db.m.has(key) {
+        return ""
+    }
+    return db.m.get(key)
+}
+
+/// 键是否存在：1 / 0。
+pub fn kv_has(db: Kv, key: str) -> int {
+    if db.cell.get(0) == -1 {
+        return 0
+    }
+    if db.m.has(key) {
+        return 1
+    }
+    return 0
+}
+
+/// 删除一个键（追加墓碑）：0 成功 / -1 失败。删不存在的键也算成功。
+pub fn kv_del(db: Kv, key: str) -> int {
+    let fd = db.cell.get(0)
+    if fd == -1 || len(key) == 0 {
+        return -1
+    }
+    if !db.m.has(key) {
+        return 0
+    }
+    if fs_write(fd, _rec(key, "", 1)) < 0 {
+        return -1
+    }
+    db.m.del(key)
+    return 0
+}
+
+/// 当前键数量（不含已删除的）。
+pub fn kv_len(db: Kv) -> int {
+    return len(db.m)
+}
+
+/// 刷盘（FlushFileBuffers）：0 成功 / -1 失败。掉电安全需要它。
+pub fn kv_sync(db: Kv) -> int {
+    let fd = db.cell.get(0)
+    if fd == -1 {
+        return -1
+    }
+    return fs_sync(fd)
+}
+
+/// 压缩：把活记录重写进 `<path>.tmp` 后原子改名。
+/// 返回 `[压缩前字节数, 压缩后字节数]`；失败返回空 vec。压缩后句柄仍可用。
+pub fn kv_compact(db: Kv) -> vec[int] {
+    let out = vec[int].new(2)
+    let fd = db.cell.get(0)
+    if fd == -1 {
+        return out
+    }
+    let tmp = db.path + ".tmp"
+    let before = fs_size(fd)
+    let tf = fs_open(tmp, "w")
+    if tf == -1 {
+        return out
+    }
+    let mut wrote = 0
+    for k in db.m {
+        let r = fs_write(tf, _rec(k, db.m.get(k), 0))
+        if r < 0 {
+            fs_close(tf)
+            return out
+        }
+        wrote = wrote + r
+    }
+    fs_sync(tf)
+    fs_close(tf)
+    fs_close(fd)
+    if fs_rename(tmp, db.path) != 0 {
+        db.cell.set(0, -1)
+        return out
+    }
+    let nf = fs_open(db.path, "a")
+    db.cell.set(0, nf)
+    out.push(before)
+    out.push(wrote)
+    return out
+}
+
+/// 关闭：先刷盘再关句柄，并清空内存索引。
+/// 关闭后 `kv_ok(db)` 为 0，其余接口一律 -1 / 空串 / 0——**不留"还能读但写不进去"
+/// 的半死状态**（那会让人误以为数据还在库里）。
+pub fn kv_close(db: Kv) -> int {
+    let fd = db.cell.get(0)
+    if fd == -1 {
+        return -1
+    }
+    let r = fs_sync(fd)
+    fs_close(fd)
+    db.cell.set(0, -1)
+    _clear(db.m)
+    return r
+}
+
+/// 文件当前字节数（观察日志膨胀 / 压缩效果），失败 -1。
+pub fn kv_file_size(db: Kv) -> int {
+    return fs_size(db.cell.get(0))
+}

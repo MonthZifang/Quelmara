@@ -1,0 +1,102 @@
+// t127_kv.qma：std/kv 持久化键值存储（v1.101）
+// 覆盖：put/get/has/del/len、空值与"不存在"的区分、二进制安全的键值
+//       （换行/空字节）、重开重放、覆盖写、压缩、两个库同时打开、关闭后行为。
+// 全部断言自校验，退出码 0 = 通过。
+module t127_kv
+
+import std.kv
+
+fn main() {
+    let p1 = "build/t127_a.db"
+    let p2 = "build/t127_b.db"
+    fs_remove(p1)
+    fs_remove(p1 + ".tmp")
+    fs_remove(p2)
+    fs_remove(p2 + ".tmp")
+
+    // ---- 1. 基本读写 ----
+    let a = kv_open(p1)
+    assert(kv_ok(a) == 1, "open")
+    assert(kv_len(a) == 0, "empty")
+    assert(kv_put(a, "name", "quelmara") == 0, "put")
+    assert(kv_put(a, "n", "42") == 0, "put 2")
+    assert(kv_len(a) == 2, "len 2")
+    assert(kv_get(a, "name") == "quelmara", "get")
+    assert(kv_has(a, "n") == 1, "has")
+    assert(kv_has(a, "missing") == 0, "has missing")
+    assert(kv_get(a, "missing") == "", "get missing")
+
+    // ---- 2. 空值 vs 不存在（必须有 has 才分得清）----
+    assert(kv_put(a, "empty", "") == 0, "put empty")
+    assert(kv_has(a, "empty") == 1, "empty 存在")
+    assert(kv_get(a, "empty") == "", "空值读出来还是空串")
+    assert(kv_has(a, "nope") == 0, "nope 不存在")
+
+    // ---- 3. 空键被拒绝 ----
+    assert(kv_put(a, "", "x") == -1, "空键拒绝")
+    assert(kv_del(a, "") == -1, "空键删除拒绝")
+
+    // ---- 4. 二进制安全：键值里有换行与 \0 ----
+    assert(kv_put(a, "k\n1", "v\0x\ny") == 0, "put binary")
+    assert(kv_get(a, "k\n1") == "v\0x\ny", "get binary")
+    assert(kv_len(a) == 4, "len 4")
+
+    // ---- 5. 删除 + 删不存在的键 ----
+    assert(kv_del(a, "n") == 0, "del")
+    assert(kv_has(a, "n") == 0, "del 生效")
+    assert(kv_del(a, "n") == 0, "重复删除也算成功")
+    assert(kv_len(a) == 3, "len 3")
+    assert(kv_sync(a) == 0, "sync")
+    assert(kv_close(a) == 0, "close")
+    assert(kv_ok(a) == 0, "关闭后 ok=0")
+    assert(kv_put(a, "x", "y") == -1, "关闭后写失败")
+    assert(kv_get(a, "name") == "", "关闭后读空")
+    assert(kv_close(a) == -1, "重复关闭 -1")
+
+    // ---- 6. 重开重放（进程内重新打开，等价于重启后的恢复路径）----
+    let a2 = kv_open(p1)
+    assert(kv_ok(a2) == 1, "reopen")
+    assert(kv_len(a2) == 3, "reopen len")
+    assert(kv_get(a2, "name") == "quelmara", "reopen name")
+    assert(kv_has(a2, "n") == 0, "reopen 删除也持久")
+    assert(kv_get(a2, "k\n1") == "v\0x\ny", "reopen binary")
+    assert(kv_has(a2, "empty") == 1, "reopen empty")
+
+    // ---- 7. 两个库同时打开，互不干扰 ----
+    let b = kv_open(p2)
+    assert(kv_ok(b) == 1, "open b")
+    assert(kv_put(b, "name", "other") == 0, "put b")
+    assert(kv_len(b) == 1, "b len 1")
+    assert(kv_get(a2, "name") == "quelmara", "a 不受 b 影响")
+    assert(kv_get(b, "name") == "other", "b 独立")
+    kv_close(b)
+
+    // ---- 8. 覆盖写 + 压缩 ----
+    let mut i = 0
+    while i < 64 {
+        assert(kv_put(a2, "hot", "v" + i.to_str()) == 0, "put hot")
+        i += 1
+    }
+    assert(kv_get(a2, "hot") == "v63", "hot 最新值")
+    assert(kv_len(a2) == 4, "len 4 after hot")
+    let before = kv_file_size(a2)
+    let r = kv_compact(a2)
+    assert(len(r) == 2, "compact 返回两个数")
+    assert(r.get(0) == before, "压缩前 = 当时的文件大小")
+    assert(r.get(1) < before, "压缩后更小")
+    assert(kv_len(a2) == 4, "压缩不改键数")
+    assert(kv_get(a2, "hot") == "v63", "压缩保留最新值")
+    assert(kv_get(a2, "name") == "quelmara", "压缩保留其他键")
+    assert(kv_file_size(a2) == r.get(1), "句柄指向压缩后的文件")
+
+    // ---- 9. 压缩后继续写 + 重开仍然一致 ----
+    assert(kv_put(a2, "after", "compact") == 0, "压缩后写")
+    kv_close(a2)
+    let a3 = kv_open(p1)
+    assert(kv_len(a3) == 5, "最终 5 个键")
+    assert(kv_get(a3, "hot") == "v63", "最终 hot")
+    assert(kv_get(a3, "after") == "compact", "最终 after")
+    kv_close(a3)
+
+    print("kv ok")
+}

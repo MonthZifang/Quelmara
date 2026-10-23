@@ -1,0 +1,60 @@
+// kv_fixture.qma —— std/kv 的进程级夹具（v1.101）
+// 用法：kv_fixture <db路径> <模式>
+//   seed     写入 k0..k4 -> v0..v4，关库
+//   verify5  断言库里正好 5 个键、k2 = v2
+//   verify4  断言库里正好 4 个键（撕裂尾巴丢掉最后一条之后）
+//   add      追加一个键 after=yes
+//   verify5b 断言 5 个键（4 + after）且 after = yes
+//   verify6  断言 6 个键（5 + after，垃圾尾巴场景）且 after = yes
+// 每个模式都是一次独立进程：恢复路径（重放日志）在进程边界上才被测到。
+module kv_fixture
+
+import std.kv
+
+fn main() {
+    let a = args()
+    assert(len(a) >= 2, "用法: kv_fixture <db> <mode>")
+    let path = a[0]
+    let mode = a[1]
+
+    if mode == "seed" {
+        let db = kv_open(path)
+        assert(kv_ok(db) == 1, "open")
+        let mut i = 0
+        while i < 5 {
+            assert(kv_put(db, "k" + i.to_str(), "v" + i.to_str()) == 0, "put")
+            i += 1
+        }
+        assert(kv_close(db) == 0, "close")
+        print("seeded")
+        return
+    }
+
+    let db = kv_open(path)
+    assert(kv_ok(db) == 1, "open")
+
+    if mode == "verify5" {
+        assert(kv_len(db) == 5, "len 5")
+        assert(kv_get(db, "k2") == "v2", "k2")
+        assert(kv_get(db, "k4") == "v4", "k4")
+    } else if mode == "verify4" {
+        assert(kv_len(db) == 4, "len 4")
+        assert(kv_get(db, "k2") == "v2", "k2")
+        assert(kv_has(db, "k4") == 0, "k4 被丢弃")
+    } else if mode == "add" {
+        assert(kv_put(db, "after", "yes") == 0, "put after")
+    } else if mode == "verify6" {
+        assert(kv_len(db) == 6, "len 6")
+        assert(kv_get(db, "after") == "yes", "after")
+        assert(kv_get(db, "k4") == "v4", "k4 仍在")
+    } else if mode == "verify5b" {
+        assert(kv_len(db) == 5, "len 5")
+        assert(kv_get(db, "after") == "yes", "after")
+        assert(kv_get(db, "k3") == "v3", "k3 仍在")
+    } else {
+        assert(false, "未知模式")
+    }
+
+    assert(kv_close(db) == 0, "close")
+    print("ok " + mode)
+}

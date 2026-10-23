@@ -1,0 +1,48 @@
+// t128_mainret.qma：void 函数里的空 `return` 必须让 RAX 归零（v1.101）
+//
+// 缺陷：`if c { return }` 这种早退在 v1.100 及以前会把**上一次比较的结果**
+// 留在 RAX 里，而入口把 main 的 RAX 当退出码 —— 于是"程序正常跑完、只输出一行"
+// 却带着 rc=1 退出（脚本/CI 会判成失败）。函数体末尾的兜底返回早就写的是
+// ret 0，只有显式 `return` 这一条路径漏了清零。
+//
+// 本文件只负责**走到每条早退路径并正常打印**；真正的断言在
+// `run_win_tests.py` 里（case_output 检查退出码 0 + 输出行）。
+module t128_mainret
+
+fn early_if(n: int) -> int {
+    if n > 0 {
+        return 1
+    }
+    return 0
+}
+
+// void 函数里的早退：调用方不看返回值，但 RAX 会漏到 main
+fn sink(n: int) {
+    if n == 1 {
+        return
+    }
+    if n == 2 {
+        return
+    }
+    let mut i = 0
+    while i < 3 {
+        i += 1
+        if i == 2 {
+            return
+        }
+    }
+}
+
+fn main() {
+    // 1. main 自己的早退（最直接的复现：`if a == 1 { return }`）
+    if early_if(1) == 1 {
+        sink(1)
+    }
+    // 2. 被调 void 函数早退后，main 继续跑
+    sink(2)
+    sink(3)
+    // 3. 循环里的早退
+    sink(9)
+    print("mainret ok")
+    return
+}

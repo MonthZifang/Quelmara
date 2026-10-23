@@ -1,0 +1,121 @@
+// bench/kv_bench.qma —— std/kv 持久化键值存储的吞吐（v1.101）
+// 用法：python tools/stage0/qlm_cli.py run bench/kv_bench.qma --target win
+//
+// 口径：
+//   * 全部用进程内 now_ns()，不含进程启动；
+//   * put = 一次 WriteFile（进内核，**不刷盘**）+ 一次 map 插入；
+//     get = 纯内存（map 查找），不打盘；
+//   * 数据集：2 万条 8 字节键 + 32 字节值，再对 2000 个键覆盖写 10 轮
+//     （制造日志膨胀，好观察压缩）；
+//   * **键值预先构造好**（不计入计时）：这里量的是存储本身，不是调用方的
+//     字符串拼接；真实代码里键值往往来自请求体或已有字段；
+//   * 掉电安全要 kv_sync，它的成本单独测（每条一次 FlushFileBuffers）。
+module kv_bench
+
+import std.kv
+
+fn key_of(i: int) -> str {
+    return "k" + i.to_str()
+}
+
+fn val_of(i: int) -> str {
+    let mut s = "v" + i.to_str() + ":"
+    while len(s) < 32 {
+        s = s + "x"
+    }
+    return s
+}
+
+fn main() {
+    let N = 20000
+    let path = "build/kv_bench.db"
+    fs_remove(path)
+    fs_remove(path + ".tmp")
+
+    // 键值先造好（不参与计时）
+    let keys = vec[str].new(N)
+    let vals = vec[str].new(N)
+    let mut p = 0
+    while p < N {
+        keys.push(key_of(p))
+        vals.push(val_of(p))
+        p += 1
+    }
+
+    // ---------- 写入 2 万条 ----------
+    let db = kv_open(path)
+    assert(kv_ok(db) == 1, "open")
+    let t0 = now_ns()
+    let mut i = 0
+    while i < N {
+        kv_put(db, keys.get(i), vals.get(i))
+        i += 1
+    }
+    let t1 = now_ns()
+    print("put " + N.to_str() + " 条: " + ((t1 - t0) / 1000000).to_str() + " ms  ("
+        + ((t1 - t0) / N).to_str() + " ns/条)")
+
+    // ---------- 读取（纯内存） ----------
+    let mut acc = 0
+    let t2 = now_ns()
+    i = 0
+    while i < N {
+        acc += len(kv_get(db, keys.get(i)))
+        i += 1
+    }
+    let t3 = now_ns()
+    assert(acc == N * 32, "get 内容长度")
+    print("get " + N.to_str() + " 条: " + ((t3 - t2) / 1000000).to_str() + " ms  ("
+        + ((t3 - t2) / N).to_str() + " ns/条)")
+
+    // ---------- 覆盖写：2000 个键 × 10 轮（日志膨胀） ----------
+    let t4 = now_ns()
+    let mut r = 0
+    while r < 10 {
+        i = 0
+        while i < 2000 {
+            kv_put(db, keys.get(i), vals.get((i + r) % N))
+            i += 1
+        }
+        r += 1
+    }
+    let t5 = now_ns()
+    print("覆盖写 20000 次: " + ((t5 - t4) / 1000000).to_str() + " ms  ("
+        + ((t5 - t4) / 20000).to_str() + " ns/次)")
+    let size_before = kv_file_size(db)
+    assert(kv_len(db) == N, "覆盖写不改键数")
+
+    // ---------- 刷盘成本 ----------
+    let t6 = now_ns()
+    let mut s = 0
+    while s < 200 {
+        kv_put(db, "sync" + s.to_str(), "y")
+        kv_sync(db)
+        s += 1
+    }
+    let t7 = now_ns()
+    print("put+sync ×200: " + ((t7 - t6) / 1000000).to_str() + " ms  ("
+        + ((t7 - t6) / 200).to_str() + " ns/条)")
+    kv_close(db)
+
+    // ---------- 重开（重放日志重建索引） ----------
+    let t8 = now_ns()
+    let db2 = kv_open(path)
+    let t9 = now_ns()
+    assert(kv_ok(db2) == 1, "reopen")
+    assert(kv_len(db2) == N + 200, "reopen 条数")
+    print("重开 + 重放 " + (N + 200).to_str() + " 条: "
+        + ((t9 - t8) / 1000000).to_str() + " ms  ("
+        + ((t9 - t8) / (N + 200)).to_str() + " ns/条)")
+
+    // ---------- 压缩 ----------
+    let ta = now_ns()
+    let cr = kv_compact(db2)
+    let tb = now_ns()
+    assert(len(cr) == 2, "compact")
+    print("压缩: " + ((tb - ta) / 1000000).to_str() + " ms  ("
+        + cr.get(0).to_str() + " B -> " + cr.get(1).to_str() + " B)")
+    assert(kv_len(db2) == N + 200, "压缩不改键数")
+    assert(kv_get(db2, "k7") != "", "压缩后仍可读")
+    kv_close(db2)
+}
