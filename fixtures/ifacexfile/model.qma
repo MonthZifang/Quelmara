@@ -1,0 +1,27 @@
+// fixtures/ifacexfile/model.qma：接口声明与 impl 在库侧（v1.81）
+//
+// 接口不再是"必须和 impl 同源文件"：`pub interface` 导出后，调用方
+// 可以在自己的文件里 `impl 自己的类型 : Shape`，两边共用同一张
+// {data, vt} 布局与同一套槽位顺序。
+module model
+
+pub interface Shape {
+    fn area(self) -> int
+    fn name(self) -> str
+}
+
+pub struct Circle { r: int }
+
+impl Circle : Shape {
+    fn area(c: Circle) -> int { return c.r * c.r * 3 }
+    fn name(c: Circle) -> str { return "circle" }
+}
+
+// 跨模块结构体字面量仍不支持（见 07-gaps §1 模块系统），库侧用构造器。
+pub fn circle(r: int) -> Circle {
+    return Circle { r: r }
+}
+
+pub fn circle_as_shape(r: int) -> Shape {
+    return Circle { r: r }
+}

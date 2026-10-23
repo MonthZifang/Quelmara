@@ -221,6 +221,42 @@ class EncA64:
     def nop(self):
         self.emit(0xD503201F)
 
+    # -- 原子 / 屏障（v1.98：LL-SC 序列 + 屏障，AArch64 无 lock 前缀） --
+    # ARMv8.0 只有 LL/SC（LDXR/STXR 家族），没有 x86 那样的单指令 RMW；
+    # 因此 atomic_add / cas / xchg 都编成 "LDAXR … STLXR + 失败重试" 循环。
+    # 用带 acquire/release 的变体（LD AXR / ST LXR）而不是裸 LDXR/STXR：
+    # 前者在一条指令里给足顺序保证，省掉循环外的 DMB。
+    def ldaxr(self, rt, rn):
+        # LDAXR Xt, [Xn]：1100 1000 0101 1111 1100 00 Rn Rt
+        self.emit(0xC85FFC00 | ((rn & 31) << 5) | (rt & 31))
+
+    def stlxr(self, rs, rt, rn):
+        # STLXR Ws, Xt, [Xn]：1100 1000 0000 0000 1111 11 Rn Rt
+        # Ws = 0 表示独占写成功；非 0 表示监视器已被清（须重试）
+        self.emit(0xC800FC00 | ((rs & 31) << 16) | ((rn & 31) << 5) | (rt & 31))
+
+    def ldar(self, rt, rn):
+        # LDAR Xt, [Xn]：1100 1000 1101 1111 1100 00 Rn Rt（acquire 读）
+        self.emit(0xC8DFFC00 | ((rn & 31) << 5) | (rt & 31))
+
+    def stlr(self, rt, rn):
+        # STLR Xt, [Xn]：1100 1000 1001 1111 1100 00 Rn Rt（release 写）
+        self.emit(0xC89FFC00 | ((rn & 31) << 5) | (rt & 31))
+
+    def clrex(self):
+        self.emit(0xD5033F5F)         # CLREX：放弃独占监视器
+
+    def dmb_ish(self):
+        self.emit(0xD5033BBF)         # DMB ISH：全内存屏障（等价 mfence 的域内语义）
+
+    def yield_(self):
+        self.emit(0xD503203F)         # YIELD：等价 x86 的 pause（自旋提示）
+
+    def mrs_cntvct(self, rt):
+        # MRS Xt, CNTVCT_EL0：虚拟计数器（EL0 可读，Linux 默认开放）
+        # now_cycle 的 A64 对应物——单调递增，不保证等于核心周期。
+        self.emit(0xD53BE040 | (rt & 31))
+
     def resolve(self):
         for wi, label, kind in self.fixups:
             target = self.labels[label]
@@ -244,6 +280,7 @@ class CodegenA64:
         self.enc = EncA64()
         self.global_fixups = []   # (word_index, gid) —— movz/movk 序列起点
         self.code_fixups = []     # (word_index, fname, reg) —— 函数地址（fnaddr）加载点
+        self.vt_fixups = []       # (word_index, fname) —— vtable 槽（8 字节数据）
 
     # ---- 操作数 ----
     def fetch(self, target, spec):
@@ -284,6 +321,24 @@ class CodegenA64:
     def dst_move(self, dst):
         kind, val = self.alloc[dst]
         return ("r", val) if kind == "r" else ("m", val)
+
+    def fetch_fixed(self, reg, spec):
+        """取值并保证落在指定寄存器。
+
+        `fetch()` 在操作数已经在分配池寄存器里时直接返回那个寄存器，
+        而 LL/SC 序列要求地址、期望值、新值、状态四个操作数互不重叠，
+        且不能撞上分配池（池里的值在 IR 指令边界上都是活的）。
+        X1..X5 不在 POOL_A64 里，可安全当临时寄存器用。
+        """
+        r = self.fetch(reg, spec)
+        if r != reg:
+            self.enc.mov_rr(reg, r)
+        return reg
+
+    def enc_label(self, hint):
+        """代码段标签名（与 x86 后端的 `Fn.label` 同作用：只求全局唯一）"""
+        self.label_id = getattr(self, "label_id", 0) + 1
+        return f"__{hint}_{self.label_id}"
 
     def parallel_move(self, moves):
         pending = list(moves)
@@ -479,6 +534,73 @@ class CodegenA64:
                 raise SyntaxError("A64 暂不支持超过 8 个形参（栈传参未接）")
             moves = [(("r", ARG_REGS[i]), self.dst_move(d)) for i, d in enumerate(ins[1])]
             self.parallel_move(moves)
+        elif op == "xchg":
+            # mem_xchg(addr, val) -> old：LL/SC 交换。
+            # 与 x86 的 `xchg [m], r` 语义相同（返回旧值），只是没有单指令形式。
+            dst, addr, val = ins[1], ins[2], ins[3]
+            ra = self.fetch_fixed(SCRATCH2, addr)      # X17 = 地址
+            rv = self.fetch_fixed(X1, val)             # X1  = 新值
+            l_retry = self.enc_label("xchg")
+            enc.labels[l_retry] = enc.pos()
+            enc.ldaxr(ACC, ra)                         # ACC = 旧值 + 抢监视器
+            enc.stlxr(X2, rv, ra)                      # W2 = 0 成功 / 非 0 重试
+            enc.cbnz(X2, l_retry)
+            if dst is not None:
+                self.commit(dst, ACC)
+        elif op == "atomic":
+            # ('atomic', sub, dst, addr, a[, b])（v1.98 A64 版本）
+            #   add -> dst = 旧值；*addr += a
+            #   cas -> dst = 旧值；*addr == a 时 *addr = b
+            # 语义与 x86 的 lock xadd / lock cmpxchg 逐位一致（含 64 位回绕），
+            # 差别只在实现：ARMv8.0 没有单指令 RMW，必须 LL/SC 重试。
+            sub, dst, addr = ins[1], ins[2], ins[3]
+            ra = self.fetch_fixed(SCRATCH2, addr)      # X17 = 地址
+            if sub == "add":
+                rv = self.fetch_fixed(X1, ins[4])      # X1 = 加数
+                l_retry = self.enc_label("aadd")
+                enc.labels[l_retry] = enc.pos()
+                enc.ldaxr(ACC, ra)
+                enc.add_rr(X2, ACC, rv)
+                enc.stlxr(X3, X2, ra)
+                enc.cbnz(X3, l_retry)
+                if dst is not None:
+                    self.commit(dst, ACC)
+            elif sub == "cas":
+                rexp = self.fetch_fixed(X1, ins[4])    # X1 = 期望值
+                rnew = self.fetch_fixed(X2, ins[5])    # X2 = 新值
+                l_retry = self.enc_label("acas")
+                l_done = self.enc_label("acasd")
+                enc.labels[l_retry] = enc.pos()
+                enc.ldaxr(ACC, ra)                     # ACC = 旧值
+                enc.cmp_rr(ACC, rexp)
+                enc.bcond(COND["ne"], l_done)          # 不等：不写，直接返回旧值
+                enc.stlxr(X3, rnew, ra)
+                enc.cbnz(X3, l_retry)                  # 独占写失败：重读重试
+                enc.labels[l_done] = enc.pos()
+                enc.clrex()                            # 放弃监视器（相等失败路径也要放）
+                if dst is not None:
+                    self.commit(dst, ACC)
+            else:
+                raise SyntaxError(f"A64 atomic 未知子操作 {sub}")
+        elif op == "ldar":
+            # acquire 读：LDAR 一条指令给足顺序（x86 那边是同形的 mov）
+            ra = self.fetch_fixed(SCRATCH2, ins[2])
+            enc.ldar(ACC, ra)
+            self.commit(ins[1], ACC)
+        elif op == "stlr":
+            # release 写：STLR（x86 那边是同形的 mov）
+            ra = self.fetch_fixed(SCRATCH2, ins[1])
+            rv = self.fetch_fixed(X1, ins[2])
+            enc.stlr(rv, ra)
+        elif op == "mfence":
+            enc.dmb_ish()
+        elif op == "pause":
+            enc.yield_()
+        elif op == "rdtsc":
+            # now_cycle() -> 虚拟计数器（CNTVCT_EL0）。与 x86 的 rdtsc 一样
+            # 只保证单调，不保证等于核心周期——微基准里读两次取差即可。
+            enc.mrs_cntvct(ACC)
+            self.commit(ins[1], ACC)
         else:
             raise SyntaxError(f"A64 无法发射 {ins!r}")
 
@@ -540,13 +662,9 @@ class CodegenA64:
     # ---- 整体 ----
     def gen_all(self):
         enc = self.enc
-        # v1.9 interface 动态分发（vtable）尚未进 A64 发射层：
-        # 与 trunc/vsum 同一条边界。这里显式拦下（否则 __vt_* 标签
-        # 未定义会以 KeyError 栈收场，报错不可读）。
-        if getattr(self.low, "vtables", None):
-            raise SyntaxError(
-                "AArch64 发射层暂不支持 interface 动态分发（vtable）；"
-                "请用 x86_64 后端编译，或改用静态分发（直接调用具体类型方法）")
+        # interface 动态分发（v1.81）：vtable 与 x86_64 同构——代码段尾部
+        # 一张函数指针表，每槽 8 字节；派发走 callr（BLR）。表项用
+        # vt_fixups 在收尾时按函数标签回填绝对地址。
         # _start：先保存内核栈上的 argc/argv（若程序用到 args()），再 BL main
         if self.low is not None and getattr(self.low, "uses_args", False):
             enc.ldr(X0, SP, 0)          # x0 = [sp] = argc
@@ -565,6 +683,15 @@ class CodegenA64:
                 self.gen_instr(ins)
             self.emit_epilogue()
             enc.ret()
+
+        # ---- vtable（v1.81）----
+        for (iname, tname), fnames in sorted(
+                (getattr(self.low, "vtables", None) or {}).items()):
+            enc.labels[f"__vt_{iname}__{tname}"] = enc.pos()
+            for fname in fnames:
+                self.vt_fixups.append((enc.pos(), fname))
+                enc.emit(0)      # 低 32 位
+                enc.emit(0)      # 高 32 位（一个槽 = 8 字节地址）
 
         enc.resolve()
         blob = bytearray()
@@ -592,6 +719,12 @@ class CodegenA64:
                 words.append(0xF2800000 | (h << 21) | (chunks[h] << 5) | rd)
             for i, w in enumerate(words):
                 struct.pack_into("<I", blob, (patch + i) * 4, w)   # patch 为字索引
+        for patch, fname in self.vt_fixups:
+            # vtable 槽：两个 32 位字 = 一个 64 位绝对地址（小端）
+            addr = BASE + ENTRY_OFF + enc.labels[fname] * 4
+            struct.pack_into("<I", blob, patch * 4, addr & 0xFFFFFFFF)
+            struct.pack_into("<I", blob, (patch + 1) * 4,
+                             (addr >> 32) & 0xFFFFFFFF)
         for g in self.globals:
             blob += g
         return bytes(blob)

@@ -1,0 +1,17 @@
+// tests/bad/iface_xfile_undecl/main.qma：impl 引用了**根本没声明**的接口
+//
+// 宽松第一遍扫描（跨文件接口种子）会把 impl 里出现过的接口名先占位，
+// 占位绝不能当成"声明"——否则拼错接口名会被静默接受，vtable 是空的、
+// 派发永远走不到（v1.88 修）。
+module main
+
+struct R { w: int }
+
+impl R : Shappe {
+    fn area(r: R) -> int { return r.w }
+}
+
+fn main() {
+    let s: Shappe = R { w: 1 }
+    assert(s.area() == 1, "unreachable")
+}

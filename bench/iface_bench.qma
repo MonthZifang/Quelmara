@@ -1,0 +1,114 @@
+// bench/iface_bench.qma —— 接口装箱 / 动态派发微基准（v1.81）
+// 用法：python tools/stage0/qlm_cli.py run bench/iface_bench.qma --target win
+//
+// 三组：
+//   A. 装箱 + 派发（接口形参，每轮一次装箱）：v1.80 装箱不释放，堆线性增长；
+//      v1.81 走引用计数，装箱块回收复用。
+//   B. 纯派发（接口值只装一次，循环里只 vt[slot] + callr）。
+//   C. 局部接口变量（let s: Shape = Circle{..}，块尾释放）。
+// 本机 VBS 噪声 ±50%，只看纵向对照，别拿绝对值跟别的机器比。
+module iface_bench
+
+interface Shape {
+    fn area(self) -> int
+}
+
+struct Sq { n: int }
+
+impl Sq : Shape {
+    fn area(s: Sq) -> int { return s.n * s.n }
+}
+
+fn area_of(s: Shape) -> int {
+    return s.area()
+}
+
+fn main() {
+    let n = 1000000
+
+    // ---------- A. 每轮一次装箱（接口形参） ----------
+    let mut best_a = 0 - 1
+    let mut r = 0
+    let mut sink = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let mut i = 0
+        let mut acc = 0
+        while i < n {
+            acc = acc + area_of(Sq { n: i })
+            i = i + 1
+        }
+        let t1 = now_ns()
+        sink = acc
+        let us = (t1 - t0) / 1000
+        if best_a < 0 || us < best_a { best_a = us }
+        r = r + 1
+    }
+    assert(sink > 0, "sink A")
+    print("A box+dispatch 1M: " + best_a.to_str() + " us")
+
+    // ---------- B. 纯派发（不装箱） ----------
+    let fixed: Shape = Sq { n: 7 }
+    let mut best_b = 0 - 1
+    r = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let mut i = 0
+        let mut acc = 0
+        while i < n {
+            acc = acc + fixed.area()
+            i = i + 1
+        }
+        let t1 = now_ns()
+        sink = acc
+        let us = (t1 - t0) / 1000
+        if best_b < 0 || us < best_b { best_b = us }
+        r = r + 1
+    }
+    assert(sink == 49 * n, "sink B")
+    print("B dispatch only 1M: " + best_b.to_str() + " us")
+
+    // ---------- C. 局部接口变量（块尾释放） ----------
+    let mut best_c = 0 - 1
+    r = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let mut i = 0
+        let mut acc = 0
+        while i < n {
+            let s: Shape = Sq { n: 2 }
+            acc = acc + s.area()
+            i = i + 1
+        }
+        let t1 = now_ns()
+        sink = acc
+        let us = (t1 - t0) / 1000
+        if best_c < 0 || us < best_c { best_c = us }
+        r = r + 1
+    }
+    assert(sink == 4 * n, "sink C")
+    print("C let-iface 1M: " + best_c.to_str() + " us")
+
+    // ---------- D. 静态派发基线（同一形状，零装箱） ----------
+    let mut best_d = 0 - 1
+    r = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let mut i = 0
+        let mut acc = 0
+        while i < n {
+            let q = Sq { n: i }
+            acc = acc + q.area()
+            i = i + 1
+        }
+        let t1 = now_ns()
+        sink = acc
+        let us = (t1 - t0) / 1000
+        if best_d < 0 || us < best_d { best_d = us }
+        r = r + 1
+    }
+    assert(sink > 0, "sink D")
+    print("D static 1M: " + best_d.to_str() + " us")
+
+    print("iface bench ok")
+}

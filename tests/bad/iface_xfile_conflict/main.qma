@@ -1,0 +1,25 @@
+// tests/bad/iface_xfile_conflict/main.qma：跨文件接口**同名不同签名**必须编译失败
+//
+// 跨文件接口按"扁平合并"共用一份声明（v1.88）：同名接口在所有模块里
+// 必须同名同签名。这里 main 声明了两个方法的 Shape，m 只声明一个——
+// 谁先被扫到都不该决定结果，必须报冲突。
+module main
+
+import m
+
+pub interface Shape {
+    fn area(self) -> int
+    fn name(self) -> str
+}
+
+struct R { w: int }
+
+impl R : Shape {
+    fn area(r: R) -> int { return r.w }
+    fn name(r: R) -> str { return "r" }
+}
+
+fn main() {
+    let s: Shape = R { w: 1 }
+    assert(s.area() == 1, "unreachable")
+}

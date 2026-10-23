@@ -1,4 +1,7 @@
-// 负向夹具：同一类型在两个接口里有同名方法 -> mangling 撞车，必须报错
+// 负向夹具：同一类型在两个接口里有同名方法（v1.83 语义）
+//
+// impl 本身**合法**了（按接口名二次 mangling 共存，正例见 t116_iface_multi），
+// 但静态调用 `t.f()` 没有消歧规则——必须编译期报错并指引走接口值。
 module iface_dup_method
 
 interface A {
@@ -17,4 +20,7 @@ impl T : B {
     fn f(t: T) -> int { return t.x + 1 }
 }
 
-fn main() { }
+fn main() {
+    let t = T { x: 1 }
+    print(t.f())          // 歧义：A.f 还是 B.f？
+}

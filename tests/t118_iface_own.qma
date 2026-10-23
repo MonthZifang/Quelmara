@@ -1,0 +1,105 @@
+// t118_iface_own.qma：接口值所有权（v1.83）
+//
+// 装箱块带引用计数：局部变量 / 实参临时槽 / 返回值 / 赋值替换 / break·
+// continue·return 提前离开作用域都会释放；进入容器元素与 struct 字段的
+// 接口值 retain（容器没有 Drop，元素随容器走）。这里逐条验证**取值正确**
+// ——释放过早会读到被复用的堆块，值就不对了。
+module iface_own
+
+interface Node {
+    fn val(self) -> int
+}
+
+struct Leaf { v: int }
+
+impl Leaf : Node {
+    fn val(l: Leaf) -> int { return l.v }
+}
+
+// 1) 提前 return：块内接口变量必须在 ret 前释放（否则每次调用漏两箱）
+fn early(flag: int) -> int {
+    let a: Node = Leaf { v: 5 }
+    if flag == 1 {
+        let b: Node = Leaf { v: 7 }
+        return a.val() + b.val()
+    }
+    return a.val()
+}
+
+// 2) break / continue 跳出时释放块内接口值
+fn loops() -> int {
+    let mut i = 0
+    let mut sum = 0
+    while i < 10 {
+        let s: Node = Leaf { v: i }
+        i += 1
+        if i == 3 { continue }
+        if i == 8 { break }
+        sum = sum + s.val()
+    }
+    return sum
+}
+
+// 3) 一个箱多个变量共享：各自 retain / release，最后一个归零
+fn share() -> int {
+    let a: Node = Leaf { v: 3 }
+    let b: Node = a
+    let c: Node = b
+    return a.val() + b.val() + c.val()
+}
+
+// 4) 赋值替换：旧箱释放、新箱接管
+fn reassign() -> int {
+    let mut a: Node = Leaf { v: 1 }
+    a = Leaf { v: 2 }
+    a = Leaf { v: 3 }
+    return a.val()
+}
+
+// 5) struct 字段持有接口值（隐式装箱）：局部箱死后字段仍可读
+struct Holder { n: Node }
+
+fn field() -> int {
+    let h = Holder { n: Leaf { v: 11 } }
+    return h.n.val()
+}
+
+// 6) 容器元素：vec[Node] 混装，元素随容器走
+fn container() -> int {
+    let v = vec[Node].new(2)
+    v.push(Leaf { v: 4 })
+    v.push(Leaf { v: 5 })
+    let mut t = 0
+    for x in v {
+        t = t + x.val()
+    }
+    return t
+}
+
+// 7) 接口返回值在调用方释放：循环里反复取
+fn make(v: int) -> Node {
+    return Leaf { v: v }
+}
+
+fn retloop() -> int {
+    let mut i = 0
+    let mut t = 0
+    while i < 5 {
+        let s: Node = make(i)
+        t = t + s.val()
+        i += 1
+    }
+    return t
+}
+
+fn main() {
+    assert(early(0) == 5, "early 0")
+    assert(early(1) == 12, "early 1")
+    assert(loops() == 0 + 1 + 3 + 4 + 5 + 6, "break/continue 跳过 2 与 7")
+    assert(share() == 9, "shared box")
+    assert(reassign() == 3, "reassign")
+    assert(field() == 11, "iface field")
+    assert(container() == 9, "container elements")
+    assert(retloop() == 0 + 1 + 2 + 3 + 4, "returned iface in loop")
+    print("iface own ok")
+}

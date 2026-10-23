@@ -1,0 +1,54 @@
+// iface_rc.qma：接口装箱的引用计数回收（v1.81）
+//
+// 配合 heap_limit_mb=1：20 万轮、每轮两次装箱（接口形参 + 局部接口变量），
+// 装箱量 12 MB 以上。装箱不释放时会在中途 fail-fast；能跑完即证明
+// __iface_release 真的把箱还回了尺寸类空闲链。
+module iface_rc
+
+interface Counter {
+    fn bump(self) -> int
+}
+
+struct Cell { v: int }
+
+impl Cell : Counter {
+    fn bump(c: Cell) -> int { return c.v + 1 }
+}
+
+// 接口形参：调用点隐式装箱，语句结束释放
+fn twice(s: Counter) -> int {
+    return s.bump() + s.bump()
+}
+
+// 接口返回值：所有权转给调用方，调用方语句结束释放
+fn make(v: int) -> Counter {
+    return Cell { v: v }
+}
+
+fn main() {
+    let mut i = 0
+    let mut acc = 0
+    while i < 200000 {
+        // 1) 接口形参（临时装箱）
+        acc = acc + twice(Cell { v: i })
+        // 2) 局部接口变量（块尾释放）
+        let s: Counter = Cell { v: 1 }
+        acc = acc + s.bump()
+        // 3) 接口返回值（调用方释放）
+        let t: Counter = make(2)
+        acc = acc + t.bump()
+        i += 1
+    }
+    // 每轮：twice 返回 (i+1)+(i+1) = 2i+2，s.bump()=2，t.bump()=3
+    assert(acc == 2 * (200000 * 199999 / 2) + 2 * 200000 + 5 * 200000,
+           "装箱循环累加值正确")
+    assert(i == 200000, "循环完整执行")
+
+    // 4) 同一箱被两个变量共享：各自释放，最后一个归零
+    let a: Counter = Cell { v: 10 }
+    let b: Counter = a
+    assert(a.bump() == 11, "shared a")
+    assert(b.bump() == 11, "shared b")
+
+    print("iface rc ok")
+}

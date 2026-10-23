@@ -1,0 +1,53 @@
+// t1xx_iface_multi.qma：同一类型在两个接口里有同名方法（v1.81）
+//
+// 以前这是编译错误（mangling 会撞车、没有消歧规则）。现在 impl 按接口名
+// 二次 mangling 共存，vtable 各走各的槽位；静态调用 `t.name()` 仍然
+// fail-fast（有歧义），必须先转成接口值。
+module iface_multi
+
+interface Show {
+    fn name(self) -> str
+    fn size(self) -> int
+}
+
+interface Label {
+    fn name(self) -> str
+}
+
+struct Tag { n: int }
+
+impl Tag : Show {
+    fn name(t: Tag) -> str { return "show:" + t.n.to_str() }
+    fn size(t: Tag) -> int { return t.n }
+}
+
+impl Tag : Label {
+    fn name(t: Tag) -> str { return "label:" + t.n.to_str() }
+}
+
+// 只有 Show 才有的方法：静态分发照旧零开销
+fn raw_size(t: Tag) -> int { return t.size() }
+
+fn main() {
+    let t = Tag { n: 7 }
+
+    // 同一个值，两个接口给出不同结果——两条 impl 真的都活着
+    let s: Show = t
+    let l: Label = t
+    assert(s.name() == "show:7", "show impl")
+    assert(l.name() == "label:7", "label impl")
+    assert(s.size() == 7, "non-conflicting method still dispatches")
+
+    // 静态分发：无冲突的方法仍然直连
+    assert(raw_size(t) == 7, "static dispatch of unique method")
+
+    // 异构容器里同一个具体类型出现两次，按接口派发
+    let v = vec[Show].new(2)
+    v.push(Tag { n: 1 })
+    v.push(Tag { n: 2 })
+    let mut sum = 0
+    for x in v { sum = sum + x.size() }
+    assert(sum == 3, "vec[Show] over same type")
+
+    print("iface multi ok")
+}

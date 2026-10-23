@@ -1,0 +1,60 @@
+// fixtures/ifacexfile/main.qma：跨文件 interface（v1.81 / v1.88）
+//
+// 覆盖：库侧接口 + 库侧 impl + 库侧接口返回值 + 本侧 impl 同一接口 +
+// 本侧结构装箱 + 同一个 vec[Shape] 里混装两边的类型（vtable 槽位一致）+
+// **同名同签名的跨文件重复声明**（幂等，不报错）。
+module main
+
+import model
+
+// 6) 本侧再声明一次同名同签名的接口：跨文件接口是"扁平合并"的一份声明，
+//    重复声明只要签名一致就是幂等的（v1.88）。签名不一致会报接口冲突
+//    （负向见 tests/bad/iface_xfile_conflict/）。
+pub interface Shape {
+    fn area(self) -> int
+    fn name(self) -> str
+}
+
+struct Rect { w: int, h: int }
+
+impl Rect : Shape {
+    fn area(r: Rect) -> int { return r.w * r.h }
+    fn name(r: Rect) -> str { return "rect" }
+}
+
+fn describe(s: Shape) -> str {
+    return s.name() + ":" + s.area().to_str()
+}
+
+fn main() {
+    // 1) 库侧类型装箱成库侧接口
+    let a: Shape = circle(3)
+    assert(a.area() == 27, "lib impl via iface")
+    assert(a.name() == "circle", "lib impl name")
+
+    // 2) 本侧类型装箱成**库侧声明**的接口
+    let b: Shape = Rect { w: 4, h: 5 }
+    assert(b.area() == 20, "local impl of imported iface")
+    assert(b.name() == "rect", "local impl name")
+
+    // 3) 库函数直接返回接口值（返回路径的装箱在库侧完成）
+    let c: Shape = circle_as_shape(2)
+    assert(c.area() == 12, "lib returns iface")
+
+    // 4) 同一个异构容器混装两边的实现
+    let v = vec[Shape].new(4)
+    v.push(circle(1))
+    v.push(Rect { w: 2, h: 3 })
+    v.push(circle_as_shape(4))
+    let mut total = 0
+    for s in v {
+        total = total + s.area()
+    }
+    assert(total == 3 + 6 + 48, "heterogeneous sum across modules")
+
+    // 5) 接口形参（跨文件声明）：实参是本侧类型
+    assert(describe(Rect { w: 6, h: 7 }) == "rect:42", "iface param cross-file")
+    assert(describe(circle(1)) == "circle:3", "iface param lib type")
+
+    print("iface xfile ok")
+}

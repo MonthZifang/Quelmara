@@ -1,0 +1,8 @@
+// 与 main.qma 的 Shape 同名但少一个方法 -> 接口冲突
+module m
+
+pub interface Shape {
+    fn area(self) -> int
+}
+
+pub fn area_of(s: Shape) -> int { return s.area() }

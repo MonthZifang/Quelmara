@@ -1,0 +1,65 @@
+// iface_rc_a64.qma：AArch64 上接口装箱的引用计数回收（v1.90）
+//
+// 与 tests/iface_lowheap/iface_rc.qma 同一个证明思路，规模压到模拟器跑得动：
+//   载荷 17 字 -> 一个箱 16 + 136 = 152 字节，每轮 3 个箱 = 456 字节，
+//   2500 轮 = 1.14 MB，超过 Quelmara.toml 的 heap_limit_mb = 1。
+// 装箱不释放（或 A64 上 __iface_release 没接对）会在中途 fail-fast。
+//
+// 末尾再要一块 900 KB：此刻活着的箱只有几个（几 KB），
+// 1 MB 上限里还塞得下 900 KB —— 这一条把"前面 1.14 MB 真的还回去了"
+// 钉死，比只看"没崩"强。
+module iface_rc_a64
+
+interface Counter {
+    fn bump(self) -> int
+}
+
+struct Cell { a: int, buf: [16]int }
+
+impl Cell : Counter {
+    fn bump(x: Cell) -> int { return x.a + 1 }
+}
+
+// 接口形参：调用点隐式装箱，语句结束释放
+fn twice(s: Counter) -> int {
+    return s.bump() + s.bump()
+}
+
+// 接口返回值：所有权转给调用方，调用方语句结束释放
+fn make(v: int) -> Counter {
+    return Cell { a: v, buf: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
+}
+
+fn main() {
+    let n = 2500
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        // 1) 接口形参（临时装箱）：2i + 2
+        acc = acc + twice(Cell { a: i, buf: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] })
+        // 2) 局部接口变量（块尾释放）：2
+        let s: Counter = Cell { a: 1, buf: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
+        acc = acc + s.bump()
+        // 3) 接口返回值（调用方释放）：3
+        let t: Counter = make(2)
+        acc = acc + t.bump()
+        i += 1
+    }
+    assert(acc == 2 * (n * (n - 1) / 2) + 2 * n + 5 * n, "装箱循环累加值正确")
+
+    // 4) 同一箱两个变量共享：各自释放，最后一个归零
+    let p: Counter = Cell { a: 10, buf: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
+    let q: Counter = p
+    assert(p.bump() == 11, "shared p")
+    assert(q.bump() == 11, "shared q")
+
+    // 5) 1 MB 上限里再要 900 KB：证明 1.14 MB 的箱真的回收了
+    let big = mem_alloc(900 * 1024)
+    mem_store8(big, 0, 7)
+    mem_store8(big, 900 * 1024 - 1, 9)
+    assert(mem_load8(big, 0) == 7, "big probe head")
+    assert(mem_load8(big, 900 * 1024 - 1) == 9, "big probe tail")
+    mem_free(big, 900 * 1024)
+
+    print("iface rc a64 ok")
+}

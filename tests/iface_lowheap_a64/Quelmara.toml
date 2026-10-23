@@ -1,0 +1,7 @@
+# 低堆上限夹具：验证接口装箱的引用计数真的回收了内存
+# （1MB 上限，20 万轮 × 2 次装箱 = 至少 12MB 的装箱量）
+[core]
+multicore = true
+
+[memory]
+heap_limit_mb = 1
