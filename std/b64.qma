@@ -38,7 +38,7 @@ fn b64_val(b: int) -> int {
 }
 
 // b64_encode(ptr, n) -> str：编码 n 个字节，返回 NUL 结尾的字符串
-fn b64_encode(p: int, n: int) -> str {
+pub fn b64_encode(p: int, n: int) -> str {
     let outn = ((n + 2) / 3) * 4
     let out = mem_alloc(outn + 1)
     let mut i = 0
@@ -79,14 +79,14 @@ fn b64_encode(p: int, n: int) -> str {
 }
 
 // b64_dec_max(s) -> 解码后所需的最大字节数（调用方先 mem_alloc 这个大小）
-fn b64_dec_max(s: str) -> int {
+pub fn b64_dec_max(s: str) -> int {
     let n = len(s)
     return ((n + 3) / 4) * 3 + 1
 }
 
 // b64_decode_into(s, out) -> int：解码写入 out，返回实际字节数
 // 无填充/非法字符一律跳过（容错解析，握手与 Basic 认证场景足够）。
-fn b64_decode_into(s: str, out: int) -> int {
+pub fn b64_decode_into(s: str, out: int) -> int {
     let n = len(s)
     let mut i = 0
     let mut o = 0
@@ -134,7 +134,7 @@ fn b64url_val(b: int) -> int {
 }
 
 // b64url_encode(p, n) -> str：无填充编码
-fn b64url_encode(p: int, n: int) -> str {
+pub fn b64url_encode(p: int, n: int) -> str {
     let full = n / 3
     let rem = n - full * 3
     let mut outn = full * 4
@@ -176,7 +176,7 @@ fn b64url_encode(p: int, n: int) -> str {
 
 // b64url_decode_into(s, out) -> int：解码进调用方缓冲，返回字节数
 // 无填充、'=' 忽略、非法字符跳过（与 b64_decode_into 同一容错口径）
-fn b64url_decode_into(s: str, out: int) -> int {
+pub fn b64url_decode_into(s: str, out: int) -> int {
     let n = len(s)
     let mut i = 0
     let mut o = 0

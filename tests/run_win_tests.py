@@ -629,6 +629,17 @@ def main():
                 else bad(f"{nm} 报错但信息不符（期望含 {needle!r}）：{ex}")
         else:
             bad(f"{nm} 应当编译失败却通过了")
+    # pub 可见性负向（v1.43，多文件）：跨模块引用非 pub 声明必须编译期拦下
+    try:
+        build(os.path.join(ROOT, "tests/bad/pub_hidden/main.qma"),
+              os.path.join(ROOT, "build", "bad_pub_hidden.exe"))
+    except SyntaxError as ex:
+        ok("pub：非 pub 跨模块引用被拦下") if "非 pub" in str(ex) \
+            else bad(f"pub_hidden 报错但信息不符（期望含 '非 pub'）：{ex}")
+    else:
+        bad("pub_hidden 应当编译失败却通过了")
+    # pub 正例（v1.43，多文件）：pub 声明跨模块可用
+    case_selfcheck("t88_pubvis", "fixtures/pubvis/main.qma")
     # gzip 的唯一权威证明：Python zlib 逐字节解压
     r = subprocess.run([sys.executable, os.path.join(ROOT, "tests/gzip_interop.py")],
                        cwd=ROOT, capture_output=True, text=True, errors="replace")

@@ -18,14 +18,14 @@
 
 // ---- 自旋锁 ----
 
-fn mutex_new() -> int {
+pub fn mutex_new() -> int {
     // 锁对象 = 8 字节堆块；0 = 未锁，1 = 已锁
     let m = mem_alloc(8)
     mem_store64(m, 0, 0)
     return m
 }
 
-fn mutex_lock(m: int) {
+pub fn mutex_lock(m: int) {
     // CAS 自旋：旧值 0 = 抢锁成功；否则 pause 后重试
     let mut old = atomic_cas(m, 0, 1)
     while old != 0 {
@@ -34,7 +34,7 @@ fn mutex_lock(m: int) {
     }
 }
 
-fn mutex_unlock(m: int) {
+pub fn mutex_unlock(m: int) {
     // 释放 = 写 0。x86 TSO 下普通 store 已有 release 语义；
     // 等待方在下一轮 atomic_cas（带 lock 前缀，全屏障）看到它。
     mem_store64(m, 0, 0)
@@ -42,13 +42,13 @@ fn mutex_unlock(m: int) {
 
 // ---- 无锁栈（Treiber push / 单消费者 pop）----
 
-fn stack_new() -> int {
+pub fn stack_new() -> int {
     let s = mem_alloc(8)
     mem_store64(s, 0, 0)     // head = 空
     return s
 }
 
-fn stack_push(s: int, v: int) {
+pub fn stack_push(s: int, v: int) {
     // 节点 = [next][value]；CAS 竞争 head，失败重读重挂
     let n = mem_alloc(16)
     mem_store64(n, 1, v)
@@ -66,7 +66,7 @@ fn stack_push(s: int, v: int) {
     }
 }
 
-fn stack_pop(s: int) -> int {
+pub fn stack_pop(s: int) -> int {
     // 返回栈顶 value；空栈返回 0（0 不是合法 payload 的调用方保证）。
     // 单消费者下无 ABA：pop 的 CAS 失败只因为并发 push 改了 head，
     // 而被弹出的节点不会再被引用。
@@ -94,21 +94,21 @@ fn stack_pop(s: int) -> int {
 
 // ---- WaitGroup（fork-join 屏障）----
 
-fn wg_new() -> int {
+pub fn wg_new() -> int {
     let w = mem_alloc(8)
     mem_store64(w, 0, 0)
     return w
 }
 
-fn wg_add(w: int, n: int) {
+pub fn wg_add(w: int, n: int) {
     atomic_add(w, n)
 }
 
-fn wg_done(w: int) {
+pub fn wg_done(w: int) {
     atomic_add(w, -1)
 }
 
-fn wg_wait(w: int) {
+pub fn wg_wait(w: int) {
     // 自旋到计数归零。atomic_add 带 lock 前缀（全屏障），
     // 计数写与 wg_done 之前的所有内存写在别的线程可见性上一致。
     while mem_load64(w, 0) != 0 {

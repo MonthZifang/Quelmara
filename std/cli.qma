@@ -53,11 +53,11 @@ fn _cli_match(a: str, name: str) -> int {
     return 0
 }
 
-fn cli_count() -> int {
+pub fn cli_count() -> int {
     return len(args())
 }
 
-fn cli_at(i: int) -> str {
+pub fn cli_at(i: int) -> str {
     let a = args()
     if i < 0 || i >= len(a) {
         return ""
@@ -66,7 +66,7 @@ fn cli_at(i: int) -> str {
 }
 
 // cli_has(name) -> bool：flag 是否出现（三种写法都算）
-fn cli_has(name: str) -> bool {
+pub fn cli_has(name: str) -> bool {
     let a = args()
     let n = len(a)
     let long = "--" + name
@@ -82,7 +82,7 @@ fn cli_has(name: str) -> bool {
 }
 
 // cli_str(name, def) -> str：取字符串值
-fn cli_str(name: str, def: str) -> str {
+pub fn cli_str(name: str, def: str) -> str {
     let a = args()
     let n = len(a)
     let long = "--" + name
@@ -115,7 +115,7 @@ fn cli_str(name: str, def: str) -> str {
 }
 
 // cli_int(name, def) -> int：取整数值，解析失败回落默认值
-fn cli_int(name: str, def: int) -> int {
+pub fn cli_int(name: str, def: int) -> int {
     let s = cli_str(name, "")
     if len(s) == 0 {
         return def
@@ -142,7 +142,7 @@ fn cli_int(name: str, def: int) -> int {
 // "前一个 flag 的值"的启发式：上一个参数以 '-' 开头且不含 '='（`--out x` 形态）；
 // 含 '=' 的形态（`--out=x`）自身就带值，不吃下一个参数。
 // 这个启发式覆盖常见 CLI；如果某个 flag 的值恰好以 '-' 开头，请用 --name=value 形态。
-fn cli_positionals() -> vec[str] {
+pub fn cli_positionals() -> vec[str] {
     let a = args()
     let n = len(a)
     let out = vec[str].new(4)

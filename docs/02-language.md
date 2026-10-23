@@ -13,7 +13,12 @@ import std.core     // 扁平合并：递归加载 std/ 与同目录 .qma
 - 源码扩展名固定 `.qma`；`.ros` 已废弃，遇到会给出 `git mv` 迁移提示  <!-- legacy-ok -->
   （`tools/stage0/qlm.py:50` `require_source`）。
 - `import` 是**扁平合并**：顶层 `fn` / `struct` / `enum` / `test` 直接并入主 AST，
-  没有命名空间、没有可见性、没有版本（`load_program`）。
+  消费时直呼其名（没有限定语法 `lib.fn()`——它会被解析为方法调用）。
+- **`pub` 可见性（v1.43）**：顶层 `pub fn` / `pub struct` / `pub enum` 跨模块可见；
+  非 pub 声明只在本模块内可用，跨模块引用**编译期报错**（一次报出全部违规，
+  并指明定义文件）。`pub` 是上下文关键字——只在顶层声明位识别，函数内
+  `pub` 变量名不受影响。`const` 本就解析期内联全局共享，无需 pub；
+  interface/impl 仍限同源文件（既有边界）。命名空间与版本未做（`load_program`）。
 - 查找顺序：主文件目录 → `std/` → `[src].lib` → `[src].ref` → `.qpm/deps`，
   **惰性解析**（import 什么加载什么）。布局规则见 [`05-toolchain.md`](05-toolchain.md)。
 - 名字冲突、循环 import、被导入文件定义 `main`，一律编译报错。

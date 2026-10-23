@@ -11,12 +11,12 @@ const _T0_W = 9          // static_word(9) = 首条日志的 now_ns（相对时�
 const _LVL_W = 10        // static_word(10) = 当前级别阈值
 
 // 级别：0=全部  1=只 warn/error  2=只 error  3=静默
-fn log_set_level(lv: int) -> int {
+pub fn log_set_level(lv: int) -> int {
     mem_store64(static_word(_LVL_W), 0, lv)
     return lv
 }
 
-fn log_level() -> int {
+pub fn log_level() -> int {
     return mem_load64(static_word(_LVL_W), 0)
 }
 
@@ -49,21 +49,21 @@ fn _log_line(tag: str, msg: str) {
     print(line)
 }
 
-fn log_info(msg: str) {
+pub fn log_info(msg: str) {
     if log_level() >= 1 {
         return
     }
     _log_line("[INFO]", msg)
 }
 
-fn log_warn(msg: str) {
+pub fn log_warn(msg: str) {
     if log_level() >= 2 {
         return
     }
     _log_line("[WARN]", msg)
 }
 
-fn log_error(msg: str) {
+pub fn log_error(msg: str) {
     if log_level() >= 3 {
         return
     }
@@ -74,7 +74,7 @@ fn log_error(msg: str) {
 // kv 是**交替**的 key/value 串（k1,v1,k2,v2,...），行格式：
 //   [INFO][启动ms] msg k1=v1 k2=v2
 // 值非 str 时调用方先 to_str()（与 log_info 同约定）。
-fn log_kv(tag: str, msg: str, kv: vec[str]) -> int {
+pub fn log_kv(tag: str, msg: str, kv: vec[str]) -> int {
     let n = len(kv)
     let tn = len(tag)
     let mn = len(msg)

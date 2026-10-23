@@ -38,7 +38,7 @@ fn udp_parse_ip(ip: str) -> int {
 
 // udp_send_str(fd, ip, port, data) -> int：字符串地址便捷层
 // （解析失败返回 -1）
-fn udp_send_str(fd: int, ip: str, port: int, data: str) -> int {
+pub fn udp_send_str(fd: int, ip: str, port: int, data: str) -> int {
     let ipu = udp_parse_ip(ip)
     if ipu == 0 {
         return 0 - 1

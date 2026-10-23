@@ -29,11 +29,11 @@ fn _sb_str(b: vec[int]) -> str {
 // ---------------------------------------------------------------------------
 
 // str_find(s, needle) -> int：首个出现位置，找不到 -1
-fn str_find(s: str, needle: str) -> int {
+pub fn str_find(s: str, needle: str) -> int {
     return str_find_from(s, 0, needle)
 }
 
-fn str_find_from(s: str, from: int, needle: str) -> int {
+pub fn str_find_from(s: str, from: int, needle: str) -> int {
     let n = len(s)
     let m = len(needle)
     if m == 0 {
@@ -79,7 +79,7 @@ fn str_find_from(s: str, from: int, needle: str) -> int {
 }
 
 // 反向查找：从 need 的位置往前找最后一次出现
-fn str_rfind(s: str, needle: str) -> int {
+pub fn str_rfind(s: str, needle: str) -> int {
     let n = len(s)
     let m = len(needle)
     if m == 0 {
@@ -105,11 +105,11 @@ fn str_rfind(s: str, needle: str) -> int {
     return -1
 }
 
-fn str_contains(s: str, needle: str) -> bool {
+pub fn str_contains(s: str, needle: str) -> bool {
     return str_find(s, needle) >= 0
 }
 
-fn str_starts_with(s: str, p: str) -> bool {
+pub fn str_starts_with(s: str, p: str) -> bool {
     let n = len(s)
     let m = len(p)
     if m > n {
@@ -125,7 +125,7 @@ fn str_starts_with(s: str, p: str) -> bool {
     return true
 }
 
-fn str_ends_with(s: str, p: str) -> bool {
+pub fn str_ends_with(s: str, p: str) -> bool {
     let n = len(s)
     let m = len(p)
     if m > n {
@@ -142,7 +142,7 @@ fn str_ends_with(s: str, p: str) -> bool {
     return true
 }
 
-fn str_count(s: str, needle: str) -> int {
+pub fn str_count(s: str, needle: str) -> int {
     let m = len(needle)
     if m == 0 {
         return 0
@@ -174,7 +174,7 @@ fn _is_space(b: int) -> bool {
     return false
 }
 
-fn str_trim_left(s: str) -> str {
+pub fn str_trim_left(s: str) -> str {
     let n = len(s)
     let mut i = 0
     while i < n {
@@ -187,7 +187,7 @@ fn str_trim_left(s: str) -> str {
     return ""
 }
 
-fn str_trim_right(s: str) -> str {
+pub fn str_trim_right(s: str) -> str {
     let n = len(s)
     let mut e = n
     while e > 0 {
@@ -200,7 +200,7 @@ fn str_trim_right(s: str) -> str {
     return ""
 }
 
-fn str_trim(s: str) -> str {
+pub fn str_trim(s: str) -> str {
     let t = str_trim_left(s)
     return str_trim_right(t)
 }
@@ -209,7 +209,7 @@ fn str_trim(s: str) -> str {
 // 大小写（仅 ASCII；非 A-Z/a-z 原样保留）
 // ---------------------------------------------------------------------------
 
-fn str_upper(s: str) -> str {
+pub fn str_upper(s: str) -> str {
     let n = len(s)
     let b = _sb_new(n + 1)
     let mut i = 0
@@ -225,7 +225,7 @@ fn str_upper(s: str) -> str {
     return _sb_str(b)
 }
 
-fn str_lower(s: str) -> str {
+pub fn str_lower(s: str) -> str {
     let n = len(s)
     let b = _sb_new(n + 1)
     let mut i = 0
@@ -242,7 +242,7 @@ fn str_lower(s: str) -> str {
 }
 
 // ASCII 忽略大小写比较（HTTP 头名 / 方法名常用；RFC 7230 规定 token 是 ASCII）
-fn str_eq_ci(a: str, b: str) -> bool {
+pub fn str_eq_ci(a: str, b: str) -> bool {
     if len(a) != len(b) {
         return false
     }
@@ -266,7 +266,7 @@ fn str_eq_ci(a: str, b: str) -> bool {
 // 重复 / 拼接
 // ---------------------------------------------------------------------------
 
-fn str_repeat(s: str, n: int) -> str {
+pub fn str_repeat(s: str, n: int) -> str {
     if n <= 0 {
         return ""
     }
@@ -285,7 +285,7 @@ fn str_repeat(s: str, n: int) -> str {
 }
 
 // 用分隔符拼 vec[str]（对应 Python 的 sep.join(list)）
-fn str_join(parts: vec[str], sep: str) -> str {
+pub fn str_join(parts: vec[str], sep: str) -> str {
     let n = len(parts)
     if n == 0 {
         return ""
@@ -341,7 +341,7 @@ fn _match_at(s: str, i: int, p: str) -> bool {
 // str_split(s, sep) -> vec[str]：单遍扫描拆分。sep 为空 -> 整体一项。
 // 实现纪律：循环内不调用 substr（v1.5 实测"循环内 substr + 调用结果做下标"
 // 会被优化器误编译），改为累积字节缓冲、到分隔符处一次性成串。
-fn str_split(s: str, sep: str) -> vec[str] {
+pub fn str_split(s: str, sep: str) -> vec[str] {
     let out = vec[str].new(4)
     let m = len(sep)
     if m == 0 {
@@ -387,7 +387,7 @@ fn str_split(s: str, sep: str) -> vec[str] {
 }
 
 // 只拆前 max_parts-1 次，剩余整段作为最后一项（HTTP 请求行等场景）
-fn str_split_n(s: str, sep: str, max_parts: int) -> vec[str] {
+pub fn str_split_n(s: str, sep: str, max_parts: int) -> vec[str] {
     let out = vec[str].new(4)
     let m = len(sep)
     if m == 0 || max_parts <= 1 {
@@ -414,7 +414,7 @@ fn str_split_n(s: str, sep: str, max_parts: int) -> vec[str] {
 }
 
 // 按行拆（\n，自动去掉行尾 \r），日志/配置/HTTP 头常用
-fn str_lines(s: str) -> vec[str] {
+pub fn str_lines(s: str) -> vec[str] {
     let out = vec[str].new(8)
     let n = len(s)
     // v1.29：mem_chr 直接定位 '\n'（8 字节/步），不再逐字节 push 进缓冲
@@ -444,7 +444,7 @@ fn str_lines(s: str) -> vec[str] {
 // 替换
 // ---------------------------------------------------------------------------
 
-fn str_replace(s: str, from: str, to: str) -> str {
+pub fn str_replace(s: str, from: str, to: str) -> str {
     let m = len(from)
     if m == 0 {
         return s
@@ -484,7 +484,7 @@ fn str_replace(s: str, from: str, to: str) -> str {
     return _sb_str(b)
 }
 
-fn str_replace_first(s: str, from: str, to: str) -> str {
+pub fn str_replace_first(s: str, from: str, to: str) -> str {
     let p = str_find(s, from)
     if p < 0 {
         return s
@@ -496,7 +496,7 @@ fn str_replace_first(s: str, from: str, to: str) -> str {
 // 前缀/后缀/切片包装
 // ---------------------------------------------------------------------------
 
-fn str_slice(s: str, lo: int, hi: int) -> str {
+pub fn str_slice(s: str, lo: int, hi: int) -> str {
     let n = len(s)
     let mut a = lo
     let mut b = hi
@@ -508,23 +508,23 @@ fn str_slice(s: str, lo: int, hi: int) -> str {
     return substr(s, a, b - a)
 }
 
-fn str_left(s: str, n: int) -> str {
+pub fn str_left(s: str, n: int) -> str {
     return str_slice(s, 0, n)
 }
 
-fn str_right(s: str, n: int) -> str {
+pub fn str_right(s: str, n: int) -> str {
     return str_slice(s, len(s) - n, len(s))
 }
 
 // 去掉前缀/后缀（不存在则原样返回）
-fn str_strip_prefix(s: str, p: str) -> str {
+pub fn str_strip_prefix(s: str, p: str) -> str {
     if str_starts_with(s, p) {
         return substr(s, len(p), len(s) - len(p))
     }
     return s
 }
 
-fn str_strip_suffix(s: str, p: str) -> str {
+pub fn str_strip_suffix(s: str, p: str) -> str {
     if str_ends_with(s, p) {
         return substr(s, 0, len(s) - len(p))
     }
@@ -536,7 +536,7 @@ fn str_strip_suffix(s: str, p: str) -> str {
 // ---------------------------------------------------------------------------
 
 // 左补字符到宽度（str_pad_left("7", 3, "0") = "007"）
-fn str_pad_left(s: str, width: int, pad: str) -> str {
+pub fn str_pad_left(s: str, width: int, pad: str) -> str {
     let n = len(s)
     if n >= width || len(pad) == 0 {
         return s

@@ -1,0 +1,33 @@
+// fixtures/pubvis/lib.qma —— pub 可见性（v1.43）的被导入库
+// pub fn/struct/enum 跨模块可见；非 pub 的 helper/Secret 只在本模块内用
+module pubvis_lib
+
+pub struct Point {
+    x: int
+    y: int
+}
+
+struct Secret {
+    code: int
+}
+
+pub enum Color {
+    Red
+    Green
+}
+
+fn helper(n: int) -> int {
+    return n * 2 + 1
+}
+
+pub fn make_point(x: int, y: int) -> Point {
+    return Point { x: x, y: y }
+}
+
+pub fn bake(n: int) -> int {
+    return helper(n)          // 非 pub 的本模块声明，内部随便用
+}
+
+pub fn pick_red() -> Color {
+    return Color.Red
+}

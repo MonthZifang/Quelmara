@@ -14,7 +14,7 @@
 //   FNV-1a 32: offset 0x811c9dc5, prime 0x01000193
 //   FNV-1a 64: offset 0xcbf29ce484222325, prime 0x00000100000001b3
 
-fn fnv1a32_bytes(p: int, n: int) -> int {
+pub fn fnv1a32_bytes(p: int, n: int) -> int {
     let mut h = 0x811c9dc5
     let mut i = 0
     while i < n {
@@ -25,7 +25,7 @@ fn fnv1a32_bytes(p: int, n: int) -> int {
     return h
 }
 
-fn fnv1a64_bytes(p: int, n: int) -> int {
+pub fn fnv1a64_bytes(p: int, n: int) -> int {
     // 0xcbf29ce484222325 超出 int64 正区间，按有符号写（同一组位）
     let mut h = -3750763034362895579
     let mut i = 0
@@ -37,10 +37,10 @@ fn fnv1a64_bytes(p: int, n: int) -> int {
     return h
 }
 
-fn fnv1a32(s: str) -> int {
+pub fn fnv1a32(s: str) -> int {
     return fnv1a32_bytes(mem_ptr(s, 0), len(s))
 }
 
-fn fnv1a64(s: str) -> int {
+pub fn fnv1a64(s: str) -> int {
     return fnv1a64_bytes(mem_ptr(s, 0), len(s))
 }

@@ -13,14 +13,14 @@
 // 基础
 // ---------------------------------------------------------------------------
 
-fn fabs(x: f64) -> f64 {
+pub fn fabs(x: f64) -> f64 {
     if x < 0.0 {
         return -x
     }
     return x
 }
 
-fn fsign(x: f64) -> int {
+pub fn fsign(x: f64) -> int {
     if x > 0.0 {
         return 1
     }
@@ -44,7 +44,7 @@ fn fmax(a: f64, b: f64) -> f64 {
     return b
 }
 
-fn is_nan(x: f64) -> int {
+pub fn is_nan(x: f64) -> int {
     if x != x {
         return 1
     }
@@ -52,14 +52,14 @@ fn is_nan(x: f64) -> int {
 }
 
 // inf 的特征：x-x 不是 0（NaN 也满足），但 x==x 排除 NaN
-fn is_inf(x: f64) -> int {
+pub fn is_inf(x: f64) -> int {
     if (x - x) != 0.0 && x == x {
         return 1
     }
     return 0
 }
 
-fn is_finite(x: f64) -> int {
+pub fn is_finite(x: f64) -> int {
     if is_nan(x) == 1 || is_inf(x) == 1 {
         return 0
     }
@@ -70,11 +70,11 @@ fn is_finite(x: f64) -> int {
 // 取整（朝零截断由 to_int 提供，这里补齐四个方向）
 // ---------------------------------------------------------------------------
 
-fn trunc_f(x: f64) -> f64 {
+pub fn trunc_f(x: f64) -> f64 {
     return to_float(to_int(x))
 }
 
-fn floor(x: f64) -> f64 {
+pub fn floor(x: f64) -> f64 {
     let i = to_int(x)
     let f = to_float(i)
     if f > x {
@@ -83,7 +83,7 @@ fn floor(x: f64) -> f64 {
     return f
 }
 
-fn ceil(x: f64) -> f64 {
+pub fn ceil(x: f64) -> f64 {
     let i = to_int(x)
     let f = to_float(i)
     if f < x {
@@ -93,7 +93,7 @@ fn ceil(x: f64) -> f64 {
 }
 
 // 四舍五入（.5 向上）
-fn round(x: f64) -> f64 {
+pub fn round(x: f64) -> f64 {
     if x < 0.0 {
         return 0.0 - floor(0.0 - x + 0.5)
     }
@@ -105,7 +105,7 @@ fn round(x: f64) -> f64 {
 // ---------------------------------------------------------------------------
 
 // 整数幂（快速幂）；n 可为负
-fn powi(x: f64, n: int) -> f64 {
+pub fn powi(x: f64, n: int) -> f64 {
     if n == 0 {
         return 1.0
     }
@@ -129,7 +129,7 @@ fn powi(x: f64, n: int) -> f64 {
 }
 
 // 平方根：先把 y 缩放到 [1,4)，牛顿迭代 8 轮，再乘回 2^k
-fn sqrt(x: f64) -> f64 {
+pub fn sqrt(x: f64) -> f64 {
     if x < 0.0 {
         assert(false, "sqrt: 负数没有实数平方根")
     }
@@ -156,7 +156,7 @@ fn sqrt(x: f64) -> f64 {
 }
 
 // 立方根（牛顿：r = (2r + x/r²)/3）
-fn cbrt(x: f64) -> f64 {
+pub fn cbrt(x: f64) -> f64 {
     if x == 0.0 {
         return 0.0
     }
@@ -184,21 +184,21 @@ fn cbrt(x: f64) -> f64 {
 // 整数
 // ---------------------------------------------------------------------------
 
-fn imin(a: int, b: int) -> int {
+pub fn imin(a: int, b: int) -> int {
     if a < b {
         return a
     }
     return b
 }
 
-fn imax(a: int, b: int) -> int {
+pub fn imax(a: int, b: int) -> int {
     if a > b {
         return a
     }
     return b
 }
 
-fn clamp_int(x: int, lo: int, hi: int) -> int {
+pub fn clamp_int(x: int, lo: int, hi: int) -> int {
     if x < lo {
         return lo
     }
@@ -208,7 +208,7 @@ fn clamp_int(x: int, lo: int, hi: int) -> int {
     return x
 }
 
-fn clamp_f(x: f64, lo: f64, hi: f64) -> f64 {
+pub fn clamp_f(x: f64, lo: f64, hi: f64) -> f64 {
     if x < lo {
         return lo
     }
@@ -219,7 +219,7 @@ fn clamp_f(x: f64, lo: f64, hi: f64) -> f64 {
 }
 
 // 整数平方根（牛顿，向下取整）
-fn isqrt(n: int) -> int {
+pub fn isqrt(n: int) -> int {
     if n < 0 {
         assert(false, "isqrt: 负数")
     }
@@ -236,7 +236,7 @@ fn isqrt(n: int) -> int {
 }
 
 // 最大公约数 / 最小公倍数
-fn gcd(a: int, b: int) -> int {
+pub fn gcd(a: int, b: int) -> int {
     let mut x = a
     let mut y = b
     if x < 0 {
@@ -253,7 +253,7 @@ fn gcd(a: int, b: int) -> int {
     return x
 }
 
-fn lcm(a: int, b: int) -> int {
+pub fn lcm(a: int, b: int) -> int {
     if a == 0 || b == 0 {
         return 0
     }

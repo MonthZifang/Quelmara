@@ -1,0 +1,7 @@
+// pub_hidden_lib.qma —— pub 可见性负例的被导入库：
+// hidden_fn 故意不加 pub——main.qma 引用它应当编译失败
+module pub_hidden_lib
+
+fn hidden_fn(n: int) -> int {
+    return n * 2
+}

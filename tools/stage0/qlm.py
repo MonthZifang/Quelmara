@@ -315,6 +315,9 @@ class Parser:
         self.interfaces = {}       # name -> [(method, [param types], ret)]
         self.impls = {}            # (iface, type) -> {method: fdef}
         self.methods = {}          # (type, method) -> fdef（impl 里定义的实例方法）
+        # pub 可见性（v1.43）：pub 标记跨模块导出；本 Parser 实例 = 一个文件。
+        self.pub_types = set()     # pub struct/enum/interface 名
+        self._pending_pub = False  # `pub` 已吃掉、等下一个 fn/struct/enum 消化
         # 顶层 const，编译期内联。consts= 跨文件种子（load_program 两遍解析：
         # 第一遍收集各文件 const，第二遍带着全集重解析——import 侧的 const
         # 因此可见，std 库的槽位布局常量得以跨文件共享）。
@@ -480,8 +483,23 @@ class Parser:
                     self.parse_type()
                 self.eat("SYM", "=")
                 self.consts[cname] = self.parse_const_value(cname)
+            elif self.at("NAME", "pub"):
+                # pub 可见性（v1.43）：上下文关键字——只在顶层声明位识别，
+                # 函数内的 pub 变量名不受影响。只作用于顶层 fn/struct/enum；
+                # const 本就解析期内联全局共享、interface 与 impl 必须同源
+                # 文件（既有边界），都不需要 pub。
+                self.next()
+                nxt = self.peek()
+                if nxt.kind not in ("fn", "struct", "enum") and nxt.val not in ("fn", "struct", "enum"):
+                    raise SyntaxError(
+                        f"line {nxt.line}: pub 只支持 fn/struct/enum，"
+                        f"得到 {nxt.val!r}")
+                self._pending_pub = True
             elif self.at("fn"):
                 fdef = self.parse_fn()
+                if self._pending_pub:
+                    fdef["pub"] = True
+                    self._pending_pub = False
                 if fdef.get("type_params"):
                     # 泛型模板（v1.11）：不进发射列表，只作单态化种子。
                     # 带注解的泛型（@simd/@extern ...）暂不支持——模板复制
@@ -606,6 +624,9 @@ class Parser:
             elif self.at("struct"):
                 self.next()
                 name = self.eat("NAME").val
+                if self._pending_pub:
+                    self.pub_types.add(name)
+                    self._pending_pub = False
                 self.eat("SYM", "{")
                 fields = []
                 while not self.at("SYM", "}"):
@@ -620,6 +641,9 @@ class Parser:
             elif self.at("enum"):
                 self.next()
                 name = self.eat("NAME").val
+                if self._pending_pub:
+                    self.pub_types.add(name)
+                    self._pending_pub = False
                 self.eat("SYM", "{")
                 variants = []
                 while not self.at("SYM", "}"):
@@ -1920,11 +1944,18 @@ def load_program(src_path, cfg=None):
     """
     src_dir = os.path.dirname(os.path.abspath(src_path))
     seen, order, stack = {}, [], []
+    order_labels = []          # 与 order 平行：每个被导入文件的 basename（报错用）
 
     def parse_file(path, consts=None, generic_fns=None):
         with open(path, encoding="utf-8") as f:
-            return Parser(tokenize(f.read()), consts=consts,
-                          generic_fns=generic_fns).parse_program()
+            p = Parser(tokenize(f.read()), consts=consts,
+                       generic_fns=generic_fns)
+        res = p.parse_program()
+        # 本文件新定义的泛型模板（种子里的不算）：pub 标记随 fdef["pub"]
+        seed = set(generic_fns or {})
+        gens = {k: bool(p.generic_fns[k].get("pub"))
+                for k in p.generic_fns if k not in seed}
+        return res, p.pub_types, gens
 
     main_dir = os.path.dirname(os.path.abspath(src_path))
     src_cfg = (cfg or {}).get("src", {}) if isinstance(cfg, dict) else {}
@@ -1961,15 +1992,17 @@ def load_program(src_path, cfg=None):
             raise SyntaxError(f"import 循环："
                               f"{' -> '.join(chain + [os.path.basename(path)])}")
         stack.append(ap)
-        res = parse_file(ap)
+        res, pub_types, gens = parse_file(ap)
         stack.pop()
-        seen[ap] = res
+        seen[ap] = (res, pub_types, gens)
         order.append(res)
+        order_labels.append(os.path.basename(path))
         for imp in res[1]:
             cand = resolve_or_raise(imp, path)
             load(cand, chain + [os.path.basename(path)])
 
-    main_res = parse_file(src_path)
+    main_res, main_pub_types, main_gens = parse_file(src_path)
+    main_label = os.path.basename(src_path)
     for imp in main_res[1]:
         load(resolve_or_raise(imp, src_path), [os.path.basename(src_path)])
 
@@ -1999,22 +2032,115 @@ def load_program(src_path, cfg=None):
                     f"泛型函数冲突：{k!r} 在多个模块中定义不同")
             acc_gf[k] = v
     if acc or acc_gf:
-        seen2, order2 = {}, []
+        seen2, order2, pex2, labels2 = {}, [], [], []
 
         def reload(path):
             ap = os.path.normpath(os.path.abspath(path))
             if ap in seen2:
                 return
-            res = parse_file(ap, consts=acc, generic_fns=acc_gf)
+            res, pub_types, gens = parse_file(ap, consts=acc, generic_fns=acc_gf)
             seen2[ap] = res
             order2.append(res)
+            pex2.append((pub_types, gens))
+            labels2.append(os.path.basename(path))
             for imp in res[1]:
                 reload(resolve_or_raise(imp, path))
 
-        main_res = parse_file(src_path, consts=acc, generic_fns=acc_gf)
+        main_res, main_pub_types, main_gens = parse_file(
+            src_path, consts=acc, generic_fns=acc_gf)
         for imp in main_res[1]:
             reload(resolve_or_raise(imp, src_path))
         seen, order = seen2, order2
+        pex_list = pex2
+        labels = labels2
+        main_pex = (main_pub_types, main_gens)
+    else:
+        pex_list = [seen[ap][1:] for ap in seen]
+        labels = order_labels
+        main_pex = (main_pub_types, main_gens)
+
+    # ---- pub 可见性检查（v1.43）----
+    # 规则：文件 X 引用了名字 r，且 r 定义在另一文件 Y（X 自己没定义），
+    # 而 Y 里 r 不是 pub -> 编译期报错。单文件程序只有一个"文件"，
+    # 永远不触发（全部既有测试零影响）。
+    # 引用口径（与 global_dce 的 walk 同款 + 类型位置）：
+    #   ("call", path, ...) 取 path[-1]；("gcall", name, ...) 取 name；
+    #   ("name", x) 叶子；("enumlit"/"structlit"/"pat", [头, ...], ...) 取头段；
+    #   ("named", T) 类型引用（内建标量除外——出现在签名/字段/let 标注/
+    #   vec/map/chan 元素等一切类型位）。
+    # 遮蔽豁免：let/参数/循环变量/match 绑定过的名字跳过——局部绑定遮蔽
+    # 顶层名，跨模块同名非 pub 声明在这些位置本来就不可见，避免变量误报。
+    BUILTIN_TY = {"int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8",
+                  "bool", "str", "void", "byte", "float", "f64", "f32",
+                  "__self__"}
+
+    def _collect(e, refs, bound):
+        if isinstance(e, tuple):
+            k = e[0] if e else None
+            if k == "call" and isinstance(e[1], list) and e[1]:
+                refs.add(e[1][-1])
+            elif k == "gcall" and isinstance(e[1], str):
+                refs.add(e[1])
+            elif k == "name" and isinstance(e[1], str):
+                refs.add(e[1])
+            elif k in ("enumlit", "structlit", "pat") and \
+                    isinstance(e[1], list) and e[1]:
+                refs.add(e[1][0])
+            elif k == "named" and isinstance(e[1], str) and e[1] not in BUILTIN_TY:
+                refs.add(e[1])
+            elif k == "let" and len(e) > 2 and isinstance(e[2], str):
+                bound.add(e[2])
+            elif k in ("for", "parfor", "foreach") and len(e) > 1 \
+                    and isinstance(e[1], str):
+                bound.add(e[1])
+            for x in e:
+                _collect(x, refs, bound)
+        elif isinstance(e, list):
+            for x in e:
+                _collect(x, refs, bound)
+        elif isinstance(e, dict):
+            for x in e.values():
+                _collect(x, refs, bound)
+
+    files = [(main_label, main_res, main_pex)] + [
+        (label, res, pex) for label, (res, pex) in zip(order_labels, zip(order, pex_list))]
+    defs_of = {}
+    for _label, res, (pub_types, gens) in files:
+        fdefs = {f["name"]: bool(f.get("pub")) for f in res[2]}
+        for k in res[4]:
+            fdefs[k] = k in pub_types        # struct/enum/interface
+        fdefs.update(gens)
+        for name, is_pub in fdefs.items():
+            # fn/struct/enum 重名已由上面的合并冲突检查报错；这里 setdefault
+            # 只兜 interface/泛型这类没有专属冲突检查的条目
+            defs_of.setdefault(name, (_label, is_pub))
+    for label, res, (_pt, _gn) in files:
+        refs, bound = set(), set()
+        for f in res[2]:
+            for pn, _pt in f["params"]:
+                bound.add(pn)
+            _collect(f["body"], refs, bound)
+        for t in res[3]:
+            _collect(t["body"], refs, bound)
+        for fields in res[4].values():
+            for _fn, ft in fields:
+                _collect(ft, refs, bound)
+        for variants in res[5].values():
+            for _vn, vfs in variants:
+                for _fn, ft in vfs:
+                    _collect(ft, refs, bound)
+        viols = []
+        for r in refs:
+            if r in bound or r not in defs_of:
+                continue
+            dlabel, is_pub = defs_of[r]
+            if dlabel != label and not is_pub:
+                viols.append(f"{r!r} <- {dlabel}")
+        if viols:
+            raise SyntaxError(
+                f"{label}: 引用了非 pub 声明（{len(viols)} 处）："
+                + "、".join(sorted(viols))
+                + "。请在对方声明前加 pub 导出，或改在本模块内使用")
 
     mod, imports, fns, tests, structs, enums, decl_order = main_res
     fn_names = {f["name"] for f in fns}
@@ -2038,6 +2164,7 @@ def load_program(src_path, cfg=None):
         have = set(decl_order)
         decl_order = decl_order + [d for d in res[6] if d not in have]
         tests = tests + res[3]
+
     # 用户泛型单态化（v1.11）：gcall 全部降为普通 call，模板换成实例。
     # 必须在合并完成后做——调用点可能跨文件（std 库的泛型）。
     if acc_gf:

@@ -94,12 +94,12 @@ fn _decode(s: str, plus_as_space: int) -> str {
 }
 
 // url_decode(s)：%XX 解码 + '+' -> 空格（application/x-www-form-urlencoded）
-fn url_decode(s: str) -> str {
+pub fn url_decode(s: str) -> str {
     return _decode(s, 1)
 }
 
 // url_decode_path(s)：只解 %XX，保留 '+'（路径语义）
-fn url_decode_path(s: str) -> str {
+pub fn url_decode_path(s: str) -> str {
     return _decode(s, 0)
 }
 
@@ -136,7 +136,7 @@ fn _hex_push(out: vec[int], b: int) -> int {
 }
 
 // url_encode(s)：保留 unreserved，其余 %XX（空格 -> %20，不是 +）
-fn url_encode(s: str) -> str {
+pub fn url_encode(s: str) -> str {
     let n = len(s)
     let out = vec[int].new(n * 3 + 1)
     let mut i = 0
@@ -153,7 +153,7 @@ fn url_encode(s: str) -> str {
 }
 
 // url_encode_query(s)：同 url_encode，但空格编成 '+'（表单提交语义）
-fn url_encode_query(s: str) -> str {
+pub fn url_encode_query(s: str) -> str {
     let n = len(s)
     let out = vec[int].new(n * 3 + 1)
     let mut i = 0
@@ -177,7 +177,7 @@ fn url_encode_query(s: str) -> str {
 // ---------------------------------------------------------------------------
 
 // scheme（小写化，: 之前）；无 scheme 返回 ""
-fn url_scheme(u: str) -> str {
+pub fn url_scheme(u: str) -> str {
     let n = len(u)
     let mut i = 0
     while i < n {
@@ -234,7 +234,7 @@ fn _authority_end(u: str, from: int) -> int {
 }
 
 // host（去掉 userinfo 与端口；IPv6 保留方括号）
-fn url_host(u: str) -> str {
+pub fn url_host(u: str) -> str {
     let start = _after_scheme(u)
     let end = _authority_end(u, start)
     if end <= start {
@@ -280,7 +280,7 @@ fn url_host(u: str) -> str {
 }
 
 // 端口；缺省返回 -1
-fn url_port(u: str) -> int {
+pub fn url_port(u: str) -> int {
     let start = _after_scheme(u)
     let end = _authority_end(u, start)
     if end <= start {
@@ -338,7 +338,7 @@ fn url_port(u: str) -> int {
 }
 
 // path（不含 query/fragment）；没有 path 返回 "/" 之外的空串
-fn url_path(u: str) -> str {
+pub fn url_path(u: str) -> str {
     let n = len(u)
     let start = _after_scheme(u)
     let mut i = start
@@ -363,7 +363,7 @@ fn url_path(u: str) -> str {
 }
 
 // 原始 query（不含 '?' 与 '#')
-fn url_query(u: str) -> str {
+pub fn url_query(u: str) -> str {
     let n = len(u)
     let mut i = 0
     while i < n {
@@ -383,7 +383,7 @@ fn url_query(u: str) -> str {
     return ""
 }
 
-fn url_fragment(u: str) -> str {
+pub fn url_fragment(u: str) -> str {
     let n = len(u)
     let mut i = 0
     while i < n {
@@ -397,7 +397,7 @@ fn url_fragment(u: str) -> str {
 
 // query 里取某个键（解码后返回）；不存在返回 ""
 // 语义：同名键取第一个；键值以 '&' 分隔，'=' 可省略（值按 ""）
-fn url_query_get(u: str, key: str) -> str {
+pub fn url_query_get(u: str, key: str) -> str {
     let q = url_query(u)
     let n = len(q)
     let kn = len(key)
@@ -452,7 +452,7 @@ fn url_query_get(u: str, key: str) -> str {
 }
 
 // 便捷：拼 query（已编码的 key/value）
-fn url_join_query(base: str, key: str, val: str) -> str {
+pub fn url_join_query(base: str, key: str, val: str) -> str {
     let mut sep = "?"
     let n = len(base)
     let mut i = 0
