@@ -79,7 +79,7 @@ def modules():
 def public_fns(path):
     """公开函数签名列表（pub fn，显示剥 pub 前缀）。
 
-    v1.46 起经 qlm_doc.scan_file：v1.43 把 std 全库改成 pub fn 后，
+    v1.47 起经 qlm_doc.scan_file：v1.43 把 std 全库改成 pub fn 后，
     旧实现只认行首 `fn `，把 271 个 pub API 全部漏出、反把 195 个内部
     函数列为"公开"——本轮修正（scan_file 的 /// 文档由 render 透出）。
     """

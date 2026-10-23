@@ -9,11 +9,11 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=156 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
-| 词法器对拍 | **PASS=139 FAIL=0**（139 个源文件） | `python tests/lexdiff.py` |
-| 声明级 AST 对拍 | **PASS=119 FAIL=0**（跳过 4 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
-| 函数体 dump 对拍 | **一致 1202 / 分叉 872 / SKIP 同步 24 / SKIP 不同步 18** | `python tests/bodydiff.py` |
-| IR 架构无关对拍 | **PASS=67 FAIL=0 SKIP=48**，并行后 **60 s**（原串行 5 min 41 s；SKIP 全是 arm64 未接的特性，t85 的 `trunc` / t86 的 map 聚合值属此类；t87 的 8 参 A64 走 X6/X7 已接） | `python tests/irdiff.py` |
+| PE 回归（主回归） | **PASS=158 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
+| 词法器对拍 | **PASS=142 FAIL=0**（142 个源文件） | `python tests/lexdiff.py` |
+| 声明级 AST 对拍 | **PASS=121 FAIL=0**（跳过 4 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
+| 函数体 dump 对拍 | **一致 1277 / 分叉 1080 / SKIP 同步 25 / SKIP 不同步 31**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |
+| IR 架构无关对拍 | **PASS=68 FAIL=0 SKIP=49**，并行后 **60 s**（原串行 5 min 41 s；SKIP 全是 arm64 未接的特性，t85 的 `trunc` / t86 的 map 聚合值 / t90_mathfn 的 f64 二元运算属此类；t87 的 8 参走 X6/X7、t91 的 `defer` 已接） | `python tests/irdiff.py` |
 | 发射层确定性对拍 | **PASS=10 FAIL=0** | `python tests/emitdiff.py` |
 | gzip 解码互操作 | **PASS=86 FAIL=0**（12 种编码组合 × 7 类输入 + 多 member 拼接）+ **损坏输入拒绝 5/5** | `python tests/gzip_inflate_test.py` |
 | ECDSA P-256 验签互操作 | **PASS=32 FAIL=0**（20 正向 + 12 负向，Python bigint 参考实现） | `python tests/ecdsa_p256_test.py` |
@@ -23,7 +23,7 @@
 | RSA 验签（PKCS#1 v1.5 / PSS） | **t71 / t72 全绿**（1024 位正负向量 + PSS + 2048 位） | `python tests/run_win_tests.py` |
 | X.509 证书链 / 有效期 / 域名 | **PASS=13 FAIL=0**（EC 三级链 + RSA 根混合链 + 通配符/过期/篡改/缺中间证书） | `python tests/x509_chain_test.py` |
 | X.509 解析 + 自签验签互操作 | **PASS=7 FAIL=0**（4 正向：v3/v1/长 CN/大序列号；3 负向：篡改 TBS/篡改签名/截断） | `python tests/x509_test.py` |
-| 三道门禁 | check_names / check_origin / check_docs 全 PASS | `python tools/dev/check_*.py` |
+| 三道门禁 | check_names / check_origin / check_docs 全 PASS；`gen_stdlib_doc.py --check` 在合并工作区因另一轨在途的 `std/httpc*.qma` 未登记 DESC 而红（本版文件面无关） | `python tools/dev/check_*.py` + `python tools/dev/gen_stdlib_doc.py --check` |
 
 `run_win_tests.py` 的 7 组覆盖：PE 结构（MZ/PE32+/AMD64/无 CRT 符号）、基础语义、
 语言特性（struct/enum/match/宽度/@simd/rc/所有权/vec/map/切片/函数值）、多核

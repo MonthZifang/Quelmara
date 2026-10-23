@@ -1,0 +1,256 @@
+// t91_defer.qma：defer——块退出清理（v1.48，语言层黄标翻绿）
+// 覆盖：
+//   1) 块尾 LIFO：同块多条 defer 逆序执行
+//   2) return 路径：返回值先算好，defer 随后跑（改局部变量不影响返回值）
+//   3) 退出时的值：defer 里的变量取【退出时】的值，不是登记时的值
+//   4) 嵌套块：内层 defer 在内层退出就跑，早于外层后续语句
+//   5) 登记语义：break 在 defer 之前时那条路径不执行 defer（标志位）
+//   6) continue 路径：defer 先跑再回到判据，逐轮执行
+//   7) 未取到的 if 分支：defer 不执行
+//   8) 聚合返回（struct）：defer 在隐藏出参槽写完之后跑
+//   9) defer 赋值语句形态（defer x = v）
+// 语义纪律：defer 是语句——执行到才登记；块级作用域；LIFO；
+//           不支持 let/if/while 等带作用域的语句（编译期拒绝）。
+module t91
+
+struct P { x: int, y: int }
+enum K { A, B }
+
+fn c1(log: vec[int]) {
+    // 1) 块尾 LIFO（内层块用 if true 构造——语言没有裸块语句）
+    if true {
+        defer log.push(10)
+        defer log.push(20)
+        log.push(1)
+    }
+    log.push(2)
+}
+
+fn c2(log: vec[int]) -> int {
+    // 2) return 路径（void 之外的分支）
+    defer log.push(2)
+    defer log.push(3)
+    log.push(1)
+    return 7
+}
+
+fn c3(log: vec[int]) -> int {
+    // 3) 退出时的值
+    let mut x = 1
+    defer log.push(x)
+    x = 42
+    return 0
+}
+
+fn c4() -> int {
+    // 2b) 返回值先算：defer 改 x 不影响已经算出的返回值
+    let mut x = 1
+    defer x = 99
+    return x
+}
+
+fn c5(log: vec[int]) -> int {
+    // 5) break 在 defer 之前：那一轮不登记，不执行
+    let mut i = 0
+    while i < 3 {
+        if i == 1 {
+            break
+        }
+        defer log.push(100 + i)
+        i = i + 1
+    }
+    return i
+}
+
+fn c6(log: vec[int]) -> int {
+    // 6) continue 路径：defer 先跑再回判据
+    let mut i = 0
+    while i < 3 {
+        i = i + 1
+        defer log.push(i * 10)
+        if i == 2 {
+            continue
+        }
+        log.push(i)
+    }
+    return i
+}
+
+fn c7(log: vec[int], c: bool) {
+    // 7) 未取到的分支不执行
+    if c {
+        defer log.push(99)
+        log.push(1)
+    }
+    log.push(2)
+}
+
+fn c8(log: vec[int]) -> P {
+    // 8) 聚合返回：defer 在出参槽写完之后跑
+    defer log.push(8)
+    log.push(1)
+    return P { x: 5, y: 6 }
+}
+
+fn c9(log: vec[int]) {
+    // 9) defer 赋值语句形态
+    let mut n = 0
+    defer n = 77
+    defer log.push(n)
+    n = 1
+}
+
+fn c10(log: vec[int]) {
+    // 10) break 只跑循环体帧：函数级 defer 留到函数尾
+    defer log.push(9)
+    let mut i = 0
+    while i < 3 {
+        i = i + 1
+        if i == 2 {
+            break
+        }
+        log.push(i)
+    }
+    log.push(0)
+}
+
+fn c11(k: K, log: vec[int]) -> int {
+    // 11) match 分支里的 defer（分支体是块）
+    match k {
+        K.A => {
+            defer log.push(11)
+            log.push(1)
+            return 10
+        }
+        _ => {
+            defer log.push(22)
+            log.push(2)
+            return 20
+        }
+    }
+}
+
+fn c12(log: vec[int]) {
+    // 12) defer 字段赋值形态（defer p.x = 9）
+    let mut p = P { x: 1, y: 2 }
+    defer p.x = 9
+    defer log.push(p.x)
+}
+
+fn c13(log: vec[int]) {
+    // 13) foreach 循环体：每轮各自登记、各自跑
+    let v = vec[int].new(3)
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    for x in v {
+        defer log.push(x * 2)
+        log.push(x)
+    }
+}
+
+fn main() {
+    // 1) 块尾 LIFO + 块外顺序
+    let l1 = vec[int].new(4)
+    c1(l1)
+    assert(len(l1) == 4, "c1 len")
+    assert(l1.get(0) == 1, "c1 body first")
+    assert(l1.get(1) == 20, "c1 LIFO 20 before 10")
+    assert(l1.get(2) == 10, "c1 LIFO 10 last")
+    assert(l1.get(3) == 2, "c1 outer after inner")
+
+    // 2) return 路径 + 返回值
+    let l2 = vec[int].new(4)
+    assert(c2(l2) == 7, "c2 return value")
+    assert(len(l2) == 3, "c2 len")
+    assert(l2.get(0) == 1, "c2 body")
+    assert(l2.get(1) == 3, "c2 LIFO 3 before 2")
+    assert(l2.get(2) == 2, "c2 LIFO 2 last")
+
+    // 3) 退出时的值
+    let l3 = vec[int].new(1)
+    assert(c3(l3) == 0, "c3 return")
+    assert(l3.get(0) == 42, "c3 sees exit-time value")
+
+    // 2b) 返回值先算好
+    assert(c4() == 1, "c4 return value computed before defer")
+
+    // 5) 登记语义（break 之前的 defer 未登记）
+    let l5 = vec[int].new(4)
+    assert(c5(l5) == 1, "c5 break index")
+    assert(len(l5) == 1, "c5 only one iteration registered defer")
+    // 退出时的值：块尾执行时 i 已自增到 1，故是 100 + 1
+    assert(l5.get(0) == 101, "c5 exit-time value")
+
+    // 6) continue 路径
+    let l6 = vec[int].new(8)
+    assert(c6(l6) == 3, "c6 end index")
+    assert(len(l6) == 5, "c6 len")
+    assert(l6.get(0) == 1, "c6 iter1 body")
+    assert(l6.get(1) == 10, "c6 iter1 defer")
+    assert(l6.get(2) == 20, "c6 iter2 defer before continue")
+    assert(l6.get(3) == 3, "c6 iter3 body")
+    assert(l6.get(4) == 30, "c6 iter3 defer")
+
+    // 7) 未取到的分支
+    let l7a = vec[int].new(4)
+    c7(l7a, false)
+    assert(len(l7a) == 1, "c7 false: only trailing push")
+    assert(l7a.get(0) == 2, "c7 false body")
+    let l7b = vec[int].new(4)
+    c7(l7b, true)
+    assert(len(l7b) == 3, "c7 true len")
+    assert(l7b.get(0) == 1, "c7 true body")
+    assert(l7b.get(1) == 99, "c7 true defer")
+    assert(l7b.get(2) == 2, "c7 true outer")
+
+    // 8) 聚合返回
+    let l8 = vec[int].new(2)
+    let p = c8(l8)
+    assert(p.x == 5, "c8 struct x")
+    assert(p.y == 6, "c8 struct y")
+    assert(len(l8) == 2, "c8 len")
+    assert(l8.get(0) == 1, "c8 body")
+    assert(l8.get(1) == 8, "c8 defer after out-slot")
+
+    // 9) defer 赋值形态：赋值先登记，退出时按 LIFO 跑
+    let l9 = vec[int].new(2)
+    c9(l9)
+    assert(len(l9) == 1, "c9 len")
+    assert(l9.get(0) == 1, "c9 reads value before deferred assign")
+
+    // 10) break 不跑函数级 defer
+    let l10 = vec[int].new(4)
+    c10(l10)
+    assert(len(l10) == 3, "c10 len")
+    assert(l10.get(0) == 1, "c10 iter1")
+    assert(l10.get(1) == 0, "c10 after loop")
+    assert(l10.get(2) == 9, "c10 function defer last")
+
+    // 11) match 分支
+    let l11 = vec[int].new(4)
+    assert(c11(K.A, l11) == 10, "c11 arm A return")
+    assert(len(l11) == 2, "c11 arm A len")
+    assert(l11.get(0) == 1, "c11 arm A body")
+    assert(l11.get(1) == 11, "c11 arm A defer")
+    let l11b = vec[int].new(4)
+    assert(c11(K.B, l11b) == 20, "c11 default return")
+    assert(l11b.get(1) == 22, "c11 default defer")
+
+    // 12) 字段赋值形态：defer 读的是赋值前的值（LIFO：读在前、写在后）
+    let l12 = vec[int].new(2)
+    c12(l12)
+    assert(len(l12) == 1, "c12 len")
+    assert(l12.get(0) == 1, "c12 sees pre-assign field")
+
+    // 13) foreach：每轮登记各自跑
+    let l13 = vec[int].new(8)
+    c13(l13)
+    assert(len(l13) == 6, "c13 len")
+    assert(l13.get(0) == 1, "c13 body1")
+    assert(l13.get(1) == 2, "c13 defer1")
+    assert(l13.get(2) == 2, "c13 body2")
+    assert(l13.get(3) == 4, "c13 defer2")
+
+    print("defer ok")
+}

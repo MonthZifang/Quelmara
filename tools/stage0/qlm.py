@@ -125,7 +125,7 @@ def load_config(src_path):
 KEYWORDS = {"fn", "let", "mut", "if", "else", "while", "for", "parfor", "rc",
             "interface", "impl",
             "return", "module", "import", "true", "false", "test",
-            "break", "continue", "struct", "enum", "match",
+            "break", "continue", "defer", "struct", "enum", "match",
             "arena", "spawn", "chan", "option", "result", "map", "select",
             "const", "vec"}
 
@@ -899,6 +899,16 @@ class Parser:
         if t.kind == "continue":
             self.next()
             return ("continue",)
+        if t.kind == "defer":
+            # defer 语句（v1.48）：defer <表达式/赋值> —— 所在块退出时
+            # LIFO 执行（正常落到块尾 / return / break / continue 跳出均算）。
+            # 变量取【退出时】的值（同块内后绑定可见，内层块 shadow 不可见）。
+            self.next()
+            stmt = self.parse_stmt()
+            if stmt[0] not in ("expr", "assign", "assign_field", "assign_index"):
+                raise SyntaxError(
+                    f"line {t.line}: defer 只支持表达式/赋值语句，得到 {stmt[0]!r}")
+            return ("defer", stmt)
         if t.kind == "match":
             return ("match_stmt", self.parse_match())
         if t.kind == "arena":
@@ -4779,6 +4789,13 @@ class Codegen:
                 return f"{pad}if ({code} != 0) return {zero};"
             code, _ = self.gen_expr(e, env)
             return f"{pad}{code};"
+        if s[0] == "defer":
+            # C 后端没有 defer 语句（C99 无 RAII）；要支持得给每个退出点
+            # 复制清理代码 + goto 标签，收益不抵风险。fail-fast 明确拒绝，
+            # 不静默丢清理——defer 类测试只进 PE / A64 原生后端回归。
+            raise SyntaxError(
+                "C 后端不支持 defer（v1.48 边界：defer 只进原生后端，"
+                "C 交叉验证不含 defer 测试）")
         raise SyntaxError(f"未知语句 {s!r}")
 
     def gen_struct_let(self, s, env, ind):
@@ -5186,6 +5203,10 @@ def walk_stmts(stmts, declared, assigned, referenced):
                 referenced.add(head)
         elif k in ("break", "continue"):
             pass
+        elif k == "defer":
+            # defer <表达式/赋值>：内部语句照常计入引用/赋值，
+            # 否则"只在 defer 里用到"的变量会被 DCE 当成未使用。
+            walk_stmts([s[1]], declared, assigned, referenced)
         elif k == "match_stmt":
             walk_expr(s[1], declared, assigned, referenced)
         elif k == "arena":

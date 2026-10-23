@@ -612,6 +612,7 @@ def main():
     case_selfcheck("t85_narrowstore", "tests/t85_narrowstore.qma")
     case_selfcheck("t86_mapstruct", "tests/t86_mapstruct.qma")
     case_selfcheck("t87_callrelax", "tests/t87_callrelax.qma")
+    case_selfcheck("t91_defer", "tests/t91_defer.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),
@@ -620,7 +621,8 @@ def main():
             ("iface_missing", "impl 缺方法", "缺少方法"),
             ("iface_rettype", "impl 返回类型不符", "返回类型与接口声明不一致"),
             ("iface_no_impl", "类型未实现接口", "没有实现接口"),
-            ("iface_dup_method", "跨接口同名方法", "同名方法跨接口暂不支持")):
+            ("iface_dup_method", "跨接口同名方法", "同名方法跨接口暂不支持"),
+            ("defer_let", "defer 跟带作用域的语句", "defer 只支持")):
         try:
             build(os.path.join(ROOT, f"tests/bad/{nm}.qma"),
                   os.path.join(ROOT, "build", f"bad_{nm}.exe"))

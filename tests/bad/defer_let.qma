@@ -1,0 +1,9 @@
+// 负向夹具：defer 后面跟 let（带作用域的语句）必须编译期拒绝
+// 理由：let 引入新绑定，defer 到块尾执行时该绑定已出作用域——
+// 要么变成块对象/闭包问题，要么语义不可解释。fail-fast，不静默降级。
+module defer_let
+
+fn main() {
+    defer let x = 1
+    print("unreachable")
+}

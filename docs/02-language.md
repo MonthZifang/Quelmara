@@ -32,10 +32,10 @@ import std.core     // 扁平合并：递归加载 std/ 与同目录 .qma
 
 ## 2. 词法
 
-### 2.1 关键字（31 个，`qlm.py:125`）
+### 2.1 关键字（32 个，`qlm.py:125`）
 
 ```
-fn  let  mut  if  else  while  for  parfor  return  break  continue
+fn  let  mut  if  else  while  for  parfor  return  break  continue  defer
 struct  enum  match  interface  impl  rc
 module  import  test  const  vec  map  chan  option  result  select
 arena  spawn  true  false
@@ -248,6 +248,7 @@ ch.close()
 let got = select { ch.recv() }   // 多臂就绪选择（声明序优先）
 
 assert(cond, "消息")       // 失败 → stderr 消息 + 退出码 1
+defer expr / defer x = v   // 块退出清理（LIFO，见 §8.6）
 break / continue
 return expr
 ```
@@ -452,6 +453,34 @@ rc_drop(c)               // count 1
 | `chan[T]` | 有界 MPMC + 自旋锁 | `select` 声明序优先，无随机化 |
 | `arena { }` | bump 指针回卷 | 整块回收，无单对象释放 |
 | `atomic_*` | `lock xadd` / `lock cmpxchg` | AArch64 未接 |
+
+### 8.6 `defer`：块级清理（v1.48）
+
+```quelmara
+fn use(log: vec[int]) {
+    let mut n = 0
+    defer n = 99          // LIFO：同块内后写的先执行
+    defer log.push(n)     // 读的是【退出时】的值
+    n = 1
+}                         // 退出：push(1) → n = 99
+```
+
+| 项 | 语义 |
+|---|---|
+| 作用域 | 语句所在的块（函数体 / `if` / `while` / `for` / `match` 分支体）；内层块先跑 |
+| 顺序 | LIFO（同块内后写的先执行） |
+| 触发点 | 块正常结束、`return`、`break`、`continue` 跳出该块 |
+| 登记 | 是**语句**：执行到才登记——`if c { break }` 写在 defer 之前时那条路径不执行 |
+| 取值 | 变量按**退出时**的值读，不是登记时的值 |
+| 返回值 | `return expr` 先求值、再跑 defer；defer 改局部变量不影响已算出的返回值 |
+| 可写形态 | 表达式 / `=` / 字段赋值 / 下标赋值 |
+| 拒绝 | `defer let ...` 等带作用域的语句 → 编译期报错；C 后端整体不支持（fail-fast） |
+
+实现：块入口给块内每条 defer 分配一个"已登记"标志位（初值 0），执行到 defer 置 1，
+退出点 `if flag { 清理 }`。标志位是**语义必需**而非优化——否则 `break` 早于 defer 的
+路径会误跑清理。`break`/`continue` 只跑到循环体帧，函数帧留到 `return`/函数尾。
+
+证据：`tests/t91_defer.qma`（13 组断言）、`tests/bad/defer_let.qma`（必须编译失败）。
 
 ## 9. 已知陷阱（写代码前先看）
 

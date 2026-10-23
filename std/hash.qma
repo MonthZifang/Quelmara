@@ -14,6 +14,9 @@
 //   FNV-1a 32: offset 0x811c9dc5, prime 0x01000193
 //   FNV-1a 64: offset 0xcbf29ce484222325, prime 0x00000100000001b3
 
+/// 按字节计算 FNV-1a 32 位（p=缓冲区指针，n=字节数）。
+/// 非密码学哈希：1 字节 1 次乘加，适合缓存键 / 分片 / 布隆过滤器；
+/// 结果恒在 [0, 2^32)，可直接当数组下标取模。
 pub fn fnv1a32_bytes(p: int, n: int) -> int {
     let mut h = 0x811c9dc5
     let mut i = 0
@@ -25,6 +28,9 @@ pub fn fnv1a32_bytes(p: int, n: int) -> int {
     return h
 }
 
+/// 按字节计算 FNV-1a 64 位（p=缓冲区指针，n=字节数）。
+/// 返回 int64 承载的**无符号**值——高位为 1 时结果为负，打印成十六进制
+/// 请用 std/hex（hex_encode(mem_str(p, 8))）。
 pub fn fnv1a64_bytes(p: int, n: int) -> int {
     // 0xcbf29ce484222325 超出 int64 正区间，按有符号写（同一组位）
     let mut h = -3750763034362895579
@@ -37,10 +43,13 @@ pub fn fnv1a64_bytes(p: int, n: int) -> int {
     return h
 }
 
+/// 对 str 按 UTF-8 字节计算 FNV-1a 32 位（等价于对 mem_ptr/len 调
+/// fnv1a32_bytes）。按字节计算，不做码点归一。
 pub fn fnv1a32(s: str) -> int {
     return fnv1a32_bytes(mem_ptr(s, 0), len(s))
 }
 
+/// 对 str 按 UTF-8 字节计算 FNV-1a 64 位（语义同 fnv1a64_bytes）。
 pub fn fnv1a64(s: str) -> int {
     return fnv1a64_bytes(mem_ptr(s, 0), len(s))
 }

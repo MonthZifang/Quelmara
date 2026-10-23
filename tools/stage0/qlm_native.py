@@ -664,7 +664,10 @@ class Lower:
         self.sc = SYSCALLS[arch]
         self.structs = structs or {}
         self.enums = enums or {}
-        self.loop_stack = []       # [(cont_label, break_label)]，供 break/continue
+        self.loop_stack = []       # [(cont_label, break_label, defer_depth)]，供 break/continue
+        # v1.48 defer：每块一帧 {"slots": [登记标志], "entries": [(stmt, env, flag)], "cursor": n}
+        # 标志位初始 0、执行到 defer 语句置 1，退出点按 LIFO 逐条"标志为 1 才执行"。
+        self.defer_stack = []
         self.out = []
         self.globals = []          # bytes 列表
         self.gid_of_str = {}
@@ -3777,7 +3780,7 @@ class Lower:
             fn.emit("label", l_top)
             self.branch(s[1], fn, env, l_body := fn.label("wbody"), l_end)
             fn.emit("label", l_body)
-            self.loop_stack.append((l_top, l_end))   # continue -> 重新判据
+            self.loop_stack.append((l_top, l_end, len(self.defer_stack)))   # continue -> 重新判据
             self.block(s[2], fn, dict(env))
             self.loop_stack.pop()
             fn.emit("jmp", l_top)
@@ -3795,6 +3798,7 @@ class Lower:
                 if n != self.fn_ret_arr[1]:
                     raise SyntaxError("return 的数组长度与函数返回类型不一致")
                 self.array_copy(fn, self.fn_ret_target, spec, n)
+                self._emit_defers(fn)
                 fn.emit("ret", ("imm", 0))
                 return
             if self.fn_ret_agg or self.fn_ret_slice:
@@ -3815,9 +3819,11 @@ class Lower:
                             f"函数返回类型是 {self.fn_ret_agg}，return 的表达式类型不匹配")
                     # 值语义：拷进调用方提供的隐藏出参槽，再返回
                     self.struct_copy(fn, self.fn_ret_target, spec, self.fn_ret_agg)
+                self._emit_defers(fn)
                 fn.emit("ret", ("imm", 0))
                 return
             if s[1] is None:
+                self._emit_defers(fn)
                 fn.emit("ret", None)
             else:
                 v = self.eval(s[1], fn, env)
@@ -3826,7 +3832,34 @@ class Lower:
                 nb = self.narrow_of(self.fn_ret)
                 if nb is not None:
                     v = self.trunc_to(fn, v, nb)
+                # 返回值先算好，再跑 defer（defer 可改局部变量，不改已算出的返回值）。
+                # 有 defer 时必须先落一份副本：`return x` 求值拿到的就是 x 的槽，
+                # defer 里 `x = ...` 会把同一个槽改掉。
+                if any(fr["entries"] for fr in self.defer_stack):
+                    snap = fn.new_v()
+                    fn.emit("mov", snap, v)
+                    v = snap
+                self._emit_defers(fn)
                 fn.emit("ret", v)
+            return
+        if k == "defer":
+            # defer 语句（v1.48）：执行到才登记（标志位置 1），块退出点 LIFO 执行。
+            # 只支持表达式/赋值语句——let/if/while 等有作用域与控制流
+            # 语义，纳入即变成闭包/块对象问题，fail-fast 拒绝。
+            d = s[1]
+            if d[0] not in ("expr", "assign", "assign_field", "assign_index"):
+                raise SyntaxError(
+                    f"defer 只支持表达式/赋值语句，得到 {d[0]!r}")
+            if not self.defer_stack:
+                raise SyntaxError("defer 只能出现在块内")
+            frame = self.defer_stack[-1]
+            if frame["cursor"] >= len(frame["slots"]):
+                # 块入口的预扫描与降序不一致时才会到这里（内部错误，不静默）
+                raise SyntaxError("defer 登记与块入口预扫描不一致（编译器内部错误）")
+            flag = frame["slots"][frame["cursor"]]
+            frame["cursor"] += 1
+            fn.emit("mov", flag, ("imm", 1))
+            frame["entries"].append((d, env, flag))
             return
         if k == "expr":
             self.eval(s[1], fn, env)
@@ -3852,11 +3885,13 @@ class Lower:
         if k == "break":
             if not self.loop_stack:
                 raise SyntaxError("break 只能出现在循环内")
+            self._emit_defers(fn, upto=self.loop_stack[-1][2])
             fn.emit("jmp", self.loop_stack[-1][1])
             return
         if k == "continue":
             if not self.loop_stack:
                 raise SyntaxError("continue 只能出现在循环内")
+            self._emit_defers(fn, upto=self.loop_stack[-1][2])
             fn.emit("jmp", self.loop_stack[-1][0])
             return
         if k == "block":
@@ -3952,9 +3987,39 @@ class Lower:
             fn.emit("trunc", cur, cur, nb[0], nb[1])
         fn.emit("store", tgt, idx, cur)
 
+    def _emit_defers(self, fn, upto=None):
+        """defer 清理（v1.48）：从最内层帧起 LIFO 发射。upto=帧深度下界
+        （break/continue 只跑循环体帧，函数帧留到 return/函数尾）。"""
+        frames = self.defer_stack if upto is None else self.defer_stack[upto:]
+        for frame in reversed(frames):
+            self._emit_frame(frame, fn)
+
+    def _emit_frame(self, frame, fn):
+        """一帧的 defer：LIFO，逐条"标志位为 1 才执行"。
+
+        标志位是语义必需，不是优化：`if c { break }` 写在 defer 之前时，
+        那条路径上 defer 根本没执行过，不能跑。
+        """
+        for dstmt, denv, flag in reversed(frame["entries"]):
+            skip = fn.label("dskip")
+            fn.emit("jcc", "e", flag, ("imm", 0), skip)
+            self.stmt(dstmt, fn, denv)
+            fn.emit("label", skip)
+
     def block(self, stmts, fn, env):
+        """块：入口给块内每条 defer 分配"已登记"标志（初始 0），
+        正常落到块尾时按 LIFO 逐条判断执行。"""
+        frame = {"slots": [], "entries": [], "cursor": 0}
+        for s in stmts:
+            if s[0] == "defer":
+                flag = fn.new_v()
+                fn.emit("mov", flag, ("imm", 0))
+                frame["slots"].append(flag)
+        self.defer_stack.append(frame)
         for s in stmts:
             self.stmt(s, fn, env)
+        self.defer_stack.pop()
+        self._emit_frame(frame, fn)
 
     # ---- for / parfor ----
     def lower_foreach(self, s, fn, env):
@@ -4027,7 +4092,7 @@ class Lower:
             self._mark_map(fn, item, elem[1], elem[2])
         inner = dict(env)
         inner[var] = item
-        self.loop_stack.append((l_skip, l_end))
+        self.loop_stack.append((l_skip, l_end, len(self.defer_stack)))
         self.block(body, fn, inner)
         self.loop_stack.pop()
         fn.emit("label", l_skip)
@@ -4121,7 +4186,7 @@ class Lower:
         fn.emit("label", l_body)
         env2 = dict(env)
         env2[var] = i
-        self.loop_stack.append((l_cont, l_end))      # continue -> 自增步
+        self.loop_stack.append((l_cont, l_end, len(self.defer_stack)))      # continue -> 自增步
         self.block(body, fn, env2)
         self.loop_stack.pop()
         fn.emit("label", l_cont)
@@ -4147,7 +4212,7 @@ class Lower:
             fn.emit("jcc", "ge", i, hi_v, l_end)
             env2 = dict(env)
             env2[var] = i
-            self.loop_stack.append((l_cont, l_end))
+            self.loop_stack.append((l_cont, l_end, len(self.defer_stack)))
             self.block(body, fn, env2)
             self.loop_stack.pop()
             fn.emit("label", l_cont)
@@ -4198,7 +4263,7 @@ class Lower:
         env2[var] = i
         for r in reds:
             env2[r] = accs[r]
-        self.loop_stack.append((l_cont, l_end))
+        self.loop_stack.append((l_cont, l_end, len(self.defer_stack)))
         self.block(body, w, env2)
         self.loop_stack.pop()
         w.emit("label", l_cont)
