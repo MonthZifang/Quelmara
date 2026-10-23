@@ -13,6 +13,9 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import qlm_doc  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DOC = os.path.join(ROOT, "docs", "03-stdlib.md")
 BEGIN = "<!-- api:begin -->"
@@ -34,7 +37,7 @@ DESC = {
     "std/log.qma": "分级日志（stdout）+ 结构化字段 + 级别过滤",
     "std/lru.qma": "LRU 缓存（开放寻址表 + 双向链表，单句柄 O(1)）",
     "std/md5.qma": "MD5（RFC 1321，仅兼容用途，不要用于密码）",
-    "std/math.qma": "浮点与整数数学（sqrt/cbrt/floor/ceil/round/powi/gcd）",
+    "std/math.qma": "浮点与整数数学（exp/log/pow/sin/cos/atan/双曲/hypot + sqrt/cbrt/取整/gcd）",
     "std/mem.qma": "slab 分配 / fd 表 / 缓冲 / 对象池",
     "std/net.qma": "阻塞 TCP 便捷层",
     "std/rand.qma": "xorshift64* 伪随机",
@@ -74,11 +77,13 @@ def modules():
 
 
 def public_fns(path):
-    fns = []
-    for line in open(path, encoding="utf-8").read().splitlines():
-        if line.startswith("fn ") and not re.match(r"fn _", line):
-            fns.append(re.sub(r"\s+", " ", line.rstrip("{").strip()))
-    return fns
+    """公开函数签名列表（pub fn，显示剥 pub 前缀）。
+
+    v1.46 起经 qlm_doc.scan_file：v1.43 把 std 全库改成 pub fn 后，
+    旧实现只认行首 `fn `，把 271 个 pub API 全部漏出、反把 195 个内部
+    函数列为"公开"——本轮修正（scan_file 的 /// 文档由 render 透出）。
+    """
+    return [d for d in qlm_doc.scan_file(path) if d.kind == "fn"]
 
 
 def undocumented():
@@ -97,17 +102,26 @@ def undocumented():
 
 def render():
     parts = []
-    total = 0
+    total = internal_total = 0
     for name, path in modules():
         fns = public_fns(path)
+        _pub_n, internal_n = qlm_doc.fn_counts(path)
         total += len(fns)
+        internal_total += internal_n
         parts.append(f"\n### `{name}`\n")
         parts.append(DESC[name])
         parts.append("")
         parts.append("```quelmara")
-        parts.extend(fns if fns else ["// 无公开函数"])
+        if fns:
+            for d in fns:
+                # doc comment 原样透出为 ///（与源码写法一致）
+                for para in d.doc:
+                    parts.extend("/// " + ln if ln else "///" for ln in para)
+                parts.append(d.signature)
+        else:
+            parts.append("// 无公开函数")
         parts.append("```")
-    return "\n".join(parts), len(modules()), total
+    return "\n".join(parts), len(modules()), total, internal_total
 
 
 def main():
@@ -127,27 +141,31 @@ def main():
         print(f"FAIL：{DOC} 缺少 {BEGIN} / {END} 标记")
         return 1
 
-    body, nmod, nfn = render()
+    body, nmod, nfn, ninternal = render()
     head, rest = text.split(BEGIN, 1)
     _, tail = rest.split(END, 1)
     new = f"{head}{BEGIN}\n{body}\n{END}{tail}"
 
-    # 同步模块数与函数数（§1 的引言句）
-    new = re.sub(r"\d+ 个模块，\*\*\d+ 个公开函数\*\*",
-                 f"{nmod} 个模块，**{nfn} 个公开函数**", new, count=1)
+    # 同步模块数 / 公开函数数 / 内部函数数（§1 的引言句，整句重写）
+    new = re.sub(
+        r"^\d+ 个模块，\*\*\d+ 个公开函数\*\*.*$",
+        f"{nmod} 个模块，**{nfn} 个公开函数**（另有 {ninternal} 个内部函数）",
+        new, count=1, flags=re.M)
 
     if args.check:
         if new != text:
             print("FAIL：docs/03-stdlib.md 与 std/ 源码不一致，请运行 gen_stdlib_doc.py")
             return 1
-        print(f"PASS：{nmod} 个模块 / {nfn} 个公开函数，文档与源码一致")
+        print(f"PASS：{nmod} 个模块 / {nfn} 个公开函数"
+              f"（内部 {ninternal}），文档与源码一致")
         return 0
 
     if crlf:
         new = new.replace("\n", "\r\n")
     with open(DOC, "wb") as f:
         f.write(new.encode("utf-8"))
-    print(f"已更新 {os.path.relpath(DOC, ROOT)}：{nmod} 个模块 / {nfn} 个公开函数")
+    print(f"已更新 {os.path.relpath(DOC, ROOT)}：{nmod} 个模块 / "
+          f"{nfn} 个公开函数（内部 {ninternal}）")
     return 0
 
 

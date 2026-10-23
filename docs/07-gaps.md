@@ -26,7 +26,7 @@
 | 编译期求值 | 🟡 | 只有整型 `+ - * / %`；`const fn` 未做 | 复杂常量表要手算 |
 | 闭包 / 捕获 | ❌ | — | 只能传函数名 |
 | FFI（自研后端） | ❌ | 无动态链接器；`@extern` 只有 C 后端原型 | 无法调用系统库 |
-| `defer` / RAII / `Drop` | ❌ | 只有 `arena { }` 整块回卷 | fd/锁/缓冲释放全靠手写 |
+| `defer` / RAII / `Drop` | 🟡 v1.46 | **`defer` 语句 ✅**：块级作用域、LIFO、执行到才登记（`break` 早于 defer 的路径不跑）、取退出时的值；形态限表达式/赋值（`defer let` 编译期拒绝）；C 后端不支持（fail-fast）。仍无 `Drop`/析构——清理必须显式写 | fd/锁/缓冲释放可写清理；资源生命周期仍靠约定 |
 | 宏 / 反射 | ❌ | 前置：编译期 AST API、类型元数据段 | 序列化只能手写字段表 |
 | 字符串插值 / `format` | ❌ | 无可变参数机制 | 拼接冗长，`+` 链是 O(n²) |
 | `switch` | — | 用 `match` 代替（设计选择） | — |
@@ -46,8 +46,8 @@
 | TCP 批量收发 | 只有单次 `tcp_send/recv` | 高吞吐场景 syscall 太多 |
 | 可靠 UDP | UDP 四件之上未做 | 游戏/实时传输 |
 | 日志 | 无 stderr 通道、无轮转、无绝对时间戳（级别过滤 v1.19 已补） | 生产可观测性 |
-| 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠 |
-| 数学 | 有 sqrt/cbrt/powi/取整/gcd；**无 `exp` / `log` / `pow(x,y)` / `sin` / `cos`** | 图形、统计、复利 |
+| 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠；**`__f64_to_str` 运行库缺陷**（v1.47 实测）：nan/inf/±0 正常，有限非零值（定点与科学计数两条路径）输出空串——根因 `qlm_native.py` 有限路径收尾直接 `ret(buf)`，漏写长度前缀且未返回 `buf+8`（对照 `ret_buf()`；C 后端 `qlm.py` 有独立实现，修时双链对拍）。属语言层/运行库，不在标准库轨 |
+| 数学 | ✅ v1.47：`exp`/`log`/`log2`/`log10`/`pow`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`hypot` + 常数助手（Cody–Waite 双字归约；sin/cos 误差随 |x|·1.1e-16 增长，多字 π 归约未做） | 图形、统计、复利 |
 | 哈希 | ✅ v1.35：SHA-1 / SHA-256 / FNV-1a 32/64 / **MD5**（仅兼容用途） | 无 SHA-512、无 CRC64、无 BLAKE2 |
 | 数据结构 | ✅ v1.29/30：RingBuf / MinHeap / **set[int]·set[str]** / **deque** / **LRU**（自建开放寻址表 + 双向链表，单句柄） | LRU 的 key 只有 int（字符串先 `fnv1a64`）；无 TTL / 无容量自适应 |
 | 持久化 | 无 SQLite / KV / 序列化格式（`std/serialize` 只是编码原语） | 任何要存数据的应用 |

@@ -1,4 +1,4 @@
-// std/math.qma —— 浮点与整数数学工具（v1.19）
+// std/math.qma —— 浮点与整数数学工具（v1.19；v1.47 补超越函数）
 //
 // 为什么需要：`f64` 只有四则/比较，没有 sqrt/floor/ceil/pow，几何与统计代码
 // 只能各自手写牛顿迭代。这里给一套最小可用的纯库实现。
@@ -7,7 +7,9 @@
 //   * **不新增指令**：sqrt 用牛顿迭代 + 4 的幂缩放（不依赖 sqrtsd 编码器改动）；
 //   * 精度：sqrt 相对误差 < 1e-15（8 轮牛顿，初值 (y+1)/2，y 已归一到 [1,4)）；
 //   * 边界：floor/ceil/round 通过 to_int 转换，超出 int64 范围的值未定义；
-//   * 没有 exp/log/pow(x,y)：需要自然对数，登记在 docs/07-gaps.md。
+//   * v1.47 起补超越函数（exp/log/pow/sin/cos/atan/双曲），实现路线与精度
+//     边界见下文"超越函数"节；sin/cos 的归约误差随 |x|·1.1e-16 线性增长，
+//     多字 π 归约登记在 docs/07-gaps.md §2。
 
 // ---------------------------------------------------------------------------
 // 基础
@@ -267,4 +269,543 @@ pub fn lcm(a: int, b: int) -> int {
         y = 0 - y
     }
     return x * y
+}
+
+// ---------------------------------------------------------------------------
+// 超越函数（v1.47）：exp / log / log2 / log10 / pow / sin / cos / tan /
+// asin / acos / atan / atan2 / sinh / cosh / tanh / hypot + 常数助手
+//
+// 实现路线（纯 double 算术，无硬件超越指令依赖，零新增编码器能力）：
+//   * exp：x = n·ln2 + r（Cody–Waite 双字常数），|r| ≤ ln2/2（n 截到
+//     [-1074, 1023] 后余量并入 r，|r| < 0.93），exp(r) 走 17 项 Taylor，
+//     再按 2^n 缩放（2 的幂缩放在 IEEE 下精确，不引入舍入）；
+//   * log：x = m·2^e（m ∈ [√½, √2)），s = (m-1)/(m+1)（|s| ≤ 0.1716），
+//     ln(m) = 2s·Σ z^k/(2k+1)（z = s²，11 项，截断 < 2e-17）；
+//     e·ln2 拆双字累加，避免大 e 吞掉小数部分；
+//   * sin/cos：k = round(x/(π/2))，r = x − k·(π/2)_hi − k·(π/2)_lo，
+//     |r| ≤ π/4，象限查表 + 9 项 Taylor（截断 < 2e-17）；
+//   * atan：半角公式 atan(x) = 2·atan(x/(1+√(1+x²)))（参数 ≤ tan(π/8)），
+//     21 项交错级数；asin/acos 由 atan + 恒等式导出；
+//   * sinh/cosh/tanh 由 exp 导出；|x| > 20 走 exp(|x|−ln2)，
+//     避开 e^x 中间溢出（sinh(710) = 1.117e308 是有限值）。
+//
+// 精度（相对误差，实测见 tests/t90_mathfn.qma）：
+//   * exp / log / log2 / log10 / pow / atan / asin / acos / atan2 / hypot /
+//     sinh / cosh / tanh：≤ 1e-13（多数 ≤ 3e-14）；
+//   * sin / cos：|x| ≤ 1e3 时 ≤ 6e-14；tan：≤ 5e-10（极点附近商的相对误差）；
+//   * sin/cos/tan 误差随 |x|·1.1e-16 线性增长（朴素归约的固有限制：
+//     k·(π/2)_hi 的乘法舍入）——要更高精度需多字 π，登记 07-gaps §2；
+//   * |x| ≥ 2^52 时 double 的 ULP 已超过 π/2，无法定相 → 断言失败；
+//   * exp：x > 710 → +∞，x < −745.2 → 0（双精度溢出/枯竭边界）。
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 常数与特殊值助手
+// ---------------------------------------------------------------------------
+
+/// π（3.141592653589793）
+pub fn pi() -> f64 {
+    return 3.141592653589793
+}
+
+/// e（2.718281828459045）
+pub fn e() -> f64 {
+    return 2.718281828459045
+}
+
+/// ln2（0.6931471805599453）
+pub fn ln2() -> f64 {
+    return 0.6931471805599453
+}
+
+/// ln10（2.302585092994046）
+pub fn ln10() -> f64 {
+    return 2.302585092994046
+}
+
+/// √2（1.4142135623730951）
+pub fn sqrt2() -> f64 {
+    return 1.4142135623730951
+}
+
+/// 安静 NaN（0/0）
+pub fn nan() -> f64 {
+    let z = 0.0
+    return z / z
+}
+
+/// +∞（1/0）
+pub fn inf() -> f64 {
+    let z = 0.0
+    return 1.0 / z
+}
+
+// ---------------------------------------------------------------------------
+// 指数与对数
+// ---------------------------------------------------------------------------
+
+/// 自然指数 e^x。x > 710 → +∞；x < −745.2 → 0（双精度边界）
+pub fn exp(x: f64) -> f64 {
+    if is_nan(x) == 1 {
+        return nan()
+    }
+    if is_inf(x) == 1 {
+        if x > 0.0 {
+            return x
+        }
+        return 0.0
+    }
+    if x > 710.0 {
+        return inf()
+    }
+    if x < 0.0 - 745.2 {
+        return 0.0
+    }
+    // x = n·ln2 + r；n 截到 [-1074, 1023]（2^n 可表示范围），余量并入 r
+    let mut n = _floor_int(x * 1.4426950408889634 + 0.5)
+    let mut r = x - to_float(n) * 0.6931471805599453 - to_float(n) * 2.3190468138462996e-17
+    if n > 1023 {
+        n = 1023
+        r = x - to_float(n) * 0.6931471805599453 - to_float(n) * 2.3190468138462996e-17
+    }
+    if n < -1074 {
+        n = -1074
+        r = x - to_float(n) * 0.6931471805599453 - to_float(n) * 2.3190468138462996e-17
+    }
+    // exp(r)：17 项 Taylor，|r| < 0.93 时截断 < 1e-16
+    let mut acc = 1.0
+    let mut k = 16
+    while k >= 1 {
+        acc = 1.0 + r * acc / to_float(k)
+        k = k - 1
+    }
+    // 乘回 2^n（幂缩放精确）
+    let mut s = 1.0
+    let mut i = n
+    while i > 0 {
+        s = s * 2.0
+        i = i - 1
+    }
+    while i < 0 {
+        s = s / 2.0
+        i = i + 1
+    }
+    return acc * s
+}
+
+/// 自然对数 ln(x)。x < 0 → NaN；x = 0 → −∞；x = +∞ → +∞
+pub fn log(x: f64) -> f64 {
+    if is_nan(x) == 1 {
+        return nan()
+    }
+    if x < 0.0 {
+        return nan()
+    }
+    if x == 0.0 {
+        return 0.0 - inf()
+    }
+    if is_inf(x) == 1 {
+        return x
+    }
+    // x = m·2^e，m ∈ [√½, √2)
+    let mut m = x
+    let mut e = 0
+    while m >= 2.0 {
+        m = m / 2.0
+        e = e + 1
+    }
+    while m < 1.0 {
+        m = m * 2.0
+        e = e - 1
+    }
+    if m > 1.4142135623730951 {
+        m = m / 2.0
+        e = e + 1
+    }
+    // s = (m-1)/(m+1)，|s| ≤ (√2-1)/(√2+1) ≈ 0.1716
+    let s = (m - 1.0) / (m + 1.0)
+    let z = s * s
+    // ln(m) = 2s·Σ z^k/(2k+1)，11 项 Horner（k=0 项系数是 1）
+    let mut acc = 1.0 / 21.0
+    let mut k = 10
+    while k >= 0 {
+        acc = 1.0 / to_float(2 * k + 1) + z * acc
+        k = k - 1
+    }
+    // e·ln2 拆双字，避免大 e 的舍入吞掉小数部分
+    return to_float(e) * 0.6931471805599453 + (to_float(e) * 2.3190468138462996e-17 + 2.0 * s * acc)
+}
+
+/// 以 2 为底的对数
+pub fn log2(x: f64) -> f64 {
+    return log(x) * 1.4426950408889634
+}
+
+/// 以 10 为底的对数
+pub fn log10(x: f64) -> f64 {
+    return log(x) * 0.4342944819032518
+}
+
+/// x^y。整数指数走精确快速幂（含负底奇次幂）；x < 0 且 y 非整数 → NaN
+/// （C 库约定）；pow(0, 0) = 1；pow(0, 负) = +∞
+pub fn pow(x: f64, y: f64) -> f64 {
+    if is_nan(x) == 1 || is_nan(y) == 1 {
+        return nan()
+    }
+    // 整数指数（|y| < 2^63）：powi 精确
+    if fabs(y) < 9.2e18 && y == to_float(to_int(y)) {
+        return powi(x, to_int(y))
+    }
+    if x == 0.0 {
+        if y > 0.0 {
+            return 0.0
+        }
+        if y < 0.0 {
+            return inf()
+        }
+        return 1.0
+    }
+    if x < 0.0 {
+        return nan()
+    }
+    if is_inf(x) == 1 {
+        if y > 0.0 {
+            return x
+        }
+        return 0.0
+    }
+    if is_inf(y) == 1 {
+        if y > 0.0 {
+            if x > 1.0 {
+                return inf()
+            }
+            if x < 1.0 {
+                return 0.0
+            }
+            return 1.0
+        }
+        if x > 1.0 {
+            return 0.0
+        }
+        if x < 1.0 {
+            return inf()
+        }
+        return 1.0
+    }
+    return exp(y * log(x))
+}
+
+// ---------------------------------------------------------------------------
+// 三角函数
+// ---------------------------------------------------------------------------
+
+// floor 的整数版（to_int 朝零截断，负值需 -1 修正）；|x| < 2^63 由调用方保证
+fn _floor_int(x: f64) -> int {
+    let i = to_int(x)
+    let f = to_float(i)
+    if f > x {
+        return i - 1
+    }
+    return i
+}
+
+// 把 k 归约到 [0, 4)
+fn _mod4(k: int) -> int {
+    let mut q = k
+    while q < 0 {
+        q = q + 4
+    }
+    while q >= 4 {
+        q = q - 4
+    }
+    return q
+}
+
+// sin(r)，|r| ≤ π/4：r·(1 - z/6 + z²/120 - … + z⁹·(-1)/19!)，z = r²
+fn _sin_core(r: f64) -> f64 {
+    let z = r * r
+    let p = 1.0 + z * (0.0 - 0.16666666666666666 + z * (0.008333333333333333 + z * (0.0 - 0.0001984126984126984 + z * (0.0000027557319223985893 + z * (0.0 - 0.000000025052108385441718 + z * (0.00000000016059043836821614 + z * (0.0 - 0.0000000000007647163731819816 + z * 0.000000000000008220635246624329)))))))
+    return r * p
+}
+
+// cos(r)，|r| ≤ π/4：1 - z/2 + z²/24 - … + z⁹·(-1)/18!
+fn _cos_core(r: f64) -> f64 {
+    let z = r * r
+    let p = 1.0 + z * (0.0 - 0.5 + z * (0.041666666666666664 + z * (0.0 - 0.001388888888888889 + z * (0.000024801587301587295 + z * (0.0 - 0.0000002755731922398589 + z * (0.00000000208767569878681 + z * (0.0 - 0.000000000011470745597729725 + z * 0.0000000000000015619206968586225)))))))
+    return p
+}
+
+/// 正弦。|x| ≥ 2^52 断言失败（ULP 超过 π/2，无法定相）
+pub fn sin(x: f64) -> f64 {
+    if is_nan(x) == 1 {
+        return nan()
+    }
+    if is_inf(x) == 1 {
+        return nan()
+    }
+    if fabs(x) >= 4.503599627370496e15 {
+        assert(false, "sin: |x| >= 2^52，双精度无法定相（多字 pi 归约未做，见 07-gaps）")
+    }
+    let k = _floor_int(x * 0.6366197723675814 + 0.5)
+    let r = (x - to_float(k) * 1.5707963267948966) - to_float(k) * 6.123233995736766e-17
+    let q = _mod4(k)
+    if q == 0 {
+        return _sin_core(r)
+    }
+    if q == 1 {
+        return _cos_core(r)
+    }
+    if q == 2 {
+        return 0.0 - _sin_core(r)
+    }
+    return 0.0 - _cos_core(r)
+}
+
+/// 余弦。|x| ≥ 2^52 断言失败（同 sin）
+pub fn cos(x: f64) -> f64 {
+    if is_nan(x) == 1 {
+        return nan()
+    }
+    if is_inf(x) == 1 {
+        return nan()
+    }
+    if fabs(x) >= 4.503599627370496e15 {
+        assert(false, "cos: |x| >= 2^52，双精度无法定相（多字 pi 归约未做，见 07-gaps）")
+    }
+    let k = _floor_int(x * 0.6366197723675814 + 0.5)
+    let r = (x - to_float(k) * 1.5707963267948966) - to_float(k) * 6.123233995736766e-17
+    let q = _mod4(k)
+    if q == 0 {
+        return _cos_core(r)
+    }
+    if q == 1 {
+        return 0.0 - _sin_core(r)
+    }
+    if q == 2 {
+        return 0.0 - _cos_core(r)
+    }
+    return _sin_core(r)
+}
+
+/// 正切（sin/cos 商；cos 接近 0 时给出大数，与 C 库一致）
+pub fn tan(x: f64) -> f64 {
+    return sin(x) / cos(x)
+}
+
+// atan(x)，0 ≤ x ≤ 1：半角公式把参数压到 ≤ tan(π/8)，21 项交错级数
+fn _atan_unit(x: f64) -> f64 {
+    let a = x / (1.0 + sqrt(1.0 + x * x))
+    let z = a * a
+    let mut acc = 1.0 / 41.0
+    let mut sg = 0.0 - 1.0
+    let mut k = 19
+    while k >= 1 {
+        acc = sg / to_float(2 * k + 1) + z * acc
+        sg = 0.0 - sg
+        k = k - 1
+    }
+    acc = 1.0 + z * acc
+    return 2.0 * a * acc
+}
+
+/// 反正切（弧度，(-π/2, π/2)）
+pub fn atan(x: f64) -> f64 {
+    if is_nan(x) == 1 {
+        return nan()
+    }
+    if is_inf(x) == 1 {
+        if x > 0.0 {
+            return 1.5707963267948966
+        }
+        return 0.0 - 1.5707963267948966
+    }
+    let mut neg = 0
+    let mut v = x
+    if v < 0.0 {
+        v = 0.0 - v
+        neg = 1
+    }
+    let mut r = 0.0
+    if v > 1.0 {
+        r = 1.5707963267948966 - _atan_unit(1.0 / v)
+    } else {
+        r = _atan_unit(v)
+    }
+    if neg == 1 {
+        return 0.0 - r
+    }
+    return r
+}
+
+/// 二参数反正切（弧度，(-π, π]；按 C 库约定处理 0 与 ∞ 组合）
+pub fn atan2(y: f64, x: f64) -> f64 {
+    if is_nan(x) == 1 || is_nan(y) == 1 {
+        return nan()
+    }
+    if is_inf(y) == 1 {
+        if is_inf(x) == 1 {
+            if y > 0.0 {
+                if x > 0.0 {
+                    return 0.7853981633974483
+                }
+                return 2.356194490192345
+            }
+            if x > 0.0 {
+                return 0.0 - 0.7853981633974483
+            }
+            return 0.0 - 2.356194490192345
+        }
+        if y > 0.0 {
+            return 1.5707963267948966
+        }
+        return 0.0 - 1.5707963267948966
+    }
+    if is_inf(x) == 1 {
+        if x > 0.0 {
+            return 0.0
+        }
+        if y > 0.0 {
+            return 3.141592653589793
+        }
+        if y < 0.0 {
+            return 0.0 - 3.141592653589793
+        }
+        return 3.141592653589793
+    }
+    if x == 0.0 {
+        if y == 0.0 {
+            return 0.0
+        }
+        if y > 0.0 {
+            return 1.5707963267948966
+        }
+        return 0.0 - 1.5707963267948966
+    }
+    let mut r = atan(y / x)
+    if x > 0.0 {
+        return r
+    }
+    if y >= 0.0 {
+        return r + 3.141592653589793
+    }
+    return r - 3.141592653589793
+}
+
+/// 反正弦（[-1, 1] 外 → NaN；±1 → ±π/2）
+pub fn asin(x: f64) -> f64 {
+    if is_nan(x) == 1 {
+        return nan()
+    }
+    if x > 1.0 || x < 0.0 - 1.0 {
+        return nan()
+    }
+    if x == 1.0 {
+        return 1.5707963267948966
+    }
+    if x == 0.0 - 1.0 {
+        return 0.0 - 1.5707963267948966
+    }
+    // 端点附近用补角恒等式，避开 1-x² 的相减抵消
+    if x > 0.5 {
+        return 1.5707963267948966 - 2.0 * asin(sqrt((1.0 - x) / 2.0))
+    }
+    if x < 0.0 - 0.5 {
+        return 0.0 - 1.5707963267948966 + 2.0 * asin(sqrt((1.0 + x) / 2.0))
+    }
+    return atan(x / sqrt(1.0 - x * x))
+}
+
+/// 反余弦（[-1, 1] 外 → NaN）
+pub fn acos(x: f64) -> f64 {
+    return 1.5707963267948966 - asin(x)
+}
+
+// ---------------------------------------------------------------------------
+// 双曲函数
+// ---------------------------------------------------------------------------
+
+/// 双曲正弦。|x| > 20 走 exp(x−ln2)，避开 e^x 中间溢出
+pub fn sinh(x: f64) -> f64 {
+    if is_nan(x) == 1 {
+        return nan()
+    }
+    if is_inf(x) == 1 {
+        return x
+    }
+    if x > 20.0 {
+        return exp(x - 0.6931471805599453)
+    }
+    if x < 0.0 - 20.0 {
+        return 0.0 - exp(0.0 - x - 0.6931471805599453)
+    }
+    return (exp(x) - exp(0.0 - x)) / 2.0
+}
+
+/// 双曲余弦
+pub fn cosh(x: f64) -> f64 {
+    if is_nan(x) == 1 {
+        return nan()
+    }
+    if is_inf(x) == 1 {
+        return inf()
+    }
+    if x > 20.0 || x < 0.0 - 20.0 {
+        return exp(fabs(x) - 0.6931471805599453)
+    }
+    return (exp(x) + exp(0.0 - x)) / 2.0
+}
+
+/// 双曲正切。|x| > 20 给 ±1，避开 inf/inf
+pub fn tanh(x: f64) -> f64 {
+    if is_nan(x) == 1 {
+        return nan()
+    }
+    if is_inf(x) == 1 {
+        if x > 0.0 {
+            return 1.0
+        }
+        return 0.0 - 1.0
+    }
+    if x > 20.0 {
+        return 1.0
+    }
+    if x < 0.0 - 20.0 {
+        return 0.0 - 1.0
+    }
+    let ep = exp(x)
+    let em = exp(0.0 - x)
+    return (ep - em) / (ep + em)
+}
+
+// ---------------------------------------------------------------------------
+// 其它
+// ---------------------------------------------------------------------------
+
+/// 欧几里得范数 √(x²+y²)（先按 max 归一，防中间溢出/枯竭）
+pub fn hypot(x: f64, y: f64) -> f64 {
+    if is_nan(x) == 1 || is_nan(y) == 1 {
+        return nan()
+    }
+    if is_inf(x) == 1 || is_inf(y) == 1 {
+        return inf()
+    }
+    let ax = fabs(x)
+    let ay = fabs(y)
+    let m = fmax(ax, ay)
+    if m == 0.0 {
+        return 0.0
+    }
+    let a = ax / m
+    let b = ay / m
+    return m * sqrt(a * a + b * b)
+}
+
+/// 角度 → 弧度（乘 π/180）
+pub fn to_radians(deg: f64) -> f64 {
+    return deg * 0.017453292519943295
+}
+
+/// 弧度 → 角度（乘 180/π）
+pub fn to_degrees(rad: f64) -> f64 {
+    return rad * 57.29577951308232
 }

@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-41 个模块，**195 个公开函数**（另有 216 个 `_` 前缀的内部函数）。
+41 个模块，**296 个公开函数**（另有 445 个内部函数）
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -71,7 +71,16 @@ import std.http
 AES-128-GCM：分组加密（AES-NI 快路径 + T-table 降级）+ GHASH + CTR
 
 ```quelmara
-fn ghash(h: int, data: int, n: int, out: int) -> int
+fn aes128_expand(key: str, rk: int) -> int
+fn aes128_encrypt_block(inp: int, out: int, rk: int) -> int
+fn _aes128_encrypt_block_fast(inp: int, out: int, rk: int) -> int
+fn _aes128_encrypt_block_ni(inp: int, out: int, rk: int) -> int
+fn aes128_decrypt_block(inp: int, out: int, rk: int) -> int
+fn _gf_mul(x: int, h: int, out: int) -> int
+fn _ghash_table(h: int, t: int) -> int
+fn _gf_mul_t(x: int, t: int, out: int) -> int
+fn gcm_encrypt(key: str, iv: str, aad: str, plain: str) -> str
+fn gcm_decrypt(key: str, iv: str, aad: str, sealed: str) -> str
 ```
 
 ### `std/b64.qma`
@@ -79,10 +88,11 @@ fn ghash(h: int, data: int, n: int, out: int) -> int
 base64 编解码
 
 ```quelmara
-fn b64_char(v: int) -> int
-fn b64_val(b: int) -> int
-fn b64url_char(v: int) -> int
-fn b64url_val(b: int) -> int
+fn b64_encode(p: int, n: int) -> str
+fn b64_dec_max(s: str) -> int
+fn b64_decode_into(s: str, out: int) -> int
+fn b64url_encode(p: int, n: int) -> str
+fn b64url_decode_into(s: str, out: int) -> int
 ```
 
 ### `std/cli.qma`
@@ -90,7 +100,12 @@ fn b64url_val(b: int) -> int
 命令行 flag 解析（--k=v / --k v / -k v）
 
 ```quelmara
-// 无公开函数
+fn cli_count() -> int
+fn cli_at(i: int) -> str
+fn cli_has(name: str) -> bool
+fn cli_str(name: str, def: str) -> str
+fn cli_int(name: str, def: int) -> int
+fn cli_positionals() -> vec[str]
 ```
 
 ### `std/core.qma`
@@ -98,10 +113,7 @@ fn b64url_val(b: int) -> int
 标量小工具
 
 ```quelmara
-fn abs(x: int) -> int
-fn max2(a: int, b: int) -> int
-fn min2(a: int, b: int) -> int
-fn pow2k(x: int, k: int) -> int
+// 无公开函数
 ```
 
 ### `std/deque.qma`
@@ -109,7 +121,19 @@ fn pow2k(x: int, k: int) -> int
 双端队列（两端 O(1) + 自动扩容）
 
 ```quelmara
-// 无公开函数
+fn dq_new(cap: int) -> int
+fn dq_len(d: int) -> int
+fn dq_cap(d: int) -> int
+fn dq_push_back(d: int, v: int) -> int
+fn dq_push_front(d: int, v: int) -> int
+fn dq_pop_front(d: int) -> int
+fn dq_pop_back(d: int) -> int
+fn dq_peek_front(d: int) -> int
+fn dq_peek_back(d: int) -> int
+fn dq_get(d: int, i: int) -> int
+fn dq_set(d: int, i: int, v: int) -> int
+fn dq_clear(d: int) -> int
+fn dq_free(d: int) -> int
 ```
 
 ### `std/ds.qma`
@@ -117,16 +141,7 @@ fn pow2k(x: int, k: int) -> int
 环形缓冲与二叉最小堆
 
 ```quelmara
-fn rb_new(cap: int) -> int
-fn rb_count(rb: int) -> int
-fn rb_cap(rb: int) -> int
-fn rb_push(rb: int, v: int) -> int
-fn rb_pop(rb: int) -> int
-fn rb_peek(rb: int) -> int
-fn heap_new(cap: int) -> vec[int]
-fn heap_push(h: vec[int], key: int)
-fn heap_peek(h: vec[int]) -> int
-fn heap_pop(h: vec[int]) -> int
+// 无公开函数
 ```
 
 ### `std/gen.qma`
@@ -134,15 +149,7 @@ fn heap_pop(h: vec[int]) -> int
 泛型算法库（min/max/clamp/dist/contains/index_of/reverse，调用点推导单态化）
 
 ```quelmara
-fn gen_min[T](a: T, b: T) -> T
-fn gen_max[T](a: T, b: T) -> T
-fn gen_clamp[T](v: T, lo: T, hi: T) -> T
-fn gen_dist[T](a: T, b: T) -> T
-fn gen_first[T](xs: vec[T]) -> T
-fn gen_last[T](xs: vec[T]) -> T
-fn gen_contains[T](xs: vec[T], v: T) -> bool
-fn gen_index_of[T](xs: vec[T], v: T) -> int
-fn gen_reverse[T](xs: vec[T])
+// 无公开函数
 ```
 
 ### `std/gzip.qma`
@@ -150,9 +157,11 @@ fn gen_reverse[T](xs: vec[T])
 DEFLATE 编码 + gzip 包装 + CRC-32；v1.19 起含 inflate 解码
 
 ```quelmara
-fn gzip_hex(s: str) -> str
-fn adler32(s: str) -> int
-fn zlib_decode(s: str) -> str
+fn crc32(s: str) -> int
+fn deflate_raw(s: str) -> str
+fn gzip_encode(s: str) -> str
+fn inflate_raw(s: str) -> str
+fn gzip_decode(s: str) -> str
 ```
 
 ### `std/hash.qma`
@@ -160,7 +169,19 @@ fn zlib_decode(s: str) -> str
 FNV-1a 32/64 非密码学哈希（缓存键 / 分片）
 
 ```quelmara
-// 无公开函数
+/// 按字节计算 FNV-1a 32 位（p=缓冲区指针，n=字节数）。
+/// 非密码学哈希：1 字节 1 次乘加，适合缓存键 / 分片 / 布隆过滤器；
+/// 结果恒在 [0, 2^32)，可直接当数组下标取模。
+fn fnv1a32_bytes(p: int, n: int) -> int
+/// 按字节计算 FNV-1a 64 位（p=缓冲区指针，n=字节数）。
+/// 返回 int64 承载的**无符号**值——高位为 1 时结果为负，打印成十六进制
+/// 请用 std/hex（hex_encode(mem_str(p, 8))）。
+fn fnv1a64_bytes(p: int, n: int) -> int
+/// 对 str 按 UTF-8 字节计算 FNV-1a 32 位（等价于对 mem_ptr/len 调
+/// fnv1a32_bytes）。按字节计算，不做码点归一。
+fn fnv1a32(s: str) -> int
+/// 对 str 按 UTF-8 字节计算 FNV-1a 64 位（语义同 fnv1a64_bytes）。
+fn fnv1a64(s: str) -> int
 ```
 
 ### `std/hex.qma`
@@ -168,7 +189,10 @@ FNV-1a 32/64 非密码学哈希（缓存键 / 分片）
 十六进制编解码
 
 ```quelmara
-fn hex_val(c: int) -> int
+fn hex_encode(s: str) -> str
+fn hex_encode_upper(s: str) -> str
+fn hex_decode_ok(s: str) -> int
+fn hex_decode(s: str) -> str
 ```
 
 ### `std/http.qma`
@@ -176,39 +200,7 @@ fn hex_val(c: int) -> int
 HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商）
 
 ```quelmara
-fn http_serve(port: int, backlog: int, on_request: int) -> int
-fn http_serve_max(port: int, backlog: int, on_request: int,
-fn http_accepted() -> int
-fn http_closed() -> int
-fn http_reqs() -> int
-fn http_bytes_in() -> int
-fn http_bytes_out() -> int
-fn http_on_connect(fd: int) -> int
-fn http_on_close(fd: int) -> int
-fn http_on_data(fd: int, data: str) -> int
-fn http_respond_raw_parse_fail(fd: int) -> int
-fn http_method(fd: int) -> str
-fn http_path(fd: int) -> str
-fn http_body_ptr(fd: int) -> int
-fn http_body_len(fd: int) -> int
-fn http_body(fd: int) -> str
-fn http_header(fd: int, name: str) -> str
-fn http_set_close(fd: int) -> int
-fn http_reason(status: int) -> str
-fn http_respond_ext(fd: int, status: int, ctype: str, extra: str,
-fn http_respond(fd: int, status: int, ctype: str, body: str) -> int
-fn http_respond_close(fd: int, status: int, ctype: str, body: str) -> int
-fn http_text(fd: int, status: int, body: str) -> int
-fn http_html(fd: int, status: int, body: str) -> int
-fn http_json(fd: int, status: int, body: str) -> int
-fn http_respond_raw(fd: int, status: int, extra: str, body: str) -> int
-fn http_accepts_gzip(fd: int) -> bool
-fn http_respond_gzip(fd: int, status: int, ctype: str, body: str) -> int
-fn http_respond_auto(fd: int, status: int, ctype: str, body: str) -> int
-fn http_json_auto(fd: int, status: int, body: str) -> int
-fn http_html_auto(fd: int, status: int, body: str) -> int
-fn http_not_found(fd: int) -> int
-fn http_method_not_allowed(fd: int) -> int
+// 无公开函数
 ```
 
 ### `std/json.qma`
@@ -216,16 +208,35 @@ fn http_method_not_allowed(fd: int) -> int
 DOM 式 JSON 解析与 builder
 
 ```quelmara
-fn json_type(d: int, node: int) -> int
-fn json_is_bool(d: int, node: int) -> bool
-fn json_is_num(d: int, node: int) -> bool
-fn json_is_str(d: int, node: int) -> bool
-fn json_obj_val(d: int, node: int, i: int) -> int
-fn json_escape_into(h: int, s: str) -> int
-fn json_escape(s: str) -> str
-fn json_val_int(h: int, v: int) -> int
-fn json_val_raw(h: int, raw: str) -> int
-fn json_key_null(h: int, k: str) -> int
+fn json_parse(s: str) -> int
+fn json_ok(d: int) -> bool
+fn json_error_pos(d: int) -> int
+fn json_root(d: int) -> int
+fn json_is_null(d: int, node: int) -> bool
+fn json_is_arr(d: int, node: int) -> bool
+fn json_is_obj(d: int, node: int) -> bool
+fn json_bool(d: int, node: int) -> bool
+fn json_int(d: int, node: int) -> int
+fn json_num_raw(d: int, node: int) -> str
+fn json_str(d: int, node: int) -> str
+fn json_arr_len(d: int, node: int) -> int
+fn json_arr_at(d: int, node: int, i: int) -> int
+fn json_obj_len(d: int, node: int) -> int
+fn json_obj_key(d: int, node: int, i: int) -> str
+fn json_obj_get(d: int, node: int, key: str) -> int
+fn json_new(cap: int) -> int
+fn json_begin_obj(h: int) -> int
+fn json_end_obj(h: int) -> int
+fn json_begin_arr(h: int) -> int
+fn json_end_arr(h: int) -> int
+fn json_key(h: int, k: str) -> int
+fn json_val_str(h: int, v: str) -> int
+fn json_val_bool(h: int, v: bool) -> int
+fn json_val_null(h: int) -> int
+fn json_key_str(h: int, k: str, v: str) -> int
+fn json_key_int(h: int, k: str, v: int) -> int
+fn json_key_bool(h: int, k: str, v: bool) -> int
+fn json_done(h: int) -> str
 ```
 
 ### `std/log.qma`
@@ -233,7 +244,12 @@ fn json_key_null(h: int, k: str) -> int
 分级日志（stdout）+ 结构化字段 + 级别过滤
 
 ```quelmara
-// 无公开函数
+fn log_set_level(lv: int) -> int
+fn log_level() -> int
+fn log_info(msg: str)
+fn log_warn(msg: str)
+fn log_error(msg: str)
+fn log_kv(tag: str, msg: str, kv: vec[str]) -> int
 ```
 
 ### `std/lru.qma`
@@ -241,16 +257,93 @@ fn json_key_null(h: int, k: str) -> int
 LRU 缓存（开放寻址表 + 双向链表，单句柄 O(1)）
 
 ```quelmara
-// 无公开函数
+fn lru_new(cap: int) -> vec[int]
+fn lru_cap(st: vec[int]) -> int
+fn lru_len(st: vec[int]) -> int
+fn lru_has(st: vec[int], k: int) -> bool
+fn lru_get(st: vec[int], k: int) -> int
+fn lru_get_or(st: vec[int], k: int, def: int) -> int
+fn lru_put(st: vec[int], k: int, v: int) -> int
+fn lru_del(st: vec[int], k: int) -> int
+fn lru_order(st: vec[int]) -> vec[int]
+fn lru_peek(st: vec[int], k: int) -> int
 ```
 
 ### `std/math.qma`
 
-浮点与整数数学（sqrt/cbrt/floor/ceil/round/powi/gcd）
+浮点与整数数学（exp/log/pow/sin/cos/atan/双曲/hypot + sqrt/cbrt/取整/gcd）
 
 ```quelmara
-fn fmin(a: f64, b: f64) -> f64
-fn fmax(a: f64, b: f64) -> f64
+fn fabs(x: f64) -> f64
+fn fsign(x: f64) -> int
+fn is_nan(x: f64) -> int
+fn is_inf(x: f64) -> int
+fn is_finite(x: f64) -> int
+fn trunc_f(x: f64) -> f64
+fn floor(x: f64) -> f64
+fn ceil(x: f64) -> f64
+fn round(x: f64) -> f64
+fn powi(x: f64, n: int) -> f64
+fn sqrt(x: f64) -> f64
+fn cbrt(x: f64) -> f64
+fn imin(a: int, b: int) -> int
+fn imax(a: int, b: int) -> int
+fn clamp_int(x: int, lo: int, hi: int) -> int
+fn clamp_f(x: f64, lo: f64, hi: f64) -> f64
+fn isqrt(n: int) -> int
+fn gcd(a: int, b: int) -> int
+fn lcm(a: int, b: int) -> int
+/// π（3.141592653589793）
+fn pi() -> f64
+/// e（2.718281828459045）
+fn e() -> f64
+/// ln2（0.6931471805599453）
+fn ln2() -> f64
+/// ln10（2.302585092994046）
+fn ln10() -> f64
+/// √2（1.4142135623730951）
+fn sqrt2() -> f64
+/// 安静 NaN（0/0）
+fn nan() -> f64
+/// +∞（1/0）
+fn inf() -> f64
+/// 自然指数 e^x。x > 710 → +∞；x < −745.2 → 0（双精度边界）
+fn exp(x: f64) -> f64
+/// 自然对数 ln(x)。x < 0 → NaN；x = 0 → −∞；x = +∞ → +∞
+fn log(x: f64) -> f64
+/// 以 2 为底的对数
+fn log2(x: f64) -> f64
+/// 以 10 为底的对数
+fn log10(x: f64) -> f64
+/// x^y。整数指数走精确快速幂（含负底奇次幂）；x < 0 且 y 非整数 → NaN
+/// （C 库约定）；pow(0, 0) = 1；pow(0, 负) = +∞
+fn pow(x: f64, y: f64) -> f64
+/// 正弦。|x| ≥ 2^52 断言失败（ULP 超过 π/2，无法定相）
+fn sin(x: f64) -> f64
+/// 余弦。|x| ≥ 2^52 断言失败（同 sin）
+fn cos(x: f64) -> f64
+/// 正切（sin/cos 商；cos 接近 0 时给出大数，与 C 库一致）
+fn tan(x: f64) -> f64
+/// 反正切（弧度，(-π/2, π/2)）
+fn atan(x: f64) -> f64
+/// 二参数反正切（弧度，(-π, π]；按 C 库约定处理 0 与 ∞ 组合）
+fn atan2(y: f64, x: f64) -> f64
+/// 反正弦（[-1, 1] 外 → NaN；±1 → ±π/2）
+fn asin(x: f64) -> f64
+/// 反余弦（[-1, 1] 外 → NaN）
+fn acos(x: f64) -> f64
+/// 双曲正弦。|x| > 20 走 exp(x−ln2)，避开 e^x 中间溢出
+fn sinh(x: f64) -> f64
+/// 双曲余弦
+fn cosh(x: f64) -> f64
+/// 双曲正切。|x| > 20 给 ±1，避开 inf/inf
+fn tanh(x: f64) -> f64
+/// 欧几里得范数 √(x²+y²)（先按 max 归一，防中间溢出/枯竭）
+fn hypot(x: f64, y: f64) -> f64
+/// 角度 → 弧度（乘 π/180）
+fn to_radians(deg: f64) -> f64
+/// 弧度 → 角度（乘 180/π）
+fn to_degrees(rad: f64) -> f64
 ```
 
 ### `std/md5.qma`
@@ -258,10 +351,7 @@ fn fmax(a: f64, b: f64) -> f64
 MD5（RFC 1321，仅兼容用途，不要用于密码）
 
 ```quelmara
-fn md5_load_block(block: int, w: int) -> int
-fn md5_block(state: int, block: int, w: int) -> int
-fn md5_init(state: int) -> int
-fn md5_str(s: str) -> int
+fn md5_hex(s: str) -> str
 ```
 
 ### `std/mem.qma`
@@ -269,15 +359,27 @@ fn md5_str(s: str) -> int
 slab 分配 / fd 表 / 缓冲 / 对象池
 
 ```quelmara
-fn slab_slot_words(h: int) -> int
-fn fdtab_hash(k: int) -> int
-fn fdtab_cap(h: int) -> int
-fn buf_ptr(h: int) -> int
-fn buf_cap(h: int) -> int
-fn buf_reset(h: int) -> int
-fn buf_put8(h: int, b: int) -> int
-fn buf_put(h: int, src: int, n: int) -> int
-fn buf_lower8(b: int) -> int
+fn slab_new(cap: int, slot_words: int) -> int
+fn slab_alloc(h: int) -> int
+fn slab_free(h: int, idx: int) -> int
+fn slab_ptr(h: int, idx: int) -> int
+fn slab_cap(h: int) -> int
+fn fdtab_new(cap: int) -> int
+fn fdtab_put(h: int, fd: int, slot: int) -> int
+fn fdtab_get(h: int, fd: int) -> int
+fn fdtab_del(h: int, fd: int) -> int
+fn fdtab_len(h: int) -> int
+fn buf_new(cap: int) -> int
+fn buf_len(h: int) -> int
+fn buf_put_str(h: int, s: str) -> int
+fn buf_str(h: int) -> str
+fn buf_find(h: int, from: int, needle: str) -> int
+fn buf_find_head_end(h: int) -> int
+fn buf_find_ci(h: int, from: int, needle: str) -> int
+fn pool_new(block_words: int, capacity: int) -> int
+fn pool_alloc(h: int) -> int
+fn pool_free(h: int, p: int) -> int
+fn pool_empty(h: int) -> bool
 ```
 
 ### `std/net.qma`
@@ -285,7 +387,12 @@ fn buf_lower8(b: int) -> int
 阻塞 TCP 便捷层
 
 ```quelmara
-fn connect(host: str, port: int) -> int
+fn listen(port: int) -> int
+fn accept(fd: int) -> int
+fn send(conn: int, data: str) -> int
+fn recv(conn: int, cap: int) -> str
+fn close_conn(fd: int)
+fn serve(port: int, backlog: int,
 ```
 
 ### `std/net/core.qma`
@@ -293,24 +400,7 @@ fn connect(host: str, port: int) -> int
 连接槽位层（IOCP reactor 的底座）
 
 ```quelmara
-fn conn_state_new(max_conns: int, slot_words: int) -> int
-fn conn_max_conns(st: int) -> int
-fn conn_accepted(st: int) -> int
-fn conn_closed(st: int) -> int
-fn conn_msgs(st: int) -> int
-fn conn_bytes_in(st: int) -> int
-fn conn_bytes_out(st: int) -> int
-fn conn_lock() -> int
-fn conn_unlock() -> int
-fn conn_open(st: int, fd: int) -> int
-fn conn_slot(st: int, fd: int) -> int
-fn conn_close(st: int, fd: int) -> int
-fn conn_buf_ptr(p: int) -> int
-fn conn_buf_cap(st: int, p: int) -> int
-fn conn_append(st: int, p: int, data: str) -> int
-fn conn_shift(p: int, from: int) -> int
-fn conn_send(st: int, fd: int, ptr: int, n: int) -> int
-fn conn_send_str(st: int, fd: int, s: str) -> int
+// 无公开函数
 ```
 
 ### `std/net/udp.qma`
@@ -318,8 +408,7 @@ fn conn_send_str(st: int, fd: int, s: str) -> int
 UDP 封装与地址解析
 
 ```quelmara
-fn udp_parse_ip(ip: str) -> int
-fn udp_loopback() -> int
+fn udp_send_str(fd: int, ip: str, port: int, data: str) -> int
 ```
 
 ### `std/p256.qma`
@@ -327,7 +416,8 @@ fn udp_loopback() -> int
 NIST P-256 域运算 + ECDSA 验签（TLS 证书签名）
 
 ```quelmara
-// 无公开函数
+fn p256_on_curve(pub_x: str, pub_y: str) -> int
+fn ecdsa_p256_verify(pub_x: str, pub_y: str, hash: str, r_sig: str, s_sig: str) -> int
 ```
 
 ### `std/rand.qma`
@@ -335,7 +425,10 @@ NIST P-256 域运算 + ECDSA 验签（TLS 证书签名）
 xorshift64* 伪随机
 
 ```quelmara
-// 无公开函数
+fn rand_seed(s: int)
+fn rand_next() -> int
+fn rand_below(n: int) -> int
+fn rand_range(lo: int, hi: int) -> int
 ```
 
 ### `std/rsa.qma`
@@ -343,7 +436,8 @@ xorshift64* 伪随机
 RSA PKCS#1 v1.5 / PSS 验签（SHA-256，证书链与 TLS 用）
 
 ```quelmara
-// 无公开函数
+fn rsa_verify_pkcs1_sha256(n: str, e: int, sig: str, hash: str) -> int
+fn rsa_verify_pss_sha256(n: str, e: int, sig: str, hash: str, salt_len: int) -> int
 ```
 
 ### `std/serialize.qma`
@@ -351,16 +445,7 @@ RSA PKCS#1 v1.5 / PSS 验签（SHA-256，证书链与 TLS 用）
 LEB128 varint / 定长整数 / 长度前缀帧
 
 ```quelmara
-fn varint_put(v: int) -> str
-fn varint_get(buf: str, off: int) -> int
-fn put_u16le(w: int, off: int, v: int) -> int
-fn put_u32le(w: int, off: int, v: int) -> int
-fn put_u64le(w: int, off: int, v: int) -> int
-fn get_u16le(buf: int, off: int) -> int
-fn get_u32le(buf: int, off: int) -> int
-fn get_u64le(buf: int, off: int) -> int
-fn frame_put(payload: str) -> str
-fn frame_get(buf: str, off: int) -> str
+// 无公开函数
 ```
 
 ### `std/set.qma`
@@ -368,9 +453,20 @@ fn frame_get(buf: str, off: int) -> str
 集合 set[int] / set[str]（map 支撑，含交并差）
 
 ```quelmara
-fn sset_to_vec(s: map[str]int) -> vec[str]
-fn sset_union_into(dst: map[str]int, src: map[str]int) -> int
-fn sset_isect(a: map[str]int, b: map[str]int) -> vec[str]
+fn iset_new(cap: int) -> map[int]int
+fn iset_add(s: map[int]int, v: int) -> int
+fn iset_has(s: map[int]int, v: int) -> bool
+fn iset_del(s: map[int]int, v: int) -> int
+fn iset_len(s: map[int]int) -> int
+fn iset_to_vec(s: map[int]int) -> vec[int]
+fn iset_union_into(dst: map[int]int, src: map[int]int) -> int
+fn iset_isect(a: map[int]int, b: map[int]int) -> vec[int]
+fn iset_diff(a: map[int]int, b: map[int]int) -> vec[int]
+fn sset_new(cap: int) -> map[str]int
+fn sset_add(s: map[str]int, v: str) -> int
+fn sset_has(s: map[str]int, v: str) -> bool
+fn sset_del(s: map[str]int, v: str) -> int
+fn sset_len(s: map[str]int) -> int
 ```
 
 ### `std/sha1.qma`
@@ -378,10 +474,7 @@ fn sset_isect(a: map[str]int, b: map[str]int) -> vec[str]
 SHA-1
 
 ```quelmara
-fn sha1_rotl(x: int, n: int) -> int
-fn sha1_load_block(block: int, w: int) -> int
-fn sha1_block(state: int, block: int, w: int) -> int
-fn sha1_str(s: str) -> int
+fn sha1_hex(s: str) -> str
 ```
 
 ### `std/sha256.qma`
@@ -389,13 +482,10 @@ fn sha1_str(s: str) -> int
 SHA-256 + HMAC-SHA256
 
 ```quelmara
-fn sha256_rotr(x: int, n: int) -> int
-fn sha256_load_block(block: int, w: int) -> int
-fn sha256_k(i: int) -> int
-fn sha256_block(state: int, block: int, w: int) -> int
-fn sha256_init(state: int) -> int
-fn sha256_pad_and_hash(s: str) -> int
-fn hmac_key_block(key: str, blk: int) -> int
+fn sha256_str(s: str) -> int
+fn sha256_hex(s: str) -> str
+fn hmac_sha256_str(key: str, msg: str) -> int
+fn hmac_sha256_hex(key: str, msg: str) -> str
 ```
 
 ### `std/sort.qma`
@@ -403,7 +493,8 @@ fn hmac_key_block(key: str, blk: int) -> int
 快速排序与有序性检查
 
 ```quelmara
-// 无公开函数
+fn sort_int(v: vec[int])
+fn is_sorted(v: vec[int]) -> int
 ```
 
 ### `std/sse.qma`
@@ -411,23 +502,7 @@ fn hmac_key_block(key: str, blk: int) -> int
 Server-Sent Events 服务端
 
 ```quelmara
-fn sse_serve(port: int, backlog: int, on_sub: int) -> int
-fn sse_serve_max(port: int, backlog: int, on_sub: int,
-fn sse_accepted() -> int
-fn sse_closed() -> int
-fn sse_subs() -> int
-fn sse_events_out() -> int
-fn sse_on_connect(fd: int) -> int
-fn sse_on_close(fd: int) -> int
-fn sse_on_data(fd: int, data: str) -> int
-fn sse_event_ext(fd: int, event: str, data: str, id: str) -> int
-fn sse_event(fd: int, event: str, data: str) -> int
-fn sse_data(fd: int, data: str) -> int
-fn sse_event_id(fd: int, event: str, data: str, id: str) -> int
-fn sse_retry(fd: int, ms: int) -> int
-fn sse_comment(fd: int, text: str) -> int
-fn sse_broadcast_ext(event: str, data: str, id: str) -> int
-fn sse_broadcast(event: str, data: str) -> int
+// 无公开函数
 ```
 
 ### `std/str.qma`
@@ -435,7 +510,32 @@ fn sse_broadcast(event: str, data: str) -> int
 字符串工具集
 
 ```quelmara
-// 无公开函数
+fn str_find(s: str, needle: str) -> int
+fn str_find_from(s: str, from: int, needle: str) -> int
+fn str_rfind(s: str, needle: str) -> int
+fn str_contains(s: str, needle: str) -> bool
+fn str_starts_with(s: str, p: str) -> bool
+fn str_ends_with(s: str, p: str) -> bool
+fn str_count(s: str, needle: str) -> int
+fn str_trim_left(s: str) -> str
+fn str_trim_right(s: str) -> str
+fn str_trim(s: str) -> str
+fn str_upper(s: str) -> str
+fn str_lower(s: str) -> str
+fn str_eq_ci(a: str, b: str) -> bool
+fn str_repeat(s: str, n: int) -> str
+fn str_join(parts: vec[str], sep: str) -> str
+fn str_split(s: str, sep: str) -> vec[str]
+fn str_split_n(s: str, sep: str, max_parts: int) -> vec[str]
+fn str_lines(s: str) -> vec[str]
+fn str_replace(s: str, from: str, to: str) -> str
+fn str_replace_first(s: str, from: str, to: str) -> str
+fn str_slice(s: str, lo: int, hi: int) -> str
+fn str_left(s: str, n: int) -> str
+fn str_right(s: str, n: int) -> str
+fn str_strip_prefix(s: str, p: str) -> str
+fn str_strip_suffix(s: str, p: str) -> str
+fn str_pad_left(s: str, width: int, pad: str) -> str
 ```
 
 ### `std/sync.qma`
@@ -443,7 +543,16 @@ fn sse_broadcast(event: str, data: str) -> int
 自旋锁 / Treiber 无锁栈 / WaitGroup
 
 ```quelmara
-// 无公开函数
+fn mutex_new() -> int
+fn mutex_lock(m: int)
+fn mutex_unlock(m: int)
+fn stack_new() -> int
+fn stack_push(s: int, v: int)
+fn stack_pop(s: int) -> int
+fn wg_new() -> int
+fn wg_add(w: int, n: int)
+fn wg_done(w: int)
+fn wg_wait(w: int)
 ```
 
 ### `std/time.qma`
@@ -451,8 +560,7 @@ fn sse_broadcast(event: str, data: str) -> int
 时间便捷层
 
 ```quelmara
-fn now_ms() -> int
-fn ms_str(ms: int) -> str
+// 无公开函数
 ```
 
 ### `std/timer.qma`
@@ -460,10 +568,7 @@ fn ms_str(ms: int) -> str
 轮询式定时器（MinHeap 驱动）
 
 ```quelmara
-fn timer_after(ms: int) -> int
-fn timer_cancel(id: int)
-fn timer_poll() -> int
-fn timer_pending() -> int
+// 无公开函数
 ```
 
 ### `std/tls13.qma`
@@ -471,12 +576,29 @@ fn timer_pending() -> int
 TLS 1.3 密钥调度（HKDF-Expand-Label）+ AEAD 记录层
 
 ```quelmara
-fn tls_zeros(n: int) -> str
-fn tls_hmac(key: str, msg: str) -> str
-fn hkdf_expand_label(secret: str, label: str, ctx: str, n: int) -> str
-fn tls_aad(ctype: int, cipher_len: int) -> str
-fn tls_seal(key: str, nonce: str, aad: str, plain: str) -> str
-fn tls_open(key: str, nonce: str, aad: str, sealed: str) -> str
+fn tls_hash(s: str) -> str
+fn hkdf_extract(salt: str, ikm: str) -> str
+fn hkdf_expand(prk: str, info: str, n: int) -> str
+fn tls_derive_secret(secret: str, label: str, transcript_hash: str) -> str
+fn tls_early_secret() -> str
+fn tls_empty_hash() -> str
+fn tls_handshake_secret(early: str, shared: str) -> str
+fn tls_master_secret(handshake: str) -> str
+fn tls_traffic_key(secret: str) -> str
+fn tls_traffic_iv(secret: str) -> str
+fn tls_finished_key(secret: str) -> str
+fn tls_finished_verify_data(finished_key: str, transcript_hash: str) -> str
+fn tls_nonce(iv: str, seq: int) -> str
+fn tls_record(ctype: int, payload: str) -> str
+fn tls_seal_record(key: str, iv: str, seq: int, ctype: int, plain: str) -> str
+fn tls_open_record(key: str, iv: str, seq: int, sealed: str) -> str
+fn tls_open_record_raw(key: str, iv: str, seq: int, sealed: str) -> str
+fn tls_hs_msg(mtype: int, body: str) -> str
+fn tls_u16(v: int) -> str
+fn tls_u24(v: int) -> str
+fn tls_record_parse(buf: str, pos: int) -> vec[int]
+fn tls_hs_parse(buf: str, pos: int) -> vec[int]
+fn tls_ext(etype: int, body: str) -> str
 ```
 
 ### `std/tls_client.qma`
@@ -484,8 +606,13 @@ fn tls_open(key: str, nonce: str, aad: str, sealed: str) -> str
 TLS 1.3 客户端握手核心 + 证书链入口（RFC 8448 逐字节）
 
 ```quelmara
-fn tls_verify_cert_verify(cert_der: str, alg: int, sig: str, transcript_hash: str) -> int
-fn tls_verify_chain(r: TlsClientResult, anchor: str, host: str, now: int) -> int
+fn tls_client_err(code: str) -> TlsClientResult
+fn tls_cert_verify_hash(transcript_hash: str) -> str
+fn tls_ecdsa_sig_raw(sig: str) -> str
+fn tls_client_hello(host: str, pub: str, rnd: str, sid: str) -> str
+fn tls_client_handshake(priv: str, ch_record: str, server_bytes: str) -> TlsClientResult
+fn tls_cert_count(r: TlsClientResult) -> int
+fn tls_cert(r: TlsClientResult, i: int) -> str
 ```
 
 ### `std/tls_net.qma`
@@ -493,8 +620,9 @@ fn tls_verify_chain(r: TlsClientResult, anchor: str, host: str, now: int) -> int
 TLS 1.3 网络层：TCP 建连 + 握手 + 应用数据（Windows）
 
 ```quelmara
-fn tls_random(n: int) -> str
-fn tls_recv_exact(fd: int, n: int) -> str
+fn tls_connect(host: str, port: int) -> TlsClientResult
+fn tls_send_app(r: TlsClientResult, seq: int, data: str) -> int
+fn tls_read_app(r: TlsClientResult, seq: int) -> str
 ```
 
 ### `std/url.qma`
@@ -502,7 +630,18 @@ fn tls_recv_exact(fd: int, n: int) -> str
 URL 解析 / query 取值 / 编码解码
 
 ```quelmara
-// 无公开函数
+fn url_decode(s: str) -> str
+fn url_decode_path(s: str) -> str
+fn url_encode(s: str) -> str
+fn url_encode_query(s: str) -> str
+fn url_scheme(u: str) -> str
+fn url_host(u: str) -> str
+fn url_port(u: str) -> int
+fn url_path(u: str) -> str
+fn url_query(u: str) -> str
+fn url_fragment(u: str) -> str
+fn url_query_get(u: str, key: str) -> str
+fn url_join_query(base: str, key: str, val: str) -> str
 ```
 
 ### `std/utf8.qma`
@@ -510,7 +649,13 @@ URL 解析 / query 取值 / 编码解码
 UTF-8 解码/编码/严格校验（RFC 3629）
 
 ```quelmara
-fn utf8_char_len(b: int) -> int
+fn utf8_decode_at(s: str, i: int) -> int
+fn utf8_valid(s: str) -> bool
+fn utf8_encode(cp: int) -> str
+fn utf8_count(s: str) -> int
+fn utf8_byte_of_char(s: str, ci: int) -> int
+fn utf8_slice(s: str, lo: int, hi: int) -> str
+fn utf8_to_chars(s: str) -> vec[int]
 ```
 
 ### `std/ws.qma`
@@ -518,20 +663,7 @@ fn utf8_char_len(b: int) -> int
 WebSocket 服务端（RFC 6455）
 
 ```quelmara
-fn ws_serve(port: int, backlog: int, on_open: int, on_message: int,
-fn ws_serve_max(port: int, backlog: int, on_open: int, on_message: int,
-fn ws_accepted() -> int
-fn ws_closed() -> int
-fn ws_msgs() -> int
-fn ws_bytes_in() -> int
-fn ws_bytes_out() -> int
-fn ws_on_connect(fd: int) -> int
-fn ws_on_close(fd: int) -> int
-fn ws_on_data(fd: int, data: str) -> int
-fn ws_send(fd: int, data: str) -> int
-fn ws_send_bin(fd: int, data: str) -> int
-fn ws_ping(fd: int, data: str) -> int
-fn ws_close(fd: int, code: int) -> int
+// 无公开函数
 ```
 
 ### `std/x25519.qma`
@@ -539,7 +671,9 @@ fn ws_close(fd: int, code: int) -> int
 Curve25519 上的 X25519 密钥交换（RFC 7748，TLS ECDHE 地基）
 
 ```quelmara
-// 无公开函数
+fn x25519_clamp(k: str) -> str
+fn x25519(k: str, u: str) -> str
+fn x25519_base(k: str) -> str
 ```
 
 ### `std/x509.qma`
@@ -547,18 +681,17 @@ Curve25519 上的 X25519 密钥交换（RFC 7748，TLS ECDHE 地基）
 X.509 解析 + P-256 验签 + 证书链/有效期/域名校验
 
 ```quelmara
-fn x509_tlv(s: str, pos: int) -> vec[int]
-fn x509_ok(t: vec[int]) -> int
-fn x509_root(cert: str) -> vec[int]
-fn x509_spki_tlv(cert: str) -> vec[int]
-fn x509_verify_with_p256(cert: str, issuer_pub: str) -> int
-fn x509_issuer(cert: str) -> str
-fn x509_subject(cert: str) -> str
-fn x509_validity_raw(cert: str) -> str
-fn x509_validity(cert: str) -> vec[int]
-fn x509_is_ca(cert: str) -> int
-fn x509_san(cert: str) -> vec[str]
-fn x509_sig_bits(cert: str) -> str
+fn x509_tbs(cert: str) -> str
+fn x509_sig_alg_oid(cert: str) -> str
+fn x509_curve_oid(cert: str) -> str
+fn x509_pubkey(cert: str) -> str
+fn x509_sig(cert: str) -> str
+fn x509_verify_self_p256(cert: str) -> int
+fn x509_time_valid(cert: str, now: int) -> int
+fn x509_host_ok(cert: str, host: str) -> int
+fn x509_verify_chain(leaf: str, inter: vec[str], anchor: str, host: str, now: int) -> int
+fn x509_rsa_pub(cert: str) -> str
+fn x509_rsa_exp(cert: str) -> int
 ```
 <!-- api:end -->
 
