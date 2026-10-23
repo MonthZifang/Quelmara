@@ -1,0 +1,12 @@
+// 负向夹具：类型实参个数必须与模板参数一致
+module gstruct_arity
+
+struct Pair[A, B] {
+    first: A,
+    second: B,
+}
+
+fn main() {
+    let p = Pair[int] { first: 1, second: 2 }
+    print(p.first)
+}

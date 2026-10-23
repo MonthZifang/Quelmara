@@ -652,7 +652,7 @@ def main():
     case_selfcheck("t92_httpc", "tests/t92_httpc.qma")
     case_selfcheck("t94_slice_narrow", "tests/t94_slice_narrow.qma")
     case_selfcheck("t95_hash512", "tests/t95_hash512.qma")
-    # @simd f64 点积（v1.59）：acc += a[i] * b[i]，SSE2 mulpd 两路
+    # @simd f64 点积（v1.60）：acc += a[i] * b[i]，SSE2 mulpd 两路
     case_selfcheck("t96_simddot", "tests/t96_simddot.qma")
     case_selfcheck("t98_constfn", "tests/t98_constfn.qma")
     case_selfcheck("t99_regex", "tests/t99_regex.qma")

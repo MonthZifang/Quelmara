@@ -334,6 +334,10 @@ class Parser:
         # 供 const 右值做编译期解释执行。按声明序可见（与 const 同规则）。
         self.const_fns = {}
         self._const_steps = 0
+        # 泛型 struct 模板（v1.59）：name -> {"params": [T...], "fields": [(f, ty)]}。
+        # 不进 structs 表——只有实例化产物（Box__int）才是真正的结构体。
+        self.generic_structs = {}
+        self._cur_struct_tparams = None
         self._prescan()
 
     def _prescan(self):
@@ -896,7 +900,22 @@ class Parser:
                 if self._pending_pub:
                     self.pub_types.add(name)
                     self._pending_pub = False
+                # 泛型 struct（v1.59）：struct Box[T] { value: T }
+                # 模板不进 structs 表；类型位置写 Box[int] 时现场单态化出
+                # 普通结构体 Box__int，下游布局/ABI/方法全部零改动。
+                stparams = None
+                if self.at("SYM", "["):
+                    bracket = self.next()
+                    stparams = [self.eat("NAME").val]
+                    while self.at("SYM", ","):
+                        self.next()
+                        stparams.append(self.eat("NAME").val)
+                    if len(set(stparams)) != len(stparams):
+                        raise SyntaxError(
+                            f"line {bracket.line}: 泛型 struct 类型参数重名：{stparams}")
+                    self.eat("SYM", "]")
                 self.eat("SYM", "{")
+                self._cur_struct_tparams = stparams
                 fields = []
                 while not self.at("SYM", "}"):
                     fname = self.eat("NAME").val
@@ -905,8 +924,16 @@ class Parser:
                     if self.at("SYM", ","):
                         self.next()
                 self.eat("SYM", "}")
-                self.structs[name] = fields
-                self.decl_order.append(("struct", name))
+                self._cur_struct_tparams = None
+                if stparams:
+                    # _prescan 把 `struct NAME` 当普通结构体登记了空字段占位，
+                    # 模板必须摘掉——否则 `Box { }` 会被当成零字段结构体
+                    self.structs.pop(name, None)
+                    self.generic_structs[name] = {
+                        "params": stparams, "fields": fields}
+                else:
+                    self.structs[name] = fields
+                    self.decl_order.append(("struct", name))
             elif self.at("enum"):
                 self.next()
                 name = self.eat("NAME").val
@@ -1032,10 +1059,79 @@ class Parser:
             self.eat("SYM", "]")
             return ("named", self.ensure_result_enum(tt, et, rt.line))
         name = self.eat("NAME").val
+        if self.at("SYM", "[") and "." not in name:
+            # 泛型 struct 实例化（v1.59）：Box[int] -> ("named","Box__int")
+            if name not in self.generic_structs:
+                raise SyntaxError(
+                    f"line {self.peek().line}: {name} 不是泛型 struct"
+                    "（只有 struct Name[T] 才能带类型实参）")
+            self.next()
+            targs = [self.parse_type()]
+            while self.at("SYM", ","):
+                self.next()
+                targs.append(self.parse_type())
+            self.eat("SYM", "]")
+            return ("named", self._instantiate_struct(name, targs, self.peek().line))
+        if name in self.generic_structs:
+            raise SyntaxError(
+                f"line {self.peek().line}: 泛型 struct {name} 必须带类型实参"
+                f"（写成 {name}[int] 这种形式）")
         while self.at("SYM", "."):
             self.next()
             name += "." + self.eat("NAME").val
         return ("named", name)
+
+    def _subst_type(self, t, tp_map):
+        """类型元组里的类型参数替换（泛型 struct 单态化用）。"""
+        if not isinstance(t, tuple):
+            return t
+        if t[0] == "named":
+            # tp_map 存的是【完整类型元组】（("named","int") 等），直接替换，
+            # 不能再包一层 ("named", ...) —— 否则字段类型变成 (named,(named,int))
+            if t[1] in tp_map:
+                return tp_map[t[1]]
+            return t
+        if t[0] in ("vec", "slice", "chan", "rc"):
+            return (t[0], self._subst_type(t[1], tp_map))
+        if t[0] == "map":
+            return ("map", self._subst_type(t[1], tp_map),
+                    self._subst_type(t[2], tp_map))
+        if t[0] == "array":
+            return ("array", t[1], self._subst_type(t[2], tp_map))
+        return t
+
+    def _instantiate_struct(self, gname, targs, line):
+        """按类型实参现场合成具名结构体（受控单态化）。
+
+        命名 Box__int；同一实例只生成一次。产物就是普通结构体——布局、字段
+        偏移、值语义、聚合返回 ABI、方法派发全部复用既有路径。
+        """
+        tmpl = self.generic_structs[gname]
+        params = tmpl["params"]
+        if len(targs) != len(params):
+            raise SyntaxError(
+                f"line {line}: 泛型 struct {gname} 需要 {len(params)} 个类型实参"
+                f"（[{'、'.join(params)}]），得到 {len(targs)} 个")
+        tags = []
+        for t in targs:
+            if not (t and t[0] == "named"):
+                raise SyntaxError(
+                    f"line {line}: 泛型 struct {gname} 的类型实参暂只支持具名类型"
+                    "（标量 / struct / enum / 其他实例），容器类型实参不做")
+            if self._cur_struct_tparams and t[1] in self._cur_struct_tparams:
+                raise SyntaxError(
+                    f"line {line}: 泛型 struct 的字段里暂不支持嵌套泛型 struct"
+                    f"（{gname}[{t[1]}] 的类型实参还是外层模板的类型参数）")
+            tags.append(t[1])
+        iname = gname + "__" + "_".join(tags)
+        if iname in self.structs:
+            return iname
+        tp_map = dict(zip(params, [("named", tg) for tg in tags]))
+        fields = [(fn, self._subst_type(ft, tp_map))
+                  for fn, ft in tmpl["fields"]]
+        self.structs[iname] = fields
+        self.decl_order.append(("struct", iname))
+        return iname
 
     def parse_fn(self):
         self.eat("fn")
@@ -1751,6 +1847,31 @@ class Parser:
                         self.next()
                 self.eat("SYM", "}")
                 return ("tp_lit", path[0], fields)
+            if self.at("SYM", "[") and len(path) == 1 \
+                    and path[0] in self.generic_structs:
+                # 泛型 struct 字面量（v1.59）：Box[int] { value: 1 }
+                # 类型实参必须显式写——字面量不做类型推导（字段值推不出 T）。
+                self.next()
+                targs = [self.parse_type()]
+                while self.at("SYM", ","):
+                    self.next()
+                    targs.append(self.parse_type())
+                self.eat("SYM", "]")
+                iname = self._instantiate_struct(path[0], targs, self.peek().line)
+                if not self.at("SYM", "{"):
+                    raise SyntaxError(
+                        f"line {self.peek().line}: 泛型 struct {path[0]} 的实例化"
+                        "只用于类型位置与结构体字面量（后面要跟 { 字段 }）")
+                self.next()
+                gfields = {}
+                while not self.at("SYM", "}"):
+                    fname = self.eat("NAME").val
+                    self.eat("SYM", ":")
+                    gfields[fname] = self.parse_expr()
+                    if self.at("SYM", ","):
+                        self.next()
+                self.eat("SYM", "}")
+                return ("structlit", [iname], gfields)
             if self._is_type_path(path) and self.at("SYM", "{"):
                 # 结构体字面量 net.TcpServer { ... } / Vec3 { ... }
                 self.next()

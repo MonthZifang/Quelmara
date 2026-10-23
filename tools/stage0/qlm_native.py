@@ -4159,7 +4159,7 @@ class Lower:
             if arr_e[0] != "name" or idx_e != ("name", var):
                 raise SyntaxError("@simd 要求下标正好是循环变量，数组是具名数组")
         elif rhs[0] == "binop" and rhs[1] == "*":
-            # 点积形状（v1.57）：acc += a[i] * b[i]，两个 [N]f64
+            # 点积形状（v1.60）：acc += a[i] * b[i]，两个 [N]f64
             la, lb = rhs[2], rhs[3]
             if (la[0] != "index" or lb[0] != "index"
                     or la[2] != ("name", var) or lb[2] != ("name", var)
@@ -4201,7 +4201,7 @@ class Lower:
         fn.emit("bin", "add", ptr, ptr, base)
         cur = env[acc]
         if dot:
-            # f64 点积（v1.57）：两个基址各自偏移 lo*8
+            # f64 点积（v1.60）：两个基址各自偏移 lo*8
             ptr2 = fn.new_v()
             fn.emit("bin", "shl", ptr2, lo, ("imm", 3))
             fn.emit("bin", "add", ptr2, ptr2, base2)
@@ -8998,7 +8998,7 @@ class Codegen:
             self.commit(dst, ACC)
             return
         if op == "vdotd":
-            # f64 点积（v1.57）：movupd 非对齐读两路 + mulpd + addpd 两路累加
+            # f64 点积（v1.60）：movupd 非对齐读两路 + mulpd + addpd 两路累加
             # + 标量尾（mulsd/addsd）。结构与 vsumd 同构；多一个 baseB：
             # R11=baseA、R10=baseB、R8=count（push/pop 保护——R8 非池寄存器，
             # 序列内无调用，按 cpuid 族纪律显式保护）、RCX=下标、RDX=临时。

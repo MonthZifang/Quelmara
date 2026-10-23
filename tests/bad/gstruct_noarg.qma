@@ -1,0 +1,12 @@
+// 负向夹具：泛型 struct 必须带类型实参（裸写 Box 不是类型）
+// 理由：模板不是结构体——没有 T 就不知道字段宽度，放过去等于让布局随机。
+module gstruct_noarg
+
+struct Box[T] {
+    value: T,
+}
+
+fn main() {
+    let x: Box = Box[int] { value: 1 }
+    print(x.value)
+}

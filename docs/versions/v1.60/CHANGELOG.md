@@ -1,4 +1,4 @@
-# v1.57 — `@simd` f64 点积形状：`acc += a[i] * b[i]`（语言层黄标收窄）
+# v1.60 — `@simd` f64 点积形状：`acc += a[i] * b[i]`（语言层黄标收窄）
 
 - 日期：2026-10-23
 - 任务：语言层 §1「`@simd`」行 🟡 收窄——新增第三种形状：**f64 点积**
@@ -28,7 +28,7 @@
 | `tests/t96_simddot.qma` | **新增**：向量段（8/12 元素）、标量尾（1/3/5 元素）、两种赋值写法、与标量逐位相等（测试值全部精确可表示）、零向量/空区间、性能环（min of 5） |
 | `bench/dot_bench.qma` | **新增**：1024 f64 点积，标量 vs `@simd` 各 2000 次，ns/次 + 加速比 |
 | `docs/02-language.md` | §8.2 标题"两种形状"→"三种形状"；形状表加点积行；原"点积需 AVX2 未做"改为"f64 点积已接（SSE2 两路），int 点积需 SSE4.1、AVX2 4 通道留待"；证据行补 t96 + dot_bench |
-| `docs/07-gaps.md` | §1 `@simd` 行：补 f64 点积（v1.57，4.6×），int 点积/AVX2 仍缺 |
+| `docs/07-gaps.md` | §1 `@simd` 行：补 f64 点积（v1.60，4.6×），int 点积/AVX2 仍缺 |
 | `docs/06-status.md` | 主回归 PASS 数字 + §3.4 SIMD 节点积行 |
 
 ## 实现要点
@@ -50,5 +50,20 @@
   两路和逐位相同（85942000）。
 - 主回归 / lexdiff / parsediff / bodydiff / irdiff（t96 记 SKIP）/ emitdiff /
   三禁全绿（数字见 06-status.md）。
-- 性能双向对照：worktree 基线（HEAD）与本树各编 p0_bench / gbench / bench_str，
+- 性能双向对照：v1.56 基线 worktree 与本树各编 p0_bench / gbench / bench_str，
   三个 `.qex` 逐字节相同——点积改动对既有形状零影响。
+
+## 同版并入：泛型 struct（语言轨，红标 → 黄标）
+
+> 同一工作区两条轨并行提交，本版把泛型 struct 一起收口（`tools/stage0/qlm.py`
+> 与 @simd 的 `qlm_native.py` 零文件重叠）。
+
+- `struct Box[T] { value: T }` + `Box[int] { ... }`：**解析期单态化**，现场合成
+  普通结构体 `Box__int`，布局/字段偏移/值语义/聚合返回 ABI 全部复用既有路径，
+  后端零改动。多类型参数、`vec[T]` 等容器字段、嵌套实例 `Box[Box[int]]`、
+  形参/返回值位置全部可用。
+- fail-fast：裸写 `Box`、容器实参 `Box[vec[int]]`、实参个数不符、模板字段里嵌套
+  泛型 struct 一律编译期报错。
+- 测试：`tests/t99_generic_struct.qma`（20 断言）+ `tests/bad/gstruct_*.qma`（3 个负向）。
+- 自举 parser 不做单态化 → `tests/parsediff.py` 把 t99 记入 PARSE1_PENDING（显式记账）。
+- 07-gaps：`泛型 struct / 泛型方法` 行 ❌ → 🟡（泛型方法 / impl 泛型 / 泛型 enum 仍未做）。

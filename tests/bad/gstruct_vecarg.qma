@@ -1,0 +1,13 @@
+// 负向夹具：泛型 struct 的类型实参只能是具名类型（vec[int] 这类容器实参不做）
+// 理由：容器实参要生成 Box__vec_int 这种复合名并参与字段布局推导，
+// 本版没做——fail-fast 比"名字拼出来但布局不对"安全。
+module gstruct_vecarg
+
+struct Box[T] {
+    value: T,
+}
+
+fn main() {
+    let x = Box[vec[int]] { value: vec[int].new(2) }
+    print(x.value.get(0))
+}

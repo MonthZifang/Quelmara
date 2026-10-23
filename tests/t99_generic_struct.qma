@@ -1,0 +1,103 @@
+// t99_generic_struct.qma：泛型 struct（v1.59，红标 → 黄标）
+// 覆盖：
+//   1) 单类型参数 Box[int]：字面量、字段读写
+//   2) 多类型参数 Pair[int, str]
+//   3) 同一模板两个实例互不干扰（Box[int] 与 Box[str] 是两套布局）
+//   4) 形参 / 返回值位置的实例化（fn unwrap(b: Box[int]) -> int）
+//   5) 值语义：拷贝后改副本不影响原值
+//   6) 容器字段 vec[T]（T 落到元素类型）
+//   7) 嵌套实例 Box[Box[int]]
+//   8) 实例作普通结构体的字段（struct Wrap { inner: Box[int] }）
+//   9) 混合字段：T 与普通字段共存
+// 语义纪律：单态化在**解析期**完成——Box[int] 现场合成普通结构体 Box__int，
+//           布局/字段偏移/值语义/聚合返回 ABI 全部复用既有路径，后端零改动。
+//           类型实参必须显式写（字面量不做类型推导）；实参只能是具名类型。
+module t99
+
+struct Box[T] {
+    value: T,
+}
+
+struct Pair[A, B] {
+    first: A,
+    second: B,
+}
+
+struct Tagged[T] {
+    value: T,
+    tag: int,
+    name: str,
+}
+
+struct Wrap {
+    inner: Box[int],
+}
+
+struct Bag[T] {
+    items: vec[T],
+    n: int,
+}
+
+fn unwrap(b: Box[int]) -> int {
+    return b.value
+}
+
+fn make_box(v: int) -> Box[int] {
+    return Box[int] { value: v }
+}
+
+fn main() {
+    // 1) 单参数
+    let a = Box[int] { value: 42 }
+    assert(a.value == 42, "field read")
+    let mut b = Box[int] { value: 1 }
+    b.value = 9
+    assert(b.value == 9, "field write")
+
+    // 2) 多参数
+    let p = Pair[int, str] { first: 7, second: "x" }
+    assert(p.first == 7, "pair first")
+    assert(p.second == "x", "pair second")
+
+    // 3) 同模板不同实例互不干扰
+    let s = Box[str] { value: "hello" }
+    assert(s.value == "hello", "str instance")
+    assert(a.value == 42, "int instance untouched")
+
+    // 4) 形参 / 返回值
+    assert(unwrap(a) == 42, "param position")
+    let mb = make_box(11)
+    assert(mb.value == 11, "return position")
+
+    // 5) 值语义
+    let mut c = Box[int] { value: 1 }
+    let d = c
+    c.value = 99
+    assert(d.value == 1, "copy is independent")
+
+    // 6) 容器字段
+    let bag = Bag[int] { items: vec[int].new(2), n: 0 }
+    bag.items.push(3)
+    bag.items.push(4)
+    assert(len(bag.items) == 2, "vec field len")
+    assert(bag.items.get(1) == 4, "vec field elem")
+
+    // 7) 嵌套实例
+    let inner = Box[int] { value: 5 }
+    let outer = Box[Box[int]] { value: inner }
+    let got = outer.value
+    assert(got.value == 5, "nested instance")
+
+    // 8) 实例作普通结构体字段
+    let w = Wrap { inner: Box[int] { value: 8 } }
+    let wi = w.inner
+    assert(wi.value == 8, "instance as plain struct field")
+
+    // 9) 混合字段
+    let t = Tagged[int] { value: 3, tag: 1, name: "t" }
+    assert(t.value == 3, "mixed value")
+    assert(t.tag == 1, "mixed tag")
+    assert(t.name == "t", "mixed name")
+
+    print("generic struct ok")
+}

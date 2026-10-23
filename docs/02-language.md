@@ -437,14 +437,14 @@ enum 布局本就是 1+最大载荷字，零新机制）。`?` 所在函数必�
 |---|---|---|
 | `acc += a[i]`，`acc: int`，`a: [N]int` | SSE2 `paddq` 两路 | 循环体只有这一条语句 |
 | `acc += a[i]`，`acc: f64`，`a: [N]f64` | SSE2 `addpd` 两路 | 同上 |
-| `acc += a[i] * b[i]`，`acc: f64`，`a/b: [N]f64` | SSE2 `mulpd` 两路（v1.57） | 同上，两数组同长 |
+| `acc += a[i] * b[i]`，`acc: f64`，`a/b: [N]f64` | SSE2 `mulpd` 两路（v1.60） | 同上，两数组同长 |
 
 - 逐元素越界检查**被跳过**，调用方保证 `lo..hi ⊆ [0, len(a)]`。
 - f64 归约**改变求和顺序**，结果可能与标量版不逐位相等（2 的幂可逐位验证）。
 - 形状不匹配：函数级注解静默回落标量；语句级注解直接编译报错。
-- f64 点积已接（v1.57）：SSE2 `mulpd` 两路，求和顺序同样改变（测试值精确可表示时与标量逐位相等）。int 点积需 SSE4.1 `pmulld`（int64 无 SSE2 乘法）、AVX2 4 通道留待。
+- f64 点积已接（v1.60）：SSE2 `mulpd` 两路，求和顺序同样改变（测试值精确可表示时与标量逐位相等）。int 点积需 SSE4.1 `pmulld`（int64 无 SSE2 乘法）、AVX2 4 通道留待。
 
-证据：`tests/t50_simd.qma`、`tests/t59_simdf64.qma`、`tests/t96_simddot.qma`；`bench/dot_bench.qma`（1024 f64 点积 4.6×）。
+证据：`tests/t50_simd.qma`、`tests/t59_simdf64.qma`、`tests/t96_simddot.qma`；`bench/dot_bench.qma`（1024 f64 点积 3.5×）。
 
 ### 8.3 `rc[T]` 与所有权检查
 
