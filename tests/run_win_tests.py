@@ -625,7 +625,10 @@ def main():
             ("defer_let", "defer 跟带作用域的语句", "defer 只支持"),
             ("neg_str", "对 str 取负", "一元 - 不能用于 str"),
             ("constfn_str", "const fn 用 str 形参", "只支持 int / bool"),
-            ("constfn_call", "const 右值调普通函数", "只能调用 const fn")):
+            ("constfn_call", "const 右值调普通函数", "只能调用 const fn"),
+            ("gstruct_noarg", "泛型 struct 裸写", "必须带类型实参"),
+            ("gstruct_vecarg", "泛型 struct 容器实参", "只支持具名类型"),
+            ("gstruct_arity", "泛型 struct 实参个数", "个类型实参")):
         try:
             build(os.path.join(ROOT, f"tests/bad/{nm}.qma"),
                   os.path.join(ROOT, "build", f"bad_{nm}.exe"))
@@ -655,6 +658,7 @@ def main():
     # @simd f64 点积（v1.60）：acc += a[i] * b[i]，SSE2 mulpd 两路
     case_selfcheck("t96_simddot", "tests/t96_simddot.qma")
     case_selfcheck("t98_constfn", "tests/t98_constfn.qma")
+    case_selfcheck("t99_generic_struct", "tests/t99_generic_struct.qma")
     case_selfcheck("t99_regex", "tests/t99_regex.qma")
     # pub + 限定语法负向（多文件）：非 pub 跨模块引用必须编译失败
     # （限定调用可能先被通用 pub 检查或指向校验拦下，两种消息都算对）

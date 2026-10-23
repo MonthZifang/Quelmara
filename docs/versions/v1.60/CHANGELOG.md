@@ -67,3 +67,5 @@
 - 测试：`tests/t99_generic_struct.qma`（20 断言）+ `tests/bad/gstruct_*.qma`（3 个负向）。
 - 自举 parser 不做单态化 → `tests/parsediff.py` 把 t99 记入 PARSE1_PENDING（显式记账）。
 - 07-gaps：`泛型 struct / 泛型方法` 行 ❌ → 🟡（泛型方法 / impl 泛型 / 泛型 enum 仍未做）。
+- 验证：`tests/t99_generic_struct.qma` 20 断言全过；`gstruct_*` 三个负向夹具均编译期拦下；
+  性能双向对照（worktree@`a21c841`）8 个 bench `.qex` 逐字节相同——单态化只发生在解析期。

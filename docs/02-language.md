@@ -119,6 +119,30 @@ let r = Rect { w: 2, h: 3 }
 print(r.w.to_str())
 ```
 
+**泛型 struct（v1.59）**：解析期单态化——`Box[int]` 现场合成普通结构体
+`Box__int`，布局 / 字段偏移 / 值语义 / 聚合返回 ABI 全部复用既有路径，后端零改动。
+
+```quelmara
+struct Box[T] { value: T }
+struct Pair[A, B] { first: A, second: B }
+
+let a = Box[int] { value: 42 }          // 类型实参必须显式写
+let p = Pair[int, str] { first: 7, second: "x" }
+
+fn unwrap(b: Box[int]) -> int { return b.value }   // 类型位置同样可用
+```
+
+| 项 | 范围 |
+|---|---|
+| 类型参数 | 一个或多个（`struct Pair[A, B]`）；同一模板的不同实例互不干扰 |
+| 字段类型 | `T` 本身，或 `vec[T]` / `map[K]T` / `[]T` / `[N]T` / `chan[T]` |
+| 类型实参 | 只能是具名类型（标量 / struct / enum / 另一实例如 `Box[Box[int]]`） |
+| 字面量 | `Box[int] { ... }`——**不做类型推导**（字段值推不出 T） |
+| 拒绝 | 裸写 `Box`（缺实参）、容器实参 `Box[vec[int]]`、实参个数不符、模板字段里嵌套泛型 struct |
+| 未做 | 泛型方法 / `impl` 泛型 struct、泛型 enum |
+
+证据：`tests/t99_generic_struct.qma`（20 条断言）、`tests/bad/gstruct_*.qma`（必须编译失败）。
+
 ### 4.3 枚举与 match
 
 ```quelmara
@@ -444,7 +468,7 @@ enum 布局本就是 1+最大载荷字，零新机制）。`?` 所在函数必�
 - 形状不匹配：函数级注解静默回落标量；语句级注解直接编译报错。
 - f64 点积已接（v1.60）：SSE2 `mulpd` 两路，求和顺序同样改变（测试值精确可表示时与标量逐位相等）。int 点积需 SSE4.1 `pmulld`（int64 无 SSE2 乘法）、AVX2 4 通道留待。
 
-证据：`tests/t50_simd.qma`、`tests/t59_simdf64.qma`、`tests/t96_simddot.qma`；`bench/dot_bench.qma`（1024 f64 点积 3.5×）。
+证据：`tests/t50_simd.qma`、`tests/t59_simdf64.qma`、`tests/t96_simddot.qma`；`bench/dot_bench.qma`（1024 f64 点积 4.6×）。
 
 ### 8.3 `rc[T]` 与所有权检查
 
