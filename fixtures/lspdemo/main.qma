@@ -1,0 +1,39 @@
+module lspdemo
+
+// lspdemo：`quelmara lsp` 的端到端夹具（语义索引 / 补全 / 跳转 / 重命名）
+// 结构对齐真实工程：主文件 + 一个被导入的 pub 模块（`util.qma`）。
+//
+// 两处刻意的写法（都是当前编译器的既有边界，不是本夹具的偏好）：
+//   1. 跨文件枚举构造要限定：`util.Color.Red()`（v1.44 限定语法）
+//   2. 结构体字面量的字段值不直接写 `q.x`（07-gaps §7.9）
+
+import util
+
+struct Point { x: int, y: int }
+
+enum Mode { Fast, Slow }
+
+fn shift(p: Point, dx: int) -> Point {
+    let moved = Point { x: p.x + dx, y: p.y }
+    return moved
+}
+
+fn mode_name(m: Mode) -> str {
+    match m {
+        Mode.Fast => { return "fast" }
+        Mode.Slow => { return "slow" }
+    }
+    return "?"
+}
+
+fn main() {
+    let p = Point { x: 1, y: 2 }
+    let q = shift(p, 3)
+    let wx = q.x
+    let hy = q.y
+    let b = util.make_box(wx, hy)
+    print(util.area(b).to_str())
+    print(util.color_name(util.Color.Red()))
+    print(mode_name(Mode.Fast))
+    print(q.x.to_str())
+}

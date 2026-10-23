@@ -1,0 +1,25 @@
+module util
+
+// lspdemo 的被导入模块：pub 声明要能被主文件索引看到（跨文件跳转/补全）
+
+pub enum Color { Red, Green }
+
+pub struct Box { w: int, h: int }
+
+pub fn color_name(c: Color) -> str {
+    match c {
+        Color.Red => { return "red" }
+        Color.Green => { return "green" }
+    }
+    return "?"
+}
+
+pub fn area(b: Box) -> int {
+    return b.w * b.h
+}
+
+// 字面量在**声明所在文件**里构造：跨文件 `Box { ... }` 目前解析不了
+// （parse_primary 只认本文件预扫描到的结构体），真实工程也用构造器绕开
+pub fn make_box(w: int, h: int) -> Box {
+    return Box { w: w, h: h }
+}
