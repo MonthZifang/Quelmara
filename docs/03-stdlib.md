@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-43 个模块，**305 个公开函数**（另有 451 个内部函数）
+45 个模块，**312 个公开函数**（另有 458 个内部函数）
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -114,6 +114,17 @@ fn cli_positionals() -> vec[str]
 
 ```quelmara
 // 无公开函数
+```
+
+### `std/crc64.qma`
+
+CRC-64/XZ（ECMA-182 反射多项式，xz/zlib 容器的 64 位校验）
+
+```quelmara
+/// CRC-64/XZ 校验值（64 位；以补码整数返回，>2^63 时为负）
+fn crc64(s: str) -> int
+/// CRC-64/XZ 十六进制（16 位小写）
+fn crc64_hex(s: str) -> str
 ```
 
 ### `std/deque.qma`
@@ -522,6 +533,23 @@ fn sha256_str(s: str) -> int
 fn sha256_hex(s: str) -> str
 fn hmac_sha256_str(key: str, msg: str) -> int
 fn hmac_sha256_hex(key: str, msg: str) -> str
+```
+
+### `std/sha512.qma`
+
+SHA-512 / SHA-384（变体 IV 复用压缩函数）+ HMAC-SHA512
+
+```quelmara
+/// SHA-512 摘要缓冲区（64 字节，大端，含 0 字节不能当 str；用完 mem_free(d, 64)）
+fn sha512_str(s: str) -> int
+/// SHA-512 十六进制（128 位小写）
+fn sha512_hex(s: str) -> str
+/// SHA-384（FIPS 180-4 变体：不同的 IV，输出截断到前 48 字节）
+fn sha384_hex(s: str) -> str
+/// HMAC-SHA512 摘要缓冲区（64 字节；用完 mem_free(d, 64)）
+fn hmac_sha512_str(key: str, msg: str) -> int
+/// HMAC-SHA512 十六进制（128 位小写）
+fn hmac_sha512_hex(key: str, msg: str) -> str
 ```
 
 ### `std/sort.qma`
