@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-46 个模块，**316 个公开函数**（另有 464 个内部函数）
+47 个模块，**323 个公开函数**（另有 481 个内部函数）
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -491,6 +491,27 @@ fn rand_seed(s: int)
 fn rand_next() -> int
 fn rand_below(n: int) -> int
 fn rand_range(lo: int, hi: int) -> int
+```
+
+### `std/regex.qma`
+
+正则引擎（回溯 VM）：字面/./字符类/转义类/量词 *+?{n,m}/交替/分组(?:)/锚点 ^$；compile+match/full/exec/find/replace[_all]，步数上限防病态回溯
+
+```quelmara
+/// 编译正则。成功返回程序（vec[int]）；语法错误返回空 vec（len = 0）。
+fn regex_compile(pat: str) -> vec[int]
+/// 搜索：pat 在 s 任意位置匹配返回 1；语法错误 -2；不匹配 0
+fn regex_match(pat: str, s: str) -> int
+/// 全匹配：整个 s 被 pat 匹配返回 1（等价 Python fullmatch）；语法错误 -2
+fn regex_match_full(pat: str, s: str) -> int
+/// 已编译程序的搜索：1 匹配 / 0 不匹配 / -2 坏程序
+fn regex_exec(prog: vec[int], s: str) -> int
+/// 查找：返回最左匹配的起始位置；无匹配 -1；坏程序 -2
+fn regex_find(prog: vec[int], s: str) -> int
+/// 替换第一处（rep 为字面量，无引用展开）；空匹配不替换；坏程序返回原串
+fn regex_replace(prog: vec[int], s: str, rep: str) -> str
+/// 替换全部（空匹配跳过，避免 Python 空匹配邻接规则的复杂度）
+fn regex_replace_all(prog: vec[int], s: str, rep: str) -> str
 ```
 
 ### `std/rsa.qma`

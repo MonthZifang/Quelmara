@@ -652,9 +652,10 @@ def main():
     case_selfcheck("t92_httpc", "tests/t92_httpc.qma")
     case_selfcheck("t94_slice_narrow", "tests/t94_slice_narrow.qma")
     case_selfcheck("t95_hash512", "tests/t95_hash512.qma")
-    # @simd f64 点积（v1.57）：acc += a[i] * b[i]，SSE2 mulpd 两路
+    # @simd f64 点积（v1.59）：acc += a[i] * b[i]，SSE2 mulpd 两路
     case_selfcheck("t96_simddot", "tests/t96_simddot.qma")
     case_selfcheck("t98_constfn", "tests/t98_constfn.qma")
+    case_selfcheck("t99_regex", "tests/t99_regex.qma")
     # pub + 限定语法负向（多文件）：非 pub 跨模块引用必须编译失败
     # （限定调用可能先被通用 pub 检查或指向校验拦下，两种消息都算对）
     for nm, needles in (("pub_hidden", ("非 pub",)),

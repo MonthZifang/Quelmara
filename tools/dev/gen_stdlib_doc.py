@@ -37,6 +37,7 @@ DESC = {
     "std/http.qma": "HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商）",
     "std/httpc.qma": "HTTP/1.1 客户端核心：URL 拆分 / 请求构造 / 响应解析（content-length / chunked）/ 重定向判定（纯函数，零 socket 依赖）",
     "std/httpc_net.qma": "HTTP 客户端传输层：httpc_get / httpc_get_tls / httpc_get_follow（Windows；TLS 走 std/tls_net）",
+    "std/regex.qma": "正则引擎（回溯 VM）：字面/./字符类/转义类/量词 *+?{n,m}/交替/分组(?:)/锚点 ^$；compile+match/full/exec/find/replace[_all]，步数上限防病态回溯",
     "std/json.qma": "DOM 式 JSON 解析与 builder",
     "std/log.qma": "分级日志（stdout）+ 结构化字段 + 级别过滤",
     "std/lru.qma": "LRU 缓存（开放寻址表 + 双向链表，单句柄 O(1)）",
