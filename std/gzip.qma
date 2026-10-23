@@ -63,7 +63,7 @@ fn _crc32_table() -> int {
     return all
 }
 
-fn crc32(s: str) -> int {
+pub fn crc32(s: str) -> int {
     // slice-by-4（v1.17f，mem_load32 内建落地后重启）：4 张表 8KB，
     // 主循环每迭代吃 4 字节（一次 32 位读 + 4 次查表，替代 4 次
     // 逐字节读查）。表配对：最低字节配 T3（zlib crc32.c 同款，
@@ -309,7 +309,7 @@ fn _hash3(s: str, i: int) -> int {
 // ---------------------------------------------------------------------------
 
 // deflate_raw(s) -> str：裸 DEFLATE 流（无 gzip/zlib 头）
-fn deflate_raw(s: str) -> str {
+pub fn deflate_raw(s: str) -> str {
     let n = len(s)
     let out = vec[int].new(n / 2 + 64)
     let st = _bw_new()
@@ -446,7 +446,7 @@ fn deflate_raw(s: str) -> str {
 //   尾：CRC32 (LE) + ISIZE (LE)
 // ---------------------------------------------------------------------------
 
-fn gzip_encode(s: str) -> str {
+pub fn gzip_encode(s: str) -> str {
     let body = deflate_raw(s)
     let n = len(body)
     let out = vec[int].new(n + 24)
@@ -847,7 +847,7 @@ fn _inflate_at(s: str, start: int) -> str {
 }
 
 // raw deflate（RFC 1951，无外层封装）
-fn inflate_raw(s: str) -> str {
+pub fn inflate_raw(s: str) -> str {
     return _inflate_at(s, 0)
 }
 
@@ -905,7 +905,7 @@ fn _gzip_body_start(s: str, p0: int) -> int {
 }
 
 // gzip_decode(s) -> str：逐 member 解，结果按顺序拼接
-fn gzip_decode(s: str) -> str {
+pub fn gzip_decode(s: str) -> str {
     let n = len(s)
     if n < 18 {
         assert(false, "gzip_decode: 数据过短")

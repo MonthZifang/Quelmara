@@ -76,7 +76,7 @@ fn _lru_snnext(st: vec[int], s: int, v: int) -> int {
 }
 
 // lru_new(cap) -> vec[int]：建缓存，cap 是**最大条目数**（<2 按 2 算）
-fn lru_new(cap: int) -> vec[int] {
+pub fn lru_new(cap: int) -> vec[int] {
     if cap < 2 {
         cap = 2
     }
@@ -114,11 +114,11 @@ fn lru_new(cap: int) -> vec[int] {
     return st
 }
 
-fn lru_cap(st: vec[int]) -> int {
+pub fn lru_cap(st: vec[int]) -> int {
     return st.get(0)
 }
 
-fn lru_len(st: vec[int]) -> int {
+pub fn lru_len(st: vec[int]) -> int {
     return st.get(1)
 }
 
@@ -190,12 +190,12 @@ fn _lru_push_front(st: vec[int], s: int) -> int {
     return 0
 }
 
-fn lru_has(st: vec[int], k: int) -> bool {
+pub fn lru_has(st: vec[int], k: int) -> bool {
     return _lru_tbl_find(st, k) >= 0
 }
 
 // lru_get(st, k) -> int：命中返回并刷新为 MRU；未命中 -1（值域有歧义，见文件头）
-fn lru_get(st: vec[int], k: int) -> int {
+pub fn lru_get(st: vec[int], k: int) -> int {
     let ti = _lru_tbl_find(st, k)
     if ti < 0 {
         return -1
@@ -207,7 +207,7 @@ fn lru_get(st: vec[int], k: int) -> int {
 }
 
 // lru_get_or(st, k, def) -> int：命中返回值，未命中返回 def（不插入）
-fn lru_get_or(st: vec[int], k: int, def: int) -> int {
+pub fn lru_get_or(st: vec[int], k: int, def: int) -> int {
     let ti = _lru_tbl_find(st, k)
     if ti < 0 {
         return def
@@ -219,7 +219,7 @@ fn lru_get_or(st: vec[int], k: int, def: int) -> int {
 }
 
 // lru_put(st, k, v) -> int：写入并置为 MRU；满了淘汰 tail。返回 1=新增 / 0=更新
-fn lru_put(st: vec[int], k: int, v: int) -> int {
+pub fn lru_put(st: vec[int], k: int, v: int) -> int {
     let ti = _lru_tbl_find(st, k)
     if ti >= 0 {
         let s = st.get(LRU_HDR + ti * 2 + 1)
@@ -253,7 +253,7 @@ fn lru_put(st: vec[int], k: int, v: int) -> int {
 }
 
 // lru_del(st, k) -> int：1=删掉了 / 0=本来没有
-fn lru_del(st: vec[int], k: int) -> int {
+pub fn lru_del(st: vec[int], k: int) -> int {
     let ti = _lru_tbl_find(st, k)
     if ti < 0 {
         return 0
@@ -268,7 +268,7 @@ fn lru_del(st: vec[int], k: int) -> int {
 }
 
 // lru_order(st) -> vec[int]：按 MRU -> LRU 顺序导出 key（测试与观测用）
-fn lru_order(st: vec[int]) -> vec[int] {
+pub fn lru_order(st: vec[int]) -> vec[int] {
     let out = vec[int].new(st.get(1) + 1)
     let mut s = st.get(2)
     while s >= 0 {
@@ -279,7 +279,7 @@ fn lru_order(st: vec[int]) -> vec[int] {
 }
 
 // lru_peek(st, k) -> int：取值但**不**刷新使用顺序（观测/调试用）
-fn lru_peek(st: vec[int], k: int) -> int {
+pub fn lru_peek(st: vec[int], k: int) -> int {
     let ti = _lru_tbl_find(st, k)
     if ti < 0 {
         return -1

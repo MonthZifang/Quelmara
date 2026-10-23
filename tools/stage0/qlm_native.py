@@ -405,6 +405,12 @@ class Enc:
     def addsd(self, xd, xs):
         self.emit(b"\xf2", rex(r=xd, b=xs), b"\x0f\x58", modrm_reg(xd, xs))
 
+    def mulpd(self, xd, xs):
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\x59", modrm_reg(xd, xs))
+
+    def mulsd(self, xd, xs):
+        self.emit(b"\xf2", rex(r=xd, b=xs), b"\x0f\x59", modrm_reg(xd, xs))
+
     def movdqu_mr(self, base, index, scale, disp, x):
         """movdqu [base + index*2^scale + disp], xmm（非对齐存储）"""
         self.emit(b"\x66", rex(r=x, x=index, b=base), b"\x0f\x7f",
@@ -664,7 +670,10 @@ class Lower:
         self.sc = SYSCALLS[arch]
         self.structs = structs or {}
         self.enums = enums or {}
-        self.loop_stack = []       # [(cont_label, break_label)]，供 break/continue
+        self.loop_stack = []       # [(cont_label, break_label, defer_depth)]，供 break/continue
+        # v1.48 defer：每块一帧 {"slots": [登记标志], "entries": [(stmt, env, flag)], "cursor": n}
+        # 标志位初始 0、执行到 defer 语句置 1，退出点按 LIFO 逐条"标志为 1 才执行"。
+        self.defer_stack = []
         self.out = []
         self.globals = []          # bytes 列表
         self.gid_of_str = {}
@@ -675,6 +684,8 @@ class Lower:
         self.asset_root = asset_root  # [src].asset（read_asset 基准，编译期嵌入）
         self.arr_elem = {}         # base vreg -> 元素类型（"f64"）；f64 数组的
                                    # index/arith 位模式链路依赖此标记
+        self.arr_narrow = {}       # base vreg -> (bits, signed)；窄元素数组的
+                                   # 下标赋值/整体赋值按声明宽度截断（v1.40）
         self.uses_map = False
         self.uses_arena = False
         self.uses_join = False
@@ -852,8 +863,11 @@ class Lower:
 
     @staticmethod
     def _slice_elem(fn, v):
-        """切片元素标签：'str' / 'i64' / None（未知）。只有 str 元素需要额外标记，
-        否则 print(a[i]) 会把指针当整数打印。"""
+        """切片元素标签：'str' / 'u8' 等窄类型名 / 'f64' / None（未知）。
+
+        v1.56 起窄元素也带标签：切片是零拷贝别名，写入必须按元素声明宽度截断，
+        否则 `slice_of(u8数组)` 后 s[i] = 300 会把 300 原样写进槽（读回还是 300）。
+        """
         return getattr(fn, "slice_elem", {}).get(v) if isinstance(v, int) else None
 
     def alloc_slice(self, fn):
@@ -938,10 +952,15 @@ class Lower:
         fn.emit("frameaddr", addr, base)
         return self._mark_arr(fn, addr, n)
 
-    def array_copy(self, fn, dst, src, n):
+    def array_copy(self, fn, dst, src, n, nb=None):
+        """逐字拷贝；nb 给定时按声明宽度截断每个元素（v1.40 窄数组）"""
         for i in range(n):
             t = fn.new_v()
             fn.emit("load", t, src, ("imm", i))
+            if nb is not None:
+                tt = fn.new_v()
+                fn.emit("trunc", tt, t, nb[0], nb[1])
+                t = tt
             fn.emit("store", dst, ("imm", i), t)
 
     def emit_bounds(self, fn, idx, n, dynamic=False):
@@ -970,6 +989,12 @@ class Lower:
     def narrow_of(cls, ty):
         if ty and ty[0] == "named":
             return cls.NARROW_BITS.get(ty[1])
+        return None
+
+    def _arr_narrow_of(self, ty):
+        """声明类型 ("array", n, elem) -> 元素窄宽度 (bits, signed) / None"""
+        if ty and ty[0] == "array" and len(ty) > 2:
+            return self.narrow_of(ty[2])
         return None
 
     def trunc_to(self, fn, v, nb):
@@ -1004,20 +1029,33 @@ class Lower:
                 self.words_copy(fn, sub, val, SLICE_WORDS)
             else:
                 val = self.conv_to(fn, val, self._float_of(fn, val), self._ty_float_w(ftype))
+                nb = self.narrow_of(ftype)
+                if nb is not None:
+                    val = self.trunc_to(fn, val, nb)   # 窄字段按声明宽度截断（v1.40）
                 fn.emit("store", addr, ("imm", off), val)
         return addr
 
     def lower_enum_lit(self, e, fn, env):
-        """枚举构造 -> 帧槽块：字 0 存 tag，字 1.. 存载荷"""
+        """枚举构造 -> 帧槽块：字 0 存 tag，字 1.. 存载荷。
+        ("enumlit", path, [(fname, expr)]) 命名实参（parse 期已按本文件
+        变体表展开）；("enumlit_pos", path, [expr]) 位置实参（v1.44 限定
+        枚举构造——parse 期拿不到跨模块变体表，这里按 merged 表校验个数
+        并按下标映射字段名）。"""
         path, fields = e[1], e[2]
         ename, vname = path[0], path[1]
         if ename not in self.enums:
             raise SyntaxError(f"未声明的枚举 {ename}")
         vidx, vfields = self.enum_variant(ename, vname)
-        exprs = dict(fields)
-        if set(exprs) != {f for f, _ in vfields}:
-            raise SyntaxError(
-                f"{ename}.{vname} 构造需给出全部载荷字段 {[f for f, _ in vfields]}")
+        if e[0] == "enumlit_pos":
+            if len(fields) != len(vfields):
+                raise SyntaxError(
+                    f"{ename}.{vname} 构造需 {len(vfields)} 个载荷字段，得到 {len(fields)}")
+            exprs = {vf[0]: fields[i] for i, vf in enumerate(vfields)}
+        else:
+            exprs = dict(fields)
+            if set(exprs) != {f for f, _ in vfields}:
+                raise SyntaxError(
+                    f"{ename}.{vname} 构造需给出全部载荷字段 {[f for f, _ in vfields]}")
         addr = self.alloc_struct(fn, ename)
         fn.emit("store", addr, ("imm", 0), ("imm", vidx))
         off = 1
@@ -1031,6 +1069,9 @@ class Lower:
                 off += self.agg_size(ftype[1])
             else:
                 val = self.conv_to(fn, val, self._float_of(fn, val), self._ty_float_w(ftype))
+                nb = self.narrow_of(ftype)
+                if nb is not None:
+                    val = self.trunc_to(fn, val, nb)   # 窄载荷按声明宽度截断（v1.40）
                 fn.emit("store", addr, ("imm", off), val)
                 off += 1
         return self._mark_struct(fn, addr, ename)
@@ -1337,13 +1378,21 @@ class Lower:
             kt = e[1][1][1] if e[1][0] == "map" else "int"
             vt = e[1][2][1] if e[1][0] == "map" else "int"
             ktag = 1 if kt == "str" else 0
+            # 值扩容（v1.41）：聚合值按 agg 布局占 N 槽；未声明的聚合在这里
+            # fail-fast（agg_size 报"未声明的结构体/枚举"）
+            vw = self.agg_size(vt) if self.is_agg(vt) else 1
             cap = self.eval(e[2][0], fn, env) if e[2] else ("imm", 16)
             d = fn.new_v()
-            fn.emit("call", d, "__map_open", [cap, ("imm", ktag)])
+            fn.emit("call", d, "__map_open", [cap, ("imm", ktag), ("imm", vw)])
             return self._mark_map(fn, d, kt, vt)
         if k == "unop":
             a = self.eval(e[2], fn, env)
             if e[1] == "-":
+                # v1.51 fail-fast：str 没有取负语义。此前落到 "neg" 指令，
+                # 把长度前缀指针按整数取负，运行时读到野指针（-1e-300.to_str()
+                # 这类写法会把比较/打印直接打成段错误）。
+                if self._is_str(fn, a):
+                    raise SyntaxError("一元 - 不能用于 str（需先 to_int 或加括号）")
                 wa = self._float_of(fn, a)
                 if wa:
                     d = fn.new_v()
@@ -1567,7 +1616,7 @@ class Lower:
             if sname is None:
                 raise SyntaxError(f"原生后端不支持的结构体字面量 {'.'.join(path)}")
             return self.lower_struct_lit(sname, fields, fn, env)
-        if k == "enumlit":
+        if k in ("enumlit", "enumlit_pos"):
             return self.lower_enum_lit(e, fn, env)
         if k == "match":
             return self.lower_match(e, fn, env, as_expr=True)
@@ -1972,6 +2021,9 @@ class Lower:
             return ("imm", 0)
         if m == "push":
             v = one_arg()
+            nb = self.narrow_of(("named", elem)) if isinstance(elem, str) else None
+            if nb is not None:
+                v = self.trunc_to(fn, v, nb)      # vec[u8] 等窄元素（v1.40）
             if (isinstance(elem, tuple) and elem[0] == "agg"
                     and self._is_iface(elem[1])):
                 sn = self._struct_of(fn, v)
@@ -2024,6 +2076,9 @@ class Lower:
                 raise SyntaxError("vec.set(i, v) 需要两个实参")
             i = self.eval(args[0], fn, env)
             v = self.eval(args[1], fn, env)
+            nb = self.narrow_of(("named", elem)) if isinstance(elem, str) else None
+            if nb is not None:
+                v = self.trunc_to(fn, v, nb)      # vec[u8] 等窄元素（v1.40）
             if isinstance(elem, tuple) and elem[0] == "agg":
                 fn.emit("call", None, "__vec_set_n", [obj, i, v])
             else:
@@ -2034,9 +2089,12 @@ class Lower:
     def lower_map_method(self, m, obj, mp, args, fn, env):
         """m.set/get/has/del -> __map_* 运行时（开放寻址 + 线性探测）。
         键相等/哈希在运行时按句柄 ktag 分派（str 走 __str_eq 内容比较）；
-        这里在编译期校验键/值实参与声明的 K/V 标量一致，不许静默错编。"""
+        这里在编译期校验键/值实参与声明的 K/V 标签一致，不许静默错编。
+        值扩容（v1.41）：聚合值走 __map_set_n/__map_get_n（N 字槽按值拷入/
+        拷出），标量值走原 __map_set/__map_get（热路径零改动）。"""
         kt, vt = mp
         self.uses_map = True
+        agg_v = self.is_agg(vt)      # 值是具名 struct/enum（v1.41）
 
         def key_arg(a):
             kv = self.eval(a, fn, env)
@@ -2048,6 +2106,14 @@ class Lower:
                 raise SyntaxError("m.set(k, v) 需要两个实参")
             kv = key_arg(args[0])
             vv = self.eval(args[1], fn, env)
+            if agg_v:
+                # 值是聚合：实参必须是同名 struct/enum 值（帧槽地址），
+                # 运行时按值拷 N 字进表槽——与 struct 拷贝同语义
+                if self._struct_of(fn, vv) != vt:
+                    raise SyntaxError(f"map 值类型是 {vt}，实参不是 {vt} 值")
+                d = fn.new_v()
+                fn.emit("call", d, "__map_set_n", [obj, kv, vv])
+                return d
             self.check_map_arg("值", vt, self._is_str(fn, vv))
             d = fn.new_v()
             fn.emit("call", d, "__map_set", [obj, kv, vv])
@@ -2056,6 +2122,12 @@ class Lower:
             if len(args) != 1:
                 raise SyntaxError("m.get(k) 需要且只需要一个实参")
             kv = key_arg(args[0])
+            if agg_v:
+                # 拷出到新帧槽并挂聚合标记——let/传参/取字段全部按既有
+                # struct 值语义走（与 vec[Struct].get 同构）
+                dst = self.alloc_struct(fn, vt)
+                fn.emit("call", None, "__map_get_n", [obj, kv, dst])
+                return dst
             d = fn.new_v()
             fn.emit("call", d, "__map_get", [obj, kv])
             return self._mark_str(fn, d) if vt == "str" else d
@@ -3084,20 +3156,28 @@ class Lower:
             n = self._arr_of(fn, av)
             if n is None:
                 raise SyntaxError("slice_of() 目前只支持定长数组变量（零拷贝转换）")
-            return self.make_slice(fn, av, ("imm", n))
+            return self.make_slice(fn, av, ("imm", n), elem=self.arr_elem.get(av))
         if name not in self.fns_ast:
             if len(e[1]) == 1 and name in env:
                 # 通过值调用：标识符是持有函数地址的局部变量（fnaddr 或 vreg）
-                # -> callr 间接调用。无形参类型信息：实参原样传递（标量/str），
-                # 不做隐式转换；返回值按标量处理。
+                # -> callr 间接调用。无签名信息：返回值按标量处理（聚合/切片
+                # 返回的目标不可间接调用）；标量/str 实参原样传；
+                # 聚合实参按值编组——拷进临时帧槽传地址（v1.42，与直接调用的
+                # 聚合编组同语义；目标形参须是聚合类型，无签名校验，
+                # 与标量路径同信任级）。参数个数不再限 6（v1.42 栈传参）。
                 callee = env[name]
                 args = [self.eval(a, fn, env) for a in e[2]]
-                for a in args:
-                    if self._struct_of(fn, a) is not None or self._is_slice(fn, a):
-                        raise SyntaxError(
-                            "间接调用暂不支持结构体/切片实参（标量与 str 可以）")
-                if len(args) > 6:
-                    raise SyntaxError("间接调用最多 6 个实参（自研 ABI 参数寄存器上限）")
+                for i, a in enumerate(args):
+                    if self._is_slice(fn, a):
+                        tmp = self.alloc_slice(fn)
+                        self.words_copy(fn, tmp, a, SLICE_WORDS)
+                        args[i] = tmp
+                        continue
+                    sname = self._struct_of(fn, a)
+                    if sname is not None:
+                        tmp = self.alloc_struct(fn, sname)
+                        self.struct_copy(fn, tmp, a, sname)
+                        args[i] = tmp
                 d = fn.new_v()
                 fn.emit("callr", d, callee, args)
                 return d
@@ -3111,7 +3191,7 @@ class Lower:
                     pt = params[i][1]
                     # 形参是 `[]T`：零拷贝转切片（SPEC §2）
                     if pt[0] == "slice":
-                        args[i] = self.make_slice(fn, a, ("imm", n))
+                        args[i] = self.make_slice(fn, a, ("imm", n), elem=self.arr_elem.get(a))
                         continue
                     # 形参是 `[N]T`：传地址，callee 里按值拷一份（v1.2）
                     if pt[0] == "array":
@@ -3156,6 +3236,9 @@ class Lower:
             # 切片返回值：同聚合（隐藏出参指针约定，调用方开帧槽，callee 拷入）
             tmp = self.alloc_slice(fn)
             fn.emit("call", None, name, [tmp] + args)
+            # v1.56：返回类型里的元素标签要挂上，否则调用方经返回值写入不截断
+            if ret[1][0] == "named":
+                self._mark_slice(fn, tmp, ret[1][1])
             return tmp
         if ret[0] == "array":
             tmp = self.alloc_array(fn, ret[1])
@@ -3557,12 +3640,27 @@ class Lower:
                         spec = self.box_iface(fn, spec, sn, at[1])
             n = self._arr_of(fn, spec)
             if n is not None:
+                ann = s[4][1] if (len(s) > 4 and s[4][0] == "as") else None
+                nb = self._arr_narrow_of(ann)
                 if s[3][0] == "arraylit":
-                    # 字面量已经是在帧上新建的数组，直接绑定，不再多拷一次
+                    # 字面量已经是在帧上新建的数组，直接绑定，不再多拷一次；
+                    # 窄元素：字面量按 64 位存槽，就地把每个元素截到声明宽度（v1.40）
                     env[s[2]] = spec
+                    if nb is not None:
+                        self.arr_narrow[spec] = nb
+                        self.arr_elem[spec] = ann[2][1]
+                        for i in range(n):
+                            t = fn.new_v()
+                            fn.emit("load", t, spec, ("imm", i))
+                            tt = fn.new_v()
+                            fn.emit("trunc", tt, t, nb[0], nb[1])
+                            fn.emit("store", spec, ("imm", i), tt)
                     return
                 dst = self.alloc_array(fn, n)
-                self.array_copy(fn, dst, spec, n)
+                self.array_copy(fn, dst, spec, n, nb=nb)
+                if nb is not None:
+                    self.arr_narrow[dst] = nb
+                    self.arr_elem[dst] = ann[2][1]
                 env[s[2]] = dst
                 return
             if self._rc_of(fn, spec) is not None:
@@ -3629,7 +3727,8 @@ class Lower:
                 spec = self.eval(s[3], fn, env)
                 if self._arr_of(fn, spec) != n:
                     raise SyntaxError("数组赋值两侧长度不一致")
-                self.array_copy(fn, cur, spec, n)
+                # 窄元素数组：目标侧的声明宽度约束拷入值（v1.40）
+                self.array_copy(fn, cur, spec, n, nb=self.arr_narrow.get(cur))
                 return
             sname = self._struct_of(fn, cur)
             if sname is not None:
@@ -3700,7 +3799,7 @@ class Lower:
             fn.emit("label", l_top)
             self.branch(s[1], fn, env, l_body := fn.label("wbody"), l_end)
             fn.emit("label", l_body)
-            self.loop_stack.append((l_top, l_end))   # continue -> 重新判据
+            self.loop_stack.append((l_top, l_end, len(self.defer_stack)))   # continue -> 重新判据
             self.block(s[2], fn, dict(env))
             self.loop_stack.pop()
             fn.emit("jmp", l_top)
@@ -3718,6 +3817,7 @@ class Lower:
                 if n != self.fn_ret_arr[1]:
                     raise SyntaxError("return 的数组长度与函数返回类型不一致")
                 self.array_copy(fn, self.fn_ret_target, spec, n)
+                self._emit_defers(fn)
                 fn.emit("ret", ("imm", 0))
                 return
             if self.fn_ret_agg or self.fn_ret_slice:
@@ -3738,9 +3838,11 @@ class Lower:
                             f"函数返回类型是 {self.fn_ret_agg}，return 的表达式类型不匹配")
                     # 值语义：拷进调用方提供的隐藏出参槽，再返回
                     self.struct_copy(fn, self.fn_ret_target, spec, self.fn_ret_agg)
+                self._emit_defers(fn)
                 fn.emit("ret", ("imm", 0))
                 return
             if s[1] is None:
+                self._emit_defers(fn)
                 fn.emit("ret", None)
             else:
                 v = self.eval(s[1], fn, env)
@@ -3749,7 +3851,34 @@ class Lower:
                 nb = self.narrow_of(self.fn_ret)
                 if nb is not None:
                     v = self.trunc_to(fn, v, nb)
+                # 返回值先算好，再跑 defer（defer 可改局部变量，不改已算出的返回值）。
+                # 有 defer 时必须先落一份副本：`return x` 求值拿到的就是 x 的槽，
+                # defer 里 `x = ...` 会把同一个槽改掉。
+                if any(fr["entries"] for fr in self.defer_stack):
+                    snap = fn.new_v()
+                    fn.emit("mov", snap, v)
+                    v = snap
+                self._emit_defers(fn)
                 fn.emit("ret", v)
+            return
+        if k == "defer":
+            # defer 语句（v1.48）：执行到才登记（标志位置 1），块退出点 LIFO 执行。
+            # 只支持表达式/赋值语句——let/if/while 等有作用域与控制流
+            # 语义，纳入即变成闭包/块对象问题，fail-fast 拒绝。
+            d = s[1]
+            if d[0] not in ("expr", "assign", "assign_field", "assign_index"):
+                raise SyntaxError(
+                    f"defer 只支持表达式/赋值语句，得到 {d[0]!r}")
+            if not self.defer_stack:
+                raise SyntaxError("defer 只能出现在块内")
+            frame = self.defer_stack[-1]
+            if frame["cursor"] >= len(frame["slots"]):
+                # 块入口的预扫描与降序不一致时才会到这里（内部错误，不静默）
+                raise SyntaxError("defer 登记与块入口预扫描不一致（编译器内部错误）")
+            flag = frame["slots"][frame["cursor"]]
+            frame["cursor"] += 1
+            fn.emit("mov", flag, ("imm", 1))
+            frame["entries"].append((d, env, flag))
             return
         if k == "expr":
             self.eval(s[1], fn, env)
@@ -3775,11 +3904,13 @@ class Lower:
         if k == "break":
             if not self.loop_stack:
                 raise SyntaxError("break 只能出现在循环内")
+            self._emit_defers(fn, upto=self.loop_stack[-1][2])
             fn.emit("jmp", self.loop_stack[-1][1])
             return
         if k == "continue":
             if not self.loop_stack:
                 raise SyntaxError("continue 只能出现在循环内")
+            self._emit_defers(fn, upto=self.loop_stack[-1][2])
             fn.emit("jmp", self.loop_stack[-1][0])
             return
         if k == "block":
@@ -3825,8 +3956,11 @@ class Lower:
             self.words_copy(fn, sub, spec, SLICE_WORDS)
             return
         spec = self.eval(s[3], fn, env)
+        nb = self.narrow_of(ftype)
         if op == "=":
             spec = self.conv_to(fn, spec, self._float_of(fn, spec), self._ty_float_w(ftype))
+            if nb is not None:
+                spec = self.trunc_to(fn, spec, nb)   # 窄字段赋值截断（v1.40）
             fn.emit("store", addr, ("imm", off), spec)
             return
         binop = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}[op]
@@ -3837,6 +3971,8 @@ class Lower:
             self._mark_float(fn, cur, fw)
         tmp = self.arith(binop, cur, spec, fn, env)
         tmp = self.conv_to(fn, tmp, self._float_of(fn, tmp), fw)
+        if nb is not None:
+            tmp = self.trunc_to(fn, tmp, nb)         # 窄字段复合赋值也截断（v1.40）
         fn.emit("store", addr, ("imm", off), tmp)
 
     def lower_assign_index(self, s, fn, env):
@@ -3855,7 +3991,16 @@ class Lower:
         idx = self.eval(idxe, fn, env)
         self.emit_bounds(fn, idx, nval, dynamic=dyn)
         val = self.eval(rhs, fn, env)
+        nb = self.arr_narrow.get(obj)     # 窄元素数组（v1.40）：存槽截断
+        if nb is None and self._is_slice(fn, obj):
+            # v1.56：切片别名写入也按元素声明宽度截断（此前只跟踪 str 元素，
+            # `slice_of(a)` 之后 s[i] = 300 会把 300 原样写进 u8 元素槽）
+            se = self._slice_elem(fn, obj)
+            if se is not None and se != "str":
+                nb = self.narrow_of(("named", se))
         if op == "=":
+            if nb is not None:
+                val = self.trunc_to(fn, val, nb)
             fn.emit("store", tgt, idx, val)
             return
         binop = {"+=": "add", "-=": "sub", "*=": "mul",
@@ -3863,11 +4008,43 @@ class Lower:
         cur = fn.new_v()
         fn.emit("load", cur, tgt, idx)
         fn.emit("bin", binop, cur, cur, val)
+        if nb is not None:
+            fn.emit("trunc", cur, cur, nb[0], nb[1])
         fn.emit("store", tgt, idx, cur)
 
+    def _emit_defers(self, fn, upto=None):
+        """defer 清理（v1.48）：从最内层帧起 LIFO 发射。upto=帧深度下界
+        （break/continue 只跑循环体帧，函数帧留到 return/函数尾）。"""
+        frames = self.defer_stack if upto is None else self.defer_stack[upto:]
+        for frame in reversed(frames):
+            self._emit_frame(frame, fn)
+
+    def _emit_frame(self, frame, fn):
+        """一帧的 defer：LIFO，逐条"标志位为 1 才执行"。
+
+        标志位是语义必需，不是优化：`if c { break }` 写在 defer 之前时，
+        那条路径上 defer 根本没执行过，不能跑。
+        """
+        for dstmt, denv, flag in reversed(frame["entries"]):
+            skip = fn.label("dskip")
+            fn.emit("jcc", "e", flag, ("imm", 0), skip)
+            self.stmt(dstmt, fn, denv)
+            fn.emit("label", skip)
+
     def block(self, stmts, fn, env):
+        """块：入口给块内每条 defer 分配"已登记"标志（初始 0），
+        正常落到块尾时按 LIFO 逐条判断执行。"""
+        frame = {"slots": [], "entries": [], "cursor": 0}
+        for s in stmts:
+            if s[0] == "defer":
+                flag = fn.new_v()
+                fn.emit("mov", flag, ("imm", 0))
+                frame["slots"].append(flag)
+        self.defer_stack.append(frame)
         for s in stmts:
             self.stmt(s, fn, env)
+        self.defer_stack.pop()
+        self._emit_frame(frame, fn)
 
     # ---- for / parfor ----
     def lower_foreach(self, s, fn, env):
@@ -3940,7 +4117,7 @@ class Lower:
             self._mark_map(fn, item, elem[1], elem[2])
         inner = dict(env)
         inner[var] = item
-        self.loop_stack.append((l_skip, l_end))
+        self.loop_stack.append((l_skip, l_end, len(self.defer_stack)))
         self.block(body, fn, inner)
         self.loop_stack.pop()
         fn.emit("label", l_skip)
@@ -3961,6 +4138,8 @@ class Lower:
         """
         _, var, lo_e, hi_e, body = s
         rhs = acc = None
+        dot = False
+        arr2_e = None
         if len(body) == 1 and body[0][0] == "assign":
             b = body[0]
             if b[2] == "+=":
@@ -3971,19 +4150,44 @@ class Lower:
                     acc, rhs = b[1], r2
                 elif r2 == ("name", b[1]):
                     acc, rhs = b[1], lhs
-        if acc is None or rhs is None or rhs[0] != "index":
+        if acc is None or rhs is None:
             raise SyntaxError(
-                "@simd 只支持 `acc = acc + a[i]` / `acc += a[i]` 形式的整数归约"
-                "（见 docs/LANG.md §@simd）")
-        arr_e, idx_e = rhs[1], rhs[2]
-        if arr_e[0] != "name" or idx_e != ("name", var):
-            raise SyntaxError("@simd 要求下标正好是循环变量，数组是具名数组")
-        if acc not in env or arr_e[1] not in env:
+                "@simd 只支持 `acc = acc + a[i]` / `acc += a[i]` / "
+                "`acc += a[i] * b[i]`（点积）形式的归约（见 docs/LANG.md §@simd）")
+        if rhs[0] == "index":
+            arr_e, idx_e = rhs[1], rhs[2]
+            if arr_e[0] != "name" or idx_e != ("name", var):
+                raise SyntaxError("@simd 要求下标正好是循环变量，数组是具名数组")
+        elif rhs[0] == "binop" and rhs[1] == "*":
+            # 点积形状（v1.57）：acc += a[i] * b[i]，两个 [N]f64
+            la, lb = rhs[2], rhs[3]
+            if (la[0] != "index" or lb[0] != "index"
+                    or la[2] != ("name", var) or lb[2] != ("name", var)
+                    or la[1][0] != "name" or lb[1][0] != "name"):
+                raise SyntaxError(
+                    "@simd 点积要求 `a[i] * b[i]`：两个下标都正好是循环变量、数组具名")
+            arr_e, arr2_e, idx_e = la[1], lb[1], la[2]
+            dot = True
+        else:
+            raise SyntaxError(
+                "@simd 只支持 `acc = acc + a[i]` / `acc += a[i]` / "
+                "`acc += a[i] * b[i]`（点积）形式的归约（见 docs/LANG.md §@simd）")
+        if acc not in env or arr_e[1] not in env or (dot and arr2_e[1] not in env):
             raise SyntaxError("@simd 归约变量/数组未定义")
         base = env[arr_e[1]]
         n = self._arr_of(fn, base)
         if n is None:
             raise SyntaxError("@simd 目前只支持定长数组 [N]int（切片/vec 见 GAPS）")
+        if dot:
+            base2 = env[arr2_e[1]]
+            n2 = self._arr_of(fn, base2)
+            if n2 is None or n2 != n:
+                raise SyntaxError("@simd 点积要求两个数组是同长度定长数组")
+            if (self.arr_elem.get(base) != "f64"
+                    or self.arr_elem.get(base2) != "f64"
+                    or self._float_of(fn, env[acc]) != "f64"):
+                raise SyntaxError(
+                    "@simd 点积目前只支持 f64（int 点积需 SSE4.1 pmulld，未接）")
         lo = self.eval(lo_e, fn, env)
         hi = self.eval(hi_e, fn, env)
         # 静态越界：常量区间直接查
@@ -3996,7 +4200,15 @@ class Lower:
         fn.emit("bin", "shl", ptr, lo, ("imm", 3))
         fn.emit("bin", "add", ptr, ptr, base)
         cur = env[acc]
-        if self.arr_elem.get(base) == "f64" and self._float_of(fn, cur) == "f64":
+        if dot:
+            # f64 点积（v1.57）：两个基址各自偏移 lo*8
+            ptr2 = fn.new_v()
+            fn.emit("bin", "shl", ptr2, lo, ("imm", 3))
+            fn.emit("bin", "add", ptr2, ptr2, base2)
+            part = fn.new_v()
+            fn.emit("vdotd", part, ptr, ptr2, cnt)
+            self._mark_float(fn, part, "f64")
+        elif self.arr_elem.get(base) == "f64" and self._float_of(fn, cur) == "f64":
             # f64 归约（v1.16）：acc += a[i]，a 是 [N]f64（acc 的 float
             # 标记即契约——调用方保证数组元素类型一致）。
             part = fn.new_v()
@@ -4034,7 +4246,7 @@ class Lower:
         fn.emit("label", l_body)
         env2 = dict(env)
         env2[var] = i
-        self.loop_stack.append((l_cont, l_end))      # continue -> 自增步
+        self.loop_stack.append((l_cont, l_end, len(self.defer_stack)))      # continue -> 自增步
         self.block(body, fn, env2)
         self.loop_stack.pop()
         fn.emit("label", l_cont)
@@ -4060,7 +4272,7 @@ class Lower:
             fn.emit("jcc", "ge", i, hi_v, l_end)
             env2 = dict(env)
             env2[var] = i
-            self.loop_stack.append((l_cont, l_end))
+            self.loop_stack.append((l_cont, l_end, len(self.defer_stack)))
             self.block(body, fn, env2)
             self.loop_stack.pop()
             fn.emit("label", l_cont)
@@ -4111,7 +4323,7 @@ class Lower:
         env2[var] = i
         for r in reds:
             env2[r] = accs[r]
-        self.loop_stack.append((l_cont, l_end))
+        self.loop_stack.append((l_cont, l_end, len(self.defer_stack)))
         self.block(body, w, env2)
         self.loop_stack.pop()
         w.emit("label", l_cont)
@@ -4270,7 +4482,9 @@ class Lower:
             elif ty[0] == "map":
                 self._mark_map(fn, params[i], ty[1][1], ty[2][1])
             elif ty[0] == "slice":
-                et = "str" if ty[1] == ("named", "str") else None
+                # v1.56：元素标签带全（str / 窄类型 / f64）——切片形参内部写入
+                # 也要按声明宽度截断，否则调用方数组会被写进超宽值
+                et = ty[1][1] if ty[1][0] == "named" else None
                 self._mark_slice(fn, params[i], et)
             elif ty[0] == "rc":
                 self._mark_rc(fn, params[i], ty[1][1])
@@ -4278,10 +4492,15 @@ class Lower:
             elif ty[0] == "vec":
                 self._mark_vec(fn, params[i], self._vec_tag_of(ty[1]))
             elif ty[0] == "array":
-                # 数组形参按值语义：就地拷一份，函数内改动不外泄
+                # 数组形参按值语义：就地拷一份，函数内改动不外泄；
+                # 窄元素按声明宽度截断（v1.40）
                 dst = self.alloc_array(fn, ty[1])
-                self.array_copy(fn, dst, params[i], ty[1])
+                nb = self._arr_narrow_of(ty)
+                self.array_copy(fn, dst, params[i], ty[1], nb=nb)
                 env[name] = dst
+                if nb is not None:
+                    self.arr_narrow[dst] = nb
+                    self.arr_elem[dst] = ty[2][1]
                 if len(ty) > 2 and "f64" in str(ty[2]):
                     self.arr_elem[dst] = "f64"
             elif ty[0] == "array":
@@ -4913,10 +5132,12 @@ class Lower:
             f.emit("jmp", l_t)
             self.out.append(f)
 
-            # __map_open(cap, ktag) -> 句柄（cap<1 取 16，再向上取整到 2 的幂）
+            # __map_open(cap, ktag, vw) -> 句柄（cap<1 取 16，再向上取整到 2 的幂）
+            # vw = 值槽宽（字）。标量 1（与 v0.10 布局逐字节一致）；聚合值
+            # （v1.41）按 agg 布局 N 字，值表容量相应 ×vw，槽宽存控制块 [7]。
             f = Fn("__map_open")
-            cap, ktag = f.new_v(), f.new_v()
-            f.emit("args", [cap, ktag])
+            cap, ktag, vw = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [cap, ktag, vw])
             l_ok = f.label("mook")
             f.emit("jcc", "ge", cap, ("imm", 1), l_ok)
             f.emit("mov", cap, ("imm", 16))
@@ -4929,15 +5150,17 @@ class Lower:
                 f.emit("bin", "or", n, n, tt)
             f.emit("bin", "add", cap, n, ("imm", 1))
             blk = f.new_v()
-            f.emit("call", blk, "__alloc", [("imm", 56)])
+            f.emit("call", blk, "__alloc", [("imm", 64)])
             sz = f.new_v()
             f.emit("bin", "mul", sz, cap, ("imm", 8))
+            szv = f.new_v()
+            f.emit("bin", "mul", szv, sz, vw)          # 值表：cap*vw*8 字节
             st = f.new_v()
             f.emit("call", st, "__alloc", [sz])
             kt = f.new_v()
             f.emit("call", kt, "__alloc", [sz])
             vt = f.new_v()
-            f.emit("call", vt, "__alloc", [sz])
+            f.emit("call", vt, "__alloc", [szv])
             i = f.new_v()
             f.emit("mov", i, ("imm", 0))
             l_zt, l_ze = f.label("mozt"), f.label("moze")
@@ -4954,16 +5177,20 @@ class Lower:
             f.emit("store", blk, ("imm", 4), st)
             f.emit("store", blk, ("imm", 5), kt)
             f.emit("store", blk, ("imm", 6), vt)
+            f.emit("store", blk, ("imm", 7), vw)            # 值槽宽（v1.41）
             f.emit("ret", blk)
             self.out.append(f)
 
             # __map_grow(m)：容量翻倍 rehash（旧表是 bump 分配，不回收；
             # arena 块内随块整体回卷，块外到进程退出才丢）
+            # 值拷贝按控制块 [7] 的槽宽逐字搬（v1.41）；vw=1 时与旧布局一致
             f = Fn("__map_grow")
             m = f.new_v()
             f.emit("args", [m])
             cap = f.new_v()
             f.emit("load", cap, m, ("imm", 0))
+            vw = f.new_v()
+            f.emit("load", vw, m, ("imm", 7))
             ncap = f.new_v()
             f.emit("bin", "mul", ncap, cap, ("imm", 2))
             nmask = f.new_v()
@@ -4976,12 +5203,14 @@ class Lower:
             f.emit("load", ovt, m, ("imm", 6))
             nsz = f.new_v()
             f.emit("bin", "mul", nsz, ncap, ("imm", 8))
+            nszv = f.new_v()
+            f.emit("bin", "mul", nszv, nsz, vw)        # 新值表：ncap*vw*8
             nst = f.new_v()
             f.emit("call", nst, "__alloc", [nsz])
             nkt = f.new_v()
             f.emit("call", nkt, "__alloc", [nsz])
             nvt = f.new_v()
-            f.emit("call", nvt, "__alloc", [nsz])
+            f.emit("call", nvt, "__alloc", [nszv])
             i = f.new_v()
             f.emit("mov", i, ("imm", 0))
             l_zt, l_ze = f.label("mgzt"), f.label("mgze")
@@ -4996,6 +5225,7 @@ class Lower:
             f.emit("mov", i, ("imm", 0))
             l_rt, l_re = f.label("mgrt"), f.label("mgre")
             l_skip, l_pt, l_slot = f.label("mgsk"), f.label("mgpt"), f.label("mgsl")
+            l_vc, l_vd = f.label("mgvc"), f.label("mgvd")
             f.emit("label", l_rt)
             f.emit("jcc", "ge", i, cap, l_re)
             s = f.new_v()
@@ -5003,8 +5233,6 @@ class Lower:
             f.emit("jcc", "ne", s, ("imm", 1), l_skip)   # 墓碑/空槽不带入
             kk = f.new_v()
             f.emit("load", kk, okt, i)
-            vv = f.new_v()
-            f.emit("load", vv, ovt, i)
             h = f.new_v()
             f.emit("call", h, "__map_hash", [m, kk])
             j = f.new_v()
@@ -5019,7 +5247,25 @@ class Lower:
             f.emit("label", l_slot)
             f.emit("store", nst, j, ("imm", 1))
             f.emit("store", nkt, j, kk)
-            f.emit("store", nvt, j, vv)
+            # 值逐字拷贝：ovt[i*vw + w] -> nvt[j*vw + w]，w in 0..vw
+            base_o = f.new_v()
+            f.emit("bin", "mul", base_o, i, vw)
+            base_n = f.new_v()
+            f.emit("bin", "mul", base_n, j, vw)
+            w = f.new_v()
+            f.emit("mov", w, ("imm", 0))
+            f.emit("label", l_vc)
+            f.emit("jcc", "ge", w, vw, l_vd)
+            so = f.new_v()
+            f.emit("bin", "add", so, base_o, w)
+            vv = f.new_v()
+            f.emit("load", vv, ovt, so)
+            dn = f.new_v()
+            f.emit("bin", "add", dn, base_n, w)
+            f.emit("store", nvt, dn, vv)
+            f.emit("bin", "add", w, w, ("imm", 1))
+            f.emit("jmp", l_vc)
+            f.emit("label", l_vd)
             f.emit("bin", "add", nused, nused, ("imm", 1))
             f.emit("label", l_skip)
             f.emit("bin", "add", i, i, ("imm", 1))
@@ -5127,6 +5373,151 @@ class Lower:
             d = f.new_v()
             f.emit("load", d, vt, idx)
             f.emit("ret", d)
+            self.out.append(f)
+
+            # __map_set_n(m, k, src)：聚合值插入/覆盖写（v1.41）。
+            # 探测结构与 __map_set 完全一致，值写改为按控制块 [7] 的槽宽
+            # 逐字从 src 拷入 vt[i*vw + w]。只在聚合值 map 上发射，
+            # 标量热路径（__map_set）零改动。
+            f = Fn("__map_set_n")
+            m, k, src = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [m, k, src])
+            cap = f.new_v()
+            f.emit("load", cap, m, ("imm", 0))
+            vw = f.new_v()
+            f.emit("load", vw, m, ("imm", 7))
+            mask = f.new_v()
+            f.emit("bin", "sub", mask, cap, ("imm", 1))
+            st = f.new_v()
+            f.emit("load", st, m, ("imm", 4))
+            kt = f.new_v()
+            f.emit("load", kt, m, ("imm", 5))
+            vt = f.new_v()
+            f.emit("load", vt, m, ("imm", 6))
+            h = f.new_v()
+            f.emit("call", h, "__map_hash", [m, k])
+            i = f.new_v()
+            f.emit("bin", "and", i, h, mask)
+            first = f.new_v()
+            f.emit("mov", first, ("imm", -1))
+            l_t, l_ins = f.label("msnt"), f.label("msnins")
+            l_tomb, l_upd = f.label("msntm"), f.label("msnup")
+            l_next, l_use = f.label("msnn"), f.label("msnuse")
+            l_ucp, l_udone = f.label("msnuc"), f.label("msnud")
+            l_icp, l_idone = f.label("msnic"), f.label("msnid")
+            l_noused, l_grow = f.label("msnnu"), f.label("msngr")
+            f.emit("label", l_t)
+            s = f.new_v()
+            f.emit("load", s, st, i)
+            f.emit("jcc", "e", s, ("imm", 0), l_ins)
+            f.emit("jcc", "e", s, ("imm", 2), l_tomb)
+            kk = f.new_v()
+            f.emit("load", kk, kt, i)
+            eq = f.new_v()
+            f.emit("call", eq, "__map_key_eq", [m, kk, k])
+            f.emit("jnz", eq, l_upd)
+            f.emit("jmp", l_next)
+            f.emit("label", l_upd)
+            # 覆盖写：vt[i*vw + w] <- src[w]，逐字拷入后直接返回
+            base = f.new_v()
+            f.emit("bin", "mul", base, i, vw)
+            w = f.new_v()
+            f.emit("mov", w, ("imm", 0))
+            f.emit("label", l_ucp)
+            f.emit("jcc", "ge", w, vw, l_udone)
+            ld = f.new_v()
+            f.emit("load", ld, src, w)
+            dn = f.new_v()
+            f.emit("bin", "add", dn, base, w)
+            f.emit("store", vt, dn, ld)
+            f.emit("bin", "add", w, w, ("imm", 1))
+            f.emit("jmp", l_ucp)
+            f.emit("label", l_udone)
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_tomb)
+            f.emit("jcc", "ge", first, ("imm", 0), l_next)
+            f.emit("mov", first, i)                   # 记第一个墓碑
+            f.emit("jmp", l_next)
+            f.emit("label", l_ins)
+            f.emit("jcc", "l", first, ("imm", 0), l_use)
+            f.emit("mov", i, first)                   # 复用墓碑，探测链不断
+            f.emit("label", l_use)
+            f.emit("store", st, i, ("imm", 1))
+            f.emit("store", kt, i, k)
+            base2 = f.new_v()
+            f.emit("bin", "mul", base2, i, vw)
+            w2 = f.new_v()
+            f.emit("mov", w2, ("imm", 0))
+            f.emit("label", l_icp)
+            f.emit("jcc", "ge", w2, vw, l_idone)
+            ld2 = f.new_v()
+            f.emit("load", ld2, src, w2)
+            dn2 = f.new_v()
+            f.emit("bin", "add", dn2, base2, w2)
+            f.emit("store", vt, dn2, ld2)
+            f.emit("bin", "add", w2, w2, ("imm", 1))
+            f.emit("jmp", l_icp)
+            f.emit("label", l_idone)
+            cnt = f.new_v()
+            f.emit("load", cnt, m, ("imm", 1))
+            f.emit("bin", "add", cnt, cnt, ("imm", 1))
+            f.emit("store", m, ("imm", 1), cnt)
+            f.emit("jcc", "ge", first, ("imm", 0), l_noused)
+            used = f.new_v()
+            f.emit("load", used, m, ("imm", 2))
+            f.emit("bin", "add", used, used, ("imm", 1))
+            f.emit("store", m, ("imm", 2), used)
+            f.emit("label", l_noused)
+            used2 = f.new_v()
+            f.emit("load", used2, m, ("imm", 2))
+            u10 = f.new_v()
+            f.emit("bin", "mul", u10, used2, ("imm", 10))
+            c7 = f.new_v()
+            f.emit("bin", "mul", c7, cap, ("imm", 7))
+            f.emit("jcc", "ge", u10, c7, l_grow)     # 装载因子 >= 0.7 -> 扩容
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_grow)
+            f.emit("call", None, "__map_grow", [m])
+            f.emit("ret", ("imm", 0))
+            f.emit("label", l_next)
+            f.emit("bin", "add", i, i, ("imm", 1))
+            f.emit("bin", "and", i, i, mask)
+            f.emit("jmp", l_t)
+            self.out.append(f)
+
+            # __map_get_n(m, k, dst)：聚合值拷出（v1.41）。键不存在同样
+            # fail-fast；命中后按槽宽逐字 vt[idx*vw + w] -> dst[w]。
+            f = Fn("__map_get_n")
+            m, k, dst = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [m, k, dst])
+            idx = f.new_v()
+            f.emit("call", idx, "__map_find", [m, k])
+            l_ok = f.label("mgnok")
+            f.emit("jcc", "ge", idx, ("imm", 0), l_ok)
+            p = f.new_v()
+            f.emit("movaddr", p, gid_nf)
+            self.emit_write(f, 2, p, ("imm", len(msg_nf.encode("utf-8"))))
+            self.emit_exit(f, 1)
+            f.emit("label", l_ok)
+            vt = f.new_v()
+            f.emit("load", vt, m, ("imm", 6))
+            vw = f.new_v()
+            f.emit("load", vw, m, ("imm", 7))
+            base = f.new_v()
+            f.emit("bin", "mul", base, idx, vw)
+            w = f.new_v()
+            f.emit("mov", w, ("imm", 0))
+            l_cp, l_cpdone = f.label("mgncp"), f.label("mgncd")
+            f.emit("label", l_cp)
+            f.emit("jcc", "ge", w, vw, l_cpdone)
+            ld = f.new_v()
+            f.emit("load", ld, vt, base)              # vt[base + w]
+            f.emit("store", dst, w, ld)
+            f.emit("bin", "add", base, base, ("imm", 1))
+            f.emit("bin", "add", w, w, ("imm", 1))
+            f.emit("jmp", l_cp)
+            f.emit("label", l_cpdone)
+            f.emit("ret", dst)
             self.out.append(f)
 
             # __map_has(m, k) -> 0/1
@@ -7766,7 +8157,9 @@ class Lower:
             f.emit("call", pos, "__fmt_u64", [buf, pos, aexp, ("imm", 1)])
             f.emit("label", l_done)
             f.emit("store8", buf, pos, ("imm", 0))
-            f.emit("ret", buf)
+            # v1.51 修：有限值路径曾直接 ret(buf)——漏长度前缀、返回的是分配基址
+            # 而不是字节区（buf+8），调用方按 str ABI 读到的长度是 0（打印空串）。
+            ret_buf()
             self.out.append(f)
 
         # __str_from_bool(v) -> ptr
@@ -7898,6 +8291,11 @@ class Lower:
             return "str"
         if et and et[0] == "named" and self.is_agg(et[1]):
             return ("agg", et[1])
+        if et and et[0] == "named" and et[1] in self.NARROW_BITS:
+            # 窄标量元素（v1.40）：标签 = 类型名（与 parser 的 vec_elem_tag 一致）。
+            # 消费方全是 "== 'str'" / isinstance(tuple) 判定，字符串标签走标量路径；
+            # push/set 凭它查出窄宽度做截断，vecinner 嵌套时随内层标签穿透。
+            return et[1]
         if et and et[0] == "vec":
             return ("vecinner", self._vec_tag_of(et[1]))
         if et and et[0] == "map":
@@ -8029,6 +8427,8 @@ def _map_ins(ins, f):
         return ("vsum", V(ins[1]), S(ins[2]), S(ins[3]))
     if op == "vsumd":
         return ("vsumd", V(ins[1]), S(ins[2]), S(ins[3]))
+    if op == "vdotd":
+        return ("vdotd", V(ins[1]), S(ins[2]), S(ins[3]), S(ins[4]))
     if op == "atomic":
         # ('atomic', sub, dst, addr, a[, b])：变长，cas 多一个操作数
         return tuple(["atomic", ins[1], V(ins[2]), S(ins[3]), S(ins[4])]
@@ -8413,10 +8813,49 @@ class Codegen:
                 else:
                     raise RuntimeError("并行搬移无法调度")
 
+    def _emit_call_args(self, args):
+        """调用实参布局（v1.42 ABI）：前 6 参进 ARG_REGS（并行搬移，既有路径），
+        第 7 参起进调用方溢出区：sub rsp 开区 -> 逐参经 SCRATCH 存 [rsp+8j]。
+        返回栈参数个数（call/callr 在 call 之后按它回卷 rsp）。
+        安全性：参数搬移只写 ARG_REGS 与 SCRATCH（都在分配池外），池寄存器与
+        RBP 相对槽不受影响——栈实参的取值在搬移前后读都正确。
+        调用点栈布局：call 压返回地址后，被调方 [rbp+8]=返回地址、
+        [rbp+16+8j]=第 7+j 参（'args' 指令的 ("stk", j) 源与之对应）。"""
+        reg = args[:6]
+        stk = args[6:]
+        moves = [(self.src_move(a), ("r", ARG_REGS[i])) for i, a in enumerate(reg)]
+        self.parallel_move(moves)
+        if stk:
+            self.enc.alu_ri("sub", RSP, 8 * len(stk))
+            for j, a in enumerate(stk):
+                self.mat(SCRATCH, a)
+                self.enc.mov_mr(RSP, 4, 0, 8 * j, SCRATCH)
+        return len(stk)
+
+    def _stkarg_base(self):
+        """栈实参在被调方帧里的基址偏移（v1.42）。
+        序言是 push callee-saved -> push rbp -> mov rbp,rsp，所以 [rbp+8]
+        不是返回地址：ret 在 [rbp + 8*(1+n)]（n = rbp 之前的 push 数），
+        第一个栈实参在 [rbp + 8*(2+n)]（= 调用点的 [rsp+0]，call 压 ret 后
+        恰好落到这里）。线程入口（win_thread）在 callee-saved 之前还压了
+        RDI/RSI 两次，一并计入——线程函数当前不收栈实参，公式保持成立。"""
+        n = len(self.used_callee or [])
+        if getattr(self, "cur_fn_thread", False):
+            n += 2
+        return 8 * (2 + n)
+
     def emit_move(self, src, dst):
         if src[0] == "r" and dst[0] == "r":
             if src[1] != dst[1]:
                 self.enc.mov_rr(dst[1], src[1])
+        elif src[0] == "stk":
+            # 栈实参（v1.42）：调用方溢出区 -> dst（偏移见 _stkarg_base）
+            base = self._stkarg_base() + src[1] * 8
+            if dst[0] == "r":
+                self.enc.mov_rm(dst[1], RBP, 4, 0, base)
+            else:
+                self.enc.mov_rm(SCRATCH, RBP, 4, 0, base)
+                self.enc.mov_mr(RBP, 4, 0, -dst[1], SCRATCH)
         elif src[0] == "r" and dst[0] == "m":
             self.enc.mov_mr(RBP, 4, 0, -dst[1], src[1])
         elif src[0] == "m" and dst[0] == "r":
@@ -8556,6 +8995,53 @@ class Codegen:
             enc.alu_ri("add", RCX, 1)
             enc.jmp(Ls)
             enc.labels[Ld] = enc.pos()
+            self.commit(dst, ACC)
+            return
+        if op == "vdotd":
+            # f64 点积（v1.57）：movupd 非对齐读两路 + mulpd + addpd 两路累加
+            # + 标量尾（mulsd/addsd）。结构与 vsumd 同构；多一个 baseB：
+            # R11=baseA、R10=baseB、R8=count（push/pop 保护——R8 非池寄存器，
+            # 序列内无调用，按 cpuid 族纪律显式保护）、RCX=下标、RDX=临时。
+            # xmm0=累加器、xmm1/xmm2=两路加载。
+            _, dst, base_a, base_b, count = ins
+            seq = getattr(self, "_vdotd_seq", 0)
+            self._vdotd_seq = seq + 1
+            Lv, Lt, Ls, Ld = (f"__vdotd.v{seq}", f"__vdotd.t{seq}",
+                              f"__vdotd.s{seq}", f"__vdotd.d{seq}")
+            bpa = self.mat(SCRATCH, base_a)
+            bpb = self.mat(SCRATCH2, base_b)
+            enc.push(R8)
+            cnt = self.mat(R8, count)
+            enc.mov_ri(RCX, 0)
+            enc.pxor_x(0, 0)
+            enc.labels[Lv] = enc.pos()
+            enc.lea(RDX, RCX, 2)
+            enc.alu_rr("cmp", RDX, cnt)
+            enc.jcc("g", Lt)
+            enc.movupd_rm(1, bpa, RCX, 3, 0)
+            enc.movupd_rm(2, bpb, RCX, 3, 0)
+            enc.mulpd(1, 2)
+            enc.addpd(0, 1)
+            enc.alu_ri("add", RCX, 2)
+            enc.jmp(Lv)
+            enc.labels[Lt] = enc.pos()
+            enc.movhlps(1, 0)
+            enc.addsd(0, 1)
+            enc.movq_rx(ACC, 0)
+            enc.labels[Ls] = enc.pos()
+            enc.alu_rr("cmp", RCX, cnt)
+            enc.jcc("ge", Ld)
+            enc.mov_rm(RDX, bpa, RCX, 3, 0)
+            enc.movq_xr(1, RDX)
+            enc.mov_rm(RDX, bpb, RCX, 3, 0)
+            enc.movq_xr(2, RDX)
+            enc.mulsd(1, 2)
+            enc.addsd(0, 1)
+            enc.movq_rx(ACC, 0)
+            enc.alu_ri("add", RCX, 1)
+            enc.jmp(Ls)
+            enc.labels[Ld] = enc.pos()
+            enc.pop(R8)
             self.commit(dst, ACC)
             return
         if op in ("psrlw_i", "psllw_i", "psrlq_i", "psllq_i", "pslldq_i", "psrldq_i"):
@@ -8773,23 +9259,23 @@ class Codegen:
             enc.movzx_r_r8(ACC, RAX)
             self.commit(dst, ACC)
         elif op == "call":
-            moves = []
-            for i, arg in enumerate(ins[3]):
-                moves.append((self.src_move(arg), ("r", ARG_REGS[i])))
-            self.parallel_move(moves)
+            nk = self._emit_call_args(ins[3])
             enc.call(ins[2])
+            if nk:
+                enc.alu_ri("add", RSP, 8 * nk)     # 回卷溢出区（v1.42）
             if ins[1] is not None:
                 self.commit(ins[1], ACC)
         elif op == "callr":
-            # 间接调用（自研 ABI，与 call 同参数寄存器）。函数地址先物化进
+            # 间接调用（自研 ABI，与 call 同参数布局）。函数地址先物化进
             # SCRATCH2（r10 不在分配池，不会被随后的参数搬移覆盖；
             # fnaddr/ga 操作数在此走 movabs + 回填，PE 下生成 DIR64 重定位）。
+            # 栈传参（v1.42）：第 7 参起落调用方溢出区；r10 全程无人碰
+            # （栈区存取走 SCRATCH，参数搬移只写 ARG_REGS）。
             freg = self.mat(SCRATCH2, ins[2])
-            moves = []
-            for i, arg in enumerate(ins[3]):
-                moves.append((self.src_move(arg), ("r", ARG_REGS[i])))
-            self.parallel_move(moves)
+            nk = self._emit_call_args(ins[3])
             enc.call_reg(SCRATCH2)
+            if nk:
+                enc.alu_ri("add", RSP, 8 * nk)     # 回卷溢出区（v1.42）
             if ins[1] is not None:
                 self.commit(ins[1], ACC)
         elif op == "cssub":
@@ -8934,7 +9420,12 @@ class Codegen:
         elif op == "args":
             moves = []
             for i, d in enumerate(ins[1]):
-                moves.append((("r", ARG_REGS[i]), self.dst_move(d)))
+                if i < 6:
+                    moves.append((("r", ARG_REGS[i]), self.dst_move(d)))
+                else:
+                    # 第 7+ 参从调用方溢出区读（v1.42）：[rbp+16+8j]，
+                    # 与 _emit_call_args 的调用点布局逐字节对应
+                    moves.append((("stk", i - 6), self.dst_move(d)))
             self.parallel_move(moves)
         else:
             raise SyntaxError(f"无法发射指令 {ins!r}")

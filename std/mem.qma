@@ -15,7 +15,7 @@
 //   槽位首字存 next（空闲时），因此业务数据从第 1 字起用。
 // ---------------------------------------------------------------------------
 
-fn slab_new(cap: int, slot_words: int) -> int {
+pub fn slab_new(cap: int, slot_words: int) -> int {
     let h = mem_alloc(32)
     let words = cap * slot_words
     let data = mem_alloc(words * 8)
@@ -37,7 +37,7 @@ fn slab_new(cap: int, slot_words: int) -> int {
     return h
 }
 
-fn slab_alloc(h: int) -> int {
+pub fn slab_alloc(h: int) -> int {
     let head = mem_load64(h, 3)
     if head == 0 {
         return -1
@@ -51,7 +51,7 @@ fn slab_alloc(h: int) -> int {
     return idx
 }
 
-fn slab_free(h: int, idx: int) -> int {
+pub fn slab_free(h: int, idx: int) -> int {
     if idx < 0 {
         return -1
     }
@@ -63,13 +63,13 @@ fn slab_free(h: int, idx: int) -> int {
     return 0
 }
 
-fn slab_ptr(h: int, idx: int) -> int {
+pub fn slab_ptr(h: int, idx: int) -> int {
     let data = mem_load64(h, 0)
     let sw = mem_load64(h, 2)
     return data + idx * sw * 8
 }
 
-fn slab_cap(h: int) -> int {
+pub fn slab_cap(h: int) -> int {
     return mem_load64(h, 1)
 }
 
@@ -84,7 +84,7 @@ fn slab_slot_words(h: int) -> int {
 //   cap 必须是 2 的幂；hash 用 splitmix 风格的 64 位混合，避免顺序 fd 聚簇。
 // ---------------------------------------------------------------------------
 
-fn fdtab_new(cap: int) -> int {
+pub fn fdtab_new(cap: int) -> int {
     let h = mem_alloc(32)
     let n = cap
     let keys = mem_alloc(n * 8)
@@ -107,7 +107,7 @@ fn fdtab_hash(k: int) -> int {
     return x
 }
 
-fn fdtab_put(h: int, fd: int, slot: int) -> int {
+pub fn fdtab_put(h: int, fd: int, slot: int) -> int {
     let keys = mem_load64(h, 0)
     let vals = mem_load64(h, 1)
     let mask = mem_load64(h, 2) - 1
@@ -132,7 +132,7 @@ fn fdtab_put(h: int, fd: int, slot: int) -> int {
     return -1                              // 表满（调用方应扩容）
 }
 
-fn fdtab_get(h: int, fd: int) -> int {
+pub fn fdtab_get(h: int, fd: int) -> int {
     let keys = mem_load64(h, 0)
     let vals = mem_load64(h, 1)
     let mask = mem_load64(h, 2) - 1
@@ -155,7 +155,7 @@ fn fdtab_get(h: int, fd: int) -> int {
 
 // 删除用「后移填洞」：命中后把后续探测链上仍可前移的项前移，
 // 避免墓碑堆积（开放寻址 + 无墓碑 = 查找链不断裂）。
-fn fdtab_del(h: int, fd: int) -> int {
+pub fn fdtab_del(h: int, fd: int) -> int {
     let keys = mem_load64(h, 0)
     let vals = mem_load64(h, 1)
     let mask = mem_load64(h, 2) - 1
@@ -206,7 +206,7 @@ fn fdtab_del(h: int, fd: int) -> int {
     return 0
 }
 
-fn fdtab_len(h: int) -> int {
+pub fn fdtab_len(h: int) -> int {
     return mem_load64(h, 3)
 }
 
@@ -219,7 +219,7 @@ fn fdtab_cap(h: int) -> int {
 //   句柄 3 字：{ptr, cap, len}
 // ---------------------------------------------------------------------------
 
-fn buf_new(cap: int) -> int {
+pub fn buf_new(cap: int) -> int {
     let h = mem_alloc(24)
     let p = mem_alloc(cap)
     mem_store64(h, 0, p)
@@ -232,7 +232,7 @@ fn buf_ptr(h: int) -> int {
     return mem_load64(h, 0)
 }
 
-fn buf_len(h: int) -> int {
+pub fn buf_len(h: int) -> int {
     return mem_load64(h, 2)
 }
 
@@ -265,7 +265,7 @@ fn buf_put(h: int, src: int, n: int) -> int {
     return 0
 }
 
-fn buf_put_str(h: int, s: str) -> int {
+pub fn buf_put_str(h: int, s: str) -> int {
     let n = len(s)
     let len = mem_load64(h, 2)
     if len + n > mem_load64(h, 1) {
@@ -281,12 +281,12 @@ fn buf_put_str(h: int, s: str) -> int {
     return 0
 }
 
-fn buf_str(h: int) -> str {
+pub fn buf_str(h: int) -> str {
     return mem_str(mem_load64(h, 0), mem_load64(h, 2))
 }
 
 // 在 [from, len) 里找 needle 的首个出现位置；找不到返回 -1
-fn buf_find(h: int, from: int, needle: str) -> int {
+pub fn buf_find(h: int, from: int, needle: str) -> int {
     let p = mem_load64(h, 0)
     let len = mem_load64(h, 2)
     let nl = len(needle)
@@ -319,7 +319,7 @@ fn buf_find(h: int, from: int, needle: str) -> int {
 }
 
 // 找 "\r\n\r\n"（HTTP 头结束）—— 按 4 字节滑窗，避免逐字节 substr 分配
-fn buf_find_head_end(h: int) -> int {
+pub fn buf_find_head_end(h: int) -> int {
     let p = mem_load64(h, 0)
     let len = mem_load64(h, 2)
     let mut i = 0
@@ -341,7 +341,7 @@ fn buf_lower8(b: int) -> int {
     return b
 }
 
-fn buf_find_ci(h: int, from: int, needle: str) -> int {
+pub fn buf_find_ci(h: int, from: int, needle: str) -> int {
     let p = mem_load64(h, 0)
     let len = mem_load64(h, 2)
     let nl = len(needle)
@@ -371,7 +371,7 @@ fn buf_find_ci(h: int, from: int, needle: str) -> int {
 // 的同尺寸对象（连接对象、粒子、消息帧）。O(1) 两端，零系统调用。
 // ---------------------------------------------------------------------------
 
-fn pool_new(block_words: int, capacity: int) -> int {
+pub fn pool_new(block_words: int, capacity: int) -> int {
     // 句柄 3 槽：0=freelist 头，1=block_words，2=块区基址
     let h = mem_alloc(3 * 8)
     let region = mem_alloc(capacity * block_words * 8)
@@ -392,7 +392,7 @@ fn pool_new(block_words: int, capacity: int) -> int {
     return h
 }
 
-fn pool_alloc(h: int) -> int {
+pub fn pool_alloc(h: int) -> int {
     let head = mem_load64(h, 0)
     if head == 0 {
         return 0                     // 池空：调用方扩容或降级
@@ -402,7 +402,7 @@ fn pool_alloc(h: int) -> int {
     return head
 }
 
-fn pool_free(h: int, p: int) -> int {
+pub fn pool_free(h: int, p: int) -> int {
     // 头插回 freelist（p 必须来自本池；double-free 会成环——调试期
     // 可用 pool owns 校验，v0 不查）
     let head = mem_load64(h, 0)
@@ -411,6 +411,6 @@ fn pool_free(h: int, p: int) -> int {
     return 0
 }
 
-fn pool_empty(h: int) -> bool {
+pub fn pool_empty(h: int) -> bool {
     return mem_load64(h, 0) == 0
 }

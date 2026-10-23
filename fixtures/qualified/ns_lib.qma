@@ -1,0 +1,37 @@
+// fixtures/qualified/ns_lib.qma —— 命名空间限定语法（v1.44）的被导入库
+// 注意：库内函数用自然名（greet/bake），消费方以 ns_lib.greet(...) 限定
+// ——这是命名空间语义消除前缀膨胀的第一块：限定引用受 pub 与指向校验
+module ns_lib
+
+pub struct Point {
+    x: int
+    y: int
+}
+
+pub enum Color {
+    Red
+    Green
+}
+
+fn helper(n: int) -> int {
+    return n * 2 + 1
+}
+
+pub fn greet(who: str) -> str {
+    return helper(1).to_str() + ":" + who
+}
+
+pub fn make_point(x: int, y: int) -> Point {
+    return Point { x: x, y: y }
+}
+
+pub fn bake(n: int) -> int {
+    return helper(n)
+}
+
+pub fn pick(c: int) -> Color {
+    if c == 0 {
+        return Color.Red
+    }
+    return Color.Green
+}

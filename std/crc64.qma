@@ -1,0 +1,73 @@
+// std/crc64.qma —— CRC-64/XZ（ECMA-182 反射多项式），Quelmara 自实现
+//
+// 为什么需要：07-gaps §2「哈希」行点名空缺。xz/zlib 容器、gzip 尾部校验的
+// 64 位表亲——大块数据完整性校验（磁盘镜像、归档、网络帧）用 CRC-32 位宽
+// 不够的场景。
+//
+// 参数（CRC 目录标准名 CRC-64/XZ）：
+//   宽 64、poly 0x42F0E1EBA9EA3693（反射形式 0xC96C5795D7870F42）、
+//   init 全 1、refin/refout = true、xorout 全 1。
+//   check("123456789") = 0x995DC9BBDF1939FA（公开标准常数，t94 锚定）。
+//
+// 实现要点：
+//   * 表驱动（256 项 × 8 字节，每次调用现建——CRC 通常一次一整块，
+//     建表成本 2048 步相对可忽略；与 std/gzip 的 crc32 同款策略）；
+//   * 反射算法：crc = (crc >>> 8) ^ table[(crc ^ byte) & 0xFF]；
+//   * **右移必须 >>>**：64 位值可能为负（全 1 init = -1），>> 会灌符号位。
+
+// 反射多项式常量（0x42F0E1EBA9EA3693 的位反转）
+const CRC64_REFL_POLY = 0xC96C5795D7870F42
+
+fn _crc64_table(t: int) -> int {
+    let mut i = 0
+    while i < 256 {
+        let mut c = i
+        let mut k = 0
+        while k < 8 {
+            if (c & 1) == 1 {
+                c = (c >>> 1) ^ CRC64_REFL_POLY
+            } else {
+                c = c >>> 1
+            }
+            k = k + 1
+        }
+        mem_store64(t, i, c)
+        i = i + 1
+    }
+    return 0
+}
+
+/// CRC-64/XZ 校验值（64 位；以补码整数返回，>2^63 时为负）
+pub fn crc64(s: str) -> int {
+    let t = mem_alloc(256 * 8)
+    _crc64_table(t)
+    let mut crc = 0xFFFFFFFFFFFFFFFF
+    let mut i = 0
+    while i < len(s) {
+        let b = s[i]
+        crc = (crc >>> 8) ^ mem_load64(t, (crc ^ b) & 0xFF)
+        i = i + 1
+    }
+    mem_free(t, 256 * 8)
+    return crc ^ 0xFFFFFFFFFFFFFFFF
+}
+
+/// CRC-64/XZ 十六进制（16 位小写）
+pub fn crc64_hex(s: str) -> str {
+    let v = crc64(s)
+    let out = mem_alloc(17)
+    let mut i = 0
+    while i < 16 {
+        let nib = (v >>> (60 - i * 4)) & 0xF
+        if nib < 10 {
+            mem_store8(out, i, 48 + nib)
+        } else {
+            mem_store8(out, i, 87 + nib)
+        }
+        i = i + 1
+    }
+    mem_store8(out, 16, 0)
+    let hex = mem_str(out, 16)
+    mem_free(out, 17)
+    return hex
+}

@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""qpm —— Quelmara Package Manager（v0）
+"""qpm —— Quelmara Package Manager（v1.45：semver 区间）
 
-设计（v0 诚实边界）：
+设计：
   * 依赖声明：项目 Quelmara.toml 的 [deps] 段，`name = "spec"`：
-      - 路径依赖：spec 以 ./ ../ 或盘符/绝对路径开头
-      - git 依赖：spec 为 git URL，可带 #rev（tag/branch/sha，缺省默认分支）
+      - 路径依赖：`path:../mylib`，或 v0 的前缀探测（./ ../ / 盘符）
+      - git 依赖：`git:https://…#v1.2.3` 精确 tag/branch/sha，
+        或 `https://…#^1.2.0` semver 区间（ls-remote 选最新满足 tag）
   * 布局：git 依赖 clone 到全局缓存 ~/.qpm/cache/<name>-<rev>，再复制到
     <project>/.qpm/deps/<name>/（Windows 无 symlink，复制保证构建不碰网络）；
     路径依赖在 lock 中记录绝对路径，编译器直接搜索。
-  * 锁文件：<project>/.qpm/lock.toml，记录每个依赖的来源与 git sha。
+  * 锁文件：<project>/.qpm/lock.toml，`name = "kind|src|rev|sha"`；
+    区间依赖的 rev 是**解析后**的 tag（区间文本留在 Quelmara.toml）。
   * 编译器集成：qlm.py 的 _import_candidates 会搜索 <src_dir>/.qpm/deps/，
     `import jsonx.encoding` 解析为 .qpm/deps/jsonx/encoding.qma。
-  * 未做（路线）：semver 区间解析、registry 服务、发布/上传、依赖传递冲突
-    合并策略、包内 Quelmara.toml 的构建配置继承。
+  * 未做（路线）：registry 服务、发布/上传、依赖传递冲突合并策略、
+    包内 Quelmara.toml 的构建配置继承。
+
+区间语法（^ ~ >= <= > < = * 通配、AND/OR、预发布门槛）见 tools/qpm_semver.py。
+区间判定是语法式的：含运算符/通配段/分隔符才算区间，纯版本串按精确 tag
+（v0 语义）——名字恰好长得像区间的 tag 会被当区间解析，失败即报错。
 
 命令：
   python tools/qpm.py install            # 按 [deps] 拉取 + 写锁
@@ -27,6 +33,8 @@ import shutil
 import subprocess
 import sys
 
+import qpm_semver
+
 ROOT = os.getcwd()
 PROJ_TOML = os.path.join(ROOT, "Quelmara.toml")
 DEPS_DIR = os.path.join(ROOT, ".qpm", "deps")
@@ -37,6 +45,56 @@ CACHE = os.path.join(os.path.expanduser("~"), ".qpm", "cache")
 def _is_path_spec(spec):
     return spec.startswith("./") or spec.startswith("../") \
         or spec.startswith("/") or (len(spec) > 1 and spec[1] == ":")
+
+
+def parse_spec(spec):
+    """依赖 spec -> (kind, source, rev)。kind ∈ {"path", "git"}。
+
+    形态（v1.45：显式前缀与 v0 的前缀探测等价，文档口径统一到这两种）：
+      path:../mylib / ./x / ../x / /abs / C:\\x          路径依赖
+      git:https://…#v1.2.3 / https://…#^1.2.0 / …         git 依赖（#rev 或 #区间）
+    """
+    if spec.startswith("path:"):
+        return ("path", spec[len("path:"):], "")
+    if spec.startswith("git:"):
+        spec = spec[len("git:"):]
+    elif _is_path_spec(spec):
+        return ("path", spec, "")
+    url, rev = spec, ""
+    if "#" in spec:
+        url, rev = spec.split("#", 1)
+    return ("git", url, rev)
+
+
+def _looks_like_range(rev):
+    """rev 是 semver 区间还是精确 tag/branch/sha？语法式判定。
+
+    区间必须"长得像区间"：运算符开头、含分隔符、或整段通配版本。
+    纯版本串（`1.0.1` / `v1.0`）按精确 tag——v0 语义，名为 `1.0` 的
+    tag 不会被误读成区间。
+    """
+    if not rev:
+        return False
+    if rev in ("*", "x", "X"):
+        return True
+    if rev[0] in "^~><=":
+        return True
+    if any(c in rev for c in ", \t"):
+        return True
+    if "||" in rev:
+        return True
+    return bool(re.match(r"^v?\d+\.(?:[xX*]|\d+\.(?:[xX*]|\d+\.(?:[xX*]))?)$", rev))
+
+
+def ls_remote_tags(url):
+    """git ls-remote --tags 的 tag 名列表（剥 refs/tags/ 与 ^{} 解引用）。"""
+    out = _git(["ls-remote", "--tags", url])
+    tags = []
+    for ln in out.splitlines():
+        _sha, _, ref = ln.partition("\t")
+        if ref.startswith("refs/tags/") and not ref.endswith("^{}"):
+            tags.append(ref[len("refs/tags/"):])
+    return tags
 
 
 def parse_deps():
@@ -117,9 +175,14 @@ def _git(args, cwd=None):
 
 
 def resolve_one(name, spec):
-    """安装单个依赖，返回 lock 条目 (kind, source, rev, sha)。"""
-    if _is_path_spec(spec):
-        p = os.path.normpath(os.path.join(ROOT, spec))
+    """安装单个依赖，返回 lock 条目 (kind, source, rev, sha)。
+
+    git 依赖的 rev 若是 semver 区间：先 ls-remote 列 tag，选满足区间的最大
+    版本，rev 收敛为具体 tag 后再走 v0 的 clone/缓存/复制路径。
+    """
+    kind, source, rev = parse_spec(spec)
+    if kind == "path":
+        p = os.path.normpath(os.path.join(ROOT, source))
         if not os.path.isdir(p):
             raise SystemExit(f"qpm: 路径依赖 {name!r} 不存在：{p}")
         dst = os.path.join(DEPS_DIR, name)
@@ -129,10 +192,18 @@ def resolve_one(name, spec):
         print(f"  {name} <- path {p}")
         return ("path", p, "", "")
 
-    # git 依赖：url[#rev]
-    url, rev = spec, ""
-    if "#" in spec:
-        url, rev = spec.split("#", 1)
+    # git 依赖：url[#rev 或 #semver 区间]
+    url = source
+    if rev and _looks_like_range(rev):
+        tags = ls_remote_tags(url)
+        sel = qpm_semver.select_tag(tags, rev)
+        if sel is None:
+            avail = "、".join(sorted(tags)) or "（无 tag）"
+            raise SystemExit(
+                f"qpm: {name!r} 的 semver 区间 {rev!r} 没有满足的 tag；"
+                f"{url} 可用 tag：{avail}")
+        print(f"  {name} <- git {url} 区间 {rev} → {sel[0]}")
+        rev = sel[0]
     cache = os.path.join(CACHE, f"{name}-{re.sub(r'[^A-Za-z0-9_.\-]', '_', rev or 'main')}")
     if not os.path.isdir(os.path.join(cache, ".git")):
         os.makedirs(CACHE, exist_ok=True)
@@ -173,7 +244,9 @@ def cmd_install():
 
 def cmd_add(args):
     if len(args) < 2:
-        raise SystemExit("qpm: add <name> <spec>（path 或 git-url#rev）")
+        raise SystemExit(
+            "qpm: add <name> <spec>（path:… / git:url#rev / url#semver 区间，"
+            "如 \"^1.2.0\"）")
     name, spec = args[0], args[1]
     set_dep(name, spec)
     print(f"qpm: 已添加 {name} = \"{spec}\"")

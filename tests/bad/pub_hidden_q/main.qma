@@ -1,0 +1,11 @@
+// pub_hidden_q/main.qma —— 命名空间限定负例（v1.44）：
+// lib.fn(...) 限定调用指向非 pub 声明必须在编译期被拦下
+module pub_hidden_q
+
+import pub_hidden_lib
+
+fn main() {
+    // hidden_fn 在 pub_hidden_lib.qma 里没有 pub —— 限定调用必须报错
+    let v = pub_hidden_lib.hidden_fn(3)
+    print(v.to_str())
+}

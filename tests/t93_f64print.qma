@@ -1,0 +1,47 @@
+// t93_f64print.qma：f64 打印/转字符串（v1.51 修 __f64_to_str 有限值路径）
+// 覆盖：
+//   1) 定点区间 [1e-6, 1e12)：6 位小数、去尾零、整数不带小数点
+//   2) 科学计数：尾数 6 位小数去尾零，指数带符号（e+12 / e-7）
+//   3) 特殊值：0 / -0 → "0"，nan，inf，-inf
+//   4) 长度前缀：str ABI 的 len() 与字节数一致（修复前有限值长度为 0 → 打印空串）
+//   5) 拼接：f64.to_str() 参与字符串拼接不截断
+// 语义纪律：与 C 后端 qlm_f64_to_str 逐位一致（half away from zero；
+//           定点 x*1e6+0.5 截断）；-0.0 归一为 "0"（符号位丢弃）。
+module t93
+
+fn main() {
+    // 1) 定点
+    assert(0.0.to_str() == "0", "zero")
+    assert(1.5.to_str() == "1.5", "1.5")
+    assert((-2.25).to_str() == "-2.25", "neg fixed")
+    assert(3.0.to_str() == "3", "integer-valued has no dot")
+    assert(0.1.to_str() == "0.1", "0.1")
+    assert((1.0 / 3.0).to_str() == "0.333333", "one third rounds to 6 decimals")
+    assert(123.456.to_str() == "123.456", "123.456")
+    assert(1000000.5.to_str() == "1000000.5", "big fixed")
+    assert(999999.999999.to_str() == "999999.999999", "6 decimals kept")
+    assert(1e-6.to_str() == "0.000001", "lower bound of fixed range")
+
+    // 2) 科学计数
+    assert(1e12.to_str() == "1e+12", "upper bound leaves fixed range")
+    assert(2.5e-7.to_str() == "2.5e-7", "small scientific")
+    assert(1e300.to_str() == "1e+300", "huge")
+    assert((-1e-300).to_str() == "-1e-300", "tiny negative")
+
+    // 3) 特殊值
+    assert((0.0 / 0.0).to_str() == "nan", "nan")
+    assert((1.0 / 0.0).to_str() == "inf", "+inf")
+    assert((-1.0 / 0.0).to_str() == "-inf", "-inf")
+    assert((-0.0).to_str() == "0", "negative zero normalizes")
+
+    // 4) 长度前缀（修复前这里全是 0）
+    assert(len(1.5.to_str()) == 3, "len 1.5")
+    assert(len((-2.25).to_str()) == 5, "len -2.25")
+    assert(len(1e300.to_str()) == 6, "len 1e+300")
+
+    // 5) 拼接
+    assert("v=" + 1.5.to_str() == "v=1.5", "concat")
+    assert("[" + (-0.125).to_str() + "]" == "[-0.125]", "concat negative")
+
+    print("f64 print ok")
+}

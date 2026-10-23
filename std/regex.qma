@@ -1,0 +1,721 @@
+// std/regex.qma —— 正则表达式引擎（回溯 VM），Quelmara 自实现
+//
+// 为什么需要：07-gaps §2「正则」行点名空缺——文本清洗、路由匹配、表单校验
+// 都缺。本模块给一套最小可用的子集（与 Python re 差分对拍，见 t98）。
+//
+// 支持（v1.57 子集）：
+//   * 字面字节、`.`（除 \n 外任意字节）、字符类 `[a-z0-9]` / `[^...]`（范围 +
+//     \d \w \s 及大写否定式）、转义 `\d \w \s \D \W \S \n \t \r \f \v` 与
+//     `\. \* \+ \? \( \) \[ \] \{ \} \| \^ \$ \\`
+//   * 量词 `*` `+` `?` `{n}` `{n,}` `{n,m}`（贪婪；无懒惰 `*?`）
+//   * 交替 `|`、分组 `( )` / `(?: )`（**仅分组语义，不捕获**——捕获组留待后续）
+//   * 锚点 `^` `$`（$ 兼容 Python：串尾、或串尾单个 \n 之前）
+// 不做：反向引用、环视、多行模式、POSIX 类、Unicode 属性。
+// 边界：空匹配不参与替换（regex_replace_all 跳过空匹配，避免 Python 那套
+// 空匹配邻接规则的复杂度）；病态模式（指数级回溯）由 VM 步数上限兜底
+// （400 万步后判不匹配）。
+//
+// 实现路线（Russ Cox 式字节码 + 显式栈回溯，无 AST）：
+//   * 递归下降直接发射到 vec[int] 程序；指令变长（CHAR/ANY/BOL/EOL/JMP 2 槽，
+//     SPLIT 3 槽，CLASS 34 槽——VM 按 op 决定步进）；
+//   * I_CLASS 后跟 32 个 64 位图槽（256 位集合内联在指令流里）；
+//   * SPLIT x, y：先试 x，把 (y, sp) 压栈；JMP x 绝对跳转；
+//   * 解析器带 emit 开关：量词需要"先探测 atom 边界、再决定包裹结构"，
+//     所以同一套解析代码跑两遍（emit=0 探边界 / emit=1 发射）；
+//   * 空循环守卫：每个 SPLIT 记录上次进入时的 sp，相同 sp 再进入说明循环体
+//     吃了空串，直接走 y 出口——`(a?)*` 这类可空体量词不会挂死；
+//   * 匹配为迭代循环（显式栈），长输入不爆调用栈。
+
+import std.str
+
+// 指令操作码
+const RE_CHAR = 1      // [RE_CHAR, byte]
+const RE_ANY = 2       // [RE_ANY, 0]
+const RE_CLASS = 3     // [RE_CLASS, 0, w0..w31]（共 34 槽）
+const RE_BOL = 4       // [RE_BOL, 0]
+const RE_EOL = 5       // [RE_EOL, 0]
+const RE_JMP = 6       // [RE_JMP, target]
+const RE_SPLIT = 7     // [RE_SPLIT, x, y]（先 x，备选 y）
+const RE_MATCH = 8     // [RE_MATCH, 0]
+
+// ---------------------------------------------------------------------------
+// 发射辅助
+// ---------------------------------------------------------------------------
+
+fn _re_emit(prog: vec[int], op: int, arg: int) -> int {
+    prog.push(op)
+    prog.push(arg)
+    return len(prog) - 2
+}
+
+// SPLIT：3 槽，返回 pc（x/y 槽待回填）
+fn _re_emit_split(prog: vec[int]) -> int {
+    prog.push(RE_SPLIT)
+    prog.push(0)
+    prog.push(0)
+    return len(prog) - 3
+}
+
+// 把 32 个 64 位图字作为 I_CLASS 指令发射（setw 需已填好 32 项）
+fn _re_emit_class(prog: vec[int], setw: vec[int]) -> int {
+    let pc = _re_emit(prog, RE_CLASS, 0)
+    let mut i = 0
+    while i < 32 {
+        prog.push(setw.get(i))
+        i = i + 1
+    }
+    return pc
+}
+
+// ---------------------------------------------------------------------------
+// 字符类集合构建（32 × 64 位图）
+// ---------------------------------------------------------------------------
+
+fn _re_set_new() -> vec[int] {
+    let setw = vec[int].new(32)
+    let mut i = 0
+    while i < 32 {
+        setw.push(0)
+        i = i + 1
+    }
+    return setw
+}
+
+fn _re_set_add(setw: vec[int], b: int) -> int {
+    setw.set(b >> 6, setw.get(b >> 6) | (1 << (b & 63)))
+    return 0
+}
+
+fn _re_set_add_range(setw: vec[int], lo: int, hi: int) -> int {
+    let mut b = lo
+    while b <= hi {
+        _re_set_add(setw, b)
+        b = b + 1
+    }
+    return 0
+}
+
+fn _re_set_negate(setw: vec[int]) -> int {
+    let mut i = 0
+    while i < 32 {
+        setw.set(i, 0 - setw.get(i) - 1)
+        i = i + 1
+    }
+    return 0
+}
+
+// \d \w \s 及其否定式 → 填进 setw
+fn _re_fill_escape_class(setw: vec[int], kind: int) -> int {
+    if kind == 100 {
+        // \d：0-9
+        _re_set_add_range(setw, 48, 57)
+    }
+    if kind == 119 {
+        // \w：0-9 A-Z a-z _
+        _re_set_add_range(setw, 48, 57)
+        _re_set_add_range(setw, 65, 90)
+        _re_set_add_range(setw, 97, 122)
+        _re_set_add(setw, 95)
+    }
+    if kind == 115 {
+        // \s：\t \n \v \f \r 空格
+        _re_set_add(setw, 9)
+        _re_set_add(setw, 10)
+        _re_set_add(setw, 11)
+        _re_set_add(setw, 12)
+        _re_set_add(setw, 13)
+        _re_set_add(setw, 32)
+    }
+    if kind == 68 {
+        // \D = 非 \d
+        _re_set_add_range(setw, 48, 57)
+        _re_set_negate(setw)
+    }
+    if kind == 87 {
+        // \W = 非 \w
+        _re_set_add_range(setw, 48, 57)
+        _re_set_add_range(setw, 65, 90)
+        _re_set_add_range(setw, 97, 122)
+        _re_set_add(setw, 95)
+        _re_set_negate(setw)
+    }
+    if kind == 83 {
+        // \S = 非 \s
+        _re_set_add(setw, 9)
+        _re_set_add(setw, 10)
+        _re_set_add(setw, 11)
+        _re_set_add(setw, 12)
+        _re_set_add(setw, 13)
+        _re_set_add(setw, 32)
+        _re_set_negate(setw)
+    }
+    return 0
+}
+
+// 控制字符转义 → 字节值；非控制转义返回 -1
+fn _re_ctrl_escape(c: int) -> int {
+    if c == 110 {
+        return 10
+    }
+    if c == 116 {
+        return 9
+    }
+    if c == 114 {
+        return 13
+    }
+    if c == 102 {
+        return 12
+    }
+    if c == 118 {
+        return 11
+    }
+    return 0 - 1
+}
+
+// 是否是类转义（\d \w \s \D \W \S）
+fn _re_is_class_escape(c: int) -> int {
+    if c == 100 || c == 119 || c == 115 {
+        return 1
+    }
+    if c == 68 || c == 87 || c == 83 {
+        return 1
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// 递归下降解析（emit = 0 只探边界不发射；emit = 1 发射）
+// ---------------------------------------------------------------------------
+
+// alt := concat ('|' concat)*
+fn _re_alt(pat: str, pos: int, prog: vec[int], emit: int) -> int {
+    // 先探本支边界，决定有无 '|'——单分支不发射 SPLIT（序列体是强制性的，
+    // 跳过分支体等于空匹配，v1.57 初版在这里错）
+    let probe_end = _re_concat(pat, pos, prog, 0)
+    if probe_end < 0 {
+        return probe_end
+    }
+    if probe_end < len(pat) && pat[probe_end] == 124 {
+        // '|'：SPLIT(左支, 右支)；左支结尾 JMP 到整体出口
+        let split_pc = _re_emit_split(prog)
+        let pos2 = _re_concat(pat, pos, prog, emit)
+        if pos2 < 0 {
+            return pos2
+        }
+        let jmp_pc = _re_emit(prog, RE_JMP, 0)
+        let pos3 = _re_alt(pat, pos2 + 1, prog, emit)
+        if pos3 < 0 {
+            return pos3
+        }
+        let end_pc = len(prog)
+        prog.set(split_pc + 1, split_pc + 3)      // x = 左支
+        prog.set(split_pc + 2, jmp_pc + 2)        // y = 右支
+        prog.set(jmp_pc + 1, end_pc)
+        return pos3
+    }
+    // 单分支：原样发射，无 SPLIT
+    return _re_concat(pat, pos, prog, emit)
+}
+
+// concat := repeat*（直到 '|'、')' 或串尾）
+fn _re_concat(pat: str, pos: int, prog: vec[int], emit: int) -> int {
+    let mut p = pos
+    while p < len(pat) && pat[p] != 124 && pat[p] != 41 {
+        p = _re_repeat(pat, p, prog, emit)
+        if p < 0 {
+            return p
+        }
+    }
+    return p
+}
+
+// repeat := atom quantifier?
+fn _re_repeat(pat: str, pos: int, prog: vec[int], emit: int) -> int {
+    // 先探 atom 边界（不发射）
+    let end = _re_atom(pat, pos, prog, 0)
+    if end < 0 {
+        return 0 - 1
+    }
+    if end >= len(pat) {
+        _re_atom(pat, pos, prog, emit)
+        return end
+    }
+    let c = pat[end]
+    if c == 42 {
+        // '*'：L1: SPLIT body, exit ; body ; JMP L1
+        let l1 = _re_emit_split(prog)
+        _re_atom(pat, pos, prog, emit)
+        _re_emit(prog, RE_JMP, l1)
+        let exit_pc = len(prog)
+        prog.set(l1 + 1, l1 + 3)
+        prog.set(l1 + 2, exit_pc)
+        return end + 1
+    }
+    if c == 43 {
+        // '+'：L1: body ; SPLIT L1, exit
+        let l1 = len(prog)
+        _re_atom(pat, pos, prog, emit)
+        let sp = _re_emit_split(prog)
+        prog.set(sp + 1, l1)
+        prog.set(sp + 2, len(prog))
+        return end + 1
+    }
+    if c == 63 {
+        // '?'：SPLIT body, exit ; body
+        let sp = _re_emit_split(prog)
+        _re_atom(pat, pos, prog, emit)
+        let exit_pc = len(prog)
+        prog.set(sp + 1, sp + 3)
+        prog.set(sp + 2, exit_pc)
+        return end + 1
+    }
+    if c == 123 {
+        // '{'：{n} / {n,} / {n,m}；非法按字面量 '{'
+        let parsed = _re_parse_braces(pat, end)
+        if parsed == 0 - 1 {
+            // 不是合法量词：'{' 按字面量
+            _re_atom(pat, pos, prog, emit)
+            return end
+        }
+        let lo = 0
+        let open_ended = 0
+        let hi = 0
+        if parsed < 0 {
+            // 开区间 {n,}：编码 = -2-lo
+            open_ended = 1
+            lo = 0 - 2 - parsed
+        } else {
+            lo = parsed / 1000000
+            hi = parsed % 1000000
+        }
+        let mut k = 0
+        while k < lo {
+            _re_atom(pat, pos, prog, emit)
+            k = k + 1
+        }
+        if open_ended == 1 {
+            // {n,}：之后一个 STAR
+            let l1 = _re_emit_split(prog)
+            _re_atom(pat, pos, prog, emit)
+            _re_emit(prog, RE_JMP, l1)
+            let exit_pc = len(prog)
+            prog.set(l1 + 1, l1 + 3)
+            prog.set(l1 + 2, exit_pc)
+        } else {
+            let mut k2 = lo
+            while k2 < hi {
+                let sp = _re_emit_split(prog)
+                _re_atom(pat, pos, prog, emit)
+                let exit_pc = len(prog)
+                prog.set(sp + 1, sp + 3)
+                prog.set(sp + 2, exit_pc)
+                k2 = k2 + 1
+            }
+        }
+        // 跳过 '}'（_re_parse_braces 已验证存在）
+        let close = end + 1
+        while close < len(pat) && pat[close] != 125 {
+            close = close + 1
+        }
+        return close + 1
+    }
+    // 无量词：原样发射 atom
+    _re_atom(pat, pos, prog, emit)
+    return end
+}
+
+// atom := '(' alt ')' | '(?:' alt ')' | '[' class ']' | '.' | '^' | '$' | 转义 | 字面量
+fn _re_atom(pat: str, pos: int, prog: vec[int], emit: int) -> int {
+    if pos >= len(pat) {
+        return pos
+    }
+    let c = pat[pos]
+    if c == 40 {
+        // '('：支持 (?: 前缀
+        let body = pos + 1
+        if body + 1 < len(pat) && pat[body] == 63 && pat[body + 1] == 58 {
+            let pos2 = _re_alt(pat, body + 2, prog, emit)
+            if pos2 >= 0 && pos2 < len(pat) && pat[pos2] == 41 {
+                return pos2 + 1
+            }
+            return 0 - 1
+        }
+        let pos2 = _re_alt(pat, body, prog, emit)
+        if pos2 >= 0 && pos2 < len(pat) && pat[pos2] == 41 {
+            return pos2 + 1
+        }
+        return 0 - 1
+    }
+    if c == 91 {
+        // '['：字符类
+        return _re_class(pat, pos, prog, emit)
+    }
+    if c == 46 {
+        // '.'
+        if emit == 1 {
+            _re_emit(prog, RE_ANY, 0)
+        }
+        return pos + 1
+    }
+    if c == 94 {
+        // '^'
+        if emit == 1 {
+            _re_emit(prog, RE_BOL, 0)
+        }
+        return pos + 1
+    }
+    if c == 36 {
+        // '$'
+        if emit == 1 {
+            _re_emit(prog, RE_EOL, 0)
+        }
+        return pos + 1
+    }
+    if c == 92 {
+        // '\'：转义
+        if pos + 1 >= len(pat) {
+            return 0 - 1
+        }
+        let e = pat[pos + 1]
+        let ctrl = _re_ctrl_escape(e)
+        if ctrl >= 0 {
+            if emit == 1 {
+                _re_emit(prog, RE_CHAR, ctrl)
+            }
+            return pos + 2
+        }
+        if _re_is_class_escape(e) == 1 {
+            let setw = _re_set_new()
+            _re_fill_escape_class(setw, e)
+            if emit == 1 {
+                _re_emit_class(prog, setw)
+            }
+            return pos + 2
+        }
+        // 其余转义按字面量（\. \* \( 等）
+        if emit == 1 {
+            _re_emit(prog, RE_CHAR, e)
+        }
+        return pos + 2
+    }
+    if c == 42 || c == 43 || c == 63 {
+        // 悬空量词：atom 位置的 * + ? 是语法错误（没有可重复的前导
+        // atom）——必须 fail-fast 返回 -1（regex_match -> -2），不能
+        // 当字面量发射（v1.59 修：'a|*' 曾被编译成字面星号）
+        return 0 - 1
+    }
+    // 字面字节
+    if emit == 1 {
+        _re_emit(prog, RE_CHAR, c)
+    }
+    return pos + 1
+}
+
+// '[' class ']'：范围 / 单字节 / \d \w \s / 前导 ^ 否定
+fn _re_class(pat: str, pos: int, prog: vec[int], emit: int) -> int {
+    let mut p = pos + 1
+    let mut neg = 0
+    if p < len(pat) && pat[p] == 94 {
+        neg = 1
+        p = p + 1
+    }
+    let setw = _re_set_new()
+    let mut first = 1
+    while p < len(pat) && (pat[p] != 93 || first == 1) {
+        first = 0
+        let mut lo = 0
+        if pat[p] == 92 {
+            // 类内转义
+            if p + 1 >= len(pat) {
+                return 0 - 1
+            }
+            let e = pat[p + 1]
+            let ctrl = _re_ctrl_escape(e)
+            if ctrl >= 0 {
+                lo = ctrl
+                p = p + 2
+            } else {
+                if _re_is_class_escape(e) == 1 {
+                    _re_fill_escape_class(setw, e)
+                    p = p + 2
+                    continue
+                }
+                lo = e
+                p = p + 2
+            }
+        } else {
+            lo = pat[p]
+            p = p + 1
+        }
+        // 范围 a-z（'-' 不在末尾）
+        if p + 1 < len(pat) && pat[p] == 45 && pat[p + 1] != 93 {
+            let mut hi = 0
+            if pat[p + 1] == 92 {
+                if p + 2 >= len(pat) {
+                    return 0 - 1
+                }
+                let e2 = pat[p + 2]
+                let ctrl2 = _re_ctrl_escape(e2)
+                if ctrl2 >= 0 {
+                    hi = ctrl2
+                } else {
+                    hi = e2
+                }
+                p = p + 3
+            } else {
+                hi = pat[p + 1]
+                p = p + 2
+            }
+            if lo <= hi {
+                _re_set_add_range(setw, lo, hi)
+            }
+            continue
+        }
+        _re_set_add(setw, lo)
+    }
+    if p >= len(pat) || pat[p] != 93 {
+        return 0 - 1
+    }
+    if neg == 1 {
+        _re_set_negate(setw)
+    }
+    if emit == 1 {
+        _re_emit_class(prog, setw)
+    }
+    return p + 1
+}
+
+// '{' 后的 n/n,/n,m 解析。闭区间返回 lo*1000000 + hi（≥ 0）；
+// 开区间 {n,} 返回 -2-lo（≤ -2，与错误哨兵 -1 不撞）；非法返回 -1
+// （调用方按字面量 '{'）
+fn _re_parse_braces(pat: str, pos: int) -> int {
+    let mut p = pos + 1
+    let mut lo = 0
+    let mut digits = 0
+    while p < len(pat) && pat[p] >= 48 && pat[p] <= 57 {
+        lo = lo * 10 + (pat[p] - 48)
+        p = p + 1
+        digits = digits + 1
+    }
+    if digits == 0 {
+        return 0 - 1
+    }
+    if p < len(pat) && pat[p] == 44 {
+        p = p + 1
+        let mut hi = 0
+        let mut digits2 = 0
+        while p < len(pat) && pat[p] >= 48 && pat[p] <= 57 {
+            hi = hi * 10 + (pat[p] - 48)
+            p = p + 1
+            digits2 = digits2 + 1
+        }
+        if p < len(pat) && pat[p] == 125 {
+            if digits2 == 0 {
+                return 0 - 2 - lo
+            }
+            return lo * 1000000 + hi
+        }
+        return 0 - 1
+    }
+    if p < len(pat) && pat[p] == 125 {
+        return lo * 1000000 + lo
+    }
+    return 0 - 1
+}
+
+// ---------------------------------------------------------------------------
+// 编译入口
+// ---------------------------------------------------------------------------
+
+/// 编译正则。成功返回程序（vec[int]）；语法错误返回空 vec（len = 0）。
+pub fn regex_compile(pat: str) -> vec[int] {
+    // 第一遍探边界（校验语法），第二遍发射
+    let probe = vec[int].new(8)
+    let end = _re_alt(pat, 0, probe, 0)
+    if end != len(pat) {
+        return vec[int].new(1)
+    }
+    let prog = vec[int].new(32)
+    _re_alt(pat, 0, prog, 1)
+    _re_emit(prog, RE_MATCH, 0)
+    return prog
+}
+
+// ---------------------------------------------------------------------------
+// 回溯 VM
+// ---------------------------------------------------------------------------
+
+// 从 start 起匹配；成功返回结束位置，失败 -1
+fn _re_vm(prog: vec[int], s: str, start: int) -> int {
+    let mut pc = 0
+    let mut sp = start
+    let stack = vec[int].new(64)
+    let guard = vec[int].new(len(prog) + 1)
+    let mut gi = 0
+    while gi < len(prog) {
+        guard.push(0 - 1)
+        gi = gi + 1
+    }
+    let n = len(s)
+    let plen = len(prog)
+    let mut steps = 0
+    while steps < 4000000 {
+        steps = steps + 1
+        if pc < 0 || pc >= plen {
+            return 0 - 1
+        }
+        let op = prog.get(pc)
+        if op == RE_CHAR {
+            if sp < n && s[sp] == prog.get(pc + 1) {
+                sp = sp + 1
+                pc = pc + 2
+                continue
+            }
+        } else if op == RE_ANY {
+            if sp < n && s[sp] != 10 {
+                sp = sp + 1
+                pc = pc + 2
+                continue
+            }
+        } else if op == RE_CLASS {
+            if sp < n {
+                let b = s[sp]
+                let w = prog.get(pc + 2 + (b >> 6))
+                if (w >>> (b & 63)) & 1 == 1 {
+                    sp = sp + 1
+                    pc = pc + 34
+                    continue
+                }
+            }
+        } else if op == RE_BOL {
+            if sp == 0 {
+                pc = pc + 2
+                continue
+            }
+        } else if op == RE_EOL {
+            if sp == n || (sp == n - 1 && s[sp] == 10) {
+                pc = pc + 2
+                continue
+            }
+        } else if op == RE_JMP {
+            pc = prog.get(pc + 1)
+            continue
+        } else if op == RE_SPLIT {
+            if guard.get(pc) == sp {
+                // 循环体吃了空串——走 y 出口
+                pc = prog.get(pc + 2)
+                continue
+            }
+            guard.set(pc, sp)
+            stack.push(prog.get(pc + 2))
+            stack.push(sp)
+            pc = prog.get(pc + 1)
+            continue
+        } else if op == RE_MATCH {
+            return sp
+        }
+        // 失败：回溯
+        if len(stack) == 0 {
+            return 0 - 1
+        }
+        sp = stack.pop()
+        pc = stack.pop()
+    }
+    return 0 - 1
+}
+
+// ---------------------------------------------------------------------------
+// 公开 API
+// ---------------------------------------------------------------------------
+
+/// 搜索：pat 在 s 任意位置匹配返回 1；语法错误 -2；不匹配 0
+pub fn regex_match(pat: str, s: str) -> int {
+    let prog = regex_compile(pat)
+    if len(prog) == 0 {
+        return 0 - 2
+    }
+    return regex_exec(prog, s)
+}
+
+/// 全匹配：整个 s 被 pat 匹配返回 1（等价 Python fullmatch）；语法错误 -2
+pub fn regex_match_full(pat: str, s: str) -> int {
+    let prog = regex_compile(pat)
+    if len(prog) == 0 {
+        return 0 - 2
+    }
+    let r = _re_vm(prog, s, 0)
+    if r == len(s) {
+        return 1
+    }
+    return 0
+}
+
+/// 已编译程序的搜索：1 匹配 / 0 不匹配 / -2 坏程序
+pub fn regex_exec(prog: vec[int], s: str) -> int {
+    if len(prog) == 0 {
+        return 0 - 2
+    }
+    let mut start = 0
+    while start <= len(s) {
+        let r = _re_vm(prog, s, start)
+        if r >= 0 {
+            return 1
+        }
+        start = start + 1
+    }
+    return 0
+}
+
+/// 查找：返回最左匹配的起始位置；无匹配 -1；坏程序 -2
+pub fn regex_find(prog: vec[int], s: str) -> int {
+    if len(prog) == 0 {
+        return 0 - 2
+    }
+    let mut start = 0
+    while start <= len(s) {
+        let r = _re_vm(prog, s, start)
+        if r >= 0 {
+            return start
+        }
+        start = start + 1
+    }
+    return 0 - 1
+}
+
+/// 替换第一处（rep 为字面量，无引用展开）；空匹配不替换；坏程序返回原串
+pub fn regex_replace(prog: vec[int], s: str, rep: str) -> str {
+    if len(prog) == 0 {
+        return s
+    }
+    let mut start = 0
+    while start <= len(s) {
+        let r = _re_vm(prog, s, start)
+        if r > start {
+            return str_slice(s, 0, start) + rep + str_slice(s, r, len(s))
+        }
+        start = start + 1
+    }
+    return s
+}
+
+/// 替换全部（空匹配跳过，避免 Python 空匹配邻接规则的复杂度）
+pub fn regex_replace_all(prog: vec[int], s: str, rep: str) -> str {
+    if len(prog) == 0 {
+        return s
+    }
+    let mut out = ""
+    let mut i = 0
+    let mut copied = 0
+    while i <= len(s) {
+        let r = _re_vm(prog, s, i)
+        if r > i {
+            out = out + str_slice(s, copied, i) + rep
+            copied = r
+            i = r
+        } else {
+            i = i + 1
+        }
+    }
+    out = out + str_slice(s, copied, len(s))
+    return out
+}

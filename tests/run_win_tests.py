@@ -609,6 +609,10 @@ def main():
     case_selfcheck("t82_vecmap", "tests/t82_vecmap.qma")
     case_selfcheck("t83_resagg", "tests/t83_resagg.qma")
     case_selfcheck("t84_structnest", "tests/t84_structnest.qma")
+    case_selfcheck("t85_narrowstore", "tests/t85_narrowstore.qma")
+    case_selfcheck("t86_mapstruct", "tests/t86_mapstruct.qma")
+    case_selfcheck("t87_callrelax", "tests/t87_callrelax.qma")
+    case_selfcheck("t91_defer", "tests/t91_defer.qma")
     # 所有权负向：这三个必须被借用检查拦下（编译失败）
     for nm, why, needle in (
             ("own_use_after_drop", "use-after-drop", "所有权检查"),
@@ -617,13 +621,51 @@ def main():
             ("iface_missing", "impl 缺方法", "缺少方法"),
             ("iface_rettype", "impl 返回类型不符", "返回类型与接口声明不一致"),
             ("iface_no_impl", "类型未实现接口", "没有实现接口"),
-            ("iface_dup_method", "跨接口同名方法", "同名方法跨接口暂不支持")):
+            ("iface_dup_method", "跨接口同名方法", "同名方法跨接口暂不支持"),
+            ("defer_let", "defer 跟带作用域的语句", "defer 只支持"),
+            ("neg_str", "对 str 取负", "一元 - 不能用于 str"),
+            ("constfn_str", "const fn 用 str 形参", "只支持 int / bool"),
+            ("constfn_call", "const 右值调普通函数", "只能调用 const fn")):
         try:
             build(os.path.join(ROOT, f"tests/bad/{nm}.qma"),
                   os.path.join(ROOT, "build", f"bad_{nm}.exe"))
         except SyntaxError as ex:
             ok(f"编译期拦下 {why}") if needle in str(ex) \
                 else bad(f"{nm} 报错但信息不符（期望含 {needle!r}）：{ex}")
+        else:
+            bad(f"{nm} 应当编译失败却通过了")
+    # pub 可见性负向（v1.43，多文件）：跨模块引用非 pub 声明必须编译期拦下
+    try:
+        build(os.path.join(ROOT, "tests/bad/pub_hidden/main.qma"),
+              os.path.join(ROOT, "build", "bad_pub_hidden.exe"))
+    except SyntaxError as ex:
+        ok("pub：非 pub 跨模块引用被拦下") if "非 pub" in str(ex) \
+            else bad(f"pub_hidden 报错但信息不符（期望含 '非 pub'）：{ex}")
+    else:
+        bad("pub_hidden 应当编译失败却通过了")
+    # pub 正例（v1.43，多文件）：pub 声明跨模块可用
+    case_selfcheck("t88_pubvis", "fixtures/pubvis/main.qma")
+    # 限定语法正例（v1.44，多文件）：lib.fn()/lib.Enum.Variant/限定模式
+    case_selfcheck("t89_qualified", "fixtures/qualified/main.qma")
+    case_selfcheck("t90_mathfn", "tests/t90_mathfn.qma")
+    case_selfcheck("t93_f64print", "tests/t93_f64print.qma")
+    case_selfcheck("t92_httpc", "tests/t92_httpc.qma")
+    case_selfcheck("t94_slice_narrow", "tests/t94_slice_narrow.qma")
+    case_selfcheck("t95_hash512", "tests/t95_hash512.qma")
+    # @simd f64 点积（v1.59）：acc += a[i] * b[i]，SSE2 mulpd 两路
+    case_selfcheck("t96_simddot", "tests/t96_simddot.qma")
+    case_selfcheck("t98_constfn", "tests/t98_constfn.qma")
+    case_selfcheck("t99_regex", "tests/t99_regex.qma")
+    # pub + 限定语法负向（多文件）：非 pub 跨模块引用必须编译失败
+    # （限定调用可能先被通用 pub 检查或指向校验拦下，两种消息都算对）
+    for nm, needles in (("pub_hidden", ("非 pub",)),
+                        ("pub_hidden_q", ("非 pub", "无法解析"))):
+        try:
+            build(os.path.join(ROOT, f"tests/bad/{nm}/main.qma"),
+                  os.path.join(ROOT, "build", f"bad_{nm}.exe"))
+        except SyntaxError as ex:
+            ok(f"pub 负例拦下 {nm}") if any(n in str(ex) for n in needles) \
+                else bad(f"{nm} 报错但信息不符（期望含 {needles!r}）：{ex}")
         else:
             bad(f"{nm} 应当编译失败却通过了")
     # gzip 的唯一权威证明：Python zlib 逐字节解压

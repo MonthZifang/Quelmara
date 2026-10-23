@@ -13,7 +13,18 @@ import std.core     // 扁平合并：递归加载 std/ 与同目录 .qma
 - 源码扩展名固定 `.qma`；`.ros` 已废弃，遇到会给出 `git mv` 迁移提示  <!-- legacy-ok -->
   （`tools/stage0/qlm.py:50` `require_source`）。
 - `import` 是**扁平合并**：顶层 `fn` / `struct` / `enum` / `test` 直接并入主 AST，
-  没有命名空间、没有可见性、没有版本（`load_program`）。
+  消费时直呼其名（没有限定语法 `lib.fn()`——它会被解析为方法调用）。
+- **`pub` 可见性（v1.43）**：顶层 `pub fn` / `pub struct` / `pub enum` 跨模块可见；
+  非 pub 声明只在本模块内可用，跨模块引用**编译期报错**（一次报出全部违规，
+  并指明定义文件）。`pub` 是上下文关键字——只在顶层声明位识别，函数内
+  `pub` 变量名不受影响。`const` 本就解析期内联全局共享，无需 pub；
+  interface/impl 仍限同源文件（既有边界）。命名空间与版本未做（`load_program`）。
+- **限定语法（v1.44）**：`lib.fn(...)` 限定调用、`lib.Color.Red(v)` 限定枚举
+  构造（只收位置实参）、模式 `lib.Color.Red =>`——头段必须匹配本文件
+  `import`（拼错模块名/漏 import 编译期报错），且目标必须 `pub` 并定义在
+  该 import 解析到的文件里。限定是纯语法糖 + 校验：生成的调用与扁平直呼
+  其名完全一致。**限定 struct 字面量不做**（用 pub 工厂函数）；跨模块
+  同名声明不允许（扁平唯一性），前缀约定仍用于避免撞名。
 - 查找顺序：主文件目录 → `std/` → `[src].lib` → `[src].ref` → `.qpm/deps`，
   **惰性解析**（import 什么加载什么）。布局规则见 [`05-toolchain.md`](05-toolchain.md)。
 - 名字冲突、循环 import、被导入文件定义 `main`，一律编译报错。
@@ -21,10 +32,10 @@ import std.core     // 扁平合并：递归加载 std/ 与同目录 .qma
 
 ## 2. 词法
 
-### 2.1 关键字（31 个，`qlm.py:125`）
+### 2.1 关键字（32 个，`qlm.py:125`）
 
 ```
-fn  let  mut  if  else  while  for  parfor  return  break  continue
+fn  let  mut  if  else  while  for  parfor  return  break  continue  defer
 struct  enum  match  interface  impl  rc
 module  import  test  const  vec  map  chan  option  result  select
 arena  spawn  true  false
@@ -79,13 +90,13 @@ true  false
 | 定长数组 | `[N]T` | 值语义，可作参数/返回值 |
 | 切片 | `[]T` | 零拷贝视图 `{ptr, len}`，别名共享 |
 | 动态数组 | `vec[T]` | 堆上，2 倍扩容，句柄语义 |
-| 映射 | `map[K]V` | 开放寻址，K∈int/bool/str，V∈int/str |
+| 映射 | `map[K]V` | 开放寻址，K∈int/bool/str，V∈int/str/具名 struct/enum（v1.41 值扩容，按值拷入拷出） |
 | 通道 | `chan[T]` | 有界 MPMC |
 | 可选 | `option[T]` | 合成枚举，`some` / `none` |
 | 结果 | `result[T,E]` | 合成枚举，`ok` / `err`，支持 `?` |
 | 引用计数 | `rc[T]` | `[refcount][payload]`，载荷仅具名 struct |
 | 接口 | `interface Shape { ... }` | 接口值 = `{data, vt}` 两字 |
-| 函数值 | 函数名直接作值 | `callr` 间接调用，≤6 参 |
+| 函数值 | 函数名直接作值 | `callr` 间接调用，8 参 + struct/slice 实参（v1.42；x86-64 第 7 参起走栈） |
 
 嵌套容器：`vec[vec[T]]` 支持（任意深度）；`vec[map[K]V]` 支持（v1.37，
 map 句柄 1 字标量拷贝语义——vec 不持有 map 的所有权）。
@@ -188,15 +199,41 @@ let m = pair[int, str](1, "x")      // 显式多参
 跨文件调用时若被调用方在调用方之后解析，仍需显式方括号（解析期还不知道它是泛型）。
 开箱即用的泛型算法（min/max/clamp/contains/index_of/reverse）见 `std/gen`。
 
-### 4.6 常量（编译期算术）
+### 4.6 常量与 `const fn`（编译期求值）
 
 ```quelmara
 const KB: int = 1024
 const BUF: int = 4 * KB        // 引用前面的 const
 const HALF: int = BUF / 2      // C 截断除法
+
+const fn fact(n: int) -> int {  // 编译期可求值，运行期也可调
+    let mut r = 1
+    let mut i = 2
+    while i <= n {
+        r = r * i
+        i = i + 1
+    }
+    return r
+}
+
+const F5 = fact(5)              // 解析期解释执行 → 120
+const BIG = fact(5) * 2 + 1     // 调用可嵌在算术里
+const EVEN = is_even(10)        // 返回 bool 的 const fn
 ```
 
-只支持整型 `+ - * / %`、括号与 const 引用，按声明序求值。`const fn` 未做。
+`const` 右值：整型字面量 / 一元负号 / 括号 / `+ - * / %` / const 引用 / **const fn 调用**，
+按声明序求值（引用未声明即报错）。`const fn` 的支持子集：
+
+| 项 | 范围 |
+|---|---|
+| 形参与返回值 | `int` / `bool`（其余编译期拒绝） |
+| 语句 | `let` / 赋值（含 `+=` 等）/ `if` / `while` / `return` / 表达式 |
+| 表达式 | 字面量、变量、算术、比较、逻辑、位运算、调用其他 const fn（含递归，深度 ≤ 64） |
+| 求值口径 | **有符号 64 位回卷**——与同一个函数在运行时的结果逐位一致 |
+| 拒绝 | `str` 值、普通函数调用、`break`/`continue`、超 200000 步（疑似死循环） |
+
+`const fn` 同时是**普通函数**：照常发射、运行时可调，只是多了一个"能在解析期被解释执行"
+的身份。证据：`tests/t98_constfn.qma`（18 条断言）、`tests/bad/constfn_*.qma`（必须编译失败）。
 
 ### 4.7 注解
 
@@ -237,6 +274,7 @@ ch.close()
 let got = select { ch.recv() }   // 多臂就绪选择（声明序优先）
 
 assert(cond, "消息")       // 失败 → stderr 消息 + 退出码 1
+defer expr / defer x = v   // 块退出清理（LIFO，见 §8.6）
 break / continue
 return expr
 ```
@@ -284,7 +322,9 @@ enum 布局本就是 1+最大载荷字，零新机制）。`?` 所在函数必�
 ### 6.4 其它
 
 - 子切片：`a[lo..hi]`（左闭右开）。`str` 切片是拷贝，数组/切片是零拷贝视图。
-- 函数值：直接写函数名，经 `callr` 间接调用（≤6 参，实参不能是 struct/slice，无捕获）。
+- 函数值：直接写函数名，经 `callr` 间接调用（v1.42：8 参、聚合/切片实参按值编组；
+  无捕获，闭包见下一条）。返回值按标量处理——聚合/切片返回的函数不可间接调用；
+  间接调用无签名校验，聚合实参要求目标形参是聚合类型（与标量路径同信任级）。
 - 强制转换：`to_int(x)` / `to_float(x)` / `to_f32(x)`。
 
 ## 7. 内建函数（67 个）
@@ -379,25 +419,32 @@ enum 布局本就是 1+最大载荷字，零新机制）。`?` 所在函数必�
 | `x = expr`（x 为窄变量） | 同上 |
 | 形参 `fn f(x: u8)` | **入口**截断（传 300 → 44） |
 | 返回值 `-> i8` | **出口**截断（`127+1` → `-128`） |
+| struct 窄字段（字面量 / `p.f =` / `p.f +=`） | **存槽**截断（v1.40） |
+| enum 窄载荷（变体构造） | **存槽**截断（v1.40） |
+| `vec[u8]` 元素（`push` / `set`） | **存槽**截断（v1.40） |
+| `[N]u8` 定长数组（字面量 / `a[i] =` / `a[i] +=` / 整体赋值拷入 / 形参拷贝） | **存槽**截断（v1.40） |
+| 切片别名写入（`slice_of(a)` 后 `s[i] =` / `s[i] +=`，含子切片与 `[]T` 形参） | **存槽**截断（v1.56，按元素声明宽度） |
 | 表达式内部 | **不截断**，按 C 提升（`u8 200 + 100 == 300`） |
 
-未覆盖：struct 字段存窄值不截断（字段类型只用于布局）；`vec[u8]` 元素仍是 8 字节槽。
+边界（如实登记）：`vec[u8]` 元素**仍是 8 字节槽**（语义已对，内存打包见 `07-gaps.md` §5）。
 
-证据：`tests/t49_width.qma`（14 条断言）。
+证据：`tests/t49_width.qma`（14 条断言）、`tests/t85_narrowstore.qma`（20 条断言，v1.40）、
+`tests/t94_slice_narrow.qma`（16 条断言，v1.56 切片别名写入）。
 
-### 8.2 `@simd`：两种形状，不是向量化器
+### 8.2 `@simd`：三种形状，不是向量化器
 
 | 形状 | 指令 | 要求 |
 |---|---|---|
 | `acc += a[i]`，`acc: int`，`a: [N]int` | SSE2 `paddq` 两路 | 循环体只有这一条语句 |
 | `acc += a[i]`，`acc: f64`，`a: [N]f64` | SSE2 `addpd` 两路 | 同上 |
+| `acc += a[i] * b[i]`，`acc: f64`，`a/b: [N]f64` | SSE2 `mulpd` 两路（v1.57） | 同上，两数组同长 |
 
 - 逐元素越界检查**被跳过**，调用方保证 `lo..hi ⊆ [0, len(a)]`。
 - f64 归约**改变求和顺序**，结果可能与标量版不逐位相等（2 的幂可逐位验证）。
 - 形状不匹配：函数级注解静默回落标量；语句级注解直接编译报错。
-- 点积 `a[i]*b[i]` 需要 AVX2 `vpmullq`，未做。
+- f64 点积已接（v1.57）：SSE2 `mulpd` 两路，求和顺序同样改变（测试值精确可表示时与标量逐位相等）。int 点积需 SSE4.1 `pmulld`（int64 无 SSE2 乘法）、AVX2 4 通道留待。
 
-证据：`tests/t50_simd.qma`、`tests/t59_simdf64.qma`。
+证据：`tests/t50_simd.qma`、`tests/t59_simdf64.qma`、`tests/t96_simddot.qma`；`bench/dot_bench.qma`（1024 f64 点积 4.6×）。
 
 ### 8.3 `rc[T]` 与所有权检查
 
@@ -435,6 +482,34 @@ rc_drop(c)               // count 1
 | `arena { }` | bump 指针回卷 | 整块回收，无单对象释放 |
 | `atomic_*` | `lock xadd` / `lock cmpxchg` | AArch64 未接 |
 
+### 8.6 `defer`：块级清理（v1.48）
+
+```quelmara
+fn use(log: vec[int]) {
+    let mut n = 0
+    defer n = 99          // LIFO：同块内后写的先执行
+    defer log.push(n)     // 读的是【退出时】的值
+    n = 1
+}                         // 退出：push(1) → n = 99
+```
+
+| 项 | 语义 |
+|---|---|
+| 作用域 | 语句所在的块（函数体 / `if` / `while` / `for` / `match` 分支体）；内层块先跑 |
+| 顺序 | LIFO（同块内后写的先执行） |
+| 触发点 | 块正常结束、`return`、`break`、`continue` 跳出该块 |
+| 登记 | 是**语句**：执行到才登记——`if c { break }` 写在 defer 之前时那条路径不执行 |
+| 取值 | 变量按**退出时**的值读，不是登记时的值 |
+| 返回值 | `return expr` 先求值、再跑 defer；defer 改局部变量不影响已算出的返回值 |
+| 可写形态 | 表达式 / `=` / 字段赋值 / 下标赋值 |
+| 拒绝 | `defer let ...` 等带作用域的语句 → 编译期报错；C 后端整体不支持（fail-fast） |
+
+实现：块入口给块内每条 defer 分配一个"已登记"标志位（初值 0），执行到 defer 置 1，
+退出点 `if flag { 清理 }`。标志位是**语义必需**而非优化——否则 `break` 早于 defer 的
+路径会误跑清理。`break`/`continue` 只跑到循环体帧，函数帧留到 `return`/函数尾。
+
+证据：`tests/t91_defer.qma`（13 组断言）、`tests/bad/defer_let.qma`（必须编译失败）。
+
 ## 9. 已知陷阱（写代码前先看）
 
 1. **`s + n` 会被字符串拼接劫持**——指针算术一律用 `mem_ptr(p, off)`；`str + int` 现在是编译错误。
@@ -449,6 +524,8 @@ rc_drop(c)               // count 1
 9. **泛型调用推不出类型参数时报错**：`f(...)` 按实参推导；推不出（如唯一约束形参
    不是类型参数）时报错并提示 `f[T](...)`。跨文件前向泛型（被调用方后解析）仍须显式。
 10. **`vec[map]` 存的是句柄**（v1.37）：`vec.clear/扩容` 不释放 map 本身；
-    `map[str]Struct`（结构体值）仍不支持。
+    `map[K]Struct` 是**按值存储**（v1.41）：`set` 拷 N 字进表槽、`get` 拷出副本，
+    改副本不影响表内——与 struct 赋值同语义；struct 里的 vec/map/chan 字段
+    是句柄，随值拷贝、底层共享（陷阱 7 同款）。
 11. **`substr(s, start, count)` 的第二参是长度，不是结束位置**——`substr("abcde", 1, 4)` 得
     `"bcde"`（4 个字符），不是 `"bcd"`。切片语法 `s[lo..hi]` 才是左闭右开。

@@ -1,0 +1,14 @@
+// 负向夹具：const 右值里只能调用 const fn，普通函数必须编译期拒绝
+// 理由：普通函数可能有 I/O / 分配 / 全局状态，编译期执行它们等于在解析期
+// 跑用户程序——语义与副作用都不可控。fail-fast，不静默跳过求值。
+module constfn_call
+
+fn runtime_only(n: int) -> int {
+    return n + 1
+}
+
+const X = runtime_only(1)
+
+fn main() {
+    print(X)
+}

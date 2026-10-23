@@ -1,0 +1,12 @@
+// 负向夹具：const fn 只支持 int / bool 形参，str 形参必须编译期拒绝
+// 理由：编译期解释器不建字符串对象（str 是长度前缀指针，运行时才有内存），
+// 静默放过会让 const 求值读到编译期不存在的东西。
+module constfn_str
+
+const fn f(s: str) -> int {
+    return 1
+}
+
+fn main() {
+    print(f("x"))
+}

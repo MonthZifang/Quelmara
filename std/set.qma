@@ -21,11 +21,11 @@
 // set[int]
 // ---------------------------------------------------------------------------
 
-fn iset_new(cap: int) -> map[int]int {
+pub fn iset_new(cap: int) -> map[int]int {
     return map[int]int.new(cap)
 }
 
-fn iset_add(s: map[int]int, v: int) -> int {
+pub fn iset_add(s: map[int]int, v: int) -> int {
     if s.has(v) {
         return 0
     }
@@ -33,11 +33,11 @@ fn iset_add(s: map[int]int, v: int) -> int {
     return 1
 }
 
-fn iset_has(s: map[int]int, v: int) -> bool {
+pub fn iset_has(s: map[int]int, v: int) -> bool {
     return s.has(v)
 }
 
-fn iset_del(s: map[int]int, v: int) -> int {
+pub fn iset_del(s: map[int]int, v: int) -> int {
     // map.del 没有返回值（运行时恒返回 0），所以先 has 再 del 才能报"删没删到"
     if !s.has(v) {
         return 0
@@ -46,12 +46,12 @@ fn iset_del(s: map[int]int, v: int) -> int {
     return 1
 }
 
-fn iset_len(s: map[int]int) -> int {
+pub fn iset_len(s: map[int]int) -> int {
     return len(s)
 }
 
 // iset_to_vec(s) -> vec[int]：导出成 vec（遍历顺序未定义，需要有序自行排序）
-fn iset_to_vec(s: map[int]int) -> vec[int] {
+pub fn iset_to_vec(s: map[int]int) -> vec[int] {
     let out = vec[int].new(len(s) + 1)
     for k in s {
         out.push(k)
@@ -60,7 +60,7 @@ fn iset_to_vec(s: map[int]int) -> vec[int] {
 }
 
 // iset_union_into(dst, src) -> int：把 src 并入 dst，返回新增个数
-fn iset_union_into(dst: map[int]int, src: map[int]int) -> int {
+pub fn iset_union_into(dst: map[int]int, src: map[int]int) -> int {
     let mut added = 0
     for k in src {
         added = added + iset_add(dst, k)
@@ -69,7 +69,7 @@ fn iset_union_into(dst: map[int]int, src: map[int]int) -> int {
 }
 
 // iset_isect(a, b) -> vec[int]：交集（结果无序）
-fn iset_isect(a: map[int]int, b: map[int]int) -> vec[int] {
+pub fn iset_isect(a: map[int]int, b: map[int]int) -> vec[int] {
     let out = vec[int].new(4)
     // 遍历较小的那个：命中率决定成本
     if len(a) <= len(b) {
@@ -89,7 +89,7 @@ fn iset_isect(a: map[int]int, b: map[int]int) -> vec[int] {
 }
 
 // iset_diff(a, b) -> vec[int]：差集 a - b（结果无序）
-fn iset_diff(a: map[int]int, b: map[int]int) -> vec[int] {
+pub fn iset_diff(a: map[int]int, b: map[int]int) -> vec[int] {
     let out = vec[int].new(4)
     for k in a {
         if !b.has(k) {
@@ -103,11 +103,11 @@ fn iset_diff(a: map[int]int, b: map[int]int) -> vec[int] {
 // set[str]
 // ---------------------------------------------------------------------------
 
-fn sset_new(cap: int) -> map[str]int {
+pub fn sset_new(cap: int) -> map[str]int {
     return map[str]int.new(cap)
 }
 
-fn sset_add(s: map[str]int, v: str) -> int {
+pub fn sset_add(s: map[str]int, v: str) -> int {
     if s.has(v) {
         return 0
     }
@@ -115,11 +115,11 @@ fn sset_add(s: map[str]int, v: str) -> int {
     return 1
 }
 
-fn sset_has(s: map[str]int, v: str) -> bool {
+pub fn sset_has(s: map[str]int, v: str) -> bool {
     return s.has(v)
 }
 
-fn sset_del(s: map[str]int, v: str) -> int {
+pub fn sset_del(s: map[str]int, v: str) -> int {
     if !s.has(v) {
         return 0
     }
@@ -127,7 +127,7 @@ fn sset_del(s: map[str]int, v: str) -> int {
     return 1
 }
 
-fn sset_len(s: map[str]int) -> int {
+pub fn sset_len(s: map[str]int) -> int {
     return len(s)
 }
 

@@ -24,7 +24,7 @@ fn hex_val(c: int) -> int {
     return -1
 }
 
-fn hex_encode(s: str) -> str {
+pub fn hex_encode(s: str) -> str {
     let n = len(s)
     let out = vec[int].new(n * 2 + 1)
     let mut i = 0
@@ -47,7 +47,7 @@ fn hex_encode(s: str) -> str {
     return str_from_bytes(out)
 }
 
-fn hex_encode_upper(s: str) -> str {
+pub fn hex_encode_upper(s: str) -> str {
     let n = len(s)
     let out = vec[int].new(n * 2 + 1)
     let mut i = 0
@@ -70,7 +70,7 @@ fn hex_encode_upper(s: str) -> str {
     return str_from_bytes(out)
 }
 
-fn hex_decode_ok(s: str) -> int {
+pub fn hex_decode_ok(s: str) -> int {
     let n = len(s)
     if (n & 1) != 0 {
         return 0
@@ -85,7 +85,7 @@ fn hex_decode_ok(s: str) -> int {
     return 1
 }
 
-fn hex_decode(s: str) -> str {
+pub fn hex_decode(s: str) -> str {
     let n = len(s)
     if (n & 1) != 0 {
         assert(false, "hex_decode: 长度为奇数")

@@ -1,0 +1,84 @@
+// t86_mapstruct.qma：map 值扩容——聚合值全形态（v1.41）
+// 覆盖：
+//   1) map[str]Struct：set 拷入 / get 拷出 / has / 覆盖写 / 拷出即副本
+//   2) 扩容正确性：40 条逼出 rehash，值逐字搬运后全部可取回（map[int]P）
+//   3) del 墓碑 + 复用墓碑插入（聚合值路径）
+//   4) 含 str/vec 字段的 struct：句柄字段按字拷贝、底层共享（句柄语义）
+//   5) map[str]Enum：枚举值 + match 解构
+//   6) 标量 map 与聚合 map 共存（运行时按控制块槽宽分派）
+// 语义纪律：值槽按 agg 布局 N 字（布局期定宽），set/get 按值拷入拷出——
+//          与 struct 拷贝同语义；键仍限 int/bool/str 标量。
+//          for x in m 只产出键（既有设计，不变）。
+module t86
+
+struct P { x: int, y: int }
+struct Rec { name: str, score: int, tags: vec[str] }
+enum E {
+    A
+    B(v: int)
+}
+
+fn main() {
+    // 1) 基本存取
+    let m = map[str]P.new(4)
+    m.set("a", P { x: 1, y: 2 })
+    m.set("b", P { x: 3, y: 4 })
+    let pa = m.get("a")
+    assert(pa.x == 1 and pa.y == 2, "struct value get")
+    assert(m.has("a") and !m.has("zz"), "has")
+    assert(len(m) == 2, "len")
+
+    // 覆盖写（聚合值走 _n 路径的更新分支）
+    m.set("a", P { x: 9, y: 9 })
+    let pa2 = m.get("a")
+    assert(pa2.x == 9 and pa2.y == 9, "overwrite")
+
+    // 拷出是副本：改副本不影响表内
+    pa2.x = 100
+    assert(m.get("a").x == 9, "get returns a copy")
+
+    // 2) 扩容：40 条逼出两次 rehash，值逐字搬运
+    let big = map[int]P.new(4)
+    let n = 40
+    for i in 0..n {
+        big.set(i, P { x: i, y: i * 2 })
+    }
+    assert(len(big) == n, "len after grow")
+    for k in big {
+        let v = big.get(k)
+        assert(v.x == k and v.y == k * 2, "grow keeps values")
+    }
+
+    // 3) del + 墓碑复用
+    big.del(5)
+    assert(!big.has(5) and len(big) == n - 1, "del")
+    big.set(5, P { x: 50, y: 100 })
+    assert(big.get(5).x == 50 and big.get(5).y == 100, "reuse after del")
+
+    // 4) 含句柄字段的 struct（句柄 1 字随值拷贝、底层共享）
+    let r = map[str]Rec.new(4)
+    let t = vec[str].new(2)
+    t.push("x")
+    r.set("r1", Rec { name: "n1", score: 7, tags: t })
+    let got = r.get("r1")
+    assert(got.name == "n1" and got.score == 7, "rec fields")
+    assert(got.tags.get(0) == "x", "handle field survives map roundtrip")
+    got.tags.push("y")
+    assert(t.len() == 2, "handle semantics: shared backing")
+
+    // 5) 枚举值 + match 解构
+    let em = map[str]E.new(4)
+    em.set("k", E.B(v: 42))
+    match em.get("k") {
+        E.B(v) => { assert(v == 42, "enum value get") }
+        E.A => { assert(false, "wrong variant") }
+    }
+
+    // 6) 标量 map 与聚合 map 共存（运行时槽宽分派互不干扰）
+    let scalar = map[str]int.new(4)
+    scalar.set("s", 5)
+    m.set("c", P { x: 7, y: 8 })
+    assert(scalar.get("s") == 5 and m.get("c").x == 7, "scalar+agg coexist")
+
+    print("mapstruct ok")
+}

@@ -34,7 +34,7 @@ fn utf8_char_len(b: int) -> int {
 }
 
 // utf8_decode_at(s, i) -> int：解出 i 处码点；非法返回 -1
-fn utf8_decode_at(s: str, i: int) -> int {
+pub fn utf8_decode_at(s: str, i: int) -> int {
     let n = len(s)
     if i < 0 || i >= n {
         return -1
@@ -82,7 +82,7 @@ fn utf8_decode_at(s: str, i: int) -> int {
 }
 
 // utf8_valid(s) -> bool：整串严格校验（上面四条全查）
-fn utf8_valid(s: str) -> bool {
+pub fn utf8_valid(s: str) -> bool {
     let n = len(s)
     let mut i = 0
     while i < n {
@@ -96,7 +96,7 @@ fn utf8_valid(s: str) -> bool {
 }
 
 // utf8_encode(cp) -> str：码点编码成 UTF-8（非法码点写成 U+FFFD）
-fn utf8_encode(cp: int) -> str {
+pub fn utf8_encode(cp: int) -> str {
     let buf = mem_alloc(5)
     let mut n = 0
     if cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) {
@@ -131,7 +131,7 @@ fn utf8_encode(cp: int) -> str {
 // ---------------------------------------------------------------------------
 
 // utf8_count(s) -> int：字符数（非法字节各算 1）
-fn utf8_count(s: str) -> int {
+pub fn utf8_count(s: str) -> int {
     let n = len(s)
     let mut i = 0
     let mut c = 0
@@ -148,7 +148,7 @@ fn utf8_count(s: str) -> int {
 }
 
 // utf8_byte_of_char(s, ci) -> int：第 ci 个字符的起始字节偏移；越界返回 -1
-fn utf8_byte_of_char(s: str, ci: int) -> int {
+pub fn utf8_byte_of_char(s: str, ci: int) -> int {
     let n = len(s)
     if ci < 0 {
         return -1
@@ -174,7 +174,7 @@ fn utf8_byte_of_char(s: str, ci: int) -> int {
 }
 
 // utf8_slice(s, lo, hi) -> str：按**字符**下标切片（半开区间，越界自动夹紧）
-fn utf8_slice(s: str, lo: int, hi: int) -> str {
+pub fn utf8_slice(s: str, lo: int, hi: int) -> str {
     let n = len(s)
     let cnt = utf8_count(s)
     let mut a = lo
@@ -197,7 +197,7 @@ fn utf8_slice(s: str, lo: int, hi: int) -> str {
 }
 
 // utf8_to_chars(s) -> vec[int]：码点序列（非法位置填 -1，便于测试定位）
-fn utf8_to_chars(s: str) -> vec[int] {
+pub fn utf8_to_chars(s: str) -> vec[int] {
     let n = len(s)
     let out = vec[int].new(utf8_count(s) + 1)
     let mut i = 0

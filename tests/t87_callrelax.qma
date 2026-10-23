@@ -1,0 +1,81 @@
+// t87_callrelax.qma：函数值放宽（v1.42）
+// 覆盖：
+//   1) 8 参直接调用（6 寄存器 + 2 栈传参：自研 ABI 溢出区，v1.42）
+//   2) 8 参间接调用（callr 同布局）：let 绑定 + 分派（同变量持不同目标）
+//   3) 聚合实参经 callr：struct 按值编组（拷临时槽传地址）
+//   4) 值语义：callee 改字段不影响 caller 的 struct
+//   5) 切片实参经 callr：2 字头拷贝， callee 读元素
+//   6) 既有 6 参内行为不回退（寄存器路径逐字节不变）
+// 语义纪律：无签名信息——返回值按标量处理（聚合/切片返回的目标不可间接
+//          调用）；聚合实参编组与直接调用同语义；仍无捕获（闭包另有条目）。
+module t87
+
+struct P { x: int, y: int }
+
+fn sum8(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int) -> int {
+    return a + b + c + d + e + f + g + h
+}
+
+fn mix8(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int) -> int {
+    return a * 1 + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8
+}
+
+fn add3(a: int, b: int, c: int) -> int {
+    return a * 100 + b * 10 + c
+}
+
+fn getx(p: P) -> int {
+    return p.x
+}
+
+fn mutx(p: P) -> int {
+    p.x = 99
+    return p.x
+}
+
+fn first_of(s: []int) -> int {
+    return s[0]
+}
+
+fn apply3(f: int, a: int, b: int, c: int) -> int {
+    return f(a, b, c)
+}
+
+fn main() {
+    // 1) 8 参直接调用（溢出区走栈）
+    assert(sum8(1, 2, 3, 4, 5, 6, 7, 8) == 36, "direct 8-arg")
+    assert(mix8(1, 2, 3, 4, 5, 6, 7, 8) == 204, "direct 8-arg weighted")
+
+    // 2) 8 参间接调用
+    let g = sum8
+    assert(g(1, 2, 3, 4, 5, 6, 7, 8) == 36, "callr 8-arg")
+    let m = mix8
+    assert(m(1, 2, 3, 4, 5, 6, 7, 8) == 204, "callr 8-arg weighted")
+    // 分派：同一调用点两种 8 参目标
+    let mut h = sum8
+    assert(h(0, 0, 0, 0, 0, 0, 0, 1) == 1, "dispatch-a")
+    h = mix8
+    assert(h(0, 0, 0, 0, 0, 0, 0, 1) == 8, "dispatch-b")
+
+    // 3) struct 实参经 callr（拷临时槽传地址）
+    let gp = getx
+    let p = P { x: 5, y: 6 }
+    assert(gp(p) == 5, "struct arg via callr")
+
+    // 4) 值语义：callee 改字段不影响 caller
+    let mp = mutx
+    assert(mp(p) == 99, "callee mutation visible in return")
+    assert(p.x == 5, "caller struct unchanged")
+
+    // 5) 切片实参经 callr（2 字头拷贝）
+    let fs = first_of
+    let a = [10, 20, 30]
+    assert(fs(slice_of(a)) == 10, "slice arg via callr")
+
+    // 6) 既有小参数量行为不回退（寄存器路径）
+    let a3 = add3
+    assert(a3(1, 2, 3) == 123, "3-arg unchanged")
+    assert(apply3(a3, 4, 5, 6) == 456, "fn value as arg")
+
+    print("callrelax ok")
+}

@@ -1,0 +1,419 @@
+// std/sha512.qma —— SHA-512 + HMAC-SHA512（FIPS 180-4 / RFC 2104），Quelmara 自实现
+//
+// 为什么需要：07-gaps §2「哈希」行点名的空缺——SHA-384 是它的截断形态（见
+// sha384_hex），TLS 1.3 的 SHA-384 PRF、大文件签名、长消息 MAC 都靠它。
+//
+// 实现要点（与 std/sha256.qma 同一套纪律，按 64 位字宽落地）：
+//   * int 是 64 位——SHA-512 的 uint64 运算原生落地，加法回绕免费、无需掩码；
+//   * **右移必须 >>>（逻辑右移）**：64 位值可能为负（>2^63 的轮常量以补码
+//     存储），>> 会灌符号位（GHASH 的教训，docs/STATUS 有记录）；
+//   * 循环右移 = (x >>> n) | (x << (64 - n))——64 位原生宽度，无需 & 掩码；
+//   * 按位非 = x ^ 0xFFFFFFFFFFFFFFFF（一元 ~ 不存在）；
+//   * 旋转按常量位移内联（sha256 v1.34 的同款优化：每块 80 轮，调用开销即全部成本）；
+//   * 消息调度表 80 字、轮常量表、状态区全部堆上分配，返回前归还；
+//   * 摘要缓冲区含 0 字节，不能当 str 用——要字符串走 *_hex。
+const K512_0  = 0x428A2F98D728AE22  const K512_1  = 0x7137449123EF65CD  const K512_2  = 0xB5C0FBCFEC4D3B2F  const K512_3  = 0xE9B5DBA58189DBBC
+const K512_4  = 0x3956C25BF348B538  const K512_5  = 0x59F111F1B605D019  const K512_6  = 0x923F82A4AF194F9B  const K512_7  = 0xAB1C5ED5DA6D8118
+const K512_8  = 0xD807AA98A3030242  const K512_9  = 0x12835B0145706FBE  const K512_10 = 0x243185BE4EE4B28C  const K512_11 = 0x550C7DC3D5FFB4E2
+const K512_12 = 0x72BE5D74F27B896F  const K512_13 = 0x80DEB1FE3B1696B1  const K512_14 = 0x9BDC06A725C71235  const K512_15 = 0xC19BF174CF692694
+const K512_16 = 0xE49B69C19EF14AD2  const K512_17 = 0xEFBE4786384F25E3  const K512_18 = 0x0FC19DC68B8CD5B5  const K512_19 = 0x240CA1CC77AC9C65
+const K512_20 = 0x2DE92C6F592B0275  const K512_21 = 0x4A7484AA6EA6E483  const K512_22 = 0x5CB0A9DCBD41FBD4  const K512_23 = 0x76F988DA831153B5
+const K512_24 = 0x983E5152EE66DFAB  const K512_25 = 0xA831C66D2DB43210  const K512_26 = 0xB00327C898FB213F  const K512_27 = 0xBF597FC7BEEF0EE4
+const K512_28 = 0xC6E00BF33DA88FC2  const K512_29 = 0xD5A79147930AA725  const K512_30 = 0x06CA6351E003826F  const K512_31 = 0x142929670A0E6E70
+const K512_32 = 0x27B70A8546D22FFC  const K512_33 = 0x2E1B21385C26C926  const K512_34 = 0x4D2C6DFC5AC42AED  const K512_35 = 0x53380D139D95B3DF
+const K512_36 = 0x650A73548BAF63DE  const K512_37 = 0x766A0ABB3C77B2A8  const K512_38 = 0x81C2C92E47EDAEE6  const K512_39 = 0x92722C851482353B
+const K512_40 = 0xA2BFE8A14CF10364  const K512_41 = 0xA81A664BBC423001  const K512_42 = 0xC24B8B70D0F89791  const K512_43 = 0xC76C51A30654BE30
+const K512_44 = 0xD192E819D6EF5218  const K512_45 = 0xD69906245565A910  const K512_46 = 0xF40E35855771202A  const K512_47 = 0x106AA07032BBD1B8
+const K512_48 = 0x19A4C116B8D2D0C8  const K512_49 = 0x1E376C085141AB53  const K512_50 = 0x2748774CDF8EEB99  const K512_51 = 0x34B0BCB5E19B48A8
+const K512_52 = 0x391C0CB3C5C95A63  const K512_53 = 0x4ED8AA4AE3418ACB  const K512_54 = 0x5B9CCA4F7763E373  const K512_55 = 0x682E6FF3D6B2B8A3
+const K512_56 = 0x748F82EE5DEFB2FC  const K512_57 = 0x78A5636F43172F60  const K512_58 = 0x84C87814A1F0AB72  const K512_59 = 0x8CC702081A6439EC
+const K512_60 = 0x90BEFFFA23631E28  const K512_61 = 0xA4506CEBDE82BDE9  const K512_62 = 0xBEF9A3F7B2C67915  const K512_63 = 0xC67178F2E372532B
+const K512_64 = 0xCA273ECEEA26619C  const K512_65 = 0xD186B8C721C0C207  const K512_66 = 0xEADA7DD6CDE0EB1E  const K512_67 = 0xF57D4F7FEE6ED178
+const K512_68 = 0x06F067AA72176FBA  const K512_69 = 0x0A637DC5A2C898A6  const K512_70 = 0x113F9804BEF90DAE  const K512_71 = 0x1B710B35131C471B
+const K512_72 = 0x28DB77F523047D84  const K512_73 = 0x32CAAB7B40C72493  const K512_74 = 0x3C9EBE0A15C9BEBC  const K512_75 = 0x431D67C49C100D4C
+const K512_76 = 0x4CC5D4BECB3E42B6  const K512_77 = 0x597F299CFC657E2A  const K512_78 = 0x5FCB6FAB3AD6FAEC  const K512_79 = 0x6C44198C4A475817
+// ---------------------------------------------------------------------------
+// 轮常量表（v1.51 同款：整个消息只建一次，每轮一次 mem_load64）
+// ---------------------------------------------------------------------------
+
+fn _sha512_ktab(t: int) -> int {
+    mem_store64(t, 0, K512_0)
+    mem_store64(t, 1, K512_1)
+    mem_store64(t, 2, K512_2)
+    mem_store64(t, 3, K512_3)
+    mem_store64(t, 4, K512_4)
+    mem_store64(t, 5, K512_5)
+    mem_store64(t, 6, K512_6)
+    mem_store64(t, 7, K512_7)
+    mem_store64(t, 8, K512_8)
+    mem_store64(t, 9, K512_9)
+    mem_store64(t, 10, K512_10)
+    mem_store64(t, 11, K512_11)
+    mem_store64(t, 12, K512_12)
+    mem_store64(t, 13, K512_13)
+    mem_store64(t, 14, K512_14)
+    mem_store64(t, 15, K512_15)
+    mem_store64(t, 16, K512_16)
+    mem_store64(t, 17, K512_17)
+    mem_store64(t, 18, K512_18)
+    mem_store64(t, 19, K512_19)
+    mem_store64(t, 20, K512_20)
+    mem_store64(t, 21, K512_21)
+    mem_store64(t, 22, K512_22)
+    mem_store64(t, 23, K512_23)
+    mem_store64(t, 24, K512_24)
+    mem_store64(t, 25, K512_25)
+    mem_store64(t, 26, K512_26)
+    mem_store64(t, 27, K512_27)
+    mem_store64(t, 28, K512_28)
+    mem_store64(t, 29, K512_29)
+    mem_store64(t, 30, K512_30)
+    mem_store64(t, 31, K512_31)
+    mem_store64(t, 32, K512_32)
+    mem_store64(t, 33, K512_33)
+    mem_store64(t, 34, K512_34)
+    mem_store64(t, 35, K512_35)
+    mem_store64(t, 36, K512_36)
+    mem_store64(t, 37, K512_37)
+    mem_store64(t, 38, K512_38)
+    mem_store64(t, 39, K512_39)
+    mem_store64(t, 40, K512_40)
+    mem_store64(t, 41, K512_41)
+    mem_store64(t, 42, K512_42)
+    mem_store64(t, 43, K512_43)
+    mem_store64(t, 44, K512_44)
+    mem_store64(t, 45, K512_45)
+    mem_store64(t, 46, K512_46)
+    mem_store64(t, 47, K512_47)
+    mem_store64(t, 48, K512_48)
+    mem_store64(t, 49, K512_49)
+    mem_store64(t, 50, K512_50)
+    mem_store64(t, 51, K512_51)
+    mem_store64(t, 52, K512_52)
+    mem_store64(t, 53, K512_53)
+    mem_store64(t, 54, K512_54)
+    mem_store64(t, 55, K512_55)
+    mem_store64(t, 56, K512_56)
+    mem_store64(t, 57, K512_57)
+    mem_store64(t, 58, K512_58)
+    mem_store64(t, 59, K512_59)
+    mem_store64(t, 60, K512_60)
+    mem_store64(t, 61, K512_61)
+    mem_store64(t, 62, K512_62)
+    mem_store64(t, 63, K512_63)
+    mem_store64(t, 64, K512_64)
+    mem_store64(t, 65, K512_65)
+    mem_store64(t, 66, K512_66)
+    mem_store64(t, 67, K512_67)
+    mem_store64(t, 68, K512_68)
+    mem_store64(t, 69, K512_69)
+    mem_store64(t, 70, K512_70)
+    mem_store64(t, 71, K512_71)
+    mem_store64(t, 72, K512_72)
+    mem_store64(t, 73, K512_73)
+    mem_store64(t, 74, K512_74)
+    mem_store64(t, 75, K512_75)
+    mem_store64(t, 76, K512_76)
+    mem_store64(t, 77, K512_77)
+    mem_store64(t, 78, K512_78)
+    mem_store64(t, 79, K512_79)
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// 块处理
+// ---------------------------------------------------------------------------
+
+// 读 16 个大端 64 位字，扩展到 80 字调度表
+fn _sha512_load_block(block: int, w: int) -> int {
+    let mut i = 0
+    while i < 16 {
+        let b0 = mem_load8(block, i * 8)
+        let b1 = mem_load8(block, i * 8 + 1)
+        let b2 = mem_load8(block, i * 8 + 2)
+        let b3 = mem_load8(block, i * 8 + 3)
+        let b4 = mem_load8(block, i * 8 + 4)
+        let b5 = mem_load8(block, i * 8 + 5)
+        let b6 = mem_load8(block, i * 8 + 6)
+        let b7 = mem_load8(block, i * 8 + 7)
+        mem_store64(w, i, (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) |
+                          (b4 << 24) | (b5 << 16) | (b6 << 8) | b7)
+        i = i + 1
+    }
+    let mut j = 16
+    while j < 80 {
+        let x = mem_load64(w, j - 15)
+        let y = mem_load64(w, j - 2)
+        // s0 = rotr(x,1) ^ rotr(x,8) ^ (x >>> 7)
+        let s0 = (((x >>> 1) | (x << 63)) ^ ((x >>> 8) | (x << 56)) ^ (x >>> 7))
+        // s1 = rotr(y,19) ^ rotr(y,61) ^ (y >>> 6)
+        let s1 = (((y >>> 19) | (y << 45)) ^ ((y >>> 61) | (y << 3)) ^ (y >>> 6))
+        let v = mem_load64(w, j - 16) + s0 + mem_load64(w, j - 7) + s1
+        mem_store64(w, j, v)
+        j = j + 1
+    }
+    return 0
+}
+
+fn _sha512_block(state: int, block: int, w: int, kt: int) -> int {
+    _sha512_load_block(block, w)
+    let mut a = mem_load64(state, 0)
+    let mut b = mem_load64(state, 1)
+    let mut c = mem_load64(state, 2)
+    let mut d = mem_load64(state, 3)
+    let mut e = mem_load64(state, 4)
+    let mut f = mem_load64(state, 5)
+    let mut g = mem_load64(state, 6)
+    let mut h = mem_load64(state, 7)
+    let mut i = 0
+    while i < 80 {
+        // S1 = rotr(e,14) ^ rotr(e,18) ^ rotr(e,41)
+        let s1 = (((e >>> 14) | (e << 50)) ^ ((e >>> 18) | (e << 46)) ^
+                  ((e >>> 41) | (e << 23)))
+        let ch = ((e & f) ^ ((e ^ 0xFFFFFFFFFFFFFFFF) & g))
+        let t1 = h + s1 + ch + mem_load64(kt, i) + mem_load64(w, i)
+        // S0 = rotr(a,28) ^ rotr(a,34) ^ rotr(a,39)
+        let s0 = (((a >>> 28) | (a << 36)) ^ ((a >>> 34) | (a << 30)) ^
+                  ((a >>> 39) | (a << 25)))
+        let maj = ((a & b) ^ (a & c) ^ (b & c))
+        let t2 = s0 + maj
+        h = g
+        g = f
+        f = e
+        e = d + t1
+        d = c
+        c = b
+        b = a
+        a = t1 + t2
+        i = i + 1
+    }
+    mem_store64(state, 0, mem_load64(state, 0) + a)
+    mem_store64(state, 1, mem_load64(state, 1) + b)
+    mem_store64(state, 2, mem_load64(state, 2) + c)
+    mem_store64(state, 3, mem_load64(state, 3) + d)
+    mem_store64(state, 4, mem_load64(state, 4) + e)
+    mem_store64(state, 5, mem_load64(state, 5) + f)
+    mem_store64(state, 6, mem_load64(state, 6) + g)
+    mem_store64(state, 7, mem_load64(state, 7) + h)
+    return 0
+}
+
+fn _sha512_init(state: int) -> int {
+    mem_store64(state, 0, 0x6A09E667F3BCC908)
+    mem_store64(state, 1, 0xBB67AE8584CAA73B)
+    mem_store64(state, 2, 0x3C6EF372FE94F82B)
+    mem_store64(state, 3, 0xA54FF53A5F1D36F1)
+    mem_store64(state, 4, 0x510E527FADE682D1)
+    mem_store64(state, 5, 0x9B05688C2B3E6C1F)
+    mem_store64(state, 6, 0x1F83D9ABFB41BD6B)
+    mem_store64(state, 7, 0x5BE0CD19137E2179)
+    return 0
+}
+
+// 内部：对 n 字节缓冲（含 0 字节）做摘要，返回 64 字节摘要缓冲（调用方 free）。
+// variant：0 = SHA-512（全 64 字节），1 = SHA-384（同压缩函数、不同 IV）
+fn _sha512_core(buf: int, n: int, variant: int) -> int {
+    let total = ((n + 17 + 127) / 128) * 128
+    let work = mem_alloc(total)
+    mem_copy(work, buf, n)
+    mem_store8(work, n, 0x80)
+    mem_zero(work + n + 1, total - n - 1)
+    // 128 位大端位长：高 8 字节恒 0（mem_zero 已清零），只写低 8 字节
+    let bits = n * 8
+    let mut b = 8
+    while b < 16 {
+        mem_store8(work, total - 16 + b, (bits >>> (120 - b * 8)) & 0xFF)
+        b = b + 1
+    }
+    let state = mem_alloc(64)
+    if variant == 1 {
+        // SHA-384 IV：第 9-16 个素数的平方根小数部分
+        mem_store64(state, 0, 0xCBBB9D5DC1059ED8)
+        mem_store64(state, 1, 0x629A292A367CD507)
+        mem_store64(state, 2, 0x9159015A3070DD17)
+        mem_store64(state, 3, 0x152FECD8F70E5939)
+        mem_store64(state, 4, 0x67332667FFC00B31)
+        mem_store64(state, 5, 0x8EB44A8768581511)
+        mem_store64(state, 6, 0xDB0C2E0D64F98FA7)
+        mem_store64(state, 7, 0x47B5481DBEFA4FA4)
+    } else {
+        _sha512_init(state)
+    }
+    let w = mem_alloc(80 * 8)
+    let kt = mem_alloc(80 * 8)
+    _sha512_ktab(kt)
+    let mut off = 0
+    while off < total {
+        _sha512_block(state, work + off, w, kt)
+        off = off + 128
+    }
+    mem_free(kt, 80 * 8)
+    let out = mem_alloc(64)
+    let mut k = 0
+    while k < 8 {
+        let v = mem_load64(state, k)
+        let mut t = 0
+        while t < 8 {
+            mem_store8(out, k * 8 + t, (v >>> (56 - t * 8)) & 0xFF)
+            t = t + 1
+        }
+        k = k + 1
+    }
+    mem_free(work, total)
+    mem_free(w, 80 * 8)
+    mem_free(state, 64)
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// 公开 API
+// ---------------------------------------------------------------------------
+
+/// SHA-512 摘要缓冲区（64 字节，大端，含 0 字节不能当 str；用完 mem_free(d, 64)）
+pub fn sha512_str(s: str) -> int {
+    return _sha512_core(s, len(s), 0)
+}
+
+/// SHA-512 十六进制（128 位小写）
+pub fn sha512_hex(s: str) -> str {
+    let dig = sha512_str(s)
+    let out = mem_alloc(129)
+    let mut i = 0
+    while i < 64 {
+        let v = mem_load8(dig, i)
+        let hi = v >> 4
+        let lo = v & 15
+        if hi < 10 {
+            mem_store8(out, i * 2, 48 + hi)
+        } else {
+            mem_store8(out, i * 2, 87 + hi)
+        }
+        if lo < 10 {
+            mem_store8(out, i * 2 + 1, 48 + lo)
+        } else {
+            mem_store8(out, i * 2 + 1, 87 + lo)
+        }
+        i = i + 1
+    }
+    mem_store8(out, 128, 0)
+    let hex = mem_str(out, 128)
+    mem_free(out, 129)
+    mem_free(dig, 64)
+    return hex
+}
+
+/// SHA-384（FIPS 180-4 变体：不同的 IV，输出截断到前 48 字节）
+pub fn sha384_hex(s: str) -> str {
+    // SHA-384 = SHA-512 换 IV + 截断；复用同一压缩函数（variant=1）
+    let dig = _sha512_core(s, len(s), 1)
+    let out = mem_alloc(97)
+    let mut i = 0
+    while i < 48 {
+        let v = mem_load8(dig, i)
+        let hi = v >> 4
+        let lo = v & 15
+        if hi < 10 {
+            mem_store8(out, i * 2, 48 + hi)
+        } else {
+            mem_store8(out, i * 2, 87 + hi)
+        }
+        if lo < 10 {
+            mem_store8(out, i * 2 + 1, 48 + lo)
+        } else {
+            mem_store8(out, i * 2 + 1, 87 + lo)
+        }
+        i = i + 1
+    }
+    mem_store8(out, 96, 0)
+    let hex = mem_str(out, 96)
+    mem_free(out, 97)
+    mem_free(dig, 64)
+    return hex
+}
+
+// ---------------------------------------------------------------------------
+// HMAC-SHA512（RFC 2104：H((K^opad) || H((K^ipad) || m))，块长 128）
+// ---------------------------------------------------------------------------
+
+fn _hmac512_key_block(key: str, blk: int) -> int {
+    let n = len(key)
+    let mut used = 0
+    if n > 128 {
+        let dig = sha512_str(key)
+        let mut i = 0
+        while i < 64 {
+            mem_store8(blk, i, mem_load8(dig, i))
+            i = i + 1
+        }
+        mem_free(dig, 64)
+        used = 64
+    } else {
+        let mut i = 0
+        while i < n {
+            mem_store8(blk, i, key[i])
+            i = i + 1
+        }
+        used = n
+    }
+    let mut j = used
+    while j < 128 {
+        mem_store8(blk, j, 0)
+        j = j + 1
+    }
+    return 0
+}
+
+/// HMAC-SHA512 摘要缓冲区（64 字节；用完 mem_free(d, 64)）
+pub fn hmac_sha512_str(key: str, msg: str) -> int {
+    let blk = mem_alloc(128)
+    _hmac512_key_block(key, blk)
+    let inner_in = mem_alloc(128 + len(msg))
+    let mut i = 0
+    while i < 128 {
+        mem_store8(inner_in, i, mem_load8(blk, i) ^ 0x36)
+        i = i + 1
+    }
+    mem_copy(inner_in + 128, msg, len(msg))
+    let inner = _sha512_core(inner_in, 128 + len(msg), 0)
+    let outer_in = mem_alloc(192)
+    let mut j = 0
+    while j < 128 {
+        mem_store8(outer_in, j, mem_load8(blk, j) ^ 0x5C)
+        j = j + 1
+    }
+    mem_copy(outer_in + 128, inner, 64)
+    let out = _sha512_core(outer_in, 192, 0)
+    mem_free(blk, 128)
+    mem_free(inner_in, 128 + len(msg))
+    mem_free(inner, 64)
+    mem_free(outer_in, 192)
+    return out
+}
+
+/// HMAC-SHA512 十六进制（128 位小写）
+pub fn hmac_sha512_hex(key: str, msg: str) -> str {
+    let dig = hmac_sha512_str(key, msg)
+    let out = mem_alloc(129)
+    let mut i = 0
+    while i < 64 {
+        let v = mem_load8(dig, i)
+        let hi = v >> 4
+        let lo = v & 15
+        if hi < 10 {
+            mem_store8(out, i * 2, 48 + hi)
+        } else {
+            mem_store8(out, i * 2, 87 + hi)
+        }
+        if lo < 10 {
+            mem_store8(out, i * 2 + 1, 48 + lo)
+        } else {
+            mem_store8(out, i * 2 + 1, 87 + lo)
+        }
+        i = i + 1
+    }
+    mem_store8(out, 128, 0)
+    let hex = mem_str(out, 128)
+    mem_free(out, 129)
+    mem_free(dig, 64)
+    return hex
+}

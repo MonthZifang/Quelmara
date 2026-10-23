@@ -12,21 +12,21 @@
 | 用户泛型 | ✅ v1.36 | 多类型参数 + 调用点推导（流不敏感、尽力而为）；显式实例化仍在 | 调用点不再啰嗦；推不出编译期报错并提示显式 |
 | 泛型 struct / 泛型方法 | ❌ | — | 容器类只能手写或扁平化 |
 | 类型约束（trait bound） | ❌ | — | “T 须支持 <”是文档性的，违反它在 Lower 报类型错 |
-| `map[K]V` | 🟡 | V 仅 int/str，不能 `map[str]Struct` | 配置表/符号表要拆成平行 map |
+| `map[K]V` | ✅ v1.41 | V 支持 int/bool/str + 具名 struct/enum（值槽按 agg 布局 N 字，set/get 按值拷入拷出）；**键仍限标量**；复合容器（vec/map）作值不做（需 mapinner 标签链） | 配置表/符号表不再拆平行 map |
 | `vec[T]` | ✅ v1.37 | 标量/str/具名聚合/嵌套 vec（任意深度）/map 句柄全支持 | 元素即用即取，无扁平化成本 |
 | struct 内嵌套聚合 | ✅ v1.39 | 字段可装 vec/map/chan/slice/struct——vec/map/chan 按句柄 1 槽、slice 按 2 槽视图；方法/下标/派发全部可用 | 无（句柄语义即设计） |
-| 函数值 | 🟡 | `callr` ≤6 参、实参不能是 struct/slice、**无捕获**（无闭包） | 回调只能固定签名 |
+| 函数值 | ✅ v1.42 | `callr` 8 参 + struct/slice 实参（x86-64 第 7 参起走栈传参；A64 用满 X0-X7，>8 fail-fast）；**无捕获**（见下行"闭包 / 捕获"）；聚合返回值的目标不可间接调用 | 回调带聚合载荷可行；闭包是独立条目 |
 | 所有权检查 | 🟡 | **只查 `rc[T]` 句柄**；struct/数组/str 的别名与生命周期不查，并发竞争不查 | 不能对外宣称"Rust 那套借用检查" |
 | `interface` | 🟡 | 装箱不释放；同类型跨接口同名方法报错；接口与 impl 必须同源文件；AArch64 未接 vtable | 热点循环装箱会涨堆 |
 | 错误处理 | ✅ v1.38 | result/option 载荷支持具名 struct/enum——库层可把 errno+上下文装入 Err（std 库尚未批量改造为富错误，属标准库工作） | 错误对象成为可能 |
-| 模块系统 | 🟡 | `import` 是扁平合并；**无命名空间、无可见性、无版本** | 第三方库靠前缀约定共存 |
-| 整数宽度 | 🟡 | struct 字段存窄值**不截断**；`vec[u8]` 元素仍是 8 字节槽 | 二进制格式要自己 mask |
-| `@simd` | 🟡 | 只认 `acc += a[i]` 两种形状（int / f64）；点积需 AVX2 | 不是向量化器 |
+| 模块系统 | 🟡 | **`pub` 可见性 ✅ v1.43** + **限定语法 ✅ v1.44**（`lib.fn()` / `lib.Enum.Variant` / 限定模式——头段须匹配本文件 import，指向 + pub 双重校验）；仍无**跨模块同名声明**（放开需 per-module mangling）、无版本 | 调用点自带来源信息；第三方库仍靠前缀约定共存 |
+| 整数宽度 | ✅ v1.40/v1.56 | **语义全覆盖**：窄值在所有存储点截断（let / 形参 / 返回值 / 赋值 / struct 字段 / enum 载荷 / vec 元素 / 定长数组 / **切片别名写入**）；表达式内部按 C 提升不截断。`vec[u8]` 槽仍 8 字节属**内存打包**，已移到 §5 性能专项 | 不用再自己 mask；二进制格式读写窄值安全 |
+| `@simd` | 🟡 | 归约两种形状（int / f64）+ **f64 点积** `a[i]*b[i]`（v1.57，SSE2 `mulpd` 两路，实测 4.6×）；int 点积需 SSE4.1 `pmulld`、AVX2 4 通道留待 | 不是向量化器 |
 | 并发 | 🟡 | `chan` 单消费者栈 pop 有 ABA；WaitGroup 自旋等待；AArch64 未接 atomic | 高竞争场景要自己加保护 |
-| 编译期求值 | 🟡 | 只有整型 `+ - * / %`；`const fn` 未做 | 复杂常量表要手算 |
+| 编译期求值 | ✅ v1.58 | `const` 右值：整型算术 + const 引用 + **const fn 调用**；`const fn` 支持 int/bool 形参与返回值、let/赋值/if/while/return、算术/比较/逻辑/位运算、递归（≤64 层），按有符号 64 位回卷（与运行时逐位一致）。仍无：str/浮点求值、泛型 const fn、跨文件 const fn 种子 | 常量表/尺寸计算/位掩码可在编译期算完，且与运行时同值 |
 | 闭包 / 捕获 | ❌ | — | 只能传函数名 |
 | FFI（自研后端） | ❌ | 无动态链接器；`@extern` 只有 C 后端原型 | 无法调用系统库 |
-| `defer` / RAII / `Drop` | ❌ | 只有 `arena { }` 整块回卷 | fd/锁/缓冲释放全靠手写 |
+| `defer` / RAII / `Drop` | 🟡 v1.48 | **`defer` 语句 ✅**：块级作用域、LIFO、执行到才登记（`break` 早于 defer 的路径不跑）、取退出时的值；形态限表达式/赋值（`defer let` 编译期拒绝）；C 后端不支持（fail-fast）。仍无 `Drop`/析构——清理必须显式写 | fd/锁/缓冲释放可写清理；资源生命周期仍靠约定 |
 | 宏 / 反射 | ❌ | 前置：编译期 AST API、类型元数据段 | 序列化只能手写字段表 |
 | 字符串插值 / `format` | ❌ | 无可变参数机制 | 拼接冗长，`+` 链是 O(n²) |
 | `switch` | — | 用 `match` 代替（设计选择） | — |
@@ -37,7 +37,7 @@
 |---|---|---|
 | 压缩 | ✅ v1.32：多 member gzip 拼接流 + **zlib 容器**（RFC 1950，含 adler32 校验）；`adler32` 也可单独用 | 仍无 zlib 预置字典（FDICT）与 raw inflate 的窗口复用 |
 | TLS | **根证书库**（信任锚管理）、**P-384 / SHA-384**；RSA（PKCS#1 + PSS）与链校验 v1.27 已实现 | 无法自动信任公网证书；部分站点链验不过 |
-| HTTP 客户端 | TLS 通道已通（v1.25，Windows），缺 HTTP 封装（重定向/chunked/连接池） | 调用第三方 API |
+| HTTP 客户端 | ✅ v1.50：`std/httpc`（URL 拆分 / 请求构造 / 响应解析 content-length+chunked / 重定向判定，纯函数）+ `std/httpc_net`（get / get_tls / get_follow，Windows，loopback E2E 实测） | 仍缺：连接池 / 流水线、自动解压 Content-Encoding、HTTP/2、Linux DNS |
 | 路由 / 中间件 | `std/http` 只有单回调，path 匹配要自己写 if 链 | 稍大的服务都要手写路由表 |
 | 静态文件 / MIME / cookie / session / multipart | 全缺 | 文件上传、登录态 |
 | `chunked` 请求体 | 回 501 | 部分客户端上传 |
@@ -46,9 +46,9 @@
 | TCP 批量收发 | 只有单次 `tcp_send/recv` | 高吞吐场景 syscall 太多 |
 | 可靠 UDP | UDP 四件之上未做 | 游戏/实时传输 |
 | 日志 | 无 stderr 通道、无轮转、无绝对时间戳（级别过滤 v1.19 已补） | 生产可观测性 |
-| 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠 |
-| 数学 | 有 sqrt/cbrt/powi/取整/gcd；**无 `exp` / `log` / `pow(x,y)` / `sin` / `cos`** | 图形、统计、复利 |
-| 哈希 | ✅ v1.35：SHA-1 / SHA-256 / FNV-1a 32/64 / **MD5**（仅兼容用途） | 无 SHA-512、无 CRC64、无 BLAKE2 |
+| 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠；**f64 打印已修（v1.51）**：定点/科学计数按 C 后端口径逐位一致（`__f64_to_str` 有限值路径漏长度前缀已补），仍缺最短往返表示（grisu/ryu） |
+| 数学 | ✅ v1.47：`exp`/`log`/`log2`/`log10`/`pow`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`hypot` + 常数助手（Cody–Waite 双字归约；sin/cos 误差随 |x|·1.1e-16 增长，多字 π 归约未做） | 图形、统计、复利 |
+| 哈希 | ✅ v1.35：SHA-1 / SHA-256 / FNV-1a 32/64 / MD5（仅兼容用途）；✅ v1.53：**SHA-512 / SHA-384 + HMAC-SHA512** + **CRC-64/XZ**（FIPS 180-4 / RFC 4231 / ECMA-182 向量全过） | ✅ v1.55：**BLAKE2b**（RFC 7693，含 keyed 与变长输出）；仍无 SHA-512/224、SHA-3 |
 | 数据结构 | ✅ v1.29/30：RingBuf / MinHeap / **set[int]·set[str]** / **deque** / **LRU**（自建开放寻址表 + 双向链表，单句柄） | LRU 的 key 只有 int（字符串先 `fnv1a64`）；无 TTL / 无容量自适应 |
 | 持久化 | 无 SQLite / KV / 序列化格式（`std/serialize` 只是编码原语） | 任何要存数据的应用 |
 | 正则 | 无 | 文本清洗、路由匹配 |
@@ -63,7 +63,7 @@
 | LSP / 补全 | ❌ | 无语义索引、跳转、重命名 |
 | 文档生成 | ❌ | 无 doc comment 语法 |
 | 库归档 `.qla` | 🚧 | 无目标文件格式 → 无法增量编译、无法分发二进制库 |
-| 包管理 | 🟡 | 有 qpm v0（path + git）；无 semver 区间、registry、发布流程、传递依赖冲突合并 |
+| 包管理 | 🟡 | 有 qpm（path + git + **semver 区间选 tag + 锁**，v1.45）；无 registry、发布流程、传递依赖冲突合并 |
 | 增量 / 并行编译 | ❌ | 每次全量 |
 | 性能回归门禁 | 🟡 | `bench --threshold` 可用，但未进 CI |
 | 覆盖率 / fuzz | ❌ | — |
@@ -102,6 +102,7 @@
 | ~~gzip 编码提速~~ | ✅ v1.30 已做：**25–27 ms → 16 ms（1.6×）**，输出字节不变 | 走的是「mem_diff 批量比对 + 插入/滚动合并」，不是 lazy matching——lazy 只会更慢、压缩率更好 |
 | **gzip lazy matching** | 压缩率 -3~8%（时间 +20~30%） | 若要更好压缩率再做；与上面的提速是两个目标，别混 |
 | **AVX2 点积** | 新形状 | 需 `vpmullq`（SSE2 64 位乘语义不一致） |
+| **vec 窄元素槽压缩** | `vec[u8]`/`vec[u16]`/`vec[u32]` 的槽从 8 字节压到 1/2/4：小元素容器内存 4–8×（1 MB 字节缓冲 8 MB → 1 MB），缓存命中率随之上升 | 运行时现在按 `ew` 字寻址（`ln*ew*8`），压缩要改成字节寻址 + 有符号扩展加载；push/get/set/pop/foreach/grow 全套 + A64 同步 + C 后端对齐；**改动面大，单开一版做，别和语义修复混** |
 
 > 性能实验两条铁律（两次回滚换来的）：
 > 1. 单点核对全对 ≠ 装起来对——必须反汇编对照或单元素 trace。
@@ -123,12 +124,13 @@
 ### P1 —— 让"语言能撑住中型程序"
 
 1. ~~泛型推导 + 多类型参数（`f[int]` → 能推就推）~~ ✅ v1.36：多参 + 调用点推导
-2. 命名空间 / `pub` 可见性（止住 `http_` / `ws_` 前缀膨胀）
+2. 命名空间 / `pub` 可见性（~~可见性~~ ✅ v1.43；~~限定语法~~ ✅ v1.44；
+   止住 `http_`/`ws_` 前缀膨胀还差跨模块同名声明——per-module mangling）
 3. `map[str]Struct`（~~`vec[map]`~~ ✅ v1.37）
 4. 函数值放宽：8 参、允许 struct 实参
 5. `defer`（接口装箱生命周期的前置）
 6. IPv6、TCP 批量收发
-7. 包管理 semver + registry
+7. 包管理 registry + 发布（~~semver 区间~~ ✅ v1.45）
 8. 自举主线：函数体 parser 收敛（当前分叉数见 `06-status.md`）
 
 ### P2 —— 生态
@@ -227,13 +229,19 @@ CSE 的 `_cse_key` 对 xmm 族返回 `None`（不参与）。
    **JSON memchr** → loop_sum 三件套 → LICM 根修 → §7.4/§7.5 两个误编译
 2. **语言层（§1）**：~~泛型多参 + 调用点推导~~（v1.36）→ ~~`vec[map]`~~（v1.37）→
    ~~result struct 载荷~~（v1.38）→ ~~struct 内嵌套聚合~~（v1.39）→
-   黄标逐项（`map[str]Struct`、
-   函数值放宽、命名空间 / `pub`、`defer` …）→ 红标逐项 红→黄→绿
-   （泛型 struct / 泛型方法 / 类型约束）
+   ~~窄值存储截断全覆盖~~（v1.40）→ ~~切片别名写入截断~~（v1.56，整数宽度行翻绿；槽压缩转 §5）→
+   ~~`map[K]Struct` 值扩容~~（v1.41）→ ~~函数值放宽（8 参 + 聚合实参）~~（v1.42）→
+   ~~`pub` 可见性~~（v1.43）→ ~~限定语法 lib.fn()~~（v1.44）→ ~~`defer`~~（v1.48）→
+   黄标逐项（`@simd` 形状、并发原语、接口装箱、所有权范围 …）→
+   红标逐项 红→黄→绿（泛型 struct / 泛型方法 / 类型约束）
 3. **标准库（§2）**：红标剩余项——**MD5**（只差旧协议兼容）、HTTP 客户端封装
    （重定向/chunked/连接池）、路由/静态文件/MIME/cookie/session/multipart、
    多 member gzip + zlib 容器、正则、持久化（KV/SQLite）、`exp/log/sin/cos`
-4. **工具链（§3）**：`.qla`、semver/registry、增量编译、覆盖率
+4. **工具链（§3）**：`.qla`、registry/发布、增量编译、覆盖率（~~semver~~ ✅ v1.45）
+
+> 2026-10-23 起语言层与工具链**双轨并行**：语言层由另一会话负责（v1.44 命名空间
+> 限定语法即其成果），工具链从 v1.45（qpm semver）起推进。两轨共享连续版本号，
+> 改动文件面基本不重叠（编译器/parser ↔ 工具链脚本/文档）。
 
 > v1.29 已把 §2 的四条红标翻绿（UTF-8 / base64url / set / deque / FNV / CLI flag），
 > 剩下的红标按「撞到的场景有多近」排序，不按条数排序。

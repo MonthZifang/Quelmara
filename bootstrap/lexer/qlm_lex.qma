@@ -60,6 +60,8 @@ fn is_keyword(w: str) -> bool {
     if w == "test" { return true }
     if w == "break" { return true }
     if w == "continue" { return true }
+    // v1.48：defer——两侧关键字表必须一致（lexdiff 会咬）
+    if w == "defer" { return true }
     if w == "struct" { return true }
     if w == "enum" { return true }
     if w == "match" { return true }

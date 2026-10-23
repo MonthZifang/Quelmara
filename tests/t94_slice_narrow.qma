@@ -1,0 +1,87 @@
+// t94_slice_narrow.qma：切片别名写入按元素声明宽度截断（v1.56）
+// 覆盖：
+//   1) slice_of(u8 数组) 后 s[i] = 300 → 底层数组读回 44
+//   2) 复合赋值 s[i] += 300 也截断（2 + 300 = 302 → 46）
+//   3) 有符号 i8：写 200 → -56（符号位按 8 位解释）
+//   4) 切片作形参（[]u8 / []i8）：被调方写入同样截断
+//   5) 子切片 s[1..3] 继承元素标签（零拷贝别名，标签必须跟着走）
+//   6) int 切片不受影响（不截断，写 300 就是 300）
+//   7) 返回值路径：fn f() -> []u8 返回的切片仍带标签
+//   8) u16 元素：70000 → 4464（16 位回卷）
+// 语义纪律：切片是零拷贝别名——写入落到底层数组，截断按【元素声明宽度】，
+//           与 a[i] = 300 的定长数组路径同语义（v1.40）。槽仍是 8 字节
+//           （内存不压缩，登记在 07-gaps §5 性能专项）。
+module t94
+
+fn fill(s: []u8) {
+    s[0] = 300
+    s[1] += 300
+}
+
+fn head(s: []i8) {
+    s[0] = 200
+}
+
+fn sum2(s: []int) -> int {
+    return s[0] + s[1]
+}
+
+fn tail(a: [4]u8) -> []u8 {
+    return slice_of(a)
+}
+
+fn main() {
+    // 1) 别名写入截断
+    let mut a: [4]u8 = [1, 2, 3, 4]
+    let s = slice_of(a)
+    s[0] = 300
+    assert(a[0] == 44, "alias write truncates to u8")
+    assert(s[0] == 44, "read back through slice")
+
+    // 2) 复合赋值
+    s[1] += 300
+    assert(a[1] == 46, "alias += truncates (2+300=302)")
+
+    // 3) 有符号
+    let mut b: [3]i8 = [0, 0, 0]
+    let sb = slice_of(b)
+    sb[0] = 200
+    assert(b[0] == -56, "i8 wraps to negative")
+
+    // 4) 切片形参
+    let mut c: [4]u8 = [1, 2, 3, 4]
+    fill(slice_of(c))
+    assert(c[0] == 44, "param []u8 write truncates")
+    assert(c[1] == 46, "param []u8 += truncates")
+    let mut d: [3]i8 = [0, 0, 0]
+    head(slice_of(d))
+    assert(d[0] == -56, "param []i8 write truncates")
+
+    // 5) 子切片继承标签
+    let mut e: [4]u8 = [1, 2, 3, 4]
+    let sub = slice_of(e)[1..3]
+    sub[0] = 300
+    assert(e[1] == 44, "subslice keeps elem tag")
+    assert(len(sub) == 2, "subslice len")
+
+    // 6) int 切片不截断
+    let mut f: [4]int = [1, 2, 3, 4]
+    let sf = slice_of(f)
+    sf[0] = 300
+    assert(f[0] == 300, "int slice unaffected")
+    assert(sum2(slice_of(f)) == 302, "int slice as param")
+
+    // 7) 返回值路径：返回类型里的元素标签要跟着走
+    let mut h: [4]u8 = [1, 2, 3, 4]
+    let sh = tail(h)
+    sh[0] = 300
+    assert(sh[0] == 44, "returned slice keeps elem tag")
+
+    // 8) u16
+    let mut g: [4]u16 = [0, 0, 0, 0]
+    let sg = slice_of(g)
+    sg[0] = 70000
+    assert(g[0] == 4464, "u16 wraps")
+
+    print("slice narrow ok")
+}

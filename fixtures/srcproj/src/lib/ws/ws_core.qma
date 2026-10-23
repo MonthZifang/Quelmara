@@ -2,7 +2,7 @@
 // import ws.ws_core 按前缀引用（目录即库，无需逐库声明）
 module ws_core
 
-fn ws_greet(name: str) -> str {
+pub fn ws_greet(name: str) -> str {
     return str_alloc_concat("ws:", name)
 }
 

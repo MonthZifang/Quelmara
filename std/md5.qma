@@ -280,7 +280,7 @@ fn md5_str(s: str) -> int {
 }
 
 // md5_hex(s) -> str：32 位小写十六进制
-fn md5_hex(s: str) -> str {
+pub fn md5_hex(s: str) -> str {
     let dig = md5_str(s)
     let out = mem_alloc(33)
     let hexd = "0123456789abcdef"

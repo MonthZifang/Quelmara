@@ -43,7 +43,7 @@ fn _dq_block(cap: int) -> int {
 }
 
 // dq_new(cap) -> int：cap 是最小初始容量（<4 按 4 算）
-fn dq_new(cap: int) -> int {
+pub fn dq_new(cap: int) -> int {
     if cap < 4 {
         cap = 4
     }
@@ -53,11 +53,11 @@ fn dq_new(cap: int) -> int {
     return cell
 }
 
-fn dq_len(d: int) -> int {
+pub fn dq_len(d: int) -> int {
     return _dq_len_at(_dq_state(d))
 }
 
-fn dq_cap(d: int) -> int {
+pub fn dq_cap(d: int) -> int {
     return _dq_cap_at(_dq_state(d))
 }
 
@@ -88,7 +88,7 @@ fn _dq_grow(st: int) -> int {
     return ns
 }
 
-fn dq_push_back(d: int, v: int) -> int {
+pub fn dq_push_back(d: int, v: int) -> int {
     let mut st = _dq_state(d)
     let cap = _dq_cap_at(st)
     if _dq_len_at(st) >= cap {
@@ -101,7 +101,7 @@ fn dq_push_back(d: int, v: int) -> int {
     return 0
 }
 
-fn dq_push_front(d: int, v: int) -> int {
+pub fn dq_push_front(d: int, v: int) -> int {
     let mut st = _dq_state(d)
     let cap = _dq_cap_at(st)
     if _dq_len_at(st) >= cap {
@@ -117,7 +117,7 @@ fn dq_push_front(d: int, v: int) -> int {
     return 0
 }
 
-fn dq_pop_front(d: int) -> int {
+pub fn dq_pop_front(d: int) -> int {
     let st = _dq_state(d)
     let n = _dq_len_at(st)
     if n == 0 {
@@ -131,7 +131,7 @@ fn dq_pop_front(d: int) -> int {
     return v
 }
 
-fn dq_pop_back(d: int) -> int {
+pub fn dq_pop_back(d: int) -> int {
     let st = _dq_state(d)
     let n = _dq_len_at(st)
     if n == 0 {
@@ -143,7 +143,7 @@ fn dq_pop_back(d: int) -> int {
 }
 
 // dq_peek_front / dq_peek_back：看但不弹（空返回 -1）
-fn dq_peek_front(d: int) -> int {
+pub fn dq_peek_front(d: int) -> int {
     let st = _dq_state(d)
     if _dq_len_at(st) == 0 {
         return -1
@@ -151,7 +151,7 @@ fn dq_peek_front(d: int) -> int {
     return mem_load64(st, _dq_slot(st, _dq_head_at(st)))
 }
 
-fn dq_peek_back(d: int) -> int {
+pub fn dq_peek_back(d: int) -> int {
     let st = _dq_state(d)
     let n = _dq_len_at(st)
     if n == 0 {
@@ -160,7 +160,7 @@ fn dq_peek_back(d: int) -> int {
     return mem_load64(st, _dq_slot(st, _dq_phys(st, n - 1)))
 }
 
-fn dq_get(d: int, i: int) -> int {
+pub fn dq_get(d: int, i: int) -> int {
     let st = _dq_state(d)
     let n = _dq_len_at(st)
     if i < 0 || i >= n {
@@ -169,7 +169,7 @@ fn dq_get(d: int, i: int) -> int {
     return mem_load64(st, _dq_slot(st, _dq_phys(st, i)))
 }
 
-fn dq_set(d: int, i: int, v: int) -> int {
+pub fn dq_set(d: int, i: int, v: int) -> int {
     let st = _dq_state(d)
     let n = _dq_len_at(st)
     if i < 0 || i >= n {
@@ -179,7 +179,7 @@ fn dq_set(d: int, i: int, v: int) -> int {
     return 0
 }
 
-fn dq_clear(d: int) -> int {
+pub fn dq_clear(d: int) -> int {
     let st = _dq_state(d)
     mem_store64(st, 1, 0)
     mem_store64(st, 2, 0)
@@ -187,7 +187,7 @@ fn dq_clear(d: int) -> int {
 }
 
 // dq_free(d)：释放状态块与句柄盒（句柄之后不可再用）
-fn dq_free(d: int) -> int {
+pub fn dq_free(d: int) -> int {
     let st = _dq_state(d)
     mem_free(st, 32 + _dq_cap_at(st) * 8)
     mem_free(d, 8)

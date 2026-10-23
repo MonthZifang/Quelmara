@@ -71,6 +71,8 @@ def vreg_mentions(ins):
         return [ins[1]], ints([ins[2]])
     if op == "vsumd":
         return [ins[1]], ints([ins[2], ins[3]])
+    if op == "vdotd":
+        return [ins[1]], ints([ins[2], ins[3], ins[4]])
     if op == "vsum":
         return [ins[1]], ints([ins[2], ins[3]])
     if op == "atomic":
@@ -789,7 +791,7 @@ _EFF = ("call", "callr", "syscall", "winapi", "spawn_child", "xchg", "ret",
         "store", "store8", "load", "load8", "load32",
         # vsum 读一整段内存（最多 count*8 字节）：必须与访存保持原序，
         # 否则调度器会把它挪到数组初始化之前（v1.8 实测：归约少一个元素）。
-        "vsum", "vsumd",
+        "vsum", "vsumd", "vdotd",
         # atomic 是读改写，mfence 是全屏障：都不可被调度器跨越或重排
         # （v1.10 实测纪律：atomic 忘登记 _EFF 会造成计数静默丢失）。
         # rdtsc 同理——它虽无副作用，但被挪过 call 会让测量差值变成

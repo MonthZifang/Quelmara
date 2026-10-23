@@ -1,0 +1,117 @@
+// t98_constfn.qma：const fn —— 编译期求值（v1.58，编译期求值行翻绿）
+// 覆盖：
+//   1) 循环体求值：fact（while + 乘）
+//   2) 递归求值：fib（自递归，深度受 64 层限制）
+//   3) 位运算：popcount（& >> 与 while）
+//   4) 返回 bool 的 const fn + const 布尔量
+//   5) 提前 return：clamp（if 里 return）
+//   6) 算术里嵌调用：sq(3) + 1、sq(sq(2))
+//   7) 复合赋值：sum_to 用 +=
+//   8) 溢出回卷：fact(25) 编译期结果必须与运行时逐位一致（有符号 64 位）
+//   9) 同一个函数运行时可调（const fn 不是"只能编译期用"）
+// 语义纪律：编译期按有符号 64 位回卷，与运行时同函数结果逐位一致；
+//           只支持 int/bool 形参与返回值、let/赋值/if/while/return，
+//           其余 fail-fast（不静默降级）。
+module t98
+
+const fn fact(n: int) -> int {
+    let mut r = 1
+    let mut i = 2
+    while i <= n {
+        r = r * i
+        i = i + 1
+    }
+    return r
+}
+
+const fn fib(n: int) -> int {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+const fn popcount(x: int) -> int {
+    let mut c = 0
+    let mut v = x
+    while v != 0 {
+        c = c + (v & 1)
+        v = v >> 1
+    }
+    return c
+}
+
+const fn is_even(n: int) -> bool {
+    return n % 2 == 0
+}
+
+const fn clamp(x: int, lo: int, hi: int) -> int {
+    if x < lo {
+        return lo
+    }
+    if x > hi {
+        return hi
+    }
+    return x
+}
+
+const fn sq(x: int) -> int {
+    return x * x
+}
+
+const fn sum_to(n: int) -> int {
+    let mut s = 0
+    let mut i = 1
+    while i <= n {
+        s += i
+        i += 1
+    }
+    return s
+}
+
+const F5 = fact(5)
+const F10 = fact(10)
+const FIB20 = fib(20)
+const PC8 = popcount(255)
+const EVEN10 = is_even(10)
+const ODD10 = is_even(11)
+const CLAMPED = clamp(100, 0, 50)
+const COMPOSED = sq(3) + 1
+const NESTED = sq(sq(2))
+const SUM100 = sum_to(100)
+const BIG = fact(25)
+
+fn main() {
+    // 1) 循环
+    assert(F5 == 120, "fact(5) const")
+    assert(F10 == 3628800, "fact(10) const")
+    assert(SUM100 == 5050, "sum_to(100) const with +=")
+
+    // 2) 递归
+    assert(FIB20 == 6765, "fib(20) const recursion")
+
+    // 3) 位运算
+    assert(PC8 == 8, "popcount(255) const")
+
+    // 4) bool
+    assert(EVEN10, "is_even(10) const")
+    assert(!ODD10, "is_even(11) const")
+
+    // 5) 提前 return
+    assert(CLAMPED == 50, "clamp const")
+
+    // 6) 算术嵌调用
+    assert(COMPOSED == 10, "sq(3)+1 const")
+    assert(NESTED == 16, "sq(sq(2)) const")
+
+    // 8) 溢出回卷：编译期与运行时逐位一致
+    assert(BIG == fact(25), "overflow wraps identically")
+
+    // 9) 运行时可调，且与编译期同值
+    assert(fact(5) == F5, "runtime fact == const")
+    assert(fib(20) == FIB20, "runtime fib == const")
+    assert(popcount(255) == PC8, "runtime popcount == const")
+    assert(clamp(100, 0, 50) == CLAMPED, "runtime clamp == const")
+
+    print("const fn ok")
+}

@@ -141,7 +141,7 @@ fn sha1_str(s: str) -> int {
 }
 
 // sha1_hex(s) -> str：40 位小写十六进制（调试/ETag/签名用）
-fn sha1_hex(s: str) -> str {
+pub fn sha1_hex(s: str) -> str {
     let dig = sha1_str(s)
     let out = mem_alloc(41)
     let mut i = 0

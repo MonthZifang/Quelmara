@@ -1,0 +1,106 @@
+// std/httpc_net.qma —— HTTP 客户端传输层（v1.48）：httpc_get / httpc_get_tls /
+// httpc_get_follow。只编译/运行于 Windows PE：tcp_connect 依赖 getaddrinfo
+// （Linux DNS 未实现，编译期报错）；TLS 走 std/tls_net（v1.25，Windows）。
+//
+// 解析逻辑全在 std/httpc（纯函数、跨平台）——本文件只做 socket 拼接：
+// 建连 → 发请求 → 收到 complete=1 或对端关闭 → 交回 httpc_parse_response。
+//
+// 边界：
+//   * 连接失败 fail-fast（与 std/net 一致，不返回错误码）；
+//   * TLS 路径的 record seq 由本模块维护；服务器在应用数据前插多条握手
+//     消息（NewSessionTicket 等）时 seq 会错位（std/tls_net 已知限制，
+//     "一次请求一次响应"场景）——生产用法建议服务端关掉 session ticket；
+//   * 不校验证书链（std/x509 另用）；httpc_get_follow 只发 GET，
+//     303→GET 的方法语义无歧义。
+
+import std.httpc
+import std.str
+import std.tls_net
+
+// 收响应字节：头齐后按 framing 判定 complete；否则读到对端关闭（空串）为止。
+fn _recv_until_complete(fd: int) -> str {
+    let mut buf = ""
+    let mut guard = 0
+    while guard < 4096 {
+        let part = tcp_recv(fd, 8192)
+        if len(part) == 0 {
+            break
+        }
+        buf = buf + part
+        if str_find(buf, "\r\n\r\n") >= 0 {
+            let r = httpc_parse_response(buf)
+            if r.complete == 1 {
+                break
+            }
+        }
+        guard = guard + 1
+    }
+    return buf
+}
+
+/// 明文 HTTP GET（Windows）。http:// 走 TCP；https:// 转 httpc_get_tls。
+pub fn httpc_get(url: str) -> HttpResponse {
+    let u = httpc_split_url(url)
+    if u.ok == 0 {
+        return httpc_bad_response()
+    }
+    if u.scheme == "https" {
+        return httpc_get_tls(url)
+    }
+    let fd = tcp_connect(u.host, u.port)
+    let req = httpc_build_request("GET", url, vec[str].new(2), "")
+    tcp_send(fd, req)
+    let buf = _recv_until_complete(fd)
+    tcp_close(fd)
+    return httpc_parse_response(buf)
+}
+
+/// HTTPS GET（Windows，TLS 1.3）。seq 从 0 起逐条 +1。
+pub fn httpc_get_tls(url: str) -> HttpResponse {
+    let u = httpc_split_url(url)
+    if u.ok == 0 {
+        return httpc_bad_response()
+    }
+    let r0 = tls_connect(u.host, u.port)
+    if r0.ok == 0 {
+        return httpc_bad_response()
+    }
+    let req = httpc_build_request("GET", url, vec[str].new(2), "")
+    tls_send_app(r0, 0, req)
+    let mut buf = ""
+    let mut seq = 0
+    let mut guard = 0
+    while guard < 4096 {
+        let part = tls_read_app(r0, seq)
+        if len(part) == 0 {
+            break
+        }
+        buf = buf + part
+        seq = seq + 1
+        if str_find(buf, "\r\n\r\n") >= 0 {
+            let r = httpc_parse_response(buf)
+            if r.complete == 1 {
+                break
+            }
+        }
+        guard = guard + 1
+    }
+    return httpc_parse_response(buf)
+}
+
+/// 跟随重定向的 GET：最多 max_hops 跳（超出返回最后一个 3xx 响应）。
+pub fn httpc_get_follow(url: str, max_hops: int) -> HttpResponse {
+    let mut cur = url
+    let mut hops = 0
+    let mut r = httpc_bad_response()
+    while hops <= max_hops {
+        r = httpc_get(cur)
+        let next = httpc_redirect(r, cur)
+        if len(next) == 0 {
+            return r
+        }
+        cur = next
+        hops = hops + 1
+    }
+    return r
+}

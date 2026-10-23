@@ -1,0 +1,11 @@
+// pub_hidden/main.qma —— pub 可见性负例（v1.43）：
+// 引用被导入模块的非 pub 声明必须在编译期被拦下
+module pub_hidden
+
+import pub_hidden_lib
+
+fn main() {
+    // hidden_fn 在 pub_hidden_lib.qma 里没有 pub —— 跨模块引用必须报错
+    let v = hidden_fn(3)
+    print(v.to_str())
+}

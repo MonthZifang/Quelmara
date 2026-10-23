@@ -125,7 +125,7 @@ def load_config(src_path):
 KEYWORDS = {"fn", "let", "mut", "if", "else", "while", "for", "parfor", "rc",
             "interface", "impl",
             "return", "module", "import", "true", "false", "test",
-            "break", "continue", "struct", "enum", "match",
+            "break", "continue", "defer", "struct", "enum", "match",
             "arena", "spawn", "chan", "option", "result", "map", "select",
             "const", "vec"}
 
@@ -315,6 +315,14 @@ class Parser:
         self.interfaces = {}       # name -> [(method, [param types], ret)]
         self.impls = {}            # (iface, type) -> {method: fdef}
         self.methods = {}          # (type, method) -> fdef（impl 里定义的实例方法）
+        # pub 可见性（v1.43）：pub 标记跨模块导出；本 Parser 实例 = 一个文件。
+        self.pub_types = set()     # pub struct/enum/interface 名
+        self._pending_pub = False  # `pub` 已吃掉、等下一个 fn/struct/enum 消化
+        # 命名空间限定语法（v1.44）：lib.fn(...) / lib.Enum.Variant /
+        # 模式 lib.Enum.Variant —— import 全串见 self.import_paths，
+        # 限定引用（import 串, 名字）见 self.qrefs（load_program 校验指向）。
+        self.import_paths = set()
+        self.qrefs = set()
         # 顶层 const，编译期内联。consts= 跨文件种子（load_program 两遍解析：
         # 第一遍收集各文件 const，第二遍带着全集重解析——import 侧的 const
         # 因此可见，std 库的槽位布局常量得以跨文件共享）。
@@ -322,6 +330,10 @@ class Parser:
         # 泛型模板全集（v1.11）：调用点 f[int](...) 的解析需要知道 f 是不是
         # 泛型——种子跨文件传递（与 consts 同一批两遍解析）。
         self.generic_fns = dict(generic_fns) if generic_fns else {}
+        # const fn 表（v1.58）：既进 fns 列表（运行时可调），也在这里登记
+        # 供 const 右值做编译期解释执行。按声明序可见（与 const 同规则）。
+        self.const_fns = {}
+        self._const_steps = 0
         self._prescan()
 
     def _prescan(self):
@@ -374,8 +386,31 @@ class Parser:
                 neg = True
             tf = self.next()
             return ("num", -tf.val if neg else tf.val)
+        # v1.58：返回 bool 的 const fn 调用（int 返回值的走 _const_int_expr，
+        # 这样 `const A = sq(3) + 1` 这类算术里嵌调用也能求值）
+        if (t.kind == "NAME" and t.val in self.const_fns
+                and self.const_fns[t.val].get("ret") == ("named", "bool")
+                and self.peek(1).kind == "SYM" and self.peek(1).val == "("):
+            self.next()
+            self.next()
+            args = []
+            if not self.at("SYM", ")"):
+                args.append(self._const_arg(name))
+                while self.at("SYM", ","):
+                    self.next()
+                    args.append(self._const_arg(name))
+            self.eat("SYM", ")")
+            return self._const_call(t.val, args, t.line, name)
         # int 路径：字面量或编译期算术
         return ("num", self._const_int_expr(name))
+
+    def _const_arg(self, ctx):
+        """const fn 调用的实参：bool 字面量或整型常量表达式。"""
+        t = self.peek()
+        if t.kind in ("true", "false"):
+            self.next()
+            return t.kind == "true"
+        return self._const_int_expr(ctx)
 
     def _const_int_expr(self, name):
         """编译期整型表达式求值（const 专用，递归下降）。
@@ -396,6 +431,24 @@ class Parser:
             if t.kind == "INT":
                 self.next()
                 return t.val
+            if t.kind == "NAME" and self.peek(1).kind == "SYM" \
+                    and self.peek(1).val == "(":
+                # v1.58：const fn 调用可以嵌在算术里（fact(5) + 1）
+                if t.val in self.const_fns:
+                    self.next()
+                    self.next()
+                    args = []
+                    if not self.at("SYM", ")"):
+                        args.append(self._const_arg(name))
+                        while self.at("SYM", ","):
+                            self.next()
+                            args.append(self._const_arg(name))
+                    self.eat("SYM", ")")
+                    self._const_steps = 0
+                    return self._const_invoke(t.val, args, t.line, 0)
+                raise SyntaxError(
+                    f"line {t.line}: const {name} 调用了非 const fn 的 {t.val!r}"
+                    "（const 右值里只能调用 const fn）")
             if t.kind == "NAME":
                 if t.val in self.consts:
                     cv = self.consts[t.val]
@@ -438,6 +491,212 @@ class Parser:
 
         return expr()
 
+    # ---- v1.58：const fn —— 编译期求值 -----------------------------------
+    #
+    # 语义：const fn 既是普通函数（运行时可调、照常发射），也能在 const 右值里
+    # 被解释执行。求值结果按**有符号 64 位回卷**——必须与同一个函数在运行时的
+    # 结果逐位一致，否则 `const X = f(3)` 与 `let x = f(3)` 会分叉。
+    #
+    # 支持子集（fail-fast，不静默降级）：int/bool 形参与返回值；语句
+    # let / 赋值（含 += 等）/ if / while / return / 表达式；表达式字面量、
+    # 变量、算术、比较、逻辑、位运算、调用其他 const fn（含递归）。
+    _CONST_STEP_LIMIT = 200000
+    _CONST_DEPTH_LIMIT = 64
+
+    @staticmethod
+    def _wrap64(x):
+        """按有符号 64 位回卷（与运行时 int 一致）。"""
+        x &= (1 << 64) - 1
+        return x - (1 << 64) if x >> 63 else x
+
+    def _const_check_fn(self, f):
+        ok = {("named", "int"), ("named", "bool")}
+        for pname, pty in f["params"]:
+            if pty not in ok:
+                raise SyntaxError(
+                    f"const fn {f['name']}: 形参 {pname} 的类型暂不支持"
+                    "（只支持 int / bool）")
+        ret = f.get("ret")
+        if ret is not None and ret not in ok and ret != ("named", "void"):
+            raise SyntaxError(
+                f"const fn {f['name']}: 返回类型暂不支持（只支持 int / bool）")
+
+    def _const_call(self, fname, args, line, ctx):
+        """const 右值里的 const fn 调用：解释执行，返回 AST 常量节点。"""
+        f = self.const_fns[fname]
+        if len(args) != len(f["params"]):
+            raise SyntaxError(
+                f"line {line}: const {ctx} 调用 {fname} 需要 "
+                f"{len(f['params'])} 个实参，得到 {len(args)} 个")
+        self._const_steps = 0
+        v = self._const_invoke(fname, args, line, 0)
+        if f.get("ret") == ("named", "bool"):
+            return ("bool", bool(v))
+        return ("num", v)
+
+    def _const_invoke(self, fname, args, line, depth):
+        if depth > self._CONST_DEPTH_LIMIT:
+            raise SyntaxError(
+                f"line {line}: const fn {fname} 递归超过 "
+                f"{self._CONST_DEPTH_LIMIT} 层")
+        f = self.const_fns[fname]
+        env = {}
+        for (pname, pty), v in zip(f["params"], args):
+            if pty == ("named", "bool"):
+                if not isinstance(v, bool):
+                    raise SyntaxError(
+                        f"line {line}: const fn {fname} 的形参 {pname} 需要 bool")
+            elif isinstance(v, bool) or not isinstance(v, int):
+                raise SyntaxError(
+                    f"line {line}: const fn {fname} 的形参 {pname} 需要 int")
+            env[pname] = v
+        sig, v = self._const_run(f["body"], env, line, depth)
+        if sig == "break" or sig == "continue":
+            raise SyntaxError(
+                f"line {line}: const fn {fname} 里的 break/continue 没有外层循环")
+        ret = f.get("ret")
+        if ret == ("named", "bool"):
+            if v is None:
+                raise SyntaxError(
+                    f"line {line}: const fn {fname} 声明返回 bool 但没有 return")
+            return bool(v)
+        if ret is not None and ret != ("named", "void") and v is None:
+            raise SyntaxError(
+                f"line {line}: const fn {fname} 声明返回 int 但没有 return")
+        return self._wrap64(v) if isinstance(v, int) and not isinstance(v, bool) else 0
+
+    def _const_tick(self, line):
+        self._const_steps += 1
+        if self._const_steps > self._CONST_STEP_LIMIT:
+            raise SyntaxError(
+                f"line {line}: const fn 求值超过 {self._CONST_STEP_LIMIT} 步"
+                "（疑似死循环）")
+
+    def _const_run(self, stmts, env, line, depth):
+        """执行语句序列，返回 (信号, 值)：normal / return / break / continue。"""
+        for s in stmts:
+            self._const_tick(line)
+            k = s[0]
+            if k == "let":
+                env[s[2]] = self._const_eval(s[3], env, line, depth)
+            elif k == "assign":
+                name, op = s[1], s[2]
+                if name not in env:
+                    raise SyntaxError(
+                        f"line {line}: const fn 给未声明的 {name!r} 赋值")
+                v = self._const_eval(s[3], env, line, depth)
+                if op != "=":
+                    v = self._const_binop(op[:-1], env[name], v, line)
+                env[name] = v
+            elif k == "if":
+                branch = s[2] if self._const_eval(s[1], env, line, depth) else s[3]
+                if branch:
+                    sig, v = self._const_run(branch, env, line, depth)
+                    if sig != "normal":
+                        return sig, v
+            elif k == "while":
+                while self._const_eval(s[1], env, line, depth):
+                    self._const_tick(line)
+                    sig, v = self._const_run(s[2], env, line, depth)
+                    if sig == "return":
+                        return sig, v
+                    if sig == "break":
+                        break
+            elif k == "return":
+                return "return", (self._const_eval(s[1], env, line, depth)
+                                  if s[1] is not None else None)
+            elif k == "break":
+                return "break", None
+            elif k == "continue":
+                return "continue", None
+            elif k == "expr":
+                self._const_eval(s[1], env, line, depth)
+            else:
+                raise SyntaxError(
+                    f"line {line}: const fn 不支持 {k!r} 语句"
+                    "（只支持 let / 赋值 / if / while / return / 表达式）")
+        return "normal", None
+
+    def _const_eval(self, e, env, line, depth):
+        k = e[0]
+        if k in ("num", "bool"):
+            return e[1]
+        if k == "str":
+            raise SyntaxError(f"line {line}: const fn 暂不支持 str 值")
+        if k == "name":
+            if e[1] in env:
+                return env[e[1]]
+            if e[1] in self.consts:
+                cv = self.consts[e[1]]
+                if cv[0] in ("num", "bool"):
+                    return cv[1]
+            raise SyntaxError(
+                f"line {line}: const fn 里引用了未声明的 {e[1]!r}"
+                "（只认形参 / 局部变量 / 顶层 const）")
+        if k == "unop":
+            v = self._const_eval(e[2], env, line, depth)
+            if e[1] == "-":
+                if isinstance(v, bool):
+                    raise SyntaxError(f"line {line}: const fn 对 bool 取负")
+                return self._wrap64(-v)
+            if e[1] == "!":
+                return not v
+            raise SyntaxError(f"line {line}: const fn 不支持一元运算符 {e[1]!r}")
+        if k == "binop":
+            a = self._const_eval(e[2], env, line, depth)
+            b = self._const_eval(e[3], env, line, depth)
+            return self._const_binop(e[1], a, b, line)
+        if k == "call":
+            if len(e[1]) == 1 and e[1][0] in self.const_fns:
+                args = [self._const_eval(a, env, line, depth) for a in e[2]]
+                return self._const_invoke(e[1][0], args, line, depth + 1)
+            raise SyntaxError(
+                f"line {line}: const fn 里只能调用 const fn，"
+                f"{'.'.join(str(x) for x in e[1])} 不是")
+        raise SyntaxError(
+            f"line {line}: const fn 不支持 {k!r} 表达式"
+            "（只支持字面量 / 变量 / 算术 / 比较 / 逻辑 / 位运算 / 调用 const fn）")
+
+    def _const_binop(self, op, a, b, line):
+        if op in ("==", "!=", "<", "<=", ">", ">="):
+            return {"==": a == b, "!=": a != b, "<": a < b,
+                    "<=": a <= b, ">": a > b, ">=": a >= b}[op]
+        if op == "&&":
+            return bool(a) and bool(b)
+        if op == "||":
+            return bool(a) or bool(b)
+        if isinstance(a, bool) or isinstance(b, bool):
+            raise SyntaxError(
+                f"line {line}: const fn 的 {op} 不接受 bool 操作数")
+        if op == "+":
+            return self._wrap64(a + b)
+        if op == "-":
+            return self._wrap64(a - b)
+        if op == "*":
+            return self._wrap64(a * b)
+        if op in ("/", "%"):
+            if b == 0:
+                raise SyntaxError(f"line {line}: const fn 编译期除零")
+            q = abs(a) // abs(b)
+            q = -q if (a < 0) != (b < 0) else q
+            return q if op == "/" else a - q * b
+        if op == "&":
+            return self._wrap64(a & b)
+        if op == "|":
+            return self._wrap64(a | b)
+        if op == "^":
+            return self._wrap64(a ^ b)
+        if op in ("<<", ">>", ">>>"):
+            if not 0 <= b < 64:
+                raise SyntaxError(
+                    f"line {line}: const fn 的移位位数越界（{b}）")
+            if op == "<<":
+                return self._wrap64(a << b)
+            if op == ">>":
+                return a >> b
+            return self._wrap64((a & ((1 << 64) - 1)) >> b)
+        raise SyntaxError(f"line {line}: const fn 不支持运算符 {op!r}")
+
     def peek(self, off=0):
         return self.toks[min(self.pos + off, len(self.toks) - 1)]
 
@@ -469,19 +728,47 @@ class Parser:
                     self.next()
                     path.append(self.eat("NAME").val)
                 imports.append(".".join(path))
+                self.import_paths.add(".".join(path))
             elif self.at("const"):
                 # const NAME [: T] = <编译期可求值>：解析期内联，无运行时存储。
                 # v1.11：右值支持整型算术（+ - * / % 与括号、const 引用），
                 # 编译期求值、C 截断语义；类型标注仅文档性（不做检查）。
                 self.next()
+                if self.at("fn"):
+                    # const fn（v1.58）：既是普通函数（运行时可调、照常发射），
+                    # 也能在 const 右值里被编译期解释执行（见 _const_call）。
+                    fdef = self.parse_fn()
+                    if fdef.get("type_params"):
+                        raise SyntaxError(
+                            f"const fn {fdef['name']!r} 暂不支持泛型类型参数")
+                    self._const_check_fn(fdef)
+                    fdef["const_fn"] = True
+                    self.const_fns[fdef["name"]] = fdef
+                    fns.append(fdef)
+                    continue
                 cname = self.eat("NAME").val
                 if self.at("SYM", ":"):
                     self.next()
                     self.parse_type()
                 self.eat("SYM", "=")
                 self.consts[cname] = self.parse_const_value(cname)
+            elif self.at("NAME", "pub"):
+                # pub 可见性（v1.43）：上下文关键字——只在顶层声明位识别，
+                # 函数内的 pub 变量名不受影响。只作用于顶层 fn/struct/enum；
+                # const 本就解析期内联全局共享、interface 与 impl 必须同源
+                # 文件（既有边界），都不需要 pub。
+                self.next()
+                nxt = self.peek()
+                if nxt.kind not in ("fn", "struct", "enum") and nxt.val not in ("fn", "struct", "enum"):
+                    raise SyntaxError(
+                        f"line {nxt.line}: pub 只支持 fn/struct/enum，"
+                        f"得到 {nxt.val!r}")
+                self._pending_pub = True
             elif self.at("fn"):
                 fdef = self.parse_fn()
+                if self._pending_pub:
+                    fdef["pub"] = True
+                    self._pending_pub = False
                 if fdef.get("type_params"):
                     # 泛型模板（v1.11）：不进发射列表，只作单态化种子。
                     # 带注解的泛型（@simd/@extern ...）暂不支持——模板复制
@@ -606,6 +893,9 @@ class Parser:
             elif self.at("struct"):
                 self.next()
                 name = self.eat("NAME").val
+                if self._pending_pub:
+                    self.pub_types.add(name)
+                    self._pending_pub = False
                 self.eat("SYM", "{")
                 fields = []
                 while not self.at("SYM", "}"):
@@ -620,6 +910,9 @@ class Parser:
             elif self.at("enum"):
                 self.next()
                 name = self.eat("NAME").val
+                if self._pending_pub:
+                    self.pub_types.add(name)
+                    self._pending_pub = False
                 self.eat("SYM", "{")
                 variants = []
                 while not self.at("SYM", "}"):
@@ -869,6 +1162,16 @@ class Parser:
         if t.kind == "continue":
             self.next()
             return ("continue",)
+        if t.kind == "defer":
+            # defer 语句（v1.48）：defer <表达式/赋值> —— 所在块退出时
+            # LIFO 执行（正常落到块尾 / return / break / continue 跳出均算）。
+            # 变量取【退出时】的值（同块内后绑定可见，内层块 shadow 不可见）。
+            self.next()
+            stmt = self.parse_stmt()
+            if stmt[0] not in ("expr", "assign", "assign_field", "assign_index"):
+                raise SyntaxError(
+                    f"line {t.line}: defer 只支持表达式/赋值语句，得到 {stmt[0]!r}")
+            return ("defer", stmt)
         if t.kind == "match":
             return ("match_stmt", self.parse_match())
         if t.kind == "arena":
@@ -927,6 +1230,12 @@ class Parser:
         while self.at("SYM", "."):
             self.next()
             path.append(self.eat("NAME").val)
+        # 命名空间限定模式（v1.44）：lib.Color.Red -> Color.Red（剥模块段）
+        if len(path) > 2:
+            imp, rest = self._match_import(tuple(path[:-1]))
+            if imp is not None and len(rest) >= 1:
+                self.qrefs.add((imp, rest[0]))
+                path = list(rest) + [path[-1]]
         binds = []
         if self.at("SYM", "("):
             self.next()
@@ -1153,7 +1462,33 @@ class Parser:
             return ("spawn", target)
         return self.parse_postfix()
 
+    def _match_import(self, segs):
+        """段元组 -> (匹配的 import 全串, 剥离模块段后的剩余段)。
+        精确等于某 import -> rest=()；某 import 是段前缀 -> rest=多余段
+        （`ws.ws_core.greet` 的 ("ws","ws_core") 精确、("ws",) 前缀均命中）；
+        不匹配 -> (None, None)。"""
+        if not segs or not self.import_paths:
+            return None, None
+        joined = ".".join(segs)
+        if joined in self.import_paths:
+            return joined, ()
+        for imp in sorted(self.import_paths):
+            ps = imp.split(".")
+            if len(segs) > len(ps) and tuple(segs[:len(ps)]) == tuple(ps):
+                return imp, tuple(segs[len(ps):])
+        return None, None
+
     def parse_postfix(self):
+        e = self._postfix_inner()
+        if e[0] == "path":
+            # 命名空间限定路径（v1.44）：lib.Color.Red -> Color.Red（剥模块段）
+            imp, rest = self._match_import(tuple(e[1]))
+            if imp is not None and rest:
+                self.qrefs.add((imp, rest[0]))
+                e = ("path", list(rest))
+        return e
+
+    def _postfix_inner(self):
         e = self.parse_primary()
         line = self.peek().line
         while True:
@@ -1163,6 +1498,31 @@ class Parser:
                 if self.at("SYM", "("):
                     self.next()
                     args = self.parse_args()
+                    # 命名空间限定调用（v1.44）：lib.fn(...) / lib.Color.Red(...)
+                    # —— 头部段匹配本文件 import 时改写为扁平调用/枚举构造，
+                    # 并记录限定引用（load_program 校验指向与 pub）。
+                    cand = None
+                    if e[0] == "name":
+                        cand = (e[1],)
+                    elif e[0] == "path":
+                        cand = tuple(e[1])
+                    if cand is not None:
+                        imp, rest = self._match_import(cand)
+                        if imp is not None:
+                            if rest:
+                                # 枚举构造：限定引用记枚举名（rest[0]），
+                                # 变体名不是顶层声明
+                                self.qrefs.add((imp, rest[0]))
+                                if any(a[0] == "namedarg" for a in args):
+                                    raise SyntaxError(
+                                        f"line {line}: 限定枚举构造只支持位置实参"
+                                        f"（字段表在被导入模块里，命名实参无法在此校验）")
+                                e = ("enumlit_pos", list(rest) + [name],
+                                     list(args))
+                            else:
+                                self.qrefs.add((imp, name))
+                                e = ("call", [name], list(args))
+                            continue
                     # `Shape.Circle(radius: 5)` -> 枚舉變體構造
                     if e[0] == "name" and self.enum_variant_of([e[1], name]):
                         e = self.mk_enumlit([e[1], name], args, line)
@@ -1920,11 +2280,20 @@ def load_program(src_path, cfg=None):
     """
     src_dir = os.path.dirname(os.path.abspath(src_path))
     seen, order, stack = {}, [], []
+    order_labels = []          # 与 order 平行：每个被导入文件的 basename（报错用）
+    order_aps = []             # 与 order 平行：绝对路径（defs_of/限定引用校验键）
+    imp_of = {}                # (文件 ap, import 串) -> 目标文件 ap（限定引用校验）
 
     def parse_file(path, consts=None, generic_fns=None):
         with open(path, encoding="utf-8") as f:
-            return Parser(tokenize(f.read()), consts=consts,
-                          generic_fns=generic_fns).parse_program()
+            p = Parser(tokenize(f.read()), consts=consts,
+                       generic_fns=generic_fns)
+        res = p.parse_program()
+        # 本文件新定义的泛型模板（种子里的不算）：pub 标记随 fdef["pub"]
+        seed = set(generic_fns or {})
+        gens = {k: bool(p.generic_fns[k].get("pub"))
+                for k in p.generic_fns if k not in seed}
+        return res, p.pub_types, gens, p.qrefs
 
     main_dir = os.path.dirname(os.path.abspath(src_path))
     src_cfg = (cfg or {}).get("src", {}) if isinstance(cfg, dict) else {}
@@ -1961,17 +2330,24 @@ def load_program(src_path, cfg=None):
             raise SyntaxError(f"import 循环："
                               f"{' -> '.join(chain + [os.path.basename(path)])}")
         stack.append(ap)
-        res = parse_file(ap)
+        res, pub_types, gens, qrefs = parse_file(ap)
         stack.pop()
-        seen[ap] = res
+        seen[ap] = (res, pub_types, gens, qrefs)
         order.append(res)
+        order_labels.append(os.path.basename(path))
+        order_aps.append(ap)
         for imp in res[1]:
             cand = resolve_or_raise(imp, path)
+            imp_of[(ap, imp)] = os.path.normpath(os.path.abspath(cand))
             load(cand, chain + [os.path.basename(path)])
 
-    main_res = parse_file(src_path)
+    main_res, main_pub_types, main_gens, main_qrefs = parse_file(src_path)
+    main_label = os.path.basename(src_path)
+    main_ap = os.path.normpath(os.path.abspath(src_path))
     for imp in main_res[1]:
-        load(resolve_or_raise(imp, src_path), [os.path.basename(src_path)])
+        cand = resolve_or_raise(imp, src_path)
+        imp_of[(main_ap, imp)] = os.path.normpath(os.path.abspath(cand))
+        load(cand, [os.path.basename(src_path)])
 
     # 两遍解析（const 跨 import 可见）：第一遍已把各文件解析过、const 都已
     # 登记；这里收集全部顶层 const 成全集（同名不同值报错），再带全集把
@@ -1999,22 +2375,137 @@ def load_program(src_path, cfg=None):
                     f"泛型函数冲突：{k!r} 在多个模块中定义不同")
             acc_gf[k] = v
     if acc or acc_gf:
-        seen2, order2 = {}, []
+        seen2, order2, pex2, labels2, aps2 = {}, [], [], [], []
 
         def reload(path):
             ap = os.path.normpath(os.path.abspath(path))
             if ap in seen2:
                 return
-            res = parse_file(ap, consts=acc, generic_fns=acc_gf)
+            res, pub_types, gens, qrefs = parse_file(
+                ap, consts=acc, generic_fns=acc_gf)
             seen2[ap] = res
             order2.append(res)
+            pex2.append((pub_types, gens, qrefs))
+            labels2.append(os.path.basename(path))
+            aps2.append(ap)
             for imp in res[1]:
+                cand = resolve_or_raise(imp, path)
+                imp_of[(ap, imp)] = os.path.normpath(os.path.abspath(cand))
                 reload(resolve_or_raise(imp, path))
 
-        main_res = parse_file(src_path, consts=acc, generic_fns=acc_gf)
+        main_res, main_pub_types, main_gens, main_qrefs = parse_file(
+            src_path, consts=acc, generic_fns=acc_gf)
         for imp in main_res[1]:
+            cand = resolve_or_raise(imp, src_path)
+            imp_of[(main_ap, imp)] = os.path.normpath(os.path.abspath(cand))
             reload(resolve_or_raise(imp, src_path))
         seen, order = seen2, order2
+        pex_list = pex2
+        labels = labels2
+        aps = aps2
+        main_pex = (main_pub_types, main_gens, main_qrefs)
+    else:
+        pex_list = [seen[ap][1:] for ap in seen]
+        labels = order_labels
+        aps = order_aps
+        main_pex = (main_pub_types, main_gens, main_qrefs)
+
+    # ---- pub 可见性检查（v1.43）----
+    # 规则：文件 X 引用了名字 r，且 r 定义在另一文件 Y（X 自己没定义），
+    # 而 Y 里 r 不是 pub -> 编译期报错。单文件程序只有一个"文件"，
+    # 永远不触发（全部既有测试零影响）。
+    # 引用口径（与 global_dce 的 walk 同款 + 类型位置）：
+    #   ("call", path, ...) 取 path[-1]；("gcall", name, ...) 取 name；
+    #   ("name", x) 叶子；("enumlit"/"structlit"/"pat", [头, ...], ...) 取头段；
+    #   ("named", T) 类型引用（内建标量除外——出现在签名/字段/let 标注/
+    #   vec/map/chan 元素等一切类型位）。
+    # 遮蔽豁免：let/参数/循环变量/match 绑定过的名字跳过——局部绑定遮蔽
+    # 顶层名，跨模块同名非 pub 声明在这些位置本来就不可见，避免变量误报。
+    BUILTIN_TY = {"int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8",
+                  "bool", "str", "void", "byte", "float", "f64", "f32",
+                  "__self__"}
+
+    def _collect(e, refs, bound):
+        if isinstance(e, tuple):
+            k = e[0] if e else None
+            if k == "call" and isinstance(e[1], list) and e[1]:
+                refs.add(e[1][-1])
+            elif k == "gcall" and isinstance(e[1], str):
+                refs.add(e[1])
+            elif k == "name" and isinstance(e[1], str):
+                refs.add(e[1])
+            elif k in ("enumlit", "structlit", "pat") and \
+                    isinstance(e[1], list) and e[1]:
+                refs.add(e[1][0])
+            elif k == "named" and isinstance(e[1], str) and e[1] not in BUILTIN_TY:
+                refs.add(e[1])
+            elif k == "let" and len(e) > 2 and isinstance(e[2], str):
+                bound.add(e[2])
+            elif k in ("for", "parfor", "foreach") and len(e) > 1 \
+                    and isinstance(e[1], str):
+                bound.add(e[1])
+            for x in e:
+                _collect(x, refs, bound)
+        elif isinstance(e, list):
+            for x in e:
+                _collect(x, refs, bound)
+        elif isinstance(e, dict):
+            for x in e.values():
+                _collect(x, refs, bound)
+
+    files = [(main_label, main_ap, main_res, main_pex)] + [
+        (label, ap, res, pex)
+        for label, (ap, (res, pex)) in zip(order_labels, zip(aps, zip(order, pex_list)))]
+    defs_of = {}
+    for _label, ap, res, (pub_types, gens, _qr) in files:
+        fdefs = {f["name"]: bool(f.get("pub")) for f in res[2]}
+        for k in res[4]:
+            fdefs[k] = k in pub_types        # struct/enum/interface
+        for k in res[5]:
+            # v1.44 修复：enum 也要进定义表——v1.43 漏收，枚举的跨模块
+            # pub 检查被静默跳过（r not in defs_of 直接 continue）
+            fdefs[k] = k in pub_types
+        fdefs.update(gens)
+        for name, is_pub in fdefs.items():
+            # fn/struct/enum 重名已由上面的合并冲突检查报错；这里 setdefault
+            # 只兜 interface/泛型这类没有专属冲突检查的条目
+            defs_of.setdefault(name, (ap, is_pub))
+    for label, ap, res, (_pt, _gn, qrefs) in files:
+        # 限定引用指向校验（v1.44）：lib.name 的 name 必须定义在 lib 解析
+        # 到的那个文件里（扁平唯一性下，指错模块 = 该模块没有这个名字）
+        for imp, name in qrefs:
+            tgt = imp_of.get((ap, imp))
+            d = defs_of.get(name)
+            if tgt is None or d is None or d[0] != tgt:
+                raise SyntaxError(
+                    f"{label}: 限定引用 {imp}.{name} 无法解析——"
+                    f"{imp} 模块里没有声明 {name!r}")
+        refs, bound = set(), set()
+        for f in res[2]:
+            for pn, _pt in f["params"]:
+                bound.add(pn)
+            _collect(f["body"], refs, bound)
+        for t in res[3]:
+            _collect(t["body"], refs, bound)
+        for fields in res[4].values():
+            for _fn, ft in fields:
+                _collect(ft, refs, bound)
+        for variants in res[5].values():
+            for _vn, vfs in variants:
+                for _fn, ft in vfs:
+                    _collect(ft, refs, bound)
+        viols = []
+        for r in refs:
+            if r in bound or r not in defs_of:
+                continue
+            dap, is_pub = defs_of[r]
+            if dap != ap and not is_pub:
+                viols.append(f"{r!r} <- {os.path.basename(dap)}")
+        if viols:
+            raise SyntaxError(
+                f"{label}: 引用了非 pub 声明（{len(viols)} 处）："
+                + "、".join(sorted(viols))
+                + "。请在对方声明前加 pub 导出，或改在本模块内使用")
 
     mod, imports, fns, tests, structs, enums, decl_order = main_res
     fn_names = {f["name"] for f in fns}
@@ -2038,6 +2529,7 @@ def load_program(src_path, cfg=None):
         have = set(decl_order)
         decl_order = decl_order + [d for d in res[6] if d not in have]
         tests = tests + res[3]
+
     # 用户泛型单态化（v1.11）：gcall 全部降为普通 call，模板换成实例。
     # 必须在合并完成后做——调用点可能跨文件（std 库的泛型）。
     if acc_gf:
@@ -2277,17 +2769,27 @@ def slice_env_elem(t):
     return t[6:] if is_slice_env(t) else None
 
 
-# ---- map[K]V（v0.10）：开放寻址哈希表（K/V 仅 int/bool/str 标量）----
+# ---- map[K]V（v0.10）：开放寻址哈希表 ----
+# 键：int/bool/str 标量（v0.10）；值：标量 + 具名 struct/enum（v1.41 值扩容，
+# 多字值按 agg 布局占 N 槽，槽宽由后端查符号表）。复合容器（vec/map/chan）作值
+# 仍不做——句柄语义要配 mapinner 标签链，留作后续。
 MAP_KV_SCALARS = ("int", "bool", "str")
 
 
 def map_kv_tag(t, which, line=None):
-    """map 的键/值类型必须是 int/bool/str 标量；返回标签，越界明确报错"""
-    if t is None or t[0] != "named" or t[1] not in MAP_KV_SCALARS:
+    """map 的键/值类型标签：键只允许标量；值 v1.41 起还允许具名聚合
+    （返回类型名，标量与聚合由消费方查符号表区分）。越界明确报错。"""
+    loc = f"line {line}: " if line is not None else ""
+    if t is None or t[0] != "named" or t[1] == "byte":
         got = t[1] if (t and t[0] == "named") else repr(t)
-        loc = f"line {line}: " if line is not None else ""
-        raise SyntaxError(f"{loc}map 的{which}只支持 int/bool/str 标量，得到 {got!r}")
-    return t[1]
+        raise SyntaxError(
+            f"{loc}map 的{which}只支持 int/bool/str 标量"
+            + ("或具名 struct/enum" if which == "值类型" else "")
+            + f"，得到 {got!r}")
+    if t[1] in MAP_KV_SCALARS or which == "值类型":
+        return t[1]          # 标量原样；值侧具名聚合放行（v1.41）
+    got = t[1]
+    raise SyntaxError(f"{loc}map 的{which}只支持 int/bool/str 标量，得到 {got!r}")
 
 
 def map_lit_cap(e):
@@ -2595,7 +3097,12 @@ class Infer:
             if mp:
                 kv, vv = mp
                 if m == "get":
-                    return "const char *" if vv == "str" else "int64_t"
+                    if vv == "str":
+                        return "const char *"
+                    if vv not in MAP_KV_SCALARS:
+                        # 聚合值（v1.41）：与 struct/enum 变量同类型串
+                        return ("struct:" if vv in self.structs else "enum:") + vv
+                    return "int64_t"
                 if m == "has":
                     return "bool"
                 return "int64_t"
@@ -2625,6 +3132,8 @@ class Infer:
         if k == "structlit":
             return "struct:" + ".".join(e[1])
         if k == "enumlit":
+            return "enum:" + e[1][0]
+        if k == "enumlit_pos":
             return "enum:" + e[1][0]
         if k == "match":
             t = None
@@ -3140,16 +3649,16 @@ static int64_t qlm_chan_closed(int64_t h) {
     return cl;
 }
 
-/* map[K]V：开放寻址 + 线性探测哈希表（SPEC 附录 v0.10）。
-   控制块 [cap, count, used, ktag, st, kt, vt]：st/kt/vt 三组平行槽，
-   每槽 state 0=空 1=占用 2=墓碑；键相等 int/bool 按值、str 按内容
-   （qlm_str_eq）；哈希：整数 splitmix64 终混、str FNV-1a ——
-   必须与原生后端 __map_hash_* 逐位一致，否则双链 diff 会挂。
-   扩容：used*10 >= cap*7 时容量翻倍 rehash（墓碑不带入）。
+/* map[K]V：开放寻址 + 线性探测哈希表（SPEC 附录 v0.10；v1.41 值扩容）。
+   控制块 [cap, count, used, ktag, esz, st, kt, vt]：st/kt/vt 三组平行槽，
+   值槽宽 esz 字（标量 1；聚合值按 C 类型 sizeof）。每槽 state 0=空 1=占用
+   2=墓碑；键相等 int/bool 按值、str 按内容（qlm_str_eq）；哈希：整数
+   splitmix64 终混、str FNV-1a —— 必须与原生后端 __map_hash_* 逐位一致，
+   否则双链 diff 会挂。扩容：used*10 >= cap*7 时容量翻倍 rehash（墓碑不带入）。
    arena 绑定：原生后端走 bump 分配器，arena 块结束整体回收；
    C 后端的 arena 是纯作用域，这里 malloc 出来的表到进程退出才回收。 */
 typedef struct {
-    int64_t cap, count, used, ktag;
+    int64_t cap, count, used, ktag, esz;
     int64_t *st, *kt, *vt;
 } QlmMap;
 
@@ -3193,14 +3702,15 @@ static void qlm_map_grow(QlmMap *m) {
     int64_t *ost = m->st, *okt = m->kt, *ovt = m->vt;
     int64_t *nst = (int64_t *)calloc((size_t)ncap, sizeof(int64_t));
     int64_t *nkt = (int64_t *)calloc((size_t)ncap, sizeof(int64_t));
-    int64_t *nvt = (int64_t *)calloc((size_t)ncap, sizeof(int64_t));
+    int64_t *nvt = (int64_t *)calloc((size_t)(ncap * m->esz), sizeof(int64_t));
     int64_t nused = 0;
     for (i = 0; i < ocap; i++) {
         if (ost[i] != 1) continue;                   /* 墓碑/空槽不带入 */
         int64_t k = okt[i];
         int64_t j = (int64_t)(qlm_map_hash(m, k) & (uint64_t)nmask);
         while (nst[j] == 1) j = (j + 1) & nmask;
-        nst[j] = 1; nkt[j] = k; nvt[j] = ovt[i];
+        nst[j] = 1; nkt[j] = k;
+        memcpy(nvt + j * m->esz, ovt + i * m->esz, (size_t)(m->esz * sizeof(int64_t)));
         nused++;
     }
     m->cap = ncap; m->used = nused;
@@ -3208,17 +3718,18 @@ static void qlm_map_grow(QlmMap *m) {
     free(ost); free(okt); free(ovt);
 }
 
-static int64_t qlm_map_open(int64_t cap, int64_t ktag) {
+static int64_t qlm_map_open(int64_t cap, int64_t ktag, int64_t esz) {
+    if (esz < 1) esz = 1;
     if (cap < 1) cap = 16;                           /* 默认容量 16 */
     cap--;                                           /* 向上取整到 2 的幂 */
     cap |= cap >> 1; cap |= cap >> 2; cap |= cap >> 4;
     cap |= cap >> 8; cap |= cap >> 16; cap |= cap >> 32;
     cap++;
     QlmMap *m = (QlmMap *)malloc(sizeof(QlmMap));
-    m->cap = cap; m->count = 0; m->used = 0; m->ktag = ktag;
+    m->cap = cap; m->count = 0; m->used = 0; m->ktag = ktag; m->esz = esz;
     m->st = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
     m->kt = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
-    m->vt = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
+    m->vt = (int64_t *)calloc((size_t)(cap * esz), sizeof(int64_t));
     return (int64_t)(intptr_t)m;
 }
 
@@ -3256,6 +3767,46 @@ static int64_t qlm_map_get(int64_t h, int64_t k) {
         exit(1);
     }
     return m->vt[i];
+}
+
+/* 聚合值插入/覆盖写（v1.41）：值写按 esz 字 memcpy 进 vt[i*esz]。
+   探测结构与 qlm_map_set 完全一致；只在聚合值 map 上生成调用。 */
+static int64_t qlm_map_set_n(int64_t h, int64_t k, const void *src) {
+    QlmMap *m = (QlmMap *)(intptr_t)h;
+    int64_t mask = m->cap - 1;
+    int64_t i = (int64_t)(qlm_map_hash(m, k) & (uint64_t)mask), first = -1;
+    for (;;) {
+        int64_t s = m->st[i];
+        if (s == 0) {
+            if (first >= 0) i = first;               /* 复用墓碑，探测链不断 */
+            m->st[i] = 1; m->kt[i] = k;
+            memcpy(m->vt + i * m->esz, src, (size_t)(m->esz * sizeof(int64_t)));
+            m->count++;
+            if (first < 0) m->used++;
+            if (m->used * 10 >= m->cap * 7) qlm_map_grow(m);
+            return 0;
+        }
+        if (s == 2) {
+            if (first < 0) first = i;                /* 记第一个墓碑 */
+        } else if (qlm_map_key_eq(m, m->kt[i], k)) {
+            memcpy(m->vt + i * m->esz, src, (size_t)(m->esz * sizeof(int64_t)));
+            return 0;                                /* 覆盖写 */
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+/* 聚合值拷出（v1.41）：键不存在同样 fail-fast；命中后 memcpy esz 字到 dst。 */
+static void *qlm_map_get_n(int64_t h, int64_t k, void *dst) {
+    QlmMap *m = (QlmMap *)(intptr_t)h;
+    int64_t i = qlm_map_find(m, k);
+    if (i < 0) {
+        fprintf(stderr, "quelmara: map key not found (fail-fast)\n");
+        fflush(stdout);
+        exit(1);
+    }
+    memcpy(dst, m->vt + i * m->esz, (size_t)(m->esz * sizeof(int64_t)));
+    return dst;
 }
 
 static bool qlm_map_has(int64_t h, int64_t k) {
@@ -3835,10 +4386,13 @@ class Codegen:
             if len(e[2]) > 1:
                 raise SyntaxError("map[K]V.new(cap) 至多一个容量实参")
             ktag = 1 if map_env_parts(tag)[0] == "str" else 0
+            vv0 = map_env_parts(tag)[1]
+            # 值扩容（v1.41）：聚合值槽宽 = sizeof(C 类型)；标量 1
+            esz = f"sizeof({vv0})" if vv0 not in MAP_KV_SCALARS else "1"
             cap = "16"
             if e[2]:
                 cap, _ = self.gen_expr(e[2][0], env)
-            return f"qlm_map_open({cap}, {ktag})", tag
+            return f"qlm_map_open({cap}, {ktag}, {esz})", tag
         if k == "method":
             obj, m, args = e[1], e[2], e[3]
             ocode, otype = self.gen_expr(obj, env)
@@ -4016,7 +4570,7 @@ class Codegen:
                 fcode, _ = self.gen_expr(fexpr, env)
                 parts.append(f".{fname} = {fcode}")
             return f"(({sname}){{ {', '.join(parts)} }})", "struct:" + sname
-        if k == "enumlit":
+        if k in ("enumlit", "enumlit_pos"):
             return self.gen_enumlit(e, env)
         if k == "match":
             inner, res_var, res_type = self.gen_match(e, env, 1, None, as_expr=True)
@@ -4025,7 +4579,9 @@ class Codegen:
         raise SyntaxError(f"无法生成表达式: {e!r}")
 
     def gen_enumlit(self, e, env):
-        """枚举构造 -> C 复合字面量 { .__tag = i, .u.Variant = { .f = ... } }"""
+        """枚举构造 -> C 复合字面量 { .__tag = i, .u.Variant = { .f = ... } }。
+        ("enumlit_pos", path, [expr])：位置实参（v1.44 限定枚举构造），
+        字段名按 merged 变体表下标映射。"""
         path, fields = e[1], e[2]
         ename, vname = path[0], path[1]
         if ename not in self.enums:
@@ -4033,10 +4589,16 @@ class Codegen:
         vidx, vfields = self.enum_variant(ename, vname)
         parts = [f".__tag = {vidx}"]
         if vfields:
-            exprs = dict(fields)
-            if set(exprs) != {f for f, _ in vfields}:
-                raise SyntaxError(
-                    f"{ename}.{vname} 构造需给出全部载荷字段 {[f for f, _ in vfields]}")
+            if e[0] == "enumlit_pos":
+                if len(fields) != len(vfields):
+                    raise SyntaxError(
+                        f"{ename}.{vname} 构造需 {len(vfields)} 个载荷字段，得到 {len(fields)}")
+                exprs = {vf[0]: fields[i] for i, vf in enumerate(vfields)}
+            else:
+                exprs = dict(fields)
+                if set(exprs) != {f for f, _ in vfields}:
+                    raise SyntaxError(
+                        f"{ename}.{vname} 构造需给出全部载荷字段 {[f for f, _ in vfields]}")
             inits = []
             for fname, ftype in vfields:
                 fcode, _ = self.gen_expr(exprs[fname], env)
@@ -4159,8 +4721,11 @@ class Codegen:
 
     def gen_map_method(self, m, ocode, mp, args, env):
         """m.set/get/has/del -> C 运行时调用（开放寻址表）。
-        键相等/哈希在运行时按句柄 ktag 分派：str 按内容，int/bool 按值。"""
+        键相等/哈希在运行时按句柄 ktag 分派：str 按内容，int/bool 按值。
+        值扩容（v1.41）：聚合值走 qlm_map_set_n/get_n（按值拷入/拷出），
+        模式与 vec[Struct] 的 push/get 相同（语句表达式物化 _vt）。"""
         kv, vv = mp
+        agg_v = vv not in MAP_KV_SCALARS
 
         def key_arg(a):
             kcode, ktype = self.gen_expr(a, env)
@@ -4173,11 +4738,19 @@ class Codegen:
             kcode = key_arg(args[0])
             vcode, vtype = self.gen_expr(args[1], env)
             self.check_map_arg("值", vv, vtype)
+            if agg_v:
+                return (f"({{ {vv} _vt = {vcode}; "
+                        f"qlm_map_set_n({ocode}, {kcode}, (const void *)&_vt); "
+                        f"(int64_t)0; }})", "int64_t")
             return f"qlm_map_set({ocode}, {kcode}, {vcode})", "int64_t"
         if m == "get":
             if len(args) != 1:
                 raise SyntaxError("m.get(k) 需要且只需要一个实参")
             kcode = key_arg(args[0])
+            if agg_v:
+                tn = ("struct:" if vv in self.structs else "enum:") + vv
+                return (f"({{ {vv} _vt; "
+                        f"qlm_map_get_n({ocode}, {kcode}, (void *)&_vt); _vt; }})", tn)
             code = f"qlm_map_get({ocode}, {kcode})"
             if vv == "str":
                 return f"((const char *)(intptr_t)({code}))", "const char *"
@@ -4196,10 +4769,15 @@ class Codegen:
 
     @staticmethod
     def check_map_arg(which, want, got):
-        """map 键/值实参类型校验：str 走内容语义，类型不匹配必须报错（不许静默错编）"""
+        """map 键/值实参类型校验：str 走内容语义，类型不匹配必须报错（不许静默错编）；
+        聚合值要求 struct:Name / enum:Name 精确同名（v1.41）"""
         if want == "str":
             if got != "const char *":
                 raise SyntaxError(f"map {which}类型是 str，实参类型不匹配（得到 {got}）")
+        elif want not in MAP_KV_SCALARS:
+            if got in ("struct:" + want, "enum:" + want):
+                return
+            raise SyntaxError(f"map 值类型是 {want}，实参类型不匹配（得到 {got}）")
         elif got == "const char *":
             raise SyntaxError(f"map {which}类型是 {want}，不能用 str 实参")
 
@@ -4474,6 +5052,13 @@ class Codegen:
                 return f"{pad}if ({code} != 0) return {zero};"
             code, _ = self.gen_expr(e, env)
             return f"{pad}{code};"
+        if s[0] == "defer":
+            # C 后端没有 defer 语句（C99 无 RAII）；要支持得给每个退出点
+            # 复制清理代码 + goto 标签，收益不抵风险。fail-fast 明确拒绝，
+            # 不静默丢清理——defer 类测试只进 PE / A64 原生后端回归。
+            raise SyntaxError(
+                "C 后端不支持 defer（v1.48 边界：defer 只进原生后端，"
+                "C 交叉验证不含 defer 测试）")
         raise SyntaxError(f"未知语句 {s!r}")
 
     def gen_struct_let(self, s, env, ind):
@@ -4821,6 +5406,9 @@ def walk_expr(e, declared, assigned, referenced):
     elif k == "enumlit":
         for _n, v in e[2]:
             walk_expr(v, declared, assigned, referenced)
+    elif k == "enumlit_pos":
+        for v in e[2]:
+            walk_expr(v, declared, assigned, referenced)
     elif k == "match":
         walk_expr(e[1], declared, assigned, referenced)
         for pat, body in e[2]:
@@ -4878,6 +5466,10 @@ def walk_stmts(stmts, declared, assigned, referenced):
                 referenced.add(head)
         elif k in ("break", "continue"):
             pass
+        elif k == "defer":
+            # defer <表达式/赋值>：内部语句照常计入引用/赋值，
+            # 否则"只在 defer 里用到"的变量会被 DCE 当成未使用。
+            walk_stmts([s[1]], declared, assigned, referenced)
         elif k == "match_stmt":
             walk_expr(s[1], declared, assigned, referenced)
         elif k == "arena":

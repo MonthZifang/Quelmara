@@ -95,19 +95,34 @@ python tools/qpm.py remove <name>
 python tools/qpm.py list
 ```
 
-依赖写在项目 `Quelmara.toml`：
+依赖写在项目 `Quelmara.toml` 的 `[deps]` 段，`name = "spec"`：
 
 ```toml
 [deps]
-mylib = "path:../mylib"                  # 本地路径
-other = "git:https://github.com/u/r#v1"  # git + 可选 rev
+mylib   = "path:../mylib"                      # 路径依赖（显式前缀）
+other   = "git:https://github.com/u/r#v1.2.3"   # git + 精确 tag/branch/sha
+newest  = "https://github.com/u/r#^1.2.0"       # git + semver 区间（选最新满足 tag）
 ```
 
-- git 依赖 clone 到 `~/.qpm/cache`，再复制到 `<project>/.qpm/deps`（Windows 无 symlink，
-  复制保证离线可构建）。
-- 锁文件 `.qpm/lock.toml` 记录来源与 sha。
+- **spec 形态**（v1.45）：`path:` 前缀，或以 `./` `../` `/` 盘符开头 = 路径依赖；
+  `git:` 前缀或裸 URL = git 依赖。`#` 之后是**精确 rev**（tag/branch/sha）或
+  **semver 区间**——含运算符（`^ ~ > >= < <= = *`）、通配段（`1.2.x` / `1.*`）
+  或分隔符（逗号/空格 = AND，`||` = OR）的按区间解析；纯版本串按精确 tag。
+- **区间解析**（`tools/qpm_semver.py`，纯标准库）：`git ls-remote --tags` 列
+  tag → 选满足区间的**最大**版本 → rev 收敛为具体 tag 后走 clone/缓存/复制。
+  无满足 tag 时 **fail-fast** 并列出远端全部可用 tag。预发布版本默认不选中
+  （`^1.2.3` 选不到 `2.0.0-rc1`；要预发布须显式写 `^1.2.3-rc1`）。区间语法
+  与语义边界见该模块 docstring。
+- git 依赖 clone 到 `~/.qpm/cache/<name>-<rev>`，再复制到
+  `<project>/.qpm/deps/<name>/`（Windows 无 symlink，复制保证离线可构建）。
+- 锁文件 `.qpm/lock.toml`：`name = "kind|src|rev|sha"` 四段式；区间依赖的
+  rev 是**解析后**的 tag，区间文本留在 `Quelmara.toml`——两处对照即
+  "声明 vs 锁定"。
 - 约定：**git 仓库根 = 包根**；包名必须 import-safe（用下划线，连字符不是合法标识符）。
-- 未做：semver 区间、registry、发布流程、传递依赖冲突合并。
+- 未做：registry、发布/上传流程、传递依赖冲突合并。
+
+测试：`python tests/qpm_semver_test.py`（单测 + `file://` 本地 git 端到端；
+`fixtures/qpm-demo` 的 `.git` 不入库，测试按需重建）。
 
 端到端夹具：`fixtures/qpm-demo`（路径依赖 + `file://` git 依赖两条路）。
 
@@ -193,4 +208,4 @@ python tools/stage0/qlm_cli.py bench bench/p0_bench.qma --runs 5 --update-baseli
   稳定通道是 `python tools/dev/push_via_api.py`（逐 blob 建 tree/commit 再 PATCH ref，
   凭据走 Windows Credential Manager）。
 - 产物是单文件可执行程序，无运行时依赖；版本号口径见 `qlm_cli.py version`
-  （注意：该命令当前打印的是 `1.0.0`，与文档版本线不一致，见 `07-gaps.md`）。
+  （与 `docs/versions/` 最新目录同源，由 `check_docs.py` 门禁强制）。

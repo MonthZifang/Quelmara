@@ -46,7 +46,7 @@ struct TlsClientResult {
     cert_msg: str          // Certificate 消息体（用 tls_cert_count / tls_cert 取证书）
 }
 
-fn tls_client_err(code: str) -> TlsClientResult {
+pub fn tls_client_err(code: str) -> TlsClientResult {
     return TlsClientResult {
         ok: 0, err: code, shared: "",
         c_hs_secret: "", s_hs_secret: "",
@@ -71,7 +71,7 @@ fn _tls_spaces(n: int) -> str {
 
 // CertificateVerify 的待签名内容哈希：
 //   64 个 0x20 || "TLS 1.3, server CertificateVerify" || 0x00 || transcript_hash
-fn tls_cert_verify_hash(transcript_hash: str) -> str {
+pub fn tls_cert_verify_hash(transcript_hash: str) -> str {
     return tls_hash(_tls_spaces(64) + "TLS 1.3, server CertificateVerify" + chr(0) + transcript_hash)
 }
 
@@ -101,7 +101,7 @@ fn _tls_pad32(s: str, off: int, n: int, out: vec[int]) -> int {
 
 // TLS 1.3 的 ECDSA 签名是 DER 的 SEQUENCE { INTEGER r, INTEGER s }，
 // 这里转成 64 字节 r||s；格式非法返回 ""。
-fn tls_ecdsa_sig_raw(sig: str) -> str {
+pub fn tls_ecdsa_sig_raw(sig: str) -> str {
     if len(sig) < 8 || sig[0] != 0x30 {
         return ""
     }
@@ -219,7 +219,7 @@ fn _tls_cert_der(body: str) -> str {
 
 // 构造 ClientHello 记录（单 cipher suite、单 key share、SNI）。
 // rnd 必须是 32 字节随机数，sid 是 0..32 字节的 legacy_session_id。
-fn tls_client_hello(host: str, pub: str, rnd: str, sid: str) -> str {
+pub fn tls_client_hello(host: str, pub: str, rnd: str, sid: str) -> str {
     if len(rnd) != 32 || len(pub) != 32 || len(sid) > 32 {
         assert(false, "tls_client_hello: 参数长度非法")
     }
@@ -249,7 +249,7 @@ fn tls_client_hello(host: str, pub: str, rnd: str, sid: str) -> str {
 // 握手：ClientHello 记录 + 服务器回包字节 → 结果
 // ---------------------------------------------------------------------------
 
-fn tls_client_handshake(priv: str, ch_record: str, server_bytes: str) -> TlsClientResult {
+pub fn tls_client_handshake(priv: str, ch_record: str, server_bytes: str) -> TlsClientResult {
     if len(priv) != 32 {
         return tls_client_err("priv-len")
     }
@@ -484,12 +484,12 @@ fn tls_verify_chain(r: TlsClientResult, anchor: str, host: str, now: int) -> int
 }
 
 // Certificate 消息里的证书数量
-fn tls_cert_count(r: TlsClientResult) -> int {
+pub fn tls_cert_count(r: TlsClientResult) -> int {
     return len(_tls_cert_list(r.cert_msg))
 }
 
 // 第 i 张证书的 DER（0 = leaf）；越界返回 ""
-fn tls_cert(r: TlsClientResult, i: int) -> str {
+pub fn tls_cert(r: TlsClientResult, i: int) -> str {
     let certs = _tls_cert_list(r.cert_msg)
     if i < 0 || i >= len(certs) {
         return ""

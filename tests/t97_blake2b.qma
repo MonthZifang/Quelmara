@@ -1,0 +1,24 @@
+// t97_blake2b.qma：BLAKE2b（RFC 7693）—— v1.54
+// 覆盖：RFC 7693 A.1 标准向量（abc 精确匹配）、空消息、多块（1000B）、
+// 变长输出（32/20/1）、keyed 两种（64B key / 短 key / keyed 空消息）。
+module t97
+
+import std.blake2b
+import std.str
+
+fn main() {
+    assert(blake2b_hex("abc") == "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923", "abc 64B")
+    assert(blake2b_hex("") == "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce", "empty 64B")
+    assert(blake2b_hex("The quick brown fox jumps over the lazy dog") == "a8add4bdddfd93e4877d2746e62817b116364a1fa7bc148d95090bc7333b3673f82401cf7aa2e4cb1ecd90296e3f14cb5413f8ed77be73045b13914cdcd6a918", "quote")
+    assert(blake2b_hex_n("abc", 32) == "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319", "outlen 32")
+    assert(blake2b_hex_n("abc", 20) == "384264f676f39536840523f284921cdc68b6846b", "outlen 20")
+    assert(blake2b_hex_n("abc", 1) == "6b", "outlen 1")
+    assert(blake2b_hex(str_repeat("a", 1000)) == "d6a69459fe93fc6b9537ed4336e5099e0dcca3e97290a412500ed7a0daffb03d80cf3650a20e0591f748e10c3c534945ee83d5f2c9722f1a68d98b8c01af23fd", "1000B 多块")
+    assert(blake2b_keyed_hex("abc", "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f !\"#$%&'()*+,-./0123456789:;<=>?") == "06bbc3dedf13a31139498655251b7588ccd3bb5aaa071b2d44d8e0a04095579ed590fbfdcf941f4370ce5ce623624e7a76d33e7a8109dcda9b57d72f8f8efa51", "keyed 64B key")
+    assert(blake2b_keyed_hex("The quick brown fox jumps over the lazy dog", "key") == "66f642208454bf2e066dac9eab68fae0146bb544c1d46e1f427008f068a45d872cd0c1fc23e7ba82a95d084aadf5e4af9edaf761fb6ced9e485a28c59a3f714c", "keyed short key")
+    assert(blake2b_keyed_hex("" , "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f !\"#$%&'()*+,-./0123456789:;<=>?") == "10ebb67700b1868efb4417987acf4690ae9d972fb7a590c2f02871799aaa4786b5e996e8f0f4eb981fc214b005f42d2ff4233499391653df7aefcbc13fc51568", "keyed empty msg")
+    let d = blake2b_str("abc", 64)
+    assert(mem_load8(d, 0) == 0xBA, "digest buf first byte")
+    mem_free(d, 64)
+    print("ok t97_blake2b")
+}

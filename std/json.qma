@@ -664,7 +664,7 @@ fn _parse_obj(d: int, depth: int) -> int {
 // json_parse(s) -> doc 句柄。失败时 json_ok(doc) == false。
 // 句柄不自动回收（一个文档一个块）；长驻进程请 mem_free(doc, 72) 并在
 // 之前释放 pool/buf/kids（当前不提供 json_free，见 docs/GAPS.md）。
-fn json_parse(s: str) -> int {
+pub fn json_parse(s: str) -> int {
     let d = mem_alloc(136)
     mem_store64(d, JDOM_PBUF, mem_alloc(32 * 6 * 8))
     mem_store64(d, JDOM_PCAP, 32 * 6)
@@ -692,7 +692,7 @@ fn json_parse(s: str) -> int {
     return d
 }
 
-fn json_ok(d: int) -> bool {
+pub fn json_ok(d: int) -> bool {
     if d == 0 {
         return false
     }
@@ -703,11 +703,11 @@ fn json_ok(d: int) -> bool {
 }
 
 // 错误位置（1-based 字节偏移；0 = 无错）
-fn json_error_pos(d: int) -> int {
+pub fn json_error_pos(d: int) -> int {
     return mem_load64(d, JDOM_ERR)
 }
 
-fn json_root(d: int) -> int {
+pub fn json_root(d: int) -> int {
     return mem_load64(d, JDOM_ROOT)
 }
 
@@ -715,7 +715,7 @@ fn json_type(d: int, node: int) -> int {
     return _tag(d, node)
 }
 
-fn json_is_null(d: int, node: int) -> bool {
+pub fn json_is_null(d: int, node: int) -> bool {
     return _tag(d, node) == JNULL
 }
 
@@ -731,11 +731,11 @@ fn json_is_str(d: int, node: int) -> bool {
     return _tag(d, node) == JSTR
 }
 
-fn json_is_arr(d: int, node: int) -> bool {
+pub fn json_is_arr(d: int, node: int) -> bool {
     return _tag(d, node) == JARR
 }
 
-fn json_is_obj(d: int, node: int) -> bool {
+pub fn json_is_obj(d: int, node: int) -> bool {
     return _tag(d, node) == JOBJ
 }
 
@@ -747,14 +747,14 @@ fn _buf_slice(d: int, start: int, n: int) -> str {
     return out
 }
 
-fn json_bool(d: int, node: int) -> bool {
+pub fn json_bool(d: int, node: int) -> bool {
     return _node_get(d, node, 1) == 1
 }
 
 // 整数部分：取小数点/指数之前的文本（"−2.75e2" -> -2），不四舍五入。
 // 实现上走 str 工具而不是自己扫 vec：v1.5 实测"局部量跨调用后读错槽位"
 // 的 codegen 问题会把这种循环算错（见 docs/GAPS.md 已知问题）。
-fn json_int(d: int, node: int) -> int {
+pub fn json_int(d: int, node: int) -> int {
     if _tag(d, node) != JNUM {
         return 0
     }
@@ -779,28 +779,28 @@ fn json_int(d: int, node: int) -> int {
 }
 
 // 原始数字文本（保留小数/指数，便于上层自己转 float）
-fn json_num_raw(d: int, node: int) -> str {
+pub fn json_num_raw(d: int, node: int) -> str {
     if _tag(d, node) != JNUM {
         return ""
     }
     return _buf_slice(d, _node_get(d, node, 1), _node_get(d, node, 2))
 }
 
-fn json_str(d: int, node: int) -> str {
+pub fn json_str(d: int, node: int) -> str {
     if _tag(d, node) != JSTR {
         return ""
     }
     return _buf_slice(d, _node_get(d, node, 1), _node_get(d, node, 2))
 }
 
-fn json_arr_len(d: int, node: int) -> int {
+pub fn json_arr_len(d: int, node: int) -> int {
     if _tag(d, node) != JARR {
         return 0
     }
     return _node_get(d, node, 2)
 }
 
-fn json_arr_at(d: int, node: int, i: int) -> int {
+pub fn json_arr_at(d: int, node: int, i: int) -> int {
     if _tag(d, node) != JARR {
         return -1
     }
@@ -811,7 +811,7 @@ fn json_arr_at(d: int, node: int, i: int) -> int {
     return mem_load64(_kbuf(d), _node_get(d, node, 1) + i)
 }
 
-fn json_obj_len(d: int, node: int) -> int {
+pub fn json_obj_len(d: int, node: int) -> int {
     if _tag(d, node) != JOBJ {
         return 0
     }
@@ -829,7 +829,7 @@ fn _obj_kid(d: int, node: int, i: int, which: int) -> int {
     return mem_load64(_kbuf(d), _node_get(d, node, 1) + i * 2 + which)
 }
 
-fn json_obj_key(d: int, node: int, i: int) -> str {
+pub fn json_obj_key(d: int, node: int, i: int) -> str {
     return json_str(d, _obj_kid(d, node, i, 0))
 }
 
@@ -838,7 +838,7 @@ fn json_obj_val(d: int, node: int, i: int) -> int {
 }
 
 // 按 key 取子节点（不存在返回 -1）
-fn json_obj_get(d: int, node: int, key: str) -> int {
+pub fn json_obj_get(d: int, node: int, key: str) -> int {
     let n = json_obj_len(d, node)
     let mut i = 0
     while i < n {
@@ -861,7 +861,7 @@ fn json_obj_get(d: int, node: int, key: str) -> int {
 //   * value: 若 awaiting 则清标志（不写逗号），否则 count>0 写 ','，count++
 // ---------------------------------------------------------------------------
 
-fn json_new(cap: int) -> int {
+pub fn json_new(cap: int) -> int {
     let h = mem_alloc(24)
     mem_store64(h, 0, vec[int].new(cap))
     mem_store64(h, 1, vec[int].new(8))
@@ -1003,14 +1003,14 @@ fn _push_level(h: int) -> int {
     return 0
 }
 
-fn json_begin_obj(h: int) -> int {
+pub fn json_begin_obj(h: int) -> int {
     _pre_value(h)
     _put(h, 123)
     _push_level(h)
     return 0
 }
 
-fn json_end_obj(h: int) -> int {
+pub fn json_end_obj(h: int) -> int {
     if _depth(h) > 0 {
         let st = _stack(h)
         st.pop()
@@ -1020,14 +1020,14 @@ fn json_end_obj(h: int) -> int {
     return 0
 }
 
-fn json_begin_arr(h: int) -> int {
+pub fn json_begin_arr(h: int) -> int {
     _pre_value(h)
     _put(h, 91)
     _push_level(h)
     return 0
 }
 
-fn json_end_arr(h: int) -> int {
+pub fn json_end_arr(h: int) -> int {
     if _depth(h) > 0 {
         let st = _stack(h)
         st.pop()
@@ -1038,7 +1038,7 @@ fn json_end_arr(h: int) -> int {
 }
 
 // key：写 "key":（逗号在此处决定）
-fn json_key(h: int, k: str) -> int {
+pub fn json_key(h: int, k: str) -> int {
     let st = _stack(h)
     let dp = _depth(h)
     if dp == 0 {
@@ -1057,7 +1057,7 @@ fn json_key(h: int, k: str) -> int {
     return 0
 }
 
-fn json_val_str(h: int, v: str) -> int {
+pub fn json_val_str(h: int, v: str) -> int {
     _pre_value(h)
     _put(h, 34)
     json_escape_into(h, v)
@@ -1072,7 +1072,7 @@ fn json_val_int(h: int, v: int) -> int {
     return 0
 }
 
-fn json_val_bool(h: int, v: bool) -> int {
+pub fn json_val_bool(h: int, v: bool) -> int {
     _pre_value(h)
     if v {
         _put_str(h, "true")
@@ -1082,7 +1082,7 @@ fn json_val_bool(h: int, v: bool) -> int {
     return 0
 }
 
-fn json_val_null(h: int) -> int {
+pub fn json_val_null(h: int) -> int {
     _pre_value(h)
     _put_str(h, "null")
     return 0
@@ -1095,19 +1095,19 @@ fn json_val_raw(h: int, raw: str) -> int {
     return 0
 }
 
-fn json_key_str(h: int, k: str, v: str) -> int {
+pub fn json_key_str(h: int, k: str, v: str) -> int {
     json_key(h, k)
     json_val_str(h, v)
     return 0
 }
 
-fn json_key_int(h: int, k: str, v: int) -> int {
+pub fn json_key_int(h: int, k: str, v: int) -> int {
     json_key(h, k)
     json_val_int(h, v)
     return 0
 }
 
-fn json_key_bool(h: int, k: str, v: bool) -> int {
+pub fn json_key_bool(h: int, k: str, v: bool) -> int {
     json_key(h, k)
     json_val_bool(h, v)
     return 0
@@ -1119,6 +1119,6 @@ fn json_key_null(h: int, k: str) -> int {
     return 0
 }
 
-fn json_done(h: int) -> str {
+pub fn json_done(h: int) -> str {
     return str_from_bytes(_out(h))
 }
