@@ -1,23 +1,31 @@
-// std/sync.qma —— 无锁同步原语（v1.10），Quelmara 自实现，零 Python/Node 运行时
+// std/sync.qma —— 无锁同步原语（v1.10，v1.98 并发转绿）
+// Quelmara 自实现，零 Python/Node 运行时
 //
 // 为什么需要它：atomic_add/cas 内建（v1.10）给了"单条 CPU 指令级"的读改写，
 // 但真实并发程序需要的是组合出来的同步对象——自旋锁（临界区）、无锁栈
 // （MPSC 队列的地基）、WaitGroup（fork-join 屏障）。全部构建在
-// atomic_cas / atomic_add / spin_hint 之上，无任何全局解释器锁。
+// atomic_cas / atomic_add / spin_hint / thread_yield 之上，无 GIL。
 //
 // 内存布局（全部 8 字节对齐，atomic 要求）：
 //   mutex  : [lock: 0=未锁 1=已锁]
-//   stack  : [head]；节点 = [next][value]（16 字节堆块）
+//   stack  : [head][poplock]；节点 = [next][value]（16 字节堆块）
 //   wg     : [count]
 //
-// 边界（诚实标注）：
-//   * 栈 pop 的 ABA 问题：单消费者（一个线程 pop）下不存在；多消费者需要
-//     带标签指针（tagged pointer），是 GAPS.md 的后续项；
-//   * 节点/锁对象不归还（堆是 bump 分配 + mem_free 显式归还，本库不自动 free）；
-//   * wg_wait 是自旋等待（无 futex/futex-wake，长等待场景请用 chan 组合）。
+// 边界（v1.98 起，诚实标注）：
+//   * 栈 pop 现在是 **MPMC 安全**：每次 pop 先取每栈的消费者锁再 CAS head，
+//     从而排除 ABA（见 stack_pop 注释里的证明）；单消费者想省这把锁用
+//     stack_pop_single。节点不回收（mem_free 不调用），所以"弹出的节点地址
+//     被复用"这条 ABA 前提在库内也不成立——锁只是让"调用方自行 free 后
+//     再 push"这种用法也安全。
+//   * 锁对象/节点不归还（堆是 bump 分配 + mem_free 显式归还，本库不自动 free）。
+//   * wg_wait / mutex_lock 是**退避等待**：先自旋、再让出时间片、最后按毫秒
+//     睡眠；不是 futex park，唤醒延迟最坏 = 一个 sleep 片（1 ms）。
+//     实测 CPU 占用见 docs/06-status.md §3.5b。
 
 // ---- 自旋锁 ----
 
+/// 新建一把锁（8 字节堆块，0=未锁 / 1=已锁），返回锁句柄。
+/// 锁对象不自动回收：用完自己 mem_free。
 pub fn mutex_new() -> int {
     // 锁对象 = 8 字节堆块；0 = 未锁，1 = 已锁
     let m = mem_alloc(8)
@@ -25,31 +33,46 @@ pub fn mutex_new() -> int {
     return m
 }
 
+/// 获取锁：atomic_cas 抢 0→1，失败时前 128 次 spin_hint、之后 thread_yield，直到抢到。
+/// **不是 futex park**：长等待靠让出时间片，不睡眠。
 pub fn mutex_lock(m: int) {
-    // CAS 自旋：旧值 0 = 抢锁成功；否则 pause 后重试
+    // CAS 自旋：旧值 0 = 抢锁成功；否则退避（先 pause，再让出时间片）
     let mut old = atomic_cas(m, 0, 1)
+    let mut spins = 0
     while old != 0 {
-        spin_hint()
+        if spins < 128 {
+            spin_hint()          // 短等待：不切线程，延迟最低
+        } else {
+            thread_yield()       // 长等待：把核让给持锁者，别空转
+        }
+        spins = spins + 1
         old = atomic_cas(m, 0, 1)
     }
 }
 
+/// 释放锁（mem_store_rel，release 语义）；x86 下就是普通 mov，AArch64 用 STLR。
 pub fn mutex_unlock(m: int) {
-    // 释放 = 写 0。x86 TSO 下普通 store 已有 release 语义；
-    // 等待方在下一轮 atomic_cas（带 lock 前缀，全屏障）看到它。
-    mem_store64(m, 0, 0)
+    // 释放 = release 存储。x86 TSO 下普通 mov 已是 release（零额外成本）；
+    // AArch64 需要 STLR，否则临界区内的写在别的核看来可能晚于解锁。
+    // 用 mem_store_rel 而不是 atomic_fence()：后者在 x86 是 mfence，
+    // 会给每次解锁加约 20 个周期，而 release 语义本来不需要全屏障。
+    mem_store_rel(m, 0)
 }
 
-// ---- 无锁栈（Treiber push / 单消费者 pop）----
+// ---- 无锁栈（Treiber push / MPMC-safe pop）----
 
+/// 新建 Treiber 栈（16 字节：head + poplock），返回句柄；节点 16 字节 [next][value]。
 pub fn stack_new() -> int {
-    let s = mem_alloc(8)
+    let s = mem_alloc(16)
     mem_store64(s, 0, 0)     // head = 空
+    mem_store64(s, 1, 0)     // poplock = 未锁
     return s
 }
 
+/// 压栈：节点 CAS 挂到 head，失败重读重挂；**全程无锁**，不拿 poplock。
 pub fn stack_push(s: int, v: int) {
-    // 节点 = [next][value]；CAS 竞争 head，失败重读重挂
+    // 节点 = [next][value]；CAS 竞争 head，失败重读重挂。
+    // push 全程无锁：任何线程都能直接挂节点，不需要拿 poplock。
     let n = mem_alloc(16)
     mem_store64(n, 1, v)
     let mut old = mem_load64(s, 0)
@@ -66,10 +89,50 @@ pub fn stack_push(s: int, v: int) {
     }
 }
 
+/// 消费者锁：pop 串行化。为什么这样就消掉了 ABA——
+///   设同一时刻只有一个线程在 pop。它读到的 head = A、A.next = B 之后，
+///   能把 A 从链上摘掉的只有 pop（push 只增加节点），而 pop 只有它自己，
+///   所以 CAS(head, A, B) 之前 A 不可能"先被摘掉再被挂回来"。
+///   并发 push 只会让 head 变成新节点，CAS 自然失败并重试（安全）。
+///   不加这把锁时的前提是"节点地址永不复用"：本库不 free 节点、也不把节点
+///   还给调用方，所以现状下 ABA 不会发生（2P/2C 压测 10 次不复现）。但那只是
+///   **隐含约定**——一旦有人让 pop 返回节点、或 allocator 把弹出的块还给新的
+///   push，head 就会变回旧值，链被写坏且无任何报错。这把锁把"不可能"变成
+///   结构性保证，代价是一次原子交换。单消费者场景用 stack_pop_single 免掉它。
 pub fn stack_pop(s: int) -> int {
     // 返回栈顶 value；空栈返回 0（0 不是合法 payload 的调用方保证）。
-    // 单消费者下无 ABA：pop 的 CAS 失败只因为并发 push 改了 head，
-    // 而被弹出的节点不会再被引用。
+    // poplock 在句柄 +8 字节处（字下标 1）
+    let mut lk = mem_xchg(s + 8, 1)
+    while lk != 0 {
+        spin_hint()
+        lk = mem_xchg(s + 8, 1)
+    }
+    let mut old = mem_load64(s, 0)
+    let mut val = 0
+    let mut done = 0
+    while done == 0 {
+        if old == 0 {
+            val = 0
+            done = 1
+        } else {
+            let nxt = mem_load64(old, 0)
+            let cur = atomic_cas(s, old, nxt)
+            if cur == old {
+                val = mem_load64(old, 1)
+                done = 1
+            } else {
+                old = cur
+                spin_hint()
+            }
+        }
+    }
+    mem_store_rel(s + 8, 0)   // 放消费者锁（release：x86 mov / A64 STLR）
+    return val
+}
+
+/// 单消费者快路径：不取 poplock，因此只在"同一时刻只有一个线程 pop"时正确。
+/// 与 stack_pop 的差 = 一次原子交换 + 一次存储（见 docs/06-status.md §3.5）。
+pub fn stack_pop_single(s: int) -> int {
     let mut old = mem_load64(s, 0)
     let mut val = 0
     let mut done = 0
@@ -94,24 +157,43 @@ pub fn stack_pop(s: int) -> int {
 
 // ---- WaitGroup（fork-join 屏障）----
 
+/// 新建 WaitGroup（8 字节计数，初始 0），返回句柄。
 pub fn wg_new() -> int {
     let w = mem_alloc(8)
     mem_store64(w, 0, 0)
     return w
 }
 
+/// 计数加 n（atomic_add，全屏障）；通常在 spawn 之前一次性加好。
 pub fn wg_add(w: int, n: int) {
     atomic_add(w, n)
 }
 
+/// 计数减 1；减到 0 时等待方才能通过 wg_wait。
 pub fn wg_done(w: int) {
-    atomic_add(w, -1)
+    atomic_add(w, 0 - 1)
 }
 
+/// 阻塞到计数归零：先纯自旋（64 次）→ 让出时间片（到 1088 次）→ 每轮 sleep 1 ms。
+/// 计数归零时 wg_done 之前的写对这里可见（atomic 全屏障）。
+/// 退避参数（全部来自本机实测，不是拍脑袋）：
+///   spin_hint  ≈ 4 ns      → 64 次 ≈ 0.3 µs，覆盖"马上就好"的等待
+///   thread_yield ≈ 5.5 µs  → 1024 次 ≈ 5.6 ms，覆盖"毫秒级"的等待
+///   sleep_ms(1) ≈ 25 ms    → 本机（Windows 默认 15.6 ms 时钟片 + VBS）
+///   所以睡眠段只在等待超过 ~5 ms 后才进，短等待不会被拉长到 25 ms。
 pub fn wg_wait(w: int) {
-    // 自旋到计数归零。atomic_add 带 lock 前缀（全屏障），
-    // 计数写与 wg_done 之前的所有内存写在别的线程可见性上一致。
+    // 三段退避：短等待纯自旋（延迟最低）→ 中等待让出时间片（不占核）→
+    // 长等待睡 1 ms（CPU 归零）。计数用 atomic_add 更新（lock 前缀 / LDAXR
+    // 都是全屏障），所以计数归零时 wg_done 之前的内存写对这里可见。
+    let mut n = 0
     while mem_load64(w, 0) != 0 {
-        spin_hint()
+        if n < 64 {
+            spin_hint()
+        } else if n < 1088 {
+            thread_yield()
+        } else {
+            sleep_ms(1)
+        }
+        n = n + 1
     }
 }

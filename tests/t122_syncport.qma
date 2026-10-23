@@ -1,0 +1,51 @@
+// t122_syncport.qma：std/sync 的双后端可移植性（v1.98）
+// 同一份代码在 x86_64（lock 前缀）与 AArch64（LDAXR/STLXR + LDAR/STLR）上
+// 必须给出相同结果——所以本用例**不碰** spawn / sleep / yield（A64 未接
+// 线程），只走无争用路径：
+//   1) mutex：加锁 atomic_cas、解锁 mem_store_rel（x86 mov / A64 STLR）
+//   2) 栈：push 无锁 CAS、pop 先 mem_xchg 抢消费者锁再 CAS head
+//   3) WaitGroup：计数归零后 wg_wait 直接返回（不进退避段）
+// 执行级验证：x86 直接跑；A64 走 tests/a64_emu.py（run_native_tests.sh [7]）。
+module t122
+import std.sync
+
+fn main() {
+    // 互斥锁：A64 上解锁必须走 STLR（release），否则临界区的写可能晚于解锁可见
+    let m = mutex_new()
+    let ctr = mem_alloc(8)
+    mem_store64(ctr, 0, 0)
+    let mut i = 0
+    while i < 100 {
+        mutex_lock(m)
+        mem_store64(ctr, 0, mem_load64(ctr, 0) + 1)
+        mutex_unlock(m)
+        i = i + 1
+    }
+    assert(mem_load64(ctr, 0) == 100, "mutex count")
+
+    // 栈：push 无锁 CAS + pop 消费者锁（xchg 抢锁、release 放锁）
+    let s = stack_new()
+    let mut k = 1
+    while k <= 10 {
+        stack_push(s, k)
+        k = k + 1
+    }
+    let mut sum = 0
+    let mut v = stack_pop(s)
+    while v != 0 {
+        sum = sum + v
+        v = stack_pop(s)
+    }
+    assert(sum == 55, "stack sum")
+
+    // WaitGroup 计数（无争用路径：自旋段直接看到 0）
+    let w = wg_new()
+    wg_add(w, 3)
+    wg_done(w)
+    wg_done(w)
+    wg_done(w)
+    wg_wait(w)
+    assert(mem_load64(w, 0) == 0, "wg zero")
+
+    print("sync port ok")
+}

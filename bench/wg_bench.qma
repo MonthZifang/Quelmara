@@ -1,0 +1,67 @@
+// bench/wg_bench.qma：WaitGroup 等待策略的 CPU 成本（v1.98）
+//
+// 同一个等待（worker 睡 200 ms 后 wg_done）跑两遍：
+//   A) 纯自旋：while 计数 != 0 { spin_hint() }      —— v1.85 及以前 wg_wait 的做法
+//   B) 退避：std/sync 的 wg_wait（自旋 → 让出 → 睡 1 ms）
+// 判据不是墙钟（两者都是 ~200 ms），而是**进程 CPU 时间 / 墙钟**：
+//   自旋 ≈ 1.0（整核跑满），退避 ≈ 0（核还回去）。
+// cpu_ns() 读的是进程累计 CPU 时间（内核+用户态），now_ns() 是单调墙钟。
+module bench_wg
+
+import std.sync
+
+fn worker(w: int, ms: int) -> int {
+    sleep_ms(ms)
+    wg_done(w)
+    return 0
+}
+
+// A) 纯自旋等待（对照组，等价于旧 wg_wait）
+fn spin_wait(w: int) {
+    while mem_load64(w, 0) != 0 {
+        spin_hint()
+    }
+}
+
+fn main() {
+    let ms = 200
+
+    // ---- A) 纯自旋 ----
+    let w1 = wg_new()
+    wg_add(w1, 1)
+    let h1 = spawn worker(w1, ms)
+    let a_w0 = now_ns()
+    let a_c0 = cpu_ns()
+    spin_wait(w1)
+    let a_c1 = cpu_ns()
+    let a_w1 = now_ns()
+    let j1 = join(h1)
+
+    // ---- B) 退避（std/sync 的 wg_wait）----
+    let w2 = wg_new()
+    wg_add(w2, 1)
+    let h2 = spawn worker(w2, ms)
+    let b_w0 = now_ns()
+    let b_c0 = cpu_ns()
+    wg_wait(w2)
+    let b_c1 = cpu_ns()
+    let b_w1 = now_ns()
+    let j2 = join(h2)
+
+    assert(j1 == 0 and j2 == 0, "worker joins")
+    assert(mem_load64(w1, 0) == 0 and mem_load64(w2, 0) == 0, "wg zero")
+
+    let a_wall = (a_w1 - a_w0) / 1000000
+    let a_cpu = (a_c1 - a_c0) / 1000000
+    let b_wall = (b_w1 - b_w0) / 1000000
+    let b_cpu = (b_c1 - b_c0) / 1000000
+
+    print("spin   wall_ms cpu_ms cpu%")
+    print(a_wall)
+    print(a_cpu)
+    print(a_cpu * 100 / a_wall)
+    print("backoff wall_ms cpu_ms cpu%")
+    print(b_wall)
+    print(b_cpu)
+    print(b_cpu * 100 / b_wall)
+}

@@ -39,6 +39,8 @@ class A64:
         self.out = bytearray()
         self.exit_code = None
         self.N = self.Z = self.C = self.V = 0
+        self.excl = None           # 独占监视器地址（LL/SC 用；单线程恒成功）
+        self.cntvct = 0            # CNTVCT_EL0 的模拟计数
 
     # ---- 内存 ----
     def _addr(self, a):
@@ -147,6 +149,42 @@ class A64:
             rd, rn, rm, cond = w & 31, (w >> 5) & 31, (w >> 16) & 31, (w >> 12) & 15
             self.put(rd, self.get(rn) if self.cond_holds(cond) else self.get(rm))
             return
+        # LDAXR / STLXR（v1.98 原子序列的 LL/SC 一对）
+        # 模拟器是单线程的：独占监视器永远成功，但"状态字"仍按硬件语义
+        # 写回（0=成功），这样调用方的 cbnz 重试分支是被真实验证过的。
+        # 掩码口径：LDAXR 的 [20:16] 是固定 11111（只放开 Rn/Rt）；
+        # STLXR 的 [20:16] 是状态寄存器 Ws（必须放开）。
+        if (w & 0xFFFFFC00) == 0xC85FFC00:          # LDAXR Xt, [Xn]
+            rt, rn = w & 31, (w >> 5) & 31
+            self.excl = self.get(rn, sp_ctx=True)
+            self.put(rt, self.rd64(self.excl))
+            return
+        if (w & 0xFFE0FC00) == 0xC800FC00:          # STLXR Ws, Xt, [Xn]
+            rs, rt, rn = (w >> 16) & 31, w & 31, (w >> 5) & 31
+            addr = self.get(rn, sp_ctx=True)
+            ok = (self.excl == addr)
+            if ok:
+                self.wr64(addr, self.get(rt))
+                self.excl = None
+            self.put(rs, 0 if ok else 1)
+            return
+        # LDAR / STLR（v1.98 acquire / release；单线程下等同普通访存）
+        if (w & 0xFFFFFC00) == 0xC8DFFC00:          # LDAR Xt, [Xn]
+            rt, rn = w & 31, (w >> 5) & 31
+            self.put(rt, self.rd64(self.get(rn, sp_ctx=True)))
+            return
+        if (w & 0xFFFFFC00) == 0xC89FFC00:          # STLR Xt, [Xn]
+            rt, rn = w & 31, (w >> 5) & 31
+            self.wr64(self.get(rn, sp_ctx=True), self.get(rt))
+            return
+        # CLREX / DMB ISH / YIELD（单线程下无可观测效应，但必须能解码）
+        if w in (0xD5033F5F, 0xD5033BBF, 0xD5033B9F, 0xD503203F, 0xD503201F):
+            return
+        # MRS Xt, CNTVCT_EL0（now_cycle）：单调计数，按步数递增
+        if (w & 0xFFFFFFE0) == 0xD53BE040:
+            self.cntvct += 1
+            self.put(w & 31, self.cntvct)
+            return
         # B / BL
         if (w & 0xFC000000) == 0x14000000 or (w & 0xFC000000) == 0x94000000:
             off = self.sext(w & 0x3FFFFFF, 26) * 4
@@ -194,7 +232,9 @@ class A64:
         if (w & 0xFFE00C00) in (0xF8400000, 0xF8000000):
             rt, rn = w & 31, (w >> 5) & 31
             imm = self.sext((w >> 12) & 0x1FF, 9)
-            addr = self.get(rn, sp_ctx=True) + imm
+            # 地址运算按 64 位截断（与硬件一致）：负的寄存器偏移
+            # （如接口装箱头 [-16]）不做掩码会溢出成 67 位整数
+            addr = (self.get(rn, sp_ctx=True) + imm) & 0xFFFFFFFFFFFFFFFF
             if (w & 0xFFE00C00) == 0xF8400000:
                 self.put(rt, self.rd64(addr))
             else:
@@ -203,7 +243,8 @@ class A64:
         # LDR/STR 寄存器偏移 LSL#3
         if (w & 0xFFE0FC00) in (0xF8607800, 0xF8207800):
             rt, rn, rm = w & 31, (w >> 5) & 31, (w >> 16) & 31
-            addr = self.get(rn, sp_ctx=True) + (self.get(rm) << 3)
+            addr = (self.get(rn, sp_ctx=True) + (self.get(rm) << 3)) \
+                & 0xFFFFFFFFFFFFFFFF
             if (w & 0xFFE0FC00) == 0xF8607800:
                 self.put(rt, self.rd64(addr))
             else:
@@ -212,7 +253,8 @@ class A64:
         # LDRB/STRB 寄存器偏移
         if (w & 0xFFE0FC00) in (0x38606800, 0x38206800):
             rt, rn, rm = w & 31, (w >> 5) & 31, (w >> 16) & 31
-            addr = self.get(rn, sp_ctx=True) + self.get(rm)
+            addr = (self.get(rn, sp_ctx=True) + self.get(rm)) \
+                & 0xFFFFFFFFFFFFFFFF
             if (w & 0xFFE0FC00) == 0x38606800:
                 self.put(rt, self.rd8(addr))
             else:

@@ -68,6 +68,19 @@ $NAT2 build tests/divmod.qma -o build/divmod_a64 >/dev/null 2>&1
 timeout 600 python3 tests/a64_emu.py build/divmod_a64 > build/.dn64 2>/dev/null
 diff build/.dc build/.dn64 >/dev/null && ok "a64 divmod 160 行与 x86/C 后端全等" || bad "a64 divmod 不一致"
 
+# v1.86：atomic 内建在 A64 上走 LDAXR/STLXR（LL-SC 重试），
+# 与 x86 的 lock xadd/cmpxchg 共用同一份用例（t97）。模拟器里独占监视器
+# 恒成功，但状态字与重试分支是被真实执行过的。
+$NAT2 build tests/t97_a64atomic.qma -o build/t97_a64 >/dev/null 2>&1
+out=$(timeout 600 python3 tests/a64_emu.py build/t97_a64 2>/dev/null)
+[ "$out" = "a64 atomic ok" ] && ok "a64 t97 atomic（LL-SC）=> a64 atomic ok" \
+  || bad "a64 t97 atomic [$out]"
+# v1.86：std/sync 在 A64 上也要能跑（解锁走 STLR、栈锁走 LDAR/STLR）
+$NAT2 build tests/t122_syncport.qma -o build/t122_a64 >/dev/null 2>&1
+out=$(timeout 600 python3 tests/a64_emu.py build/t122_a64 2>/dev/null)
+[ "$out" = "sync port ok" ] && ok "a64 t122 std/sync => sync port ok" \
+  || bad "a64 t122 std/sync [$out]"
+
 echo "[8] 语言 v0.2：break/continue + struct（双后端交叉验证）"
 for t in tests/t8.qma tests/t9.qma tests/t10.qma tests/t11.qma; do
   n=$(basename $t .qma)

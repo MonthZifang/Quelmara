@@ -1,0 +1,132 @@
+// t121_syncmpmc.qma：std/sync 并发正确性（v1.98 并发行转绿）
+// 覆盖：
+//   1) MPMC 栈：2 生产者 × 1500 + 2 消费者同时 pop（旧版 pop 有 ABA，
+//      多消费者下会静默丢/重/坏链；这里用 计数 + 和 + 异或 三重校验）
+//   2) stack_pop_single 单消费者语义（快路径与 stack_pop 结果一致）
+//   3) WaitGroup：wg_wait 走退避（自旋→让出→睡眠）后计数必须归零
+//   4) 空栈 pop 返回 0（零值约定）
+module t121
+
+import std.sync
+
+fn producer(s: int, w: int, tid: int) -> int {
+    let mut j = 1
+    while j <= 1500 {
+        stack_push(s, tid * 100000 + j)
+        j = j + 1
+    }
+    wg_done(w)
+    return 0
+}
+
+// 消费者：栈空且生产者全部结束后退出；结果写进自己的槽（互不重叠）
+fn consumer(s: int, w: int, slot: int) -> int {
+    let mut cnt = 0
+    let mut sum = 0
+    let mut xr = 0
+    let mut stop = 0
+    while stop == 0 {
+        let v = stack_pop(s)
+        if v == 0 {
+            if mem_load64(w, 0) == 0 {
+                stop = 1
+            } else {
+                thread_yield()
+            }
+        } else {
+            cnt = cnt + 1
+            sum = sum + v
+            xr = xr ^ v
+        }
+    }
+    mem_store64(slot, 0, cnt)
+    mem_store64(slot, 1, sum)
+    mem_store64(slot, 2, xr)
+    return 0
+}
+
+fn wg_worker(w: int, ms: int) -> int {
+    sleep_ms(ms)
+    wg_done(w)
+    return 0
+}
+
+fn main() {
+    // ---- 4) 空栈 ----
+    let s0 = stack_new()
+    assert(stack_pop(s0) == 0, "empty pop returns 0")
+    assert(stack_pop_single(s0) == 0, "empty pop_single returns 0")
+
+    // ---- 2) 单消费者快路径 ----
+    let s1 = stack_new()
+    let mut k = 1
+    while k <= 100 {
+        stack_push(s1, k)
+        k = k + 1
+    }
+    let mut acc = 0
+    let mut got = stack_pop_single(s1)
+    while got != 0 {
+        acc = acc + got
+        got = stack_pop_single(s1)
+    }
+    assert(acc == 5050, "pop_single sum 1..100")
+
+    // ---- 1) MPMC：2 生产者 / 2 消费者 ----
+    let s = stack_new()
+    let w = wg_new()
+    wg_add(w, 2)
+    let slot_a = static_word(20)
+    let slot_b = static_word(23)
+    mem_store64(slot_a, 0, 0)
+    mem_store64(slot_b, 0, 0)
+    let p1 = spawn producer(s, w, 0)
+    let p2 = spawn producer(s, w, 1)
+    let c1 = spawn consumer(s, w, slot_a)
+    let c2 = spawn consumer(s, w, slot_b)
+    let jp1 = join(p1)
+    let jp2 = join(p2)
+    let jc1 = join(c1)
+    let jc2 = join(c2)
+
+    let cnt = mem_load64(slot_a, 0) + mem_load64(slot_b, 0)
+    let sum = mem_load64(slot_a, 1) + mem_load64(slot_b, 1)
+    let xr = mem_load64(slot_a, 2) ^ mem_load64(slot_b, 2)
+
+    // 期望值：tid*100000 + j（tid=0/1，j=1..1500）
+    let mut ecnt = 0
+    let mut esum = 0
+    let mut exr = 0
+    let mut t = 0
+    while t < 2 {
+        let mut j = 1
+        while j <= 1500 {
+            let v = t * 100000 + j
+            ecnt = ecnt + 1
+            esum = esum + v
+            exr = exr ^ v
+            j = j + 1
+        }
+        t = t + 1
+    }
+    assert(cnt == ecnt, "mpmc count (no loss / no dup)")
+    assert(sum == esum, "mpmc sum")
+    assert(xr == exr, "mpmc xor")
+    assert(mem_load64(s, 0) == 0, "stack drained")
+
+    // ---- 3) WaitGroup 长等待（走 sleep 退避段）----
+    let w2 = wg_new()
+    wg_add(w2, 2)
+    let t0 = now_ns()
+    let w1 = spawn wg_worker(w2, 5)
+    let w2h = spawn wg_worker(w2, 8)
+    wg_wait(w2)
+    let t1 = now_ns()
+    let jw1 = join(w1)
+    let jw2 = join(w2h)
+    assert(mem_load64(w2, 0) == 0, "wg zero after wait")
+    assert(t1 - t0 >= 5000000, "wg_wait actually waited (>=5ms)")
+    assert(jw1 == 0 and jw2 == 0, "wg joins")
+
+    print("sync mpmc ok")
+}

@@ -1,0 +1,45 @@
+// bench/chan_bench.qma：chan 双线程往返延迟（v1.98）
+// 一个 ping 线程 + 一个 pong 线程，各 1 容量通道，往返 n 次。
+//
+// 用途：chan 的成本基线。v1.98 试过把"抢不到锁就让出时间片"改成
+// "先 pause 32 次再让出"：本用例两版无差异（36 vs 37 µs/往返），
+// 4 生产者争用场景也没有可复现的收益（中位 51 vs 62 ms，区间大幅重叠）。
+// 测不出好处就不留这份复杂度，改动已回滚——数据见 docs/06-status.md §3.5c。
+module bench_chan
+
+fn ponger(cin: chan[int], cout: chan[int], n: int) -> int {
+    let mut i = 0
+    while i < n {
+        let v = cin.recv()
+        cout.send(v + 1)
+        i = i + 1
+    }
+    return 0
+}
+
+fn main() {
+    let n = 20000
+    let a = chan[int].open(1)
+    let b = chan[int].open(1)
+    let t0 = now_ns()
+    let h = spawn ponger(a, b, n)
+    let mut i = 0
+    let mut last = 0
+    while i < n {
+        a.send(i)
+        last = b.recv()
+        i = i + 1
+    }
+    let t1 = now_ns()
+    let j = join(h)
+    assert(last == n, "pong returned last")
+    assert(j == 0, "ponger joined")
+    a.close()
+    b.close()
+    print("ping-pong round trips:")
+    print(n)
+    print("total_ms:")
+    print((t1 - t0) / 1000000)
+    print("ns per round trip:")
+    print((t1 - t0) / n)
+}
