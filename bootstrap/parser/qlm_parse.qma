@@ -865,14 +865,20 @@ fn main() {
                 }
                 emit("import|" + path)
             } else if w == "const" {
-                // 常量在 stage-0 里是解析期内联的，不进 AST；这里只跳过它的值
-                read_name(src, n, k)
-                expect(src, n, k, 61)
-                let mut j = cur_get(k)
-                while j < n && src[j] != 10 {
-                    j += 1
+                // 常量在 stage-0 里是解析期内联的，不进 AST；这里只跳过它的值。
+                // v1.58：`const fn` 是函数声明——按 fn 走，否则 read_name 会把
+                // 关键字 "fn" 当常量名吃掉，后续 expect(=) 直接错位。
+                let cname = read_name(src, n, k)
+                if cname == "fn" {
+                    parse_fn(src, n, k)
+                } else {
+                    expect(src, n, k, 61)
+                    let mut j = cur_get(k)
+                    while j < n && src[j] != 10 {
+                        j += 1
+                    }
+                    cur_set(k, j)
                 }
-                cur_set(k, j)
             } else if w == "struct" {
                 parse_struct(src, n, k)
             } else if w == "enum" {
@@ -1465,13 +1471,20 @@ fn run_body_mode(src: str, n: int, k: map[str]int, ks: map[str]str) {
                     }
                 }
             } else if w == "const" {
-                read_name(src, n, k)
-                expect(src, n, k, 61)
-                let mut j = cur_get(k)
-                while j < n && src[j] != 10 {
-                    j += 1
+                // v1.58：`const fn` 是函数声明——按 fn 处理（同 867 行那处）
+                let cname = read_name(src, n, k)
+                if cname == "fn" {
+                    skip_ws(src, n, k)
+                    let fname = read_name(src, n, k)
+                    body_mode_fn(src, n, k, ks, fname)
+                } else {
+                    expect(src, n, k, 61)
+                    let mut j = cur_get(k)
+                    while j < n && src[j] != 10 {
+                        j += 1
+                    }
+                    cur_set(k, j)
                 }
-                cur_set(k, j)
             } else if w == "struct" {
                 parse_struct(src, n, k)
             } else if w == "enum" {

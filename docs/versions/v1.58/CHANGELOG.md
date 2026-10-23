@@ -43,13 +43,18 @@
 ## 验证（本轮全部现跑）
 
 <!-- verify:begin -->
-- `tests/t98_constfn.qma`：18 条断言全过（循环/递归/位运算/提前 return/
-  算术嵌调用/溢出回卷/运行时==编译期），输出 `const fn ok`。
-- 负向 ×2：`tests/bad/constfn_str.qma` -> `SyntaxError: const fn f: 形参 s
-  的类型暂不支持（只支持 int / bool）`；`tests/bad/constfn_call.qma` ->
-  `SyntaxError: line 10: const X 调用了非 const fn 的 'runtime_only'`。
-- 主回归 **PASS=167 FAIL=0 SKIP=1**（合并工作区口径，数字见 06-status.md）。
-<!-- verify:end -->
+| 命令 | 结果 |
+|---|---|
+| `python tests/run_win_tests.py` | **PASS=167 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证） |
+| `python tests/lexdiff.py` | **PASS=153 FAIL=0** |
+| `python tests/parsediff.py` | **PASS=129 FAIL=0**（自举 parser 补 `const fn` 后转绿） |
+| `python tests/bodydiff.py` | 一致 1380 / 分叉 1231 / SKIP 同步 25 / SKIP 不同步 35（诊断项） |
+| `python tests/irdiff.py` | **PASS=72 FAIL=0 SKIP=53** |
+| `python tests/emitdiff.py` | **PASS=10 FAIL=0** |
+| 三道门禁 | check_names / check_origin / check_docs 全 PASS |
+| **性能（双向对照）** | `git worktree add ../perfbase-v158 4f12382` 建基线，两树各构建 8 个 bench：**`.qex` 逐字节相同**（p0/gbench/bench_str/find/simd/sync/gzip/bench_mod）——const fn 只发生在解析期，运行期代码零变化 |
+
+> 口径：HEAD `4f12382`（v1.56）+ 本版改动；工作区另含其他轨在途文件（`t96_simddot` 等）已计入 lexdiff 的源文件数。
 
 ## 已知边界 / 遗留
 

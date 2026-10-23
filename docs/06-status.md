@@ -10,10 +10,10 @@
 | 项 | 结果 | 命令 |
 |---|---|---|
 | PE 回归（主回归） | **PASS=167 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
-| 词法器对拍 | **PASS=149 FAIL=0**（149 个源文件） | `python tests/lexdiff.py` |
-| 声明级 AST 对拍 | **PASS=127 FAIL=0**（跳过 4 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
-| 函数体 dump 对拍 | **一致 1292 / 分叉 1182 / SKIP 同步 25 / SKIP 不同步 35**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |
-| IR 架构无关对拍 | **PASS=70 FAIL=0 SKIP=53**，并行后 **60 s**（原串行 5 min 41 s；SKIP 全是 arm64 未接的特性，t85 的 `trunc` / t86 的 map 聚合值 / t90_mathfn 的 f64 二元运算属此类；t87 的 8 参走 X6/X7、t91 的 `defer`、t94 的窄切片写入已接） | `python tests/irdiff.py` |
+| 词法器对拍 | **PASS=153 FAIL=0**（153 个源文件） | `python tests/lexdiff.py` |
+| 声明级 AST 对拍 | **PASS=129 FAIL=0**（跳过 4 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
+| 函数体 dump 对拍 | **一致 1380 / 分叉 1231 / SKIP 同步 25 / SKIP 不同步 35**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |
+| IR 架构无关对拍 | **PASS=72 FAIL=0 SKIP=53**，并行后 **60 s**（原串行 5 min 41 s；SKIP 全是 arm64 未接的特性，t85 的 `trunc` / t86 的 map 聚合值 / t90_mathfn 的 f64 二元运算属此类；t87 的 8 参、t91 的 `defer`、t94 的窄切片写入、t96 的点积已接） | `python tests/irdiff.py` |
 | 发射层确定性对拍 | **PASS=10 FAIL=0** | `python tests/emitdiff.py` |
 | gzip 解码互操作 | **PASS=86 FAIL=0**（12 种编码组合 × 7 类输入 + 多 member 拼接）+ **损坏输入拒绝 5/5** | `python tests/gzip_inflate_test.py` |
 | ECDSA P-256 验签互操作 | **PASS=32 FAIL=0**（20 正向 + 12 负向，Python bigint 参考实现） | `python tests/ecdsa_p256_test.py` |
