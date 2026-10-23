@@ -648,7 +648,7 @@ def main():
     case_selfcheck("t90_mathfn", "tests/t90_mathfn.qma")
     case_selfcheck("t93_f64print", "tests/t93_f64print.qma")
     case_selfcheck("t92_httpc", "tests/t92_httpc.qma")
-    case_selfcheck("t97_blake2b", "tests/t97_blake2b.qma")
+    case_selfcheck("t94_slice_narrow", "tests/t94_slice_narrow.qma")
     case_selfcheck("t95_hash512", "tests/t95_hash512.qma")
     # pub + 限定语法负向（多文件）：非 pub 跨模块引用必须编译失败
     # （限定调用可能先被通用 pub 检查或指向校验拦下，两种消息都算对）

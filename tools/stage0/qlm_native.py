@@ -857,8 +857,11 @@ class Lower:
 
     @staticmethod
     def _slice_elem(fn, v):
-        """切片元素标签：'str' / 'i64' / None（未知）。只有 str 元素需要额外标记，
-        否则 print(a[i]) 会把指针当整数打印。"""
+        """切片元素标签：'str' / 'u8' 等窄类型名 / 'f64' / None（未知）。
+
+        v1.56 起窄元素也带标签：切片是零拷贝别名，写入必须按元素声明宽度截断，
+        否则 `slice_of(u8数组)` 后 s[i] = 300 会把 300 原样写进槽（读回还是 300）。
+        """
         return getattr(fn, "slice_elem", {}).get(v) if isinstance(v, int) else None
 
     def alloc_slice(self, fn):
@@ -3147,7 +3150,7 @@ class Lower:
             n = self._arr_of(fn, av)
             if n is None:
                 raise SyntaxError("slice_of() 目前只支持定长数组变量（零拷贝转换）")
-            return self.make_slice(fn, av, ("imm", n))
+            return self.make_slice(fn, av, ("imm", n), elem=self.arr_elem.get(av))
         if name not in self.fns_ast:
             if len(e[1]) == 1 and name in env:
                 # 通过值调用：标识符是持有函数地址的局部变量（fnaddr 或 vreg）
@@ -3182,7 +3185,7 @@ class Lower:
                     pt = params[i][1]
                     # 形参是 `[]T`：零拷贝转切片（SPEC §2）
                     if pt[0] == "slice":
-                        args[i] = self.make_slice(fn, a, ("imm", n))
+                        args[i] = self.make_slice(fn, a, ("imm", n), elem=self.arr_elem.get(a))
                         continue
                     # 形参是 `[N]T`：传地址，callee 里按值拷一份（v1.2）
                     if pt[0] == "array":
@@ -3227,6 +3230,9 @@ class Lower:
             # 切片返回值：同聚合（隐藏出参指针约定，调用方开帧槽，callee 拷入）
             tmp = self.alloc_slice(fn)
             fn.emit("call", None, name, [tmp] + args)
+            # v1.56：返回类型里的元素标签要挂上，否则调用方经返回值写入不截断
+            if ret[1][0] == "named":
+                self._mark_slice(fn, tmp, ret[1][1])
             return tmp
         if ret[0] == "array":
             tmp = self.alloc_array(fn, ret[1])
@@ -3636,6 +3642,7 @@ class Lower:
                     env[s[2]] = spec
                     if nb is not None:
                         self.arr_narrow[spec] = nb
+                        self.arr_elem[spec] = ann[2][1]
                         for i in range(n):
                             t = fn.new_v()
                             fn.emit("load", t, spec, ("imm", i))
@@ -3647,6 +3654,7 @@ class Lower:
                 self.array_copy(fn, dst, spec, n, nb=nb)
                 if nb is not None:
                     self.arr_narrow[dst] = nb
+                    self.arr_elem[dst] = ann[2][1]
                 env[s[2]] = dst
                 return
             if self._rc_of(fn, spec) is not None:
@@ -3978,6 +3986,12 @@ class Lower:
         self.emit_bounds(fn, idx, nval, dynamic=dyn)
         val = self.eval(rhs, fn, env)
         nb = self.arr_narrow.get(obj)     # 窄元素数组（v1.40）：存槽截断
+        if nb is None and self._is_slice(fn, obj):
+            # v1.56：切片别名写入也按元素声明宽度截断（此前只跟踪 str 元素，
+            # `slice_of(a)` 之后 s[i] = 300 会把 300 原样写进 u8 元素槽）
+            se = self._slice_elem(fn, obj)
+            if se is not None and se != "str":
+                nb = self.narrow_of(("named", se))
         if op == "=":
             if nb is not None:
                 val = self.trunc_to(fn, val, nb)
@@ -4427,7 +4441,9 @@ class Lower:
             elif ty[0] == "map":
                 self._mark_map(fn, params[i], ty[1][1], ty[2][1])
             elif ty[0] == "slice":
-                et = "str" if ty[1] == ("named", "str") else None
+                # v1.56：元素标签带全（str / 窄类型 / f64）——切片形参内部写入
+                # 也要按声明宽度截断，否则调用方数组会被写进超宽值
+                et = ty[1][1] if ty[1][0] == "named" else None
                 self._mark_slice(fn, params[i], et)
             elif ty[0] == "rc":
                 self._mark_rc(fn, params[i], ty[1][1])
@@ -4443,6 +4459,7 @@ class Lower:
                 env[name] = dst
                 if nb is not None:
                     self.arr_narrow[dst] = nb
+                    self.arr_elem[dst] = ty[2][1]
                 if len(ty) > 2 and "f64" in str(ty[2]):
                     self.arr_elem[dst] = "f64"
             elif ty[0] == "array":
