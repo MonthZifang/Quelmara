@@ -46,7 +46,7 @@
 | TCP 批量收发 | 只有单次 `tcp_send/recv` | 高吞吐场景 syscall 太多 |
 | 可靠 UDP | UDP 四件之上未做 | 游戏/实时传输 |
 | 日志 | 无 stderr 通道、无轮转、无绝对时间戳（级别过滤 v1.19 已补） | 生产可观测性 |
-| 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠；**f64 打印已修（v1.49）**：定点/科学计数按 C 后端口径逐位一致（`__f64_to_str` 有限值路径漏长度前缀已补），仍缺最短往返表示（grisu/ryu） |
+| 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠；**f64 打印已修（v1.51）**：定点/科学计数按 C 后端口径逐位一致（`__f64_to_str` 有限值路径漏长度前缀已补），仍缺最短往返表示（grisu/ryu） |
 | 数学 | ✅ v1.47：`exp`/`log`/`log2`/`log10`/`pow`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`hypot` + 常数助手（Cody–Waite 双字归约；sin/cos 误差随 |x|·1.1e-16 增长，多字 π 归约未做） | 图形、统计、复利 |
 | 哈希 | ✅ v1.35：SHA-1 / SHA-256 / FNV-1a 32/64 / **MD5**（仅兼容用途） | 无 SHA-512、无 CRC64、无 BLAKE2 |
 | 数据结构 | ✅ v1.29/30：RingBuf / MinHeap / **set[int]·set[str]** / **deque** / **LRU**（自建开放寻址表 + 双向链表，单句柄） | LRU 的 key 只有 int（字符串先 `fnv1a64`）；无 TTL / 无容量自适应 |

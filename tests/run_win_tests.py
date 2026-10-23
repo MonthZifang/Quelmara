@@ -622,7 +622,8 @@ def main():
             ("iface_rettype", "impl 返回类型不符", "返回类型与接口声明不一致"),
             ("iface_no_impl", "类型未实现接口", "没有实现接口"),
             ("iface_dup_method", "跨接口同名方法", "同名方法跨接口暂不支持"),
-            ("defer_let", "defer 跟带作用域的语句", "defer 只支持")):
+            ("defer_let", "defer 跟带作用域的语句", "defer 只支持"),
+            ("neg_str", "对 str 取负", "一元 - 不能用于 str")):
         try:
             build(os.path.join(ROOT, f"tests/bad/{nm}.qma"),
                   os.path.join(ROOT, "build", f"bad_{nm}.exe"))
@@ -645,6 +646,7 @@ def main():
     # 限定语法正例（v1.44，多文件）：lib.fn()/lib.Enum.Variant/限定模式
     case_selfcheck("t89_qualified", "fixtures/qualified/main.qma")
     case_selfcheck("t90_mathfn", "tests/t90_mathfn.qma")
+    case_selfcheck("t93_f64print", "tests/t93_f64print.qma")
     case_selfcheck("t92_httpc", "tests/t92_httpc.qma")
     # pub + 限定语法负向（多文件）：非 pub 跨模块引用必须编译失败
     # （限定调用可能先被通用 pub 检查或指向校验拦下，两种消息都算对）

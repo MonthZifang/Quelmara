@@ -1379,6 +1379,11 @@ class Lower:
         if k == "unop":
             a = self.eval(e[2], fn, env)
             if e[1] == "-":
+                # v1.51 fail-fast：str 没有取负语义。此前落到 "neg" 指令，
+                # 把长度前缀指针按整数取负，运行时读到野指针（-1e-300.to_str()
+                # 这类写法会把比较/打印直接打成段错误）。
+                if self._is_str(fn, a):
+                    raise SyntaxError("一元 - 不能用于 str（需先 to_int 或加括号）")
                 wa = self._float_of(fn, a)
                 if wa:
                     d = fn.new_v()
@@ -8094,7 +8099,9 @@ class Lower:
             f.emit("call", pos, "__fmt_u64", [buf, pos, aexp, ("imm", 1)])
             f.emit("label", l_done)
             f.emit("store8", buf, pos, ("imm", 0))
-            f.emit("ret", buf)
+            # v1.51 修：有限值路径曾直接 ret(buf)——漏长度前缀、返回的是分配基址
+            # 而不是字节区（buf+8），调用方按 str ABI 读到的长度是 0（打印空串）。
+            ret_buf()
             self.out.append(f)
 
         # __str_from_bool(v) -> ptr
