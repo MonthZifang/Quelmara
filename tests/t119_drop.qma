@@ -1,0 +1,317 @@
+// t119_drop.qma：Drop——作用域退出析构（v1.93，defer/RAII 行翻绿）
+// 语义：`impl T : Drop { fn drop(t: T) { ... } }` 让 T 的 **let 绑定**在
+// 作用域退出时自动析构。覆盖：
+//   1) 块尾逆序：同块内后绑定的先析构
+//   2) 嵌套块：内层块退出先析构，早于外层后续语句
+//   3) return 路径：返回值先算好，再析构本帧绑定
+//   4) break 路径：跳出循环体时析构体内绑定
+//   5) continue 路径：每轮各析构一次
+//   6) defer 与 drop 的顺序：defer 先跑（可能还在用变量），drop 后跑
+//   7) `let b = a` 是移动：析构责任随值转给 b，a 不再析构（不双重析构）
+//   8) `return a` 是移动：调用方那份析构一次
+//   9) 覆盖赋值 `a = T { ... }`：先析构被覆盖的旧值，再装新值
+//   10) 枚举也能有析构（impl 作用在 enum 上）
+//   11) 析构体可以写字段 / 调方法（收到的是原对象地址，不是副本）
+//   12) 形参与容器元素**不**析构（宁可泄漏、不可悬垂，见 02-language §8.7）
+module t119
+
+// 记录析构顺序：析构体往共享的 vec 句柄里 push 自己的 id
+struct R { id: int, log: vec[int] }
+
+impl R : Drop {
+    fn drop(r: R) { r.log.push(r.id) }
+}
+
+enum K { A, B }
+
+fn mk(id: int, log: vec[int]) -> R {
+    return R { id: id, log: log }
+}
+
+// 1) 块尾逆序
+fn c1(log: vec[int]) {
+    if true {
+        let a = mk(1, log)
+        let b = mk(2, log)
+    }
+}
+
+// 2) 嵌套块
+fn c2(log: vec[int]) {
+    let a = mk(1, log)
+    if true {
+        let b = mk(2, log)
+    }
+    let c = mk(3, log)
+}
+
+// 3) return 路径
+fn c3(log: vec[int]) -> int {
+    let a = mk(7, log)
+    return 5
+}
+
+// 4) break 路径
+fn c4(log: vec[int]) -> int {
+    let mut i = 0
+    while i < 5 {
+        let a = mk(100 + i, log)
+        if i == 2 {
+            break
+        }
+        i = i + 1
+    }
+    return i
+}
+
+// 5) continue 路径
+fn c5(log: vec[int]) -> int {
+    let mut i = 0
+    while i < 3 {
+        i = i + 1
+        let a = mk(i * 10, log)
+        if i == 2 {
+            continue
+        }
+        log.push(i)
+    }
+    return i
+}
+
+// 6) defer 与 drop 的顺序
+fn c6(log: vec[int]) {
+    let a = mk(1, log)
+    defer log.push(99)
+    let b = mk(2, log)
+}
+
+// 7) 移动：let b = a
+fn c7(log: vec[int]) {
+    let a = mk(1, log)
+    let b = a
+}
+
+// 8) 移动：return a
+fn c8(log: vec[int]) -> R {
+    let a = mk(8, log)
+    return a
+}
+
+// 9) 覆盖赋值
+fn c9(log: vec[int]) {
+    let mut a = mk(1, log)
+    a = mk(2, log)
+}
+
+// 10) 枚举的析构
+enum E { A(log: vec[int], v: int), B(log: vec[int]) }
+
+impl E : Drop {
+    fn drop(e: E) {
+        match e {
+            E.A(l, v) => {
+                l.push(v)
+            }
+            E.B(l) => {
+                l.push(-1)
+            }
+        }
+    }
+}
+
+fn c10(log: vec[int]) {
+    let x = E.A(log, 41)
+    let y = E.B(log)
+}
+
+// 11) 析构体写字段 + 调普通函数：幂等 drop（open 置 0，第二次不再记）
+struct G { open: int, log: vec[int] }
+
+fn stamp(g: G) -> int { return 1000 + g.open }
+
+impl G : Drop {
+    fn drop(g: G) {
+        if g.open == 1 {
+            let v = stamp(g)      // 先读（1001），再置空：析构体里也能开局部变量
+            g.open = 0
+            g.log.push(v)
+        }
+    }
+}
+
+fn c11(log: vec[int]) {
+    let g = G { open: 1, log: log }
+}
+
+// 12) 形参不析构：传进去的副本不归被调方释放
+fn take(r: R) -> int {
+    return r.id
+}
+
+fn c12(log: vec[int]) {
+    let a = mk(5, log)
+    let n = take(a)
+    log.push(n)
+}
+
+// 13) continue 写在 let 之前：那条路径上 a 还没绑定，不能析构（否则析构未初始化槽）
+fn c13(log: vec[int]) -> int {
+    let mut i = 0
+    while i < 3 {
+        i = i + 1
+        if i == 2 {
+            continue
+        }
+        let a = mk(i, log)
+        log.push(a.id)
+    }
+    return i
+}
+
+// 14) break 写在 let 之前：同一条规则（静态登记顺序 = 执行顺序）
+fn c14(log: vec[int]) -> int {
+    let mut i = 0
+    while i < 3 {
+        if i == 1 {
+            break
+        }
+        let a = mk(70 + i, log)
+        i = i + 1
+    }
+    return i
+}
+
+// 15) match 分支体是块：臂内绑定在臂退出时析构
+fn c15(k: K, log: vec[int]) -> int {
+    match k {
+        K.A => {
+            let a = mk(15, log)
+            return 1
+        }
+        _ => {
+            let b = mk(16, log)
+            return 2
+        }
+    }
+}
+
+fn main() {
+    // 1) 块尾逆序：2 先于 1
+    let l1 = vec[int].new(4)
+    c1(l1)
+    assert(len(l1) == 2, "c1 len")
+    assert(l1.get(0) == 2, "c1 后绑定先析构")
+    assert(l1.get(1) == 1, "c1 先绑定后析构")
+
+    // 2) 嵌套块：2 在内层退出时先跑，随后 3、1
+    let l2 = vec[int].new(4)
+    c2(l2)
+    assert(len(l2) == 3, "c2 len")
+    assert(l2.get(0) == 2, "c2 内层先析构")
+    assert(l2.get(1) == 3, "c2 外层后绑定")
+    assert(l2.get(2) == 1, "c2 外层先绑定最后析构")
+
+    // 3) return 路径
+    let l3 = vec[int].new(2)
+    assert(c3(l3) == 5, "c3 返回值")
+    assert(len(l3) == 1, "c3 return 前析构")
+    assert(l3.get(0) == 7, "c3 析构的是块内绑定")
+
+    // 4) break：i=0,1 正常迭代，i=2 在 break 处析构
+    let l4 = vec[int].new(4)
+    assert(c4(l4) == 2, "c4 break 位置")
+    assert(len(l4) == 3, "c4 三轮各析构一次")
+    assert(l4.get(0) == 100, "c4 iter1")
+    assert(l4.get(1) == 101, "c4 iter2")
+    assert(l4.get(2) == 102, "c4 break 前析构")
+
+    // 5) continue：每轮都析构（迭代 2 在 continue 处就析构，没走 body 的 push）
+    let l5 = vec[int].new(8)
+    assert(c5(l5) == 3, "c5 结束下标")
+    assert(len(l5) == 5, "c5 len")
+    assert(l5.get(0) == 1, "c5 iter1 body")
+    assert(l5.get(1) == 10, "c5 iter1 块尾 drop")
+    assert(l5.get(2) == 20, "c5 iter2 continue 前 drop")
+    assert(l5.get(3) == 3, "c5 iter3 body")
+    assert(l5.get(4) == 30, "c5 iter3 drop")
+
+    // 6) defer 先、drop 后：99 在 2 与 1 之前
+    let l6 = vec[int].new(4)
+    c6(l6)
+    assert(len(l6) == 3, "c6 len")
+    assert(l6.get(0) == 99, "c6 defer 先于 drop")
+    assert(l6.get(1) == 2, "c6 drop 逆序：2")
+    assert(l6.get(2) == 1, "c6 drop 逆序：1")
+
+    // 7) 移动：只析构一次
+    let l7 = vec[int].new(2)
+    c7(l7)
+    assert(len(l7) == 1, "c7 移动后只析构一次")
+    assert(l7.get(0) == 1, "c7 析构的是 b（责任已转移）")
+
+    // 8) return a：调用方一份
+    let l8 = vec[int].new(2)
+    let r8 = c8(l8)
+    assert(r8.id == 8, "c8 返回值")
+    assert(len(l8) == 0, "c8 return 时未析构（责任转给调用方）")
+    // r8 是 main 的绑定：这里显式再走一次块尾
+    if true {
+        let tmp = r8
+    }
+    assert(len(l8) == 1, "c8 调用方块尾析构一次")
+    assert(l8.get(0) == 8, "c8 析构的是被移动出来的值")
+
+    // 9) 覆盖赋值：先析构旧值(1)，块尾再析构新值(2)
+    let l9 = vec[int].new(4)
+    c9(l9)
+    assert(len(l9) == 2, "c9 len")
+    assert(l9.get(0) == 1, "c9 被覆盖的旧值先析构")
+    assert(l9.get(1) == 2, "c9 新值块尾析构")
+
+    // 10) 枚举析构
+    let l10 = vec[int].new(4)
+    c10(l10)
+    assert(len(l10) == 2, "c10 len")
+    assert(l10.get(0) == -1, "c10 后绑定 B 先析构")
+    assert(l10.get(1) == 41, "c10 A 的载荷可读")
+
+    // 11) 析构体写字段 + 调方法
+    let l11 = vec[int].new(2)
+    c11(l11)
+    assert(len(l11) == 1, "c11 len")
+    assert(l11.get(0) == 1001, "c11 析构体读到的是原对象（open=1）")
+
+    // 12) 形参不析构：a 只在 c12 退出时析构一次
+    let l12 = vec[int].new(4)
+    c12(l12)
+    assert(len(l12) == 2, "c12 len")
+    assert(l12.get(0) == 5, "c12 函数体 push")
+    assert(l12.get(1) == 5, "c12 形参副本未析构，只有 a 析构")
+
+    // 13) continue 早于 let：i=2 那轮不绑定、不析构
+    let l13 = vec[int].new(8)
+    assert(c13(l13) == 3, "c13 结束下标")
+    assert(len(l13) == 4, "c13 len")
+    assert(l13.get(0) == 1, "c13 iter1 body")
+    assert(l13.get(1) == 1, "c13 iter1 drop")
+    assert(l13.get(2) == 3, "c13 iter3 body")
+    assert(l13.get(3) == 3, "c13 iter3 drop")
+
+    // 14) break 早于 let：只有 i=0 那轮绑定并析构
+    let l14 = vec[int].new(4)
+    assert(c14(l14) == 1, "c14 break 位置")
+    assert(len(l14) == 1, "c14 只析构一次")
+    assert(l14.get(0) == 70, "c14 析构 i=0 那轮")
+
+    // 15) match 分支体
+    let l15 = vec[int].new(4)
+    assert(c15(K.A, l15) == 1, "c15 A 返回值")
+    assert(len(l15) == 1, "c15 A 臂析构")
+    assert(l15.get(0) == 15, "c15 A 臂析构的是臂内绑定")
+    let l15b = vec[int].new(4)
+    assert(c15(K.B, l15b) == 2, "c15 B 返回值")
+    assert(len(l15b) == 1, "c15 B 臂析构")
+    assert(l15b.get(0) == 16, "c15 B 臂析构")
+
+    print("drop ok")
+}

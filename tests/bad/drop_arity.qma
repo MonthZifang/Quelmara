@@ -1,0 +1,16 @@
+// tests/bad/drop_arity.qma：析构函数多一个形参——必须编译失败
+// 负向夹具：`impl T : Drop` 的 drop 只能有一个接收者（v1.93）
+module drop_arity
+
+struct F { x: int }
+
+impl F : Drop {
+    fn drop(f: F, extra: int) {
+        print(extra.to_str())
+    }
+}
+
+fn main() {
+    let a = F { x: 1 }
+    print(a.x.to_str())
+}

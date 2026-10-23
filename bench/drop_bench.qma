@@ -1,0 +1,152 @@
+// bench/drop_bench.qma —— Drop（作用域退出析构）的运行时成本（v1.93）
+//
+// 五个函数做同一件事（每轮绑一个两字段聚合、累加、块尾清理一次），
+// 只有"清理怎么写"不同：
+//   loop_plain   —— 无析构类型（基线，没有清理）
+//   loop_manual  —— 手写显式清理（v1.93 之前的唯一做法：release(buf)）
+//   loop_defer   —— `defer` 清理（v1.48：登记标志位 + 退出点分支）
+//   loop_drop    —— Drop 类型（`impl Q : Drop`，块尾直接 call，无标志位）
+//   loop_empty   —— 空析构体（只量"一次 call/ret"的固定开销）
+//
+// 计时：now_ns() 进程内单调时钟，min of 3，N = 200 万轮。
+// 输出（每行一个）：warmup / plain / manual / defer / drop / empty，
+// 再输出各自的 ns/次 ×1000（整数，避免浮点打印差异）。
+module drop_bench
+
+struct P { x: int, y: int, buf: []int }
+
+struct Q { x: int, y: int, buf: []int }
+
+impl Q : Drop {
+    fn drop(q: Q) {
+        q.buf[0] = q.buf[0] + 1
+    }
+}
+
+struct Z { x: int, y: int, buf: []int }
+
+impl Z : Drop {
+    fn drop(z: Z) {
+        // 空析构体：只量调用本身（call + ret + 参数传递）
+    }
+}
+
+fn release(b: []int) {
+    b[0] = b[0] + 1
+}
+
+fn loop_plain(n: int, buf: []int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        let p = P { x: i, y: i, buf: buf }
+        s = s + p.x + p.y
+        i = i + 1
+    }
+    return s
+}
+
+fn loop_manual(n: int, buf: []int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        let p = P { x: i, y: i, buf: buf }
+        s = s + p.x + p.y
+        release(buf)
+        i = i + 1
+    }
+    return s
+}
+
+fn loop_defer(n: int, buf: []int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        let p = P { x: i, y: i, buf: buf }
+        defer release(buf)
+        s = s + p.x + p.y
+        i = i + 1
+    }
+    return s
+}
+
+fn loop_drop(n: int, buf: []int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        let q = Q { x: i, y: i, buf: buf }
+        s = s + q.x + q.y
+        i = i + 1
+    }
+    return s
+}
+
+fn loop_empty(n: int, buf: []int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        let z = Z { x: i, y: i, buf: buf }
+        s = s + z.x
+        i = i + 1
+    }
+    return s
+}
+
+fn main() {
+    let n = 2000000
+    let arr = [0, 0, 0, 0]
+    let buf = slice_of(arr)
+
+    // 预热（首轮含页提交 + 指令缓存冷）
+    let w0 = loop_plain(100000, buf) + loop_manual(100000, buf)
+    let w = w0 + loop_defer(100000, buf) + loop_drop(100000, buf) + loop_empty(100000, buf)
+
+    let mut best_p = 0
+    let mut best_m = 0
+    let mut best_d = 0
+    let mut best_o = 0
+    let mut best_e = 0
+    let mut r = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let a = loop_plain(n, buf)
+        let t1 = now_ns()
+        let b = loop_manual(n, buf)
+        let t2 = now_ns()
+        let c = loop_defer(n, buf)
+        let t3 = now_ns()
+        let d = loop_drop(n, buf)
+        let t4 = now_ns()
+        let e = loop_empty(n, buf)
+        let t5 = now_ns()
+        assert(a == b && b == c && c == d, "四种写法结果必须相同")
+        if r == 0 || t1 - t0 < best_p {
+            best_p = t1 - t0
+        }
+        if r == 0 || t2 - t1 < best_m {
+            best_m = t2 - t1
+        }
+        if r == 0 || t3 - t2 < best_d {
+            best_d = t3 - t2
+        }
+        if r == 0 || t4 - t3 < best_o {
+            best_o = t4 - t3
+        }
+        if r == 0 || t5 - t4 < best_e {
+            best_e = t5 - t4
+        }
+        r = r + 1
+    }
+    print(w)
+    print(best_p)
+    print(best_m)
+    print(best_d)
+    print(best_o)
+    print(best_e)
+    // ns/次 ×1000
+    print(best_p * 1000 / n)
+    print(best_m * 1000 / n)
+    print(best_d * 1000 / n)
+    print(best_o * 1000 / n)
+    print(best_e * 1000 / n)
+}

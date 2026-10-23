@@ -1,0 +1,18 @@
+// tests/bad/drop_dupe.qma：同一类型实现两次 Drop——必须编译失败
+// 负向夹具：两个析构函数"后写的赢"会让清理逻辑取决于书写顺序（v1.93）
+module drop_dupe
+
+struct F { x: int }
+
+impl F : Drop {
+    fn drop(f: F) { print("first") }
+}
+
+impl F : Drop {
+    fn drop(f: F) { print("second") }
+}
+
+fn main() {
+    let a = F { x: 1 }
+    print(a.x.to_str())
+}
