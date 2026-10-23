@@ -645,6 +645,7 @@ def main():
     # 限定语法正例（v1.44，多文件）：lib.fn()/lib.Enum.Variant/限定模式
     case_selfcheck("t89_qualified", "fixtures/qualified/main.qma")
     case_selfcheck("t90_mathfn", "tests/t90_mathfn.qma")
+    case_selfcheck("t92_httpc", "tests/t92_httpc.qma")
     # pub + 限定语法负向（多文件）：非 pub 跨模块引用必须编译失败
     # （限定调用可能先被通用 pub 检查或指向校验拦下，两种消息都算对）
     for nm, needles in (("pub_hidden", ("非 pub",)),

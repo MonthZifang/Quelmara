@@ -37,7 +37,7 @@
 |---|---|---|
 | 压缩 | ✅ v1.32：多 member gzip 拼接流 + **zlib 容器**（RFC 1950，含 adler32 校验）；`adler32` 也可单独用 | 仍无 zlib 预置字典（FDICT）与 raw inflate 的窗口复用 |
 | TLS | **根证书库**（信任锚管理）、**P-384 / SHA-384**；RSA（PKCS#1 + PSS）与链校验 v1.27 已实现 | 无法自动信任公网证书；部分站点链验不过 |
-| HTTP 客户端 | TLS 通道已通（v1.25，Windows），缺 HTTP 封装（重定向/chunked/连接池） | 调用第三方 API |
+| HTTP 客户端 | ✅ v1.50：`std/httpc`（URL 拆分 / 请求构造 / 响应解析 content-length+chunked / 重定向判定，纯函数）+ `std/httpc_net`（get / get_tls / get_follow，Windows，loopback E2E 实测） | 仍缺：连接池 / 流水线、自动解压 Content-Encoding、HTTP/2、Linux DNS |
 | 路由 / 中间件 | `std/http` 只有单回调，path 匹配要自己写 if 链 | 稍大的服务都要手写路由表 |
 | 静态文件 / MIME / cookie / session / multipart | 全缺 | 文件上传、登录态 |
 | `chunked` 请求体 | 回 501 | 部分客户端上传 |
@@ -46,7 +46,7 @@
 | TCP 批量收发 | 只有单次 `tcp_send/recv` | 高吞吐场景 syscall 太多 |
 | 可靠 UDP | UDP 四件之上未做 | 游戏/实时传输 |
 | 日志 | 无 stderr 通道、无轮转、无绝对时间戳（级别过滤 v1.19 已补） | 生产可观测性 |
-| 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠；**`__f64_to_str` 运行库缺陷**（v1.47 实测）：nan/inf/±0 正常，有限非零值（定点与科学计数两条路径）输出空串——根因 `qlm_native.py` 有限路径收尾直接 `ret(buf)`，漏写长度前缀且未返回 `buf+8`（对照 `ret_buf()`；C 后端 `qlm.py` 有独立实现，修时双链对拍）。属语言层/运行库，不在标准库轨 |
+| 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠；**f64 打印已修（v1.49）**：定点/科学计数按 C 后端口径逐位一致（`__f64_to_str` 有限值路径漏长度前缀已补），仍缺最短往返表示（grisu/ryu） |
 | 数学 | ✅ v1.47：`exp`/`log`/`log2`/`log10`/`pow`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`hypot` + 常数助手（Cody–Waite 双字归约；sin/cos 误差随 |x|·1.1e-16 增长，多字 π 归约未做） | 图形、统计、复利 |
 | 哈希 | ✅ v1.35：SHA-1 / SHA-256 / FNV-1a 32/64 / **MD5**（仅兼容用途） | 无 SHA-512、无 CRC64、无 BLAKE2 |
 | 数据结构 | ✅ v1.29/30：RingBuf / MinHeap / **set[int]·set[str]** / **deque** / **LRU**（自建开放寻址表 + 双向链表，单句柄） | LRU 的 key 只有 int（字符串先 `fnv1a64`）；无 TTL / 无容量自适应 |

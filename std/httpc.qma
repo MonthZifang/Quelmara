@@ -1,0 +1,305 @@
+// std/httpc.qma —— HTTP/1.1 客户端核心（v1.48）：URL 拆分 + 请求构造 +
+// 响应解析（content-length / chunked / 读到底）+ 重定向判定。
+//
+// 为什么需要：07-gaps §2「HTTP 客户端」——TLS 通道已通（v1.25），缺 HTTP 封装，
+// 调用第三方 API 只能手写 socket。本模块把「URL → 字节流 → 结构化响应」闭环，
+// 且**解析核心是纯函数**（不碰 socket）：离线可测、跨平台可编译。
+//
+// 设计约束：
+//   * 传输层不在这里——见 std/httpc_net.qma（httpc_get / httpc_get_tls，
+//     依赖 tcp_connect 的 getaddrinfo，只编译于 Windows PE）。本模块零 socket
+//     依赖，Linux/CI 可完整构建与测试；
+//   * 一次连接一个响应（Connection: close 语义）——不做连接池/流水线；
+//   * 不自动解压 Content-Encoding（gzip 解码在 std/gzip，调用方自选）；
+//   * 重定向只做「判定 + URL 解析」（httpc_redirect），自动跟随在
+//     httpc_net.httpc_get_follow（有深度上限）；
+//   * 端口段非十进制 / 状态码非三位数字会 fail-fast（与 str.to_int 一致）。
+//
+// 精度/边界：
+//   * chunked 支持 chunk 扩展（size;ext）与多块拼接；trailer 忽略；
+//   * 相对 Location 不解析 "../（登记 07-gaps，简化实现）；
+//   * 无 Content-Length 且非 chunked 的响应按「读到底」语义：complete=0，
+//     只有对端关闭后才由传输层补全（httpc_net 读到空串即止）。
+
+import std.str
+import std.url
+
+// ---------------------------------------------------------------------------
+// URL 拆分
+// ---------------------------------------------------------------------------
+
+pub struct HttpUrl {
+    scheme: str          // "http" / "https"（小写；缺省 http）
+    host: str
+    port: int            // 缺省 80 / 443
+    path: str            // 含 query；缺省 "/"
+    ok: int              // 1 = host 非空、可连接
+}
+
+/// 拆分 URL 为 scheme/host/port/path。无 scheme 前缀时按 http 处理。
+pub fn httpc_split_url(u: str) -> HttpUrl {
+    let mut r = HttpUrl { scheme: "http", host: "", port: 0, path: "/", ok: 0 }
+    let p = str_find(u, "://")
+    let mut rest = u
+    if p >= 0 {
+        r.scheme = str_lower(str_slice(u, 0, p))
+        rest = str_slice(u, p + 3, len(u))
+    }
+    // rest = host[:port][/path]
+    let slash = str_find(rest, "/")
+    let mut hostport = rest
+    if slash >= 0 {
+        hostport = str_slice(rest, 0, slash)
+        r.path = str_slice(rest, slash, len(rest))
+    }
+    let colon = str_find(hostport, ":")
+    if colon >= 0 {
+        r.host = str_slice(hostport, 0, colon)
+        let ps = str_slice(hostport, colon + 1, len(hostport))
+        r.port = ps.to_int()
+    } else {
+        r.host = hostport
+    }
+    if r.port <= 0 {
+        if r.scheme == "https" {
+            r.port = 443
+        } else {
+            r.port = 80
+        }
+    }
+    if len(r.host) > 0 {
+        r.ok = 1
+    }
+    return r
+}
+
+// ---------------------------------------------------------------------------
+// 请求构造
+// ---------------------------------------------------------------------------
+
+/// 构造完整请求字节（方法 + URL + 附加头 + 体）。hdrs 每行一条完整
+/// "Name: Value"（自带 \r\n 由本函数补）。URL 非法返回 ""。
+pub fn httpc_build_request(method: str, url: str, hdrs: vec[str], body: str) -> str {
+    let u = httpc_split_url(url)
+    if u.ok == 0 {
+        return ""
+    }
+    let mut req = method + " " + u.path + " HTTP/1.1\r\n"
+    req = req + "Host: " + u.host + "\r\n"
+    req = req + "User-Agent: Quelmara-httpc/1.50\r\n"
+    req = req + "Accept: */*\r\n"
+    req = req + "Connection: close\r\n"
+    let mut i = 0
+    while i < len(hdrs) {
+        req = req + hdrs.get(i) + "\r\n"
+        i = i + 1
+    }
+    let bl = len(body)
+    if bl > 0 {
+        req = req + "Content-Length: " + bl.to_str() + "\r\n"
+    }
+    req = req + "\r\n"
+    req = req + body
+    return req
+}
+
+// ---------------------------------------------------------------------------
+// 响应解析
+// ---------------------------------------------------------------------------
+
+pub struct HttpResponse {
+    status: int          // -1 = 解析失败 / 头未收全
+    reason: str
+    head: str            // 头块（status line + 头行，不含空行）
+    body: str            // 解码后的 body（chunked 已拼合）
+    complete: int        // 1 = body 完整（content-length 够 / chunked 见到 0 块）
+    chunked: int         // 1 = Transfer-Encoding: chunked
+}
+
+fn _bad_resp() -> HttpResponse {
+    return HttpResponse { status: -1, reason: "", head: "", body: "", complete: 0, chunked: 0 }
+}
+
+/// 失败响应（URL 非法 / 连接失败时由传输层返回）
+pub fn httpc_bad_response() -> HttpResponse {
+    return _bad_resp()
+}
+
+// 内部：chunked 解码结果
+struct _ChunkRes {
+    body: str
+    complete: int
+}
+
+// 十六进制字符 → 值；非法返回 -1
+fn _hexval(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 0 - 1
+}
+
+fn _parse_hex(s: str) -> int {
+    let mut v = 0
+    let mut i = 0
+    while i < len(s) {
+        let ch = s[i]
+        let d = _hexval(ch)
+        if d < 0 {
+            return 0 - 1
+        }
+        v = v * 16 + d
+        i = i + 1
+    }
+    return v
+}
+
+/// chunked 解码：拼合各块数据；见到 0 长度块 = complete。数据不完整时
+/// 返回已拼部分且 complete=0（调用方应继续收字节后整体重试）。
+fn _dechunk(s: str) -> _ChunkRes {
+    let mut r = _ChunkRes { body: "", complete: 0 }
+    let mut i = 0
+    while i < len(s) {
+        let nl = str_find_from(s, i, "\r\n")
+        if nl < 0 {
+            return r                    // size 行不完整
+        }
+        let line = str_slice(s, i, nl)
+        let semi = str_find(line, ";")
+        let mut sz = line
+        if semi >= 0 {
+            sz = str_slice(line, 0, semi)   // 去 chunk 扩展
+        }
+        let n = _parse_hex(sz)
+        if n < 0 {
+            return r                    // 非法 size 行
+        }
+        if n == 0 {
+            r.complete = 1
+            return r                    // 结尾块；trailer 忽略
+        }
+        let ds = nl + 2
+        let de = ds + n
+        if de + 2 > len(s) {
+            // 数据未收全：回已到部分（与 content-length 不足同语义；
+            // 解析是缓冲区的纯函数，续收后整体重试自然拼齐）
+            if ds < len(s) {
+                r.body = r.body + str_slice(s, ds, len(s))
+            }
+            return r
+        }
+        r.body = r.body + str_slice(s, ds, de)
+        i = de + 2
+    }
+    return r
+}
+
+/// 解析完整响应字节。buf 可以只含部分响应（complete=0）；传输层应持续
+/// 拼接后再次调用。头未收全（无 \r\n\r\n）返回 status=-1。
+pub fn httpc_parse_response(buf: str) -> HttpResponse {
+    let mut r = _bad_resp()
+    let he = str_find(buf, "\r\n\r\n")
+    if he < 0 {
+        return r
+    }
+    r.head = str_slice(buf, 0, he)
+    let rest = str_slice(buf, he + 4, len(buf))
+    let lines = str_lines(r.head)
+    if len(lines) == 0 {
+        return r
+    }
+    // status line："HTTP/1.1 200 OK"——第一空格后三位状态码
+    let sl = lines.get(0)
+    let sp1 = str_find(sl, " ")
+    if sp1 < 0 {
+        return r
+    }
+    let scode = str_slice(sl, sp1 + 1, sp1 + 4)
+    r.status = scode.to_int()
+    let sp2 = str_find_from(sl, sp1 + 4, " ")
+    if sp2 >= 0 {
+        r.reason = str_slice(sl, sp2 + 1, len(sl))
+    }
+    // 定长 / 分块判定（头名大小写不敏感）
+    let cl = httpc_header_raw(r.head, "Content-Length")
+    let te = httpc_header_raw(r.head, "Transfer-Encoding")
+    if str_find(str_lower(te), "chunked") >= 0 {
+        r.chunked = 1
+        let cr = _dechunk(rest)
+        r.body = cr.body
+        r.complete = cr.complete
+        return r
+    }
+    if len(cl) > 0 {
+        let n = cl.to_int()
+        if n >= 0 && len(rest) >= n {
+            r.body = str_slice(rest, 0, n)
+            r.complete = 1
+        } else {
+            r.body = rest
+            r.complete = 0
+        }
+        return r
+    }
+    // 无定长无分块：读到底（对端关闭后 complete 仍为 0，语义即"长度未知"）
+    r.body = rest
+    r.complete = 0
+    return r
+}
+
+// 头块内按名取值（大小写不敏感；跳过 status line）
+fn httpc_header_raw(head: str, name: str) -> str {
+    let lines = str_lines(head)
+    let mut i = 1
+    while i < len(lines) {
+        let ln = lines.get(i)
+        let c = str_find(ln, ":")
+        if c > 0 {
+            let nm = str_slice(ln, 0, c)
+            if str_eq_ci(nm, name) {
+                return str_trim(str_slice(ln, c + 1, len(ln)))
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+/// 响应头取值（大小写不敏感；无此头返回 ""）
+pub fn httpc_header(resp: HttpResponse, name: str) -> str {
+    return httpc_header_raw(resp.head, name)
+}
+
+// ---------------------------------------------------------------------------
+// 重定向
+// ---------------------------------------------------------------------------
+
+/// 重定向目标解析：3xx 且有 Location 返回目标 URL（绝对 Location 原样，
+/// 绝对路径拼 base 的 scheme://host，相对路径简化拼接），否则返回 ""。
+/// 只解析不跟随（跟随见 httpc_net.httpc_get_follow）。
+pub fn httpc_redirect(resp: HttpResponse, base: str) -> str {
+    if resp.status != 301 && resp.status != 302 && resp.status != 303 {
+        if resp.status != 307 && resp.status != 308 {
+            return ""
+        }
+    }
+    let loc = httpc_header(resp, "Location")
+    if len(loc) == 0 {
+        return ""
+    }
+    if str_find(loc, "http://") == 0 || str_find(loc, "https://") == 0 {
+        return loc
+    }
+    let b = httpc_split_url(base)
+    if str_find(loc, "/") == 0 {
+        return b.scheme + "://" + b.host + loc
+    }
+    // 相对路径（简化）：拼 base host，不解析 "../"（登记 07-gaps）
+    return b.scheme + "://" + b.host + "/" + loc
+}

@@ -9,7 +9,7 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=158 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
+| PE 回归（主回归） | **PASS=159 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
 | 词法器对拍 | **PASS=142 FAIL=0**（142 个源文件） | `python tests/lexdiff.py` |
 | 声明级 AST 对拍 | **PASS=121 FAIL=0**（跳过 4 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer`，自举 parser 未支持 interface/impl/泛型） | `python tests/parsediff.py` |
 | 函数体 dump 对拍 | **一致 1277 / 分叉 1080 / SKIP 同步 25 / SKIP 不同步 31**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |

@@ -1,0 +1,147 @@
+// t92_httpc.qma：HTTP 客户端（v1.48）—— httpc 解析核心 + httpc_net loopback E2E
+// 覆盖：URL 拆分（缺省 scheme/port/path）、请求构造（请求行/Host/自定义头/
+// Content-Length）、罐头响应解析（content-length 完整/不足、chunked 多块/
+// chunk 扩展、chunked 不完整、无定长读到底、头未收全、非法 status line）、
+// 头名大小写不敏感、重定向解析（绝对/绝对路径/相对/非 3xx/无 Location）、
+// loopback 自发自收（spawn 阻塞式服务线程 + tcp_connect 127.0.0.1，
+// 定长 + chunked 两条真实响应）。
+module t92
+
+import std.httpc
+import std.httpc_net
+import std.net
+import std.str
+
+// ---- loopback 服务（阻塞式；两次 accept：定长 + chunked）----
+fn t92_server(port: int) {
+    let fd = listen(port)
+    let mut k = 0
+    while k < 2 {
+        let c = accept(fd)
+        let req = recv(c, 8192)
+        if k == 0 {
+            send(c, "HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nhello httpc!")
+        } else {
+            send(c, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n7\r\nchunked\r\n3\r\n ok\r\n0\r\n\r\n")
+        }
+        close_conn(c)
+        k = k + 1
+    }
+    close_conn(fd)
+}
+
+fn main() {
+    // ---- URL 拆分 ----
+    let a = httpc_split_url("http://a.example/x?y=1")
+    assert(a.ok == 1, "split ok")
+    assert(a.scheme == "http", "split scheme")
+    assert(a.host == "a.example", "split host")
+    assert(a.port == 80, "split default port")
+    assert(a.path == "/x?y=1", "split path with query")
+    let b = httpc_split_url("https://b.example:8443/p")
+    assert(b.scheme == "https", "split https scheme")
+    assert(b.host == "b.example", "split https host")
+    assert(b.port == 8443, "split explicit port")
+    assert(b.path == "/p", "split https path")
+    let c = httpc_split_url("c.example/p")
+    assert(c.ok == 1, "split no-scheme ok")
+    assert(c.scheme == "http", "split no-scheme default http")
+    assert(c.host == "c.example", "split no-scheme host")
+    assert(c.path == "/p", "split no-scheme path")
+    let d = httpc_split_url("d.example")
+    assert(d.ok == 1, "split bare-host ok")
+    assert(d.path == "/", "split bare-host default path")
+    assert(d.port == 80, "split bare-host default port")
+    let e = httpc_split_url("")
+    assert(e.ok == 0, "split empty not ok")
+
+    // ---- 请求构造 ----
+    let hdrs = vec[str].new(2)
+    hdrs.push("X-Test: 42")
+    let req = httpc_build_request("POST", "http://h.example/submit?a=b", hdrs, "payload")
+    assert(str_find(req, "POST /submit?a=b HTTP/1.1\r\n") == 0, "req request-line first")
+    assert(str_contains(req, "Host: h.example\r\n"), "req host")
+    assert(str_contains(req, "X-Test: 42\r\n"), "req custom header")
+    assert(str_contains(req, "Content-Length: 7\r\n"), "req content-length")
+    assert(str_contains(req, "Connection: close\r\n"), "req connection")
+    assert(str_contains(req, "\r\n\r\npayload"), "req head/body boundary")
+    let bad = httpc_build_request("GET", "", vec[str].new(1), "")
+    assert(len(bad) == 0, "req bad url empty")
+
+    // ---- 罐头响应：content-length 完整 ----
+    let r1 = httpc_parse_response("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Trace: abc\r\n\r\nhello")
+    assert(r1.status == 200, "cl status")
+    assert(r1.reason == "OK", "cl reason")
+    assert(r1.body == "hello", "cl body")
+    assert(r1.complete == 1, "cl complete")
+    assert(httpc_header(r1, "X-Trace") == "abc", "cl header value")
+    assert(httpc_header(r1, "x-trace") == "abc", "cl header case-insensitive")
+    assert(httpc_header(r1, "content-length") == "5", "cl header lower name")
+    assert(httpc_header(r1, "X-Missing") == "", "cl header missing")
+
+    // ---- content-length 不足：complete=0，body 给已收部分 ----
+    let r2 = httpc_parse_response("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello")
+    assert(r2.status == 200, "cl-short status")
+    assert(r2.body == "hello", "cl-short partial body")
+    assert(r2.complete == 0, "cl-short incomplete")
+
+    // ---- chunked 多块 ----
+    let r3 = httpc_parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
+    assert(r3.status == 200, "chunked status")
+    assert(r3.chunked == 1, "chunked flag")
+    assert(r3.body == "hello world", "chunked body")
+    assert(r3.complete == 1, "chunked complete")
+
+    // ---- chunked 带扩展 ----
+    let r4 = httpc_parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello\r\n0\r\n\r\n")
+    assert(r4.body == "hello", "chunked ext body")
+    assert(r4.complete == 1, "chunked ext complete")
+
+    // ---- chunked 数据不完整 ----
+    let r5 = httpc_parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel")
+    assert(r5.chunked == 1, "chunked-short flag")
+    assert(r5.body == "hel", "chunked-short partial")
+    assert(r5.complete == 0, "chunked-short incomplete")
+
+    // ---- 无定长无分块：读到底 ----
+    let r6 = httpc_parse_response("HTTP/1.1 204 No Content\r\nX: 1\r\n\r\n")
+    assert(r6.status == 204, "noframe status")
+    assert(r6.reason == "No Content", "noframe reason")
+    assert(r6.body == "", "noframe empty body")
+    assert(r6.complete == 0, "noframe incomplete")
+
+    // ---- 头未收全 / 非法 status line ----
+    let r7 = httpc_parse_response("HTTP/1.1 200 OK\r\nContent-Len")
+    assert(r7.status == -1, "partial head rejected")
+    let r8 = httpc_parse_response("GARBAGE\r\n\r\n")
+    assert(r8.status == -1, "garbage status line rejected")
+
+    // ---- 重定向解析 ----
+    let s301 = httpc_parse_response("HTTP/1.1 301 Moved Permanently\r\nLocation: https://x.example/new\r\nContent-Length: 0\r\n\r\n")
+    assert(httpc_redirect(s301, "http://x.example/old") == "https://x.example/new", "redirect absolute")
+    let s302 = httpc_parse_response("HTTP/1.1 302 Found\r\nLocation: /new\r\nContent-Length: 0\r\n\r\n")
+    assert(httpc_redirect(s302, "http://x.example/old") == "http://x.example/new", "redirect abs-path")
+    let s307 = httpc_parse_response("HTTP/1.1 307 Temporary Redirect\r\nLocation: new\r\nContent-Length: 0\r\n\r\n")
+    assert(httpc_redirect(s307, "http://x.example/old") == "http://x.example/new", "redirect relative")
+    let s200 = httpc_parse_response("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+    assert(httpc_redirect(s200, "http://x.example/") == "", "no redirect on 200")
+    let s302b = httpc_parse_response("HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n")
+    assert(httpc_redirect(s302b, "http://x.example/") == "", "302 without location")
+
+    // ---- E2E：loopback 自发自收 ----
+    let port = 45799
+    let h = spawn t92_server(port)
+    sleep_ms(150)
+    let base = "http://127.0.0.1:" + port.to_str()
+    let g1 = httpc_get(base + "/one")
+    assert(g1.status == 200, "e2e1 status")
+    assert(g1.reason == "OK", "e2e1 reason")
+    assert(g1.body == "hello httpc!", "e2e1 body")
+    assert(g1.complete == 1, "e2e1 complete")
+    let g2 = httpc_get(base + "/two")
+    assert(g2.status == 200, "e2e2 status")
+    assert(g2.chunked == 1, "e2e2 chunked flag")
+    assert(g2.body == "chunked ok", "e2e2 body")
+    join(h)
+    print("ok t92_httpc")
+}

@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-41 个模块，**296 个公开函数**（另有 445 个内部函数）
+43 个模块，**305 个公开函数**（另有 451 个内部函数）
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -201,6 +201,42 @@ HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商）
 
 ```quelmara
 // 无公开函数
+```
+
+### `std/httpc.qma`
+
+HTTP/1.1 客户端核心：URL 拆分 / 请求构造 / 响应解析（content-length / chunked）/ 重定向判定（纯函数，零 socket 依赖）
+
+```quelmara
+/// 拆分 URL 为 scheme/host/port/path。无 scheme 前缀时按 http 处理。
+fn httpc_split_url(u: str) -> HttpUrl
+/// 构造完整请求字节（方法 + URL + 附加头 + 体）。hdrs 每行一条完整
+/// "Name: Value"（自带 \r\n 由本函数补）。URL 非法返回 ""。
+fn httpc_build_request(method: str, url: str, hdrs: vec[str], body: str) -> str
+/// 失败响应（URL 非法 / 连接失败时由传输层返回）
+fn httpc_bad_response() -> HttpResponse
+/// 解析完整响应字节。buf 可以只含部分响应（complete=0）；传输层应持续
+/// 拼接后再次调用。头未收全（无 \r\n\r\n）返回 status=-1。
+fn httpc_parse_response(buf: str) -> HttpResponse
+/// 响应头取值（大小写不敏感；无此头返回 ""）
+fn httpc_header(resp: HttpResponse, name: str) -> str
+/// 重定向目标解析：3xx 且有 Location 返回目标 URL（绝对 Location 原样，
+/// 绝对路径拼 base 的 scheme://host，相对路径简化拼接），否则返回 ""。
+/// 只解析不跟随（跟随见 httpc_net.httpc_get_follow）。
+fn httpc_redirect(resp: HttpResponse, base: str) -> str
+```
+
+### `std/httpc_net.qma`
+
+HTTP 客户端传输层：httpc_get / httpc_get_tls / httpc_get_follow（Windows；TLS 走 std/tls_net）
+
+```quelmara
+/// 明文 HTTP GET（Windows）。http:// 走 TCP；https:// 转 httpc_get_tls。
+fn httpc_get(url: str) -> HttpResponse
+/// HTTPS GET（Windows，TLS 1.3）。seq 从 0 起逐条 +1。
+fn httpc_get_tls(url: str) -> HttpResponse
+/// 跟随重定向的 GET：最多 max_hops 跳（超出返回最后一个 3xx 响应）。
+fn httpc_get_follow(url: str, max_hops: int) -> HttpResponse
 ```
 
 ### `std/json.qma`

@@ -60,7 +60,7 @@ v1.45 之后的在途实现只到"编译期登记、块尾按 LIFO 发射"，缺
 | `python tests/irdiff.py` | **PASS=68 FAIL=0 SKIP=49**——t91 的 defer 在 A64 直接 PASS（defer 全部降成已有 IR） |
 | `python tests/emitdiff.py` | **PASS=10 FAIL=0** |
 | 三道门禁 | check_names / check_origin / check_docs 全 PASS |
-| **性能（双向对照）** | `git worktree add ../rosoto-base 581b47b` 建基线，两树各构建 8 个 bench：**`.qex` 逐字节相同**（p0_bench 150528 B / gbench 42496 B / bench_str 17408 B / find_bench 35328 B / simd_bench 100352 B / sync_bench 14336 B / gzip_bench 84480 B / bench_mod 10752 B）——不用 defer 的程序**零指令变化**，比跑分更硬 |
+| **性能（双向对照）** | `git worktree add ../quelmara-base 581b47b` 建基线，两树各构建 8 个 bench：**`.qex` 逐字节相同**（p0_bench 150528 B / gbench 42496 B / bench_str 17408 B / find_bench 35328 B / simd_bench 100352 B / sync_bench 14336 B / gzip_bench 84480 B / bench_mod 10752 B）——不用 defer 的程序**零指令变化**，比跑分更硬 |
 | **性能（defer 自身开销）** | 3M 次函数调用自测：无 defer 4–7 ms / 有 defer 5–8 ms，**约 0.3 ns/次（≈1 周期）**——一次标志 store + 一次 `jcc` 判定；VBS 噪声 ±50%，只作量级参考 |
 <!-- verify:end -->
 
