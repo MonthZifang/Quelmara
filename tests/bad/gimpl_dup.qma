@@ -1,0 +1,17 @@
+// 负向（v1.62）：同一接口对同一实例只能实现一次（具体 impl 与模板 impl 撞车）
+module gimpl_dup
+
+interface Show { fn show(self) -> str }
+struct Box[T] { value: T }
+
+impl Box[int] : Show {
+    fn show(b: Box[int]) -> str { return "int" }
+}
+
+impl Box[T] : Show {
+    fn show(b: Box[T]) -> str { return "any" }
+}
+
+fn main() {
+    print(Box[int] { value: 1 }.show())
+}

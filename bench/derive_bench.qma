@@ -1,0 +1,132 @@
+// derive_bench.qma：@derive 生成代码与手写字段表的成本对照（v1.72）
+//
+// 四路做同一件事，只有"代码从哪来"不同：
+//   enc_derived —— r.json()，由 @derive(Json) 生成
+//   enc_hand    —— 手写字段表（派生层生成的正是这段代码）
+//   dec_derived —— Row_from_json(s)，由 @derive(Json) 生成
+//   dec_hand    —— 手写字段表解码
+//
+// 断言：四路结果必须逐字节一致（派生不是"近似等价"，是同一份代码）。
+// 输出：4 行 ns/次 ×1000（整数，避免小数打印）。
+module derive_bench
+
+import std.json
+
+@derive(Json, Eq, Show)
+struct Row { id: int, score: int, name: str, tag: str }
+
+// ---- 手写编码（与派生层产物逐行等价）----
+fn enc_hand(self: Row) -> str {
+    let h = json_new(64)
+    json_begin_obj(h)
+    json_key_int(h, "id", self.id)
+    json_key_int(h, "score", self.score)
+    json_key_str(h, "name", self.name)
+    json_key_str(h, "tag", self.tag)
+    json_end_obj(h)
+    return json_done(h)
+}
+
+// ---- 手写解码 ----
+fn dec_hand(s: str) -> Row {
+    let d = json_parse(s)
+    assert(json_ok(d), "dec_hand: 非法 JSON")
+    let n = json_root(d)
+    let mut out = Row { id: 0, score: 0, name: "", tag: "" }
+    out.id = json_int(d, json_obj_get(d, n, "id"))
+    out.score = json_int(d, json_obj_get(d, n, "score"))
+    out.name = json_str(d, json_obj_get(d, n, "name"))
+    out.tag = json_str(d, json_obj_get(d, n, "tag"))
+    return out
+}
+
+fn run_enc_derived(n: int, r: Row) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + len(r.json())
+        i = i + 1
+    }
+    return acc
+}
+
+fn run_enc_hand(n: int, r: Row) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + len(enc_hand(r))
+        i = i + 1
+    }
+    return acc
+}
+
+fn run_dec_derived(n: int, s: str) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + Row_from_json(s).id
+        i = i + 1
+    }
+    return acc
+}
+
+fn run_dec_hand(n: int, s: str) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + dec_hand(s).id
+        i = i + 1
+    }
+    return acc
+}
+
+fn main() {
+    let r = Row { id: 42, score: -7, name: "quelmara", tag: "bench" }
+    let s = r.json()
+    assert(s == enc_hand(r), "派生编码与手写编码必须逐字节一致")
+    assert(Row_from_json(s).eq(r), "派生解码往返")
+    assert(dec_hand(s).eq(r), "手写解码往返")
+    assert(s == "{\"id\":42,\"score\":-7,\"name\":\"quelmara\",\"tag\":\"bench\"}",
+           "JSON 形态")
+
+    let n = 20000
+    let mut best_e1 = 0
+    let mut best_e2 = 0
+    let mut best_d1 = 0
+    let mut best_d2 = 0
+    let mut rep = 0
+    while rep < 3 {
+        let t0 = now_ns()
+        let a = run_enc_derived(n, r)
+        let t1 = now_ns()
+        let b = run_enc_hand(n, r)
+        let t2 = now_ns()
+        let c = run_dec_derived(n, s)
+        let t3 = now_ns()
+        let d = run_dec_hand(n, s)
+        let t4 = now_ns()
+        assert(a == b, "编码两路结果必须相同")
+        assert(c == d, "解码两路结果必须相同")
+        if rep == 0 || t1 - t0 < best_e1 {
+            best_e1 = t1 - t0
+        }
+        if rep == 0 || t2 - t1 < best_e2 {
+            best_e2 = t2 - t1
+        }
+        if rep == 0 || t3 - t2 < best_d1 {
+            best_d1 = t3 - t2
+        }
+        if rep == 0 || t4 - t3 < best_d2 {
+            best_d2 = t4 - t3
+        }
+        rep = rep + 1
+    }
+    print("enc_derived")
+    print(best_e1 * 1000 / n)
+    print("enc_hand")
+    print(best_e2 * 1000 / n)
+    print("dec_derived")
+    print(best_d1 * 1000 / n)
+    print("dec_hand")
+    print(best_d2 * 1000 / n)
+}

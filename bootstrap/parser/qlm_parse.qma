@@ -229,8 +229,131 @@ fn emit(line: str) {
     print(line)
 }
 
+// ---- 属性宏 @derive 的声明级展开（v1.79）----
+// stage-0 在解析期把 @derive 展开成普通函数；声明级对拍要的是"函数签名序列"，
+// 而派生函数的签名只依赖**类型名与派生项**，与字段类型无关。所以 stage-1
+// 不必复制代码生成器，只需按同一顺序产出同一批签名行。
+//
+// 顺序必须与 stage-0 的 _DERIVE_ITEMS（Json → Eq → Show）一致，
+// 与源码里 @derive(...) 的书写顺序无关。
+fn pend_add(ds: map[str]str, line: str) {
+    let cur = ds.get("pending")
+    if cur == "" {
+        ds.set("pending", line)
+    } else {
+        ds.set("pending", cur + "\n" + line)
+    }
+}
+
+// 派生函数行必须排在**所有声明之后、第一条用户函数之前**（stage-0 的
+// fns 列表就是这个顺序），所以先缓存，遇到用户 fn 或文件结束时一次刷出。
+fn flush_pending(ds: map[str]str) {
+    let p = ds.get("pending")
+    if p != "" {
+        emit(p)
+        ds.set("pending", "")
+    }
+}
+
+// @derive(Json, Eq, Show) 的括号内：读成规范串（"Json,Eq,Show"）
+fn read_derive_items(src: str, n: int, k: map[str]int) -> str {
+    let mut has_json = 0
+    let mut has_eq = 0
+    let mut has_show = 0
+    let mut go = 1
+    while go == 1 {
+        skip_ws(src, n, k)
+        let i = cur_get(k)
+        if i >= n {
+            go = 0
+        } else {
+            let c = src[i]
+            if c == 41 {
+                cur_set(k, i + 1)
+                go = 0
+            } else if c == 44 {
+                cur_set(k, i + 1)
+            } else {
+                let w = read_name(src, n, k)
+                if w == "Json" { has_json = 1 }
+                if w == "Eq" { has_eq = 1 }
+                if w == "Show" { has_show = 1 }
+                if w == "" { cur_set(k, i + 1) }
+            }
+        }
+    }
+    let mut out = ""
+    if has_json == 1 { out = "Json" }
+    if has_eq == 1 {
+        if out == "" { out = "Eq" } else { out = out + ",Eq" }
+    }
+    if has_show == 1 {
+        if out == "" { out = "Show" } else { out = out + ",Show" }
+    }
+    return out
+}
+
+// 派生项 -> 生成的函数签名（逐行对齐 stage-0 的 _gen_json / _gen_eq / _gen_show）
+fn derive_pending(ds: map[str]str, name: str, items: str) {
+    let ni = len(items)
+    let mut i = 0
+    while i < ni {
+        let mut j = i
+        while j < ni && items[j] != 44 {
+            j += 1
+        }
+        let it = substr(items, i, j - i)
+        if it == "Json" {
+            pend_add(ds, "fn|" + name + "__json|(" + name + ")|str")
+            pend_add(ds, "fn|" + name + "__json_into|(" + name + ",int)|int")
+            pend_add(ds, "fn|" + name + "_from_json|(str)|" + name)
+            pend_add(ds, "fn|" + name + "__from_node|(int,int)|" + name)
+        } else if it == "Eq" {
+            pend_add(ds, "fn|" + name + "__eq|(" + name + "," + name + ")|bool")
+        } else if it == "Show" {
+            pend_add(ds, "fn|" + name + "__show|(" + name + ")|str")
+        }
+        i = j + 1
+    }
+}
+
+// 泛型模板 fn（`fn f[T](...)`）：stage-0 在声明层不产出（单态化发生在 Infer），
+// stage-1 同样整条跳过——跳过 [类型参数]、(形参)、-> 返回类型，再跳过函数体。
+fn skip_generic_fn(src: str, n: int, k: map[str]int) {
+    skip_ws(src, n, k)
+    if cur_get(k) < n && src[cur_get(k)] == 91 {
+        let mut depth = 1
+        cur_set(k, cur_get(k) + 1)
+        while cur_get(k) < n && depth > 0 {
+            let c = src[cur_get(k)]
+            if c == 91 { depth += 1 }
+            if c == 93 { depth -= 1 }
+            cur_set(k, cur_get(k) + 1)
+        }
+    }
+    skip_ws(src, n, k)
+    if cur_get(k) < n && src[cur_get(k)] == 40 {
+        let mut d2 = 1
+        cur_set(k, cur_get(k) + 1)
+        while cur_get(k) < n && d2 > 0 {
+            let c = src[cur_get(k)]
+            if c == 40 { d2 += 1 }
+            if c == 41 { d2 -= 1 }
+            cur_set(k, cur_get(k) + 1)
+        }
+    }
+    // 返回类型里不会有花括号：扫到 '{' 或行尾
+    let mut go = 1
+    while go == 1 {
+        let i = cur_get(k)
+        if i >= n { return }
+        if src[i] == 123 || src[i] == 10 { go = 0 } else { cur_set(k, i + 1) }
+    }
+    skip_block(src, n, k)
+}
+
 // ---- 顶层结构 ----
-fn parse_struct(src: str, n: int, k: map[str]int) {
+fn parse_struct(src: str, n: int, k: map[str]int, ds: map[str]str) {
     let name = read_name(src, n, k)
     expect(src, n, k, 123)
     let mut body = ""
@@ -257,6 +380,12 @@ fn parse_struct(src: str, n: int, k: map[str]int) {
         }
     }
     emit("struct|" + name + "|" + body)
+    // @derive：把派生函数签名排进待刷队列（字段类型不参与签名）
+    let items = ds.get("items")
+    if items != "" {
+        derive_pending(ds, name, items)
+        ds.set("items", "")
+    }
 }
 
 fn parse_enum(src: str, n: int, k: map[str]int) {
@@ -760,6 +889,12 @@ fn parse_postfix(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
 
 fn parse_fn(src: str, n: int, k: map[str]int) {
     let name = read_name(src, n, k)
+    skip_ws(src, n, k)
+    if cur_get(k) < n && src[cur_get(k)] == 91 {
+        // 泛型模板：声明层不产出（与 stage-0 一致）
+        skip_generic_fn(src, n, k)
+        return
+    }
     expect(src, n, k, 40)
     let mut params = ""
     let mut first = 1
@@ -809,6 +944,9 @@ fn main() {
     let n = len(src)
     let k = map[str]int.new(4)
     let ks = map[str]str.new(8)
+    let ds = map[str]str.new(4)
+    ds.set("items", "")
+    ds.set("pending", "")
     cur_set(k, 0)
     k.set("skip", 0)
     k.set("lk", 0)

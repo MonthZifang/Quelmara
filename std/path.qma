@@ -1,0 +1,153 @@
+// std/path.qma —— 路径处理（v1.75）
+//
+// 为什么需要：路径拼接与规整现在散在各处——`std/staticfile` 手拼 `root + "/" + p`、
+// `std/mime` 自己找最后一个点、`std/httpc` 自己切目录。抽成一块，规则只写一次。
+//
+// 语义（同时接受 '/' 与 '\' 作为分隔符，输出统一用 '/'）：
+//   * path_is_abs：'/' 开头，或 `C:` 这种盘符开头；
+//   * path_join(a, b)：b 是绝对路径则直接返回 b；否则在接缝处只留一个 '/'；
+//   * path_clean：消解 `.` 与 `..`（绝对路径不会越过根；相对路径保留前导 `..`），
+//     去掉重复分隔符与结尾 '/'（根除外）；
+//   * path_dir / path_base / path_ext / path_stem：按最后一个分隔符切；
+//     `path_ext` 返回**不带点**的扩展名（与 std/mime 的 mime_ext_of 口径一致）。
+//
+// 边界：不做符号链接解析、不处理 `~` 展开、不做大小写不敏感比较（Windows 盘符除外）。
+
+import std.str
+
+fn pth_is_sep(c: int) -> bool {
+    return c == 47 || c == 92
+}
+
+pub fn path_is_abs(p: str) -> bool {
+    if len(p) == 0 {
+        return false
+    }
+    if pth_is_sep(p[0]) {
+        return true
+    }
+    if len(p) >= 2 && p[1] == 58 {          // "C:"
+        return true
+    }
+    return false
+}
+
+// 末尾补一个分隔符（用于拼目录）
+fn pth_with_sep(p: str) -> str {
+    if len(p) == 0 {
+        return p
+    }
+    if pth_is_sep(p[len(p) - 1]) {
+        return p
+    }
+    return p + "/"
+}
+
+pub fn path_join(a: str, b: str) -> str {
+    if len(a) == 0 {
+        return b
+    }
+    if len(b) == 0 {
+        return a
+    }
+    if path_is_abs(b) {
+        return b
+    }
+    return pth_with_sep(a) + b
+}
+
+// 消解 . 与 ..
+pub fn path_clean(p: str) -> str {
+    let abs = path_is_abs(p)
+    let mut start = 0
+    if abs && pth_is_sep(p[0]) {
+        start = 1
+    }
+    let body = substr(p, start, len(p) - start)
+    let segs = str_split(body, "/")
+    let stack = vec[str].new(8)
+    let mut i = 0
+    while i < len(segs) {
+        let s = str_replace(segs.get(i), "\\", "/")
+        if len(s) == 0 || s == "." {
+            i = i + 1
+            continue
+        }
+        if s == ".." {
+            if len(stack) > 0 && stack.get(len(stack) - 1) != ".." {
+                stack.pop()
+            } else if !abs {
+                stack.push("..")
+            }
+            i = i + 1
+            continue
+        }
+        stack.push(s)
+        i = i + 1
+    }
+    let mut out = ""
+    let mut k = 0
+    while k < len(stack) {
+        if k > 0 {
+            out = out + "/"
+        }
+        out = out + stack.get(k)
+        k = k + 1
+    }
+    if abs {
+        return "/" + out
+    }
+    if len(out) == 0 {
+        return "."
+    }
+    return out
+}
+
+// 最后一个分隔符之前的部分（根目录返回 "/"）
+pub fn path_dir(p: str) -> str {
+    let mut i = len(p) - 1
+    while i >= 0 {
+        if pth_is_sep(p[i]) {
+            if i == 0 {
+                return "/"
+            }
+            return substr(p, 0, i)
+        }
+        i = i - 1
+    }
+    return "."
+}
+
+// 最后一个分隔符之后的部分
+pub fn path_base(p: str) -> str {
+    let mut i = len(p) - 1
+    while i >= 0 {
+        if pth_is_sep(p[i]) {
+            return substr(p, i + 1, len(p) - i - 1)
+        }
+        i = i - 1
+    }
+    return p
+}
+
+// 扩展名（不含点）；没有返回空串。以点开头的文件名（.gitignore）没有扩展名
+pub fn path_ext(p: str) -> str {
+    let b = path_base(p)
+    let mut i = len(b) - 1
+    while i > 0 {
+        if b[i] == 46 {
+            return substr(b, i + 1, len(b) - i - 1)
+        }
+        i = i - 1
+    }
+    return ""
+}
+
+// 去掉扩展名（含点）
+pub fn path_stem(p: str) -> str {
+    let e = path_ext(p)
+    if len(e) == 0 {
+        return p
+    }
+    return substr(p, 0, len(p) - len(e) - 1)
+}

@@ -1,0 +1,12 @@
+// 负向（v1.63）：类型实参个数必须与模板一致
+module genum_arity
+
+enum Opt[T] {
+    Some(v: T)
+    None
+}
+
+fn main() {
+    let o: Opt[int, str] = Opt[int, str].None
+    print("x")
+}

@@ -1,0 +1,59 @@
+// t114_path.qma：路径处理（v1.75）
+//
+// 覆盖：
+//   1) path_join：接缝单斜杠、b 为绝对路径、空串
+//   2) path_clean：`.` / `..` / 重复分隔符 / 尾斜杠 / 根 / 相对路径的 `..`
+//   3) path_dir / path_base：根目录、无目录、尾斜杠
+//   4) path_ext / path_stem：多点文件名、点开头文件、无扩展名
+//   5) path_is_abs：POSIX 绝对路径、Windows 盘符、相对路径
+//   6) Windows 反斜杠分隔符
+module t114
+
+import std.path
+
+fn main() {
+    // 1) join
+    assert(path_join("/srv/www", "a.txt") == "/srv/www/a.txt", "基本拼接")
+    assert(path_join("/srv/www/", "a.txt") == "/srv/www/a.txt", "接缝不重复斜杠")
+    assert(path_join("/srv/www", "/etc/passwd") == "/etc/passwd", "b 绝对路径直接返回")
+    assert(path_join("", "a.txt") == "a.txt", "空 a")
+    assert(path_join("/srv", "") == "/srv", "空 b")
+
+    // 2) clean
+    assert(path_clean("/a/b/../c/./d/") == "/a/c/d", "消解 . 与 ..")
+    assert(path_clean("/a//b") == "/a/b", "重复分隔符")
+    assert(path_clean("a/../../b") == "../b", "相对路径保留前导 ..")
+    assert(path_clean("/..") == "/", "绝对路径不越过根")
+    assert(path_clean("") == ".", "空串")
+    assert(path_clean(".") == ".", "单个点")
+    assert(path_clean("/") == "/", "根")
+    assert(path_clean("a/b/") == "a/b", "去尾斜杠")
+
+    // 3) dir / base
+    assert(path_dir("/srv/www/a.txt") == "/srv/www", "父目录")
+    assert(path_dir("a.txt") == ".", "无目录")
+    assert(path_dir("/a") == "/", "根下的文件")
+    assert(path_base("/srv/www/a.txt") == "a.txt", "文件名")
+    assert(path_base("/srv/www/") == "", "尾斜杠的文件名为空")
+    assert(path_base("a.txt") == "a.txt", "无目录的文件名")
+
+    // 4) ext / stem
+    assert(path_ext("a/b.tar.gz") == "gz", "多点取最后一段")
+    assert(path_ext("noext") == "", "无扩展名")
+    assert(path_ext(".gitignore") == "", "点开头没有扩展名")
+    assert(path_ext("a/b.") == "", "尾点是空扩展名")
+    assert(path_stem("a/b.tar.gz") == "a/b.tar", "去扩展名")
+    assert(path_stem("noext") == "noext", "无扩展名原样返回")
+
+    // 5) is_abs
+    assert(path_is_abs("/x"), "POSIX 绝对")
+    assert(path_is_abs("C:\\x"), "Windows 盘符")
+    assert(!path_is_abs("x/y"), "相对路径")
+    assert(!path_is_abs(""), "空串")
+
+    // 6) 反斜杠
+    assert(path_base("a\\b\\c.txt") == "c.txt", "反斜杠也算分隔符")
+    assert(path_dir("a\\b\\c.txt") == "a\\b", "反斜杠父目录")
+
+    print("path ok")
+}

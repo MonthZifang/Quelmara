@@ -1,0 +1,15 @@
+// 负向（v1.63）：泛型函数里不能用类型参数实例化泛型 enum
+module genum_tparam
+
+enum Opt[T] {
+    Some(v: T)
+    None
+}
+
+fn wrap[T](v: T) -> Opt[T] {
+    return Opt[T].Some(v: v)
+}
+
+fn main() {
+    print("x")
+}

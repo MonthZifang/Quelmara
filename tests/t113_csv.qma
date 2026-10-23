@@ -1,0 +1,70 @@
+// t113_csv.qma：CSV 解析与生成（v1.74）
+//
+// 覆盖：
+//   1) 基本解析（CRLF / LF 两种行尾）
+//   2) 引号包裹的逗号、转义引号 `""`、字段内换行
+//   3) 空字段、末行无换行、空输入
+//   4) 生成：只给需要的字段加引号、行间 CRLF
+//   5) 解析→生成→解析 往返一致
+//   6) 便捷函数：csv_col 越界、csv_find_row
+module t113
+
+import std.csv
+
+fn main() {
+    // 1) 基本
+    let r1 = csv_parse("a,b,c\r\n1,2,3\r\n")
+    assert(len(r1) == 2, "两行")
+    assert(len(r1.get(0)) == 3, "三列")
+    assert(csv_col(r1.get(0), 0) == "a", "第一格")
+    assert(csv_col(r1.get(1), 2) == "3", "最后一格")
+    let r1b = csv_parse("a,b\n1,2\n")
+    assert(len(r1b) == 2 && csv_col(r1b.get(1), 1) == "2", "LF 行尾")
+
+    // 2) 引号
+    let r2 = csv_parse("x,\"a,b\",\"say \"\"hi\"\"\"\r\n")
+    assert(len(r2) == 1, "一行")
+    assert(csv_col(r2.get(0), 0) == "x", "普通字段")
+    assert(csv_col(r2.get(0), 1) == "a,b", "引号里的逗号")
+    assert(csv_col(r2.get(0), 2) == "say \"hi\"", "转义引号")
+    let r3 = csv_parse("\"line1\nline2\",z\r\n")
+    assert(len(r3) == 1, "引号里的换行不算行结束")
+    assert(csv_col(r3.get(0), 0) == "line1\nline2", "字段内换行保留")
+    assert(csv_col(r3.get(0), 1) == "z", "换行后的字段")
+
+    // 3) 空字段 / 无尾换行 / 空输入
+    let r4 = csv_parse("a,,c")
+    assert(len(r4) == 1 && len(r4.get(0)) == 3, "空字段占位")
+    assert(csv_col(r4.get(0), 1) == "", "中间空字段")
+    let r5 = csv_parse("a,b\r\nc,d")
+    assert(len(r5) == 2 && csv_col(r5.get(1), 0) == "c", "末行无换行")
+    assert(len(csv_parse("")) == 0, "空输入")
+    assert(len(csv_parse("\r\n\r\n")) == 0, "只有空行")
+
+    // 4) 生成
+    let rows = vec[vec[str]].new(2)
+    let r0 = vec[str].new(3)
+    r0.push("a")
+    r0.push("b,c")
+    r0.push("d\"e")
+    rows.push(r0)
+    let r1row = vec[str].new(2)
+    r1row.push("x")
+    r1row.push("y")
+    rows.push(r1row)
+    assert(csv_build(rows) == "a,\"b,c\",\"d\"\"e\"\r\nx,y", "生成结果")
+
+    // 5) 往返
+    let round = csv_build(csv_parse("p,q\r\n\"r,s\",t\r\n"))
+    assert(round == "p,q\r\n\"r,s\",t", "往返一致")
+    let again = csv_parse(round)
+    assert(len(again) == 2 && csv_col(again.get(1), 0) == "r,s", "再解析一致")
+
+    // 6) 便捷函数
+    assert(csv_col(r1.get(0), 9) == "", "越界返回空串")
+    assert(csv_col(r1.get(0), -1) == "", "负下标返回空串")
+    assert(csv_find_row(r1, 0, "1") == 1, "按列找行")
+    assert(csv_find_row(r1, 0, "zz") == -1, "找不到")
+
+    print("csv ok")
+}

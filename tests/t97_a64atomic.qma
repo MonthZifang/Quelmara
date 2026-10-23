@@ -1,0 +1,50 @@
+// t97_a64atomic.qma：atomic 内建语义（双后端）——x86 lock xadd/cmpxchg、
+// A64 ldaxr/stlxr LL-SC 循环。单线程验证语义；并发路径归 t55_sync
+// （A64 spawn 未接，t55 在 A64 irdiff 记 SKIP）。
+module t97
+
+fn main() {
+    // atomic_add：返回旧值，*addr += v
+    let p = static_word(3)
+    mem_store64(p, 0, 10)
+    let o1 = atomic_add(p, 5)
+    assert(o1 == 10, "add returns old")
+    assert(mem_load64(p, 0) == 15, "add applied")
+    let o2 = atomic_add(p, 0 - 3)
+    assert(o2 == 15, "add neg old")
+    assert(mem_load64(p, 0) == 12, "add neg applied")
+    // 连续累加：LL/SC 循环体反复走（单线程下 stlxr 恒成功，也覆盖重试入口）
+    let mut i = 0
+    while i < 100 {
+        atomic_add(p, 1)
+        i = i + 1
+    }
+    assert(mem_load64(p, 0) == 112, "add loop")
+
+    // atomic_cas：成功写新 / 失败返回当前值且不写
+    mem_store64(p, 0, 50)
+    let c1 = atomic_cas(p, 50, 99)
+    assert(c1 == 50, "cas success old")
+    assert(mem_load64(p, 0) == 99, "cas success wrote")
+    let c2 = atomic_cas(p, 50, 1)
+    assert(c2 == 99, "cas fail returns current")
+    assert(mem_load64(p, 0) == 99, "cas fail no write")
+    let c3 = atomic_cas(p, 99, 7)
+    assert(c3 == 99, "cas retry success old")
+    assert(mem_load64(p, 0) == 7, "cas retry wrote")
+
+    // 负值 / 64 位回绕
+    mem_store64(p, 0, 0 - 5)
+    let c4 = atomic_cas(p, 0 - 5, 0 - 9)
+    assert(c4 == 0 - 5, "cas neg old")
+    assert(mem_load64(p, 0) == 0 - 9, "cas neg wrote")
+    let o3 = atomic_add(p, 0 - 1)
+    assert(o3 == 0 - 9, "add wrap old")
+    assert(mem_load64(p, 0) == 0 - 10, "add wrap applied")
+
+    // atomic_fence：单线程无可观测效应，验证可执行
+    atomic_fence()
+    assert(mem_load64(p, 0) == 0 - 10, "fence no effect")
+
+    print("a64 atomic ok")
+}

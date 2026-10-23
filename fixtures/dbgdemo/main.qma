@@ -1,0 +1,43 @@
+// dbgdemo/main.qma：源码级调试器固定靶（v1.62 工具链测试夹具）
+// 断点坐标就是行号；变量覆盖 int / str / bool / f64 / struct；
+// work() 供参数与帧槽查看，fact() 递归供调用栈（bt）查看。
+// 本文件是工具链测试夹具，不进 parser 对拍语料（fixtures/ 不被
+// lexdiff / parsediff / bodydiff 收集）。
+module dbgdemo
+
+struct Point { x: int, y: int }
+
+fn work(a: int, b: int) -> int {
+    let total = a + b
+    let mut acc = 0
+    let mut i = 0
+    while i < 3 {
+        acc = acc + total * i
+        i = i + 1
+    }
+    return acc
+}
+
+fn fact(n: int) -> int {
+    if n <= 1 {
+        return 1
+    }
+    return n * fact(n - 1)
+}
+
+fn main() {
+    let x = 3
+    let y = 4
+    let p = Point { x: 7, y: 9 }
+    let s = "quelmara"
+    let f = 2.5
+    let ok = true
+    let r = work(x, y)
+    let f5 = fact(5)
+    print("r=" + r.to_str())
+    print("f5=" + f5.to_str())
+    print("p=" + p.x.to_str() + "," + p.y.to_str())
+    print("s=" + s)
+    print("f=" + f.to_str())
+    print("ok=" + ok.to_str())
+}

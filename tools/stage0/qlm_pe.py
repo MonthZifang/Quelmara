@@ -47,6 +47,13 @@ SCN_CODE = 0x60000020         # CODE | EXECUTE | READ
 SCN_RDATA = 0xC0000040        # INITIALIZED_DATA | READ | WRITE（IAT 由加载器回填）
 SCN_DATA = 0xC0000040         # INITIALIZED_DATA | READ | WRITE
 SCN_RELOC = 0x42000040        # INITIALIZED_DATA | DISCARDABLE | READ
+# v1.62：.qlmdbg 调试节（自研格式，非 DWARF/PDB）。只读数据——
+# 不放 DEBUG_DIRECTORY：那是 CODEVIEW 目录，挂非标准格式会让标准工具误读。
+SCN_DBG = 0x40000040          # INITIALIZED_DATA | READ
+# v1.71：DWARF 节（.debug_abbrev / .debug_info / .debug_line / .debug_loc）。
+# MinGW 口径：INITIALIZED_DATA | DISCARDABLE | READ——调试节不映射进内存，
+# 也不参与基址重定位（所以地址一律写 RVA，见 qlm_dwarf 模块头）。
+SCN_DWARF = 0x42000040
 
 
 def align(n, a):
@@ -139,6 +146,10 @@ class WinCodegen(Codegen):
             relocs.append(patch)
 
         imports = list(dict.fromkeys(api for _p, api in self.api_fixups))
+        # v1.62：函数 RVA = TEXT_RVA + 标签偏移（enc.labels 在 gen_functions
+        # 里逐个登记）。调试器按 "PC - base" 反查落在哪个函数。
+        for fd in self.dbg["funcs"]:
+            fd["rva"] = TEXT_RVA + enc.labels[fd["name"]]
         return bytes(code), data, relocs, imports, self.api_fixups
 
 
@@ -238,7 +249,8 @@ def build_reloc(reloc_offsets, text_rva):
 # ---------------------------------------------------------------------------
 
 
-def build_pe(code, data, reloc_offsets, imports, api_fixups):
+def build_pe(code, data, reloc_offsets, imports, api_fixups, dbg=None,
+             dwarf=None):
     code = bytearray(code)
     text_size = len(code)
     data = data or b"\x00" * 8
@@ -255,11 +267,18 @@ def build_pe(code, data, reloc_offsets, imports, api_fixups):
         struct.pack_into("<i", code, patch, disp)
 
     reloc = build_reloc(reloc_offsets, TEXT_RVA) if reloc_offsets else b""
+    # v1.62：.qlmdbg 排在最后（.reloc 之后），不影响前面各节的 RVA 计算
+    # v1.71：DWARF 四节再往后排（只影响 --dbg-info 构建的体积）
+    extras = []                    # [(节名 bytes, 节体, 特征)]
+    if dbg:
+        extras.append((b".qlmdbg", dbg, SCN_DBG))
+    for name, body in (dwarf or {}).items():
+        extras.append((name.encode("ascii"), body, SCN_DWARF))
 
     # ---- 节表 ----
     # headers_size 必须把 section header 算进去，否则最后一节头会被 .text
     # 的 RawData 覆盖（已踩坑：入口跳到垃圾字节 -> 0xC0000096）。
-    nsec = 4 if reloc else 3
+    nsec = 3 + (1 if reloc else 0) + len(extras)
     headers_size = align(HDR_DOS + 4 + 20 + OPT_SIZE + 40 * nsec, FILE_ALIGN)
     secs = []
     raw = headers_size
@@ -279,9 +298,14 @@ def build_pe(code, data, reloc_offsets, imports, api_fixups):
     if reloc:
         add_sec(b".reloc", reloc_rva, reloc, SCN_RELOC)
 
-    size_of_image = align((reloc_rva + len(reloc)) if reloc else (rdata_rva + len(rdata)),
-                          SECT_ALIGN)
-    init_size = secs[1][3] + secs[2][3] + (secs[3][3] if reloc else 0)
+    next_rva = reloc_rva + align(len(reloc), SECT_ALIGN)
+    for name, body, chars in extras:
+        add_sec(name, next_rva, body, chars)
+        next_rva += align(max(len(body), 1), SECT_ALIGN)
+
+    size_of_image = align(secs[-1][2] + max(secs[-1][1], 1), SECT_ALIGN)
+    # 所有非 .text 节的 RawData 之和（SizeOfInitializedData）
+    init_size = sum(s[3] for s in secs[1:])
 
     # ---- DOS + PE 头 ----
     dos = b"MZ" + b"\x00" * 58 + struct.pack("<I", HDR_DOS)
@@ -314,9 +338,17 @@ def build_pe(code, data, reloc_offsets, imports, api_fixups):
     if reloc:
         struct.pack_into("<II", o, 112 + 8 * 5, reloc_rva, len(reloc))
 
+    # COFF 节名只有 8 字节；".debug_abbrev" 这类名字放不下，按 PE 规范
+    # 写成 "/<字符串表偏移>"，真名进节尾的字符串表（MinGW 同款做法）。
+    strtab = bytearray(b"\x00\x00\x00\x00")
     sect_hdr = b""
     for name, vsize, rva, raw_size, ptr, chars in secs:
-        sect_hdr += name.ljust(8, b"\x00")
+        if len(name) <= 8:
+            nm = name.ljust(8, b"\x00")
+        else:
+            nm = (b"/%d" % len(strtab)).ljust(8, b"\x00")
+            strtab += name + b"\x00"
+        sect_hdr += nm
         sect_hdr += struct.pack("<IIIIIIHHI", vsize, rva, raw_size, ptr,
                                 0, 0, 0, 0, chars)
 
@@ -325,10 +357,15 @@ def build_pe(code, data, reloc_offsets, imports, api_fixups):
     blob += b"\x00" * (headers_size - len(blob))
 
     bodies = [bytes(code), data, rdata, reloc if reloc else b""]
+    bodies += [body for _n, body, _c in extras]
     for (name, vsize, rva, raw_size, ptr, chars), body in zip(secs, bodies):
         blob += b"\x00" * (ptr - len(blob))
         blob += body
         blob += b"\x00" * (raw_size - len(body))
+
+    if len(strtab) > 4:            # 只有长节名时才追加（默认构建逐字节不变）
+        struct.pack_into("<I", strtab, 0, len(strtab))
+        blob += strtab
 
     return bytes(blob)
 
@@ -338,18 +375,34 @@ def build_pe(code, data, reloc_offsets, imports, api_fixups):
 # ---------------------------------------------------------------------------
 
 
-def transpile_win(src_path, dump_ir=False, optimize=True):
+def transpile_win(src_path, dump_ir=False, optimize=True, dbg=False):
     from qlm import load_config
     cfg = load_config(src_path)
     main_dir = os.path.dirname(os.path.abspath(src_path))
     asset_root = os.path.normpath(os.path.join(
         main_dir, cfg.get("src", {}).get("asset", "src/asset")))
+    prog = None
+    if dbg:
+        # v1.62：调试信息走 qlm_dbinfo 的行号加载器（parse_stmt 钩子 +
+        # 主文件函数名集），不改共享 parser 文件
+        import qlm_dbinfo
+        prog = qlm_dbinfo.load_program_dbg(src_path, cfg)
     fns, low, cfg = lower_and_optimize(src_path, optimize=optimize,
                                        dump_ir=dump_ir, platform="windows",
-                                       asset_root=asset_root)
+                                       asset_root=asset_root, prog=prog)
     cg = WinCodegen(fns, low.globals, low=low)   # vtable 需要 low.vtables
     code, data, relocs, imports, api_fixups = cg.gen_all_pe()
-    pe = build_pe(code, data, relocs, imports, api_fixups)
+    dbg_blob = None
+    dwarf = None
+    if dbg:
+        import qlm_dbinfo
+        import qlm_dwarf
+        layout = low.dbg_struct_layout()
+        dbg_blob = qlm_dbinfo.serialize_dbg(cg.dbg, src_path, layout)
+        # v1.71：同一份调试表再编码一份标准 DWARF v4（供外部工具消费）
+        dwarf = qlm_dwarf.build(cg.dbg, src_path, layout, TEXT_RVA, len(code))
+    pe = build_pe(code, data, relocs, imports, api_fixups, dbg=dbg_blob,
+                  dwarf=dwarf)
     return pe, cfg
 
 

@@ -1,0 +1,7 @@
+// 负向夹具：插值字符串缺少右花括号
+module interp_unclosed
+
+fn main() {
+    let n = 1
+    print(f"x={n")
+}

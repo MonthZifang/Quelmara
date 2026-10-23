@@ -1,0 +1,143 @@
+// t115_derive.qma：属性宏 @derive + 编译期反射（v1.77）
+//
+// 覆盖：
+//   1) @derive(Json)：编码为 JSON（int / bool / str / 转义 / 嵌套 / vec）
+//   2) @derive(Json) 的解码：from_json(json()) 往返等价（含 vec[struct]）
+//   3) @derive(Eq)：聚合按值相等（语言原生 == 是地址比较，见 07-gaps §7.6）
+//   4) @derive(Show)：人读文本（bool 走 true/false，不是 1/0）
+//   5) 字段顺序 = 声明顺序（JSON key 顺序稳定）
+//   6) 窄整数（u8）按宽度截断
+//   7) 编译期反射：refl_type_name / field_count / field_name / field_type
+//   8) 编译期反射：enum 的 variant_count / variant_name / variant_arity
+//   9) 反射结果可参与算术（编译期常量，零运行时元数据）
+//  10) 只派生部分项（只 Json）时，别的项不生成
+module t115
+
+// ---- 1) 基础形态 ----
+@derive(Json, Eq, Show)
+struct Point { x: int, y: int }
+
+// ---- 2) 转义 / 中文 / 字段顺序 ----
+@derive(Json, Eq, Show)
+struct Doc { title: str, body: str, n: int }
+
+// ---- 3) 嵌套 struct ----
+@derive(Json, Eq, Show)
+struct Line { p: Point, label: str }
+
+// ---- 4) 容器字段 ----
+@derive(Json, Eq, Show)
+struct Bag {
+    id: u8,
+    ok: bool,
+    tags: vec[str],
+    nums: vec[int],
+    pts: vec[Point],
+}
+
+// ---- 5) 只派生 Json ----
+@derive(Json)
+struct OnlyJson { v: int }
+
+// ---- 6) 枚举（供反射用，不派生）----
+enum Shape { Dot, Circle(r: int), Rect(w: int, h: int) }
+
+// 派生函数是普通函数：泛型模板也能调（单态化后按具体类型解析）
+fn to_json_generic[T](v: T) -> str {
+    return v.json()
+}
+
+// 反射写在使用点之前也成立（类型在文件后面声明，折叠发生在 parse_program 末尾）
+fn shape_kinds() -> int {
+    return refl_variant_count[Shape]()
+}
+
+fn main() {
+    // 1) 基础编码
+    let p = Point { x: 1, y: -2 }
+    assert(p.json() == "{\"x\":1,\"y\":-2}", "基础 JSON 形态")
+    assert(p.show() == "Point { x: 1, y: -2 }", "基础 show 形态")
+    assert(p.eq(Point { x: 1, y: -2 }), "结构等价：同值")
+    assert(!p.eq(Point { x: 1, y: -3 }), "结构等价：异值")
+    // 原生 == 仍是地址比较（派生 Eq 才是按值）
+    let p2 = Point { x: 1, y: -2 }
+    assert(!(p == p2), "原生 == 仍按地址（07-gaps §7.6 未变）")
+
+    // 2) 转义与 UTF-8
+    let d = Doc { title: "a\"b\\c", body: "行1\n行2\t✓", n: 0 }
+    assert(d.json() == "{\"title\":\"a\\\"b\\\\c\",\"body\":\"行1\\n行2\\t✓\",\"n\":0}",
+           "转义与 UTF-8")
+    assert(Doc_from_json(d.json()).eq(d), "字符串往返")
+
+    // 3) 嵌套 + 容器
+    let tags = vec[str].new(2)
+    tags.push("t1")
+    tags.push("t2,t3")
+    let nums = vec[int].new(3)
+    nums.push(7)
+    nums.push(-9)
+    nums.push(0)
+    let pts = vec[Point].new(2)
+    pts.push(Point { x: 1, y: 2 })
+    pts.push(Point { x: 3, y: 4 })
+    let b = Bag { id: 200, ok: true, tags: tags, nums: nums, pts: pts }
+    let bj = b.json()
+    assert(bj == "{\"id\":200,\"ok\":true,\"tags\":[\"t1\",\"t2,t3\"]," + "\"nums\":[7,-9,0],\"pts\":[{\"x\":1,\"y\":2},{\"x\":3,\"y\":4}]}",
+           "容器与嵌套编码")
+    let b2 = Bag_from_json(bj)
+    assert(b.eq(b2), "容器与嵌套往返")
+    assert(b2.id == 200, "u8 字段解码")
+    assert(b2.tags.len() == 2, "vec[str] 长度")
+    assert(b2.tags.get(1) == "t2,t3", "vec[str] 元素")
+    assert(b2.nums.get(1) == -9, "vec[int] 负值")
+    assert(b2.pts.get(1).eq(Point { x: 3, y: 4 }), "vec[struct] 元素")
+
+    // 4) bool 在 show 里是 true/false（不是 1/0）
+    assert(b.show() == "Bag { id: 200, ok: true, tags: [t1, t2,t3], " + "nums: [7, -9, 0], pts: [Point { x: 1, y: 2 }, " + "Point { x: 3, y: 4 }] }", "show 的 bool 与嵌套")
+
+    // 5) 空容器
+    let empty = Bag { id: 0, ok: false, tags: vec[str].new(0),
+                      nums: vec[int].new(0), pts: vec[Point].new(0) }
+    assert(empty.json() == "{\"id\":0,\"ok\":false,\"tags\":[]," + "\"nums\":[],\"pts\":[]}", "空容器编码")
+    assert(empty.eq(Bag_from_json(empty.json())), "空容器往返")
+
+    // 6) 只派生 Json：json 有、show/eq 没有（负向见 tests/bad/derive_partial.qma）
+    let o = OnlyJson { v: 5 }
+    assert(o.json() == "{\"v\":5}", "只派生 Json")
+
+    // 7) 反射：struct
+    assert(refl_type_name[Point]() == "Point", "refl_type_name")
+    assert(refl_field_count[Point]() == 2, "refl_field_count")
+    assert(refl_field_name[Point](0) == "x", "refl_field_name 0")
+    assert(refl_field_name[Point](1) == "y", "refl_field_name 1")
+    assert(refl_field_type[Point](0) == "int", "refl_field_type")
+    assert(refl_field_count[Bag]() == 5, "refl_field_count Bag")
+    assert(refl_field_name[Bag](2) == "tags", "refl_field_name Bag")
+    assert(refl_field_type[Bag](2) == "vec[str]", "refl_field_type vec")
+    assert(refl_field_type[Bag](4) == "vec[Point]", "refl_field_type vec[struct]")
+    assert(refl_field_type[Bag](0) == "u8", "refl_field_type 窄整数")
+
+    // 8) 反射：enum
+    assert(shape_kinds() == 3, "refl_variant_count（前向引用类型）")
+    assert(refl_variant_name[Shape](0) == "Dot", "refl_variant_name 0")
+    assert(refl_variant_name[Shape](1) == "Circle", "refl_variant_name 1")
+    assert(refl_variant_arity[Shape](0) == 0, "refl_variant_arity Dot")
+    assert(refl_variant_arity[Shape](1) == 1, "refl_variant_arity Circle")
+    assert(refl_variant_arity[Shape](2) == 2, "refl_variant_arity Rect")
+
+    // 9) 反射是编译期常量：可作循环上界 / 参与算术（下标必须是常量，见 §宏与反射）
+    let mut sum = 0
+    let mut i = 0
+    while i < refl_field_count[Bag]() {
+        sum = sum + 1
+        i = i + 1
+    }
+    assert(sum == 5, "refl_field_count 作循环上界")
+    let name_len = len(refl_field_name[Bag](0)) + len(refl_field_name[Bag](1)) + len(refl_field_name[Bag](2)) + len(refl_field_name[Bag](3)) + len(refl_field_name[Bag](4))
+    assert(name_len == 2 + 2 + 4 + 4 + 3, "反射结果参与运行时计算")
+
+    // 10) 派生函数是普通函数：可以被别的函数/泛型模板调用
+    assert(Point__json(p) == p.json(), "派生函数可直接调用")
+    assert(Point__eq(p, p2), "派生 eq 可直接调用")
+    assert(to_json_generic[Point](p) == p.json(), "泛型模板调用派生方法")
+}

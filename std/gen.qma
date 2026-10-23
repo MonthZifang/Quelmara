@@ -1,37 +1,40 @@
-// std/gen.qma —— 泛型算法库（v1.36）
+// std/gen.qma —— 泛型算法库（v1.36；类型约束 v1.61）
 //
 // 为什么需要它：min/max/clamp/contains 这类算法在每种标量上都要写一遍，
 // 过去要么复制粘贴要么退化成 int 专用。用户泛型（v1.11）+ 多类型参数与
 // 调用点推导（v1.36）之后，一套模板按实参类型单态化，零运行时分发。
 //
 // 语义纪律：
-//   * 单态化产物是普通函数（gen_min__int / gen_min__float ...），
+//   * 单态化产物是普通函数（gen_min__int / gen_min__f64 ...），
 //     调用点写 gen_min(a, b) 即可，类型由实参推导；推不出会编译期报错
 //     并提示显式实例化 gen_min[int](a, b)；
-//   * gen_min/gen_max/gen_clamp/gen_dist 要求 T 支持 < 比较（数值类型）；
-//     str 实例化会在降级期报错（str 暂无序）；
-//   * gen_contains/gen_index_of 要求 T 支持 == 比较；
+//   * gen_min/gen_max/gen_clamp 声明 [T: Ord]（整数/浮点），gen_dist 还要
+//     [T: Num]（用到减法）；gen_contains/gen_index_of 声明 [T: Eq]
+//     （整数/浮点/bool/str）；
+//   * 违反约束在**调用点**报错（v1.61）：`gen_min(str_a, str_b)` 直接编译失败，
+//     不再等到 Lower 或运行期才发现 str 的 < 是地址比较；
 //   * gen_first/gen_last 要求 vec 非空（空 vec 行为未定义，调用方保证）；
-//   * gen_reverse 原地交换，不分配。
+//   * gen_reverse 原地交换，不分配（对 T 无能力要求，不加约束）。
 //
-// 边界（07-gaps §1）：无类型约束声明（trait bound），上述"要求"是文档性
-// 的——违反它在编译期以 Lower 类型错误的形式出现，不是静默错。
+// 边界（07-gaps §1）：约束只有四个能力名（Ord/Eq/Num/Bit）+ 本文件 interface；
+// 聚合（struct/enum）不满足 Eq——`a == b` 对聚合是地址比较（07-gaps §7.6），
+// 需要按字段/变体手写比较。
 
-fn gen_min[T](a: T, b: T) -> T {
+fn gen_min[T: Ord](a: T, b: T) -> T {
     if a < b {
         return a
     }
     return b
 }
 
-fn gen_max[T](a: T, b: T) -> T {
+fn gen_max[T: Ord](a: T, b: T) -> T {
     if a > b {
         return a
     }
     return b
 }
 
-fn gen_clamp[T](v: T, lo: T, hi: T) -> T {
+fn gen_clamp[T: Ord](v: T, lo: T, hi: T) -> T {
     if v < lo {
         return lo
     }
@@ -42,7 +45,7 @@ fn gen_clamp[T](v: T, lo: T, hi: T) -> T {
 }
 
 // |a - b|：数值型通用（int / float）
-fn gen_dist[T](a: T, b: T) -> T {
+fn gen_dist[T: Num + Ord](a: T, b: T) -> T {
     if a < b {
         return b - a
     }
@@ -58,7 +61,7 @@ fn gen_last[T](xs: vec[T]) -> T {
     return xs.get(len(xs) - 1)
 }
 
-fn gen_contains[T](xs: vec[T], v: T) -> bool {
+fn gen_contains[T: Eq](xs: vec[T], v: T) -> bool {
     let mut i = 0
     while i < len(xs) {
         if xs.get(i) == v {
@@ -69,7 +72,7 @@ fn gen_contains[T](xs: vec[T], v: T) -> bool {
     return false
 }
 
-fn gen_index_of[T](xs: vec[T], v: T) -> int {
+fn gen_index_of[T: Eq](xs: vec[T], v: T) -> int {
     let mut i = 0
     while i < len(xs) {
         if xs.get(i) == v {

@@ -1,0 +1,16 @@
+// 负向（v1.64）：泛型 enum 的模板 impl 同样必须实现接口全部方法
+module genumimpl_missing
+
+interface Show {
+    fn show(self) -> str
+    fn name(self) -> str
+}
+enum Opt[T] { Some(v: T), None }
+
+impl Opt[T: Show] : Show {
+    fn show(o: Opt[T]) -> str { return "opt" }
+}
+
+fn main() {
+    print(Opt[int].Some(v: 1).show())
+}

@@ -135,6 +135,15 @@ def vreg_mentions(ins):
         # SHA-NI / XMM 族：操作数是 xmm 槽号（**负数编码** -(x+1)，不与
         # vreg 正数空间冲突）；仅地址实参是 vreg（正 int）
         return [], [x for x in ins[1:] if isinstance(x, int) and x >= 0]
+    # v1.62 调试信息标记：line/dbgvar/dbgparam 不定义 vreg。dbgvar 的
+    # vreg 登记为 use——让 copy_prop 替换后"变量->位置"绑定仍指向值的
+    # 最终 vreg。dbgparam 同形（形参绑定）。
+    if op == "line":
+        return [], []
+    if op == "dbgvar":
+        return [], [ins[2]]
+    if op == "dbgparam":
+        return [], [ins[2]]
     raise SyntaxError(f"未知指令 {ins!r}")
 
 
@@ -789,6 +798,12 @@ def check_suspicious_loops(fns):
 
 _EFF = ("call", "callr", "syscall", "winapi", "spawn_child", "xchg", "ret",
         "store", "store8", "load", "load8", "load32",
+        # v1.62 调试标记：line/dbgvar/dbgparam 是"语句边界 + 变量绑定"的
+        # 位置钉。列表调度会把无依赖指令浮到基本块尾部——行号标记若可浮动，
+        # 断点会落在语句第一条指令之后（值已变）。登记为效应指令后
+        # 标记保持语句边界语义；仅 --dbg-info 构建携带标记，默认构建
+        # 零影响（.text 逐字节不变）。
+        "line", "dbgvar", "dbgparam",
         # vsum 读一整段内存（最多 count*8 字节）：必须与访存保持原序，
         # 否则调度器会把它挪到数组初始化之前（v1.8 实测：归约少一个元素）。
         "vsum", "vsumd", "vdotd",
@@ -1609,6 +1624,14 @@ def _subst_vregs(ins, sub):
                      + ([S(ins[5])] if len(ins) > 5 else []))
     if op in ("mfence", "pause"):
         return ins
+    # v1.62 调试标记：dbgvar/dbgparam 的 vreg 必须跟着 copy_prop 的
+    # 别名替换走——否则"变量->位置"绑定会指向一个已被塌缩掉的 vreg，
+    # 调试器读到的是未定义槽（实测：let f = 2.5 的绑定在替换后指向
+    # 从未定义的 vreg，print f 直接失效）。
+    if op == "dbgvar":
+        return ("dbgvar", ins[1], sub(ins[2]))
+    if op == "dbgparam":
+        return ("dbgparam", ins[1], sub(ins[2]))
     return ins
 
 

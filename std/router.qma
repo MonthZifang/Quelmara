@@ -1,0 +1,99 @@
+// std/router.qma —— 路径模板匹配（v1.67）
+//
+// 为什么需要：P0「路由 / 静态文件 / MIME 最小层」的第二块。std/http 只有单回调，
+// 稍大的服务都得自己写 if 链比对 path；这里给一个最小、无分配的模板匹配器。
+//
+// 语义：
+//   * 模板按 '/' 分段；`/users/:id/posts/:pid` 里 `:name` 匹配**一段**并捕获；
+//   * `*` 只允许出现在最后一段，匹配**剩余全部**（含零段），不捕获；
+//   * 路径先做归一化：截掉 `?query` / `#frag`，去掉尾部 '/'，再去掉开头 '/'；
+//     因此 `/a/b/`、`/a/b?x=1`、`/a/b#top` 都等价于 `/a/b`；
+//   * 段数不同即不匹配（有 `*` 时除外）。
+//
+// 边界：不做正则、不做通配 `**`、不排序优先级（调用方按自己的顺序试）。
+
+import std.str
+
+// 归一化：去 query/fragment、去尾 '/'、去首 '/'
+pub fn route_norm(target: str) -> str {
+    let mut end = len(target)
+    let mut i = 0
+    while i < len(target) {
+        if target[i] == 63 || target[i] == 35 {      // '?' '#'
+            end = i
+            break
+        }
+        i = i + 1
+    }
+    let mut s = substr(target, 0, end)
+    while len(s) > 1 && s[len(s) - 1] == 47 {        // '/'
+        s = substr(s, 0, len(s) - 1)
+    }
+    if len(s) > 0 && s[0] == 47 {
+        s = substr(s, 1, len(s) - 1)
+    }
+    return s
+}
+
+// 归一化后按 '/' 切段；空路径给 0 段
+pub fn route_segs(target: str) -> vec[str] {
+    let s = route_norm(target)
+    if len(s) == 0 {
+        return vec[str].new(0)
+    }
+    return str_split(s, "/")
+}
+
+pub fn route_match(pattern: str, path: str) -> bool {
+    let ps = route_segs(pattern)
+    let xs = route_segs(path)
+    let mut i = 0
+    while i < len(ps) {
+        let p = ps.get(i)
+        if p == "*" {
+            return true                    // 通配剩余（含零段）
+        }
+        if i >= len(xs) {
+            return false
+        }
+        if len(p) == 0 || p[0] != 58 {     // 不是 ':参数' 段 -> 逐字相等
+            if p != xs.get(i) {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return i == len(xs)
+}
+
+// 捕获的参数（按出现顺序）；不匹配返回空 vec
+pub fn route_params(pattern: str, path: str) -> vec[str] {
+    let out = vec[str].new(4)
+    if !route_match(pattern, path) {
+        return out
+    }
+    let ps = route_segs(pattern)
+    let xs = route_segs(path)
+    let mut i = 0
+    while i < len(ps) {
+        let p = ps.get(i)
+        if len(p) > 0 && p[0] == 58 {
+            out.push(xs.get(i))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// "GET,POST" 里是否允许 method（HTTP 方法区分大小写，按原样比）
+pub fn route_method_allowed(allowed: str, method: str) -> bool {
+    let parts = str_split(allowed, ",")
+    let mut i = 0
+    while i < len(parts) {
+        if str_trim(parts.get(i)) == method {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}

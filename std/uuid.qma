@@ -1,0 +1,116 @@
+// std/uuid.qma —— UUID（v1.78）
+//
+// 为什么需要：会话 id、请求 id、幂等键都要唯一标识，之前 `std/session` 只能用
+// 自增 `s1`/`s2`（可枚举）。这里给 v4（随机）+ nil + 校验/解析。
+//
+// 语义：
+//   * uuid_v4：128 位随机（两次 rand_next），按 RFC 4122 打版本位（第 6 字节高 4 位
+//     = 0100）与变体位（第 8 字节高 2 位 = 10），输出小写带连字符；
+//   * uuid_nil：全零 UUID；
+//   * uuid_valid：长度 36、连字符在 8/13/18/23、其余为十六进制（大小写都收）；
+//   * uuid_version / uuid_variant_ok：读出版本号与变体位，便于校验来源。
+//
+// 边界：只生成 v4（随机）；不做 v1/v5（需要时间/命名空间哈希）；不保证密码学强度
+// ——`std/rand` 是 xorshift，用于标识足够，用于密钥不行。
+
+import std.rand
+
+fn uu_nibble(n: int) -> int {
+    if n < 10 {
+        return 48 + n
+    }
+    return 87 + n
+}
+
+fn uu_hexval(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return -1
+}
+
+fn uu_is_hex(c: int) -> bool {
+    return uu_hexval(c) >= 0
+}
+
+fn uu_byte_hex(b: int) -> str {
+    let out = vec[int].new(2)
+    out.push(uu_nibble((b / 16) % 16))
+    out.push(uu_nibble(b % 16))
+    return str_from_bytes(out)
+}
+
+pub fn uuid_v4() -> str {
+    let a = rand_next()
+    let b = rand_next()
+    let bytes = vec[int].new(16)
+    let mut i = 0
+    while i < 8 {
+        bytes.push((a >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        bytes.push((b >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+    // 版本 4：第 6 字节高 4 位 = 0100；变体：第 8 字节高 2 位 = 10
+    bytes.set(6, (bytes.get(6) & 0x0F) | 0x40)
+    bytes.set(8, (bytes.get(8) & 0x3F) | 0x80)
+    let mut out = ""
+    i = 0
+    while i < 16 {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            out = out + "-"
+        }
+        out = out + uu_byte_hex(bytes.get(i))
+        i = i + 1
+    }
+    return out
+}
+
+pub fn uuid_nil() -> str {
+    return "00000000-0000-0000-0000-000000000000"
+}
+
+pub fn uuid_valid(s: str) -> bool {
+    if len(s) != 36 {
+        return false
+    }
+    let mut i = 0
+    while i < 36 {
+        let c = s[i]
+        if i == 8 || i == 13 || i == 18 || i == 23 {
+            if c != 45 {
+                return false
+            }
+        } else if !uu_is_hex(c) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// 版本号（1..5）；不是合法 UUID 返回 -1
+pub fn uuid_version(s: str) -> int {
+    if !uuid_valid(s) {
+        return -1
+    }
+    return uu_hexval(s[14])
+}
+
+// RFC 4122 变体位是否为 10xx（0x8 / 0x9 / 0xa / 0xb）
+pub fn uuid_variant_ok(s: str) -> bool {
+    if !uuid_valid(s) {
+        return false
+    }
+    let v = uu_hexval(s[19])
+    return v == 8 || v == 9 || v == 10 || v == 11
+}

@@ -1,0 +1,58 @@
+// t109_cookie.qma：Cookie 解析与 Set-Cookie 生成（v1.70）
+//
+// 覆盖：
+//   1) 解析 Cookie 头：取单个值、不存在、空值、多余空格、同名取第一个
+//   2) 值的百分号编解码（空格用 %20 不用 '+'，`;` `=` 必须编码）
+//   3) Set-Cookie 拼装：Max-Age / Path / SameSite / HttpOnly / Secure
+//   4) 删除 cookie 的标准写法（空值 + Max-Age=0）
+//   5) 会话 cookie（max_age = 0 且值非空 → 不写 Max-Age）
+module t109
+
+import std.cookie
+
+fn main() {
+    // 1) 解析
+    let h = "sid=abc123; theme=dark; empty=; sp=a%20b"
+    assert(cookie_get(h, "sid") == "abc123", "取值")
+    assert(cookie_get(h, "theme") == "dark", "第二个值")
+    assert(cookie_get(h, "empty") == "", "空值")
+    assert(cookie_get(h, "nope") == "", "不存在")
+    assert(cookie_get(h, "sp") == "a b", "解码 %20")
+    assert(cookie_get("  sid = x  ", "sid") == "x", "两侧空白")
+    assert(cookie_get("a=1; a=2", "a") == "1", "同名取第一个")
+    assert(cookie_has(h, "theme"), "cookie_has 命中")
+    assert(!cookie_has(h, "nope"), "cookie_has 未命中")
+    assert(cookie_get("", "x") == "", "空头")
+
+    // 2) 编解码
+    assert(cookie_value_encode("abc-_.~") == "abc-_.~", "无需编码")
+    assert(cookie_value_encode("a b") == "a%20b", "空格编码成 %20")
+    assert(cookie_value_encode("a;b") == "a%3bb", "分号编码")
+    assert(cookie_value_encode("a=b") == "a%3db", "等号编码")
+    assert(cookie_value_decode("a%20b%3bc") == "a b;c", "解码")
+    assert(cookie_value_decode("100%") == "100%", "裸 % 保留")
+    assert(cookie_value_decode("%zz") == "%zz", "非法序列保留")
+
+    // 3) Set-Cookie
+    let c1 = cookie_set("sid", "abc", "/", 3600, cookie_attrs(true, true, "Lax"))
+    assert(c1 == "sid=abc; Max-Age=3600; Path=/; SameSite=Lax; HttpOnly; Secure",
+           "完整属性")
+    let c2 = cookie_set("theme", "dark mode", "/app", 60, "")
+    assert(c2 == "theme=dark%20mode; Max-Age=60; Path=/app", "无属性 + 编码")
+    let c3 = cookie_set("k", "v", "", 0, "")
+    assert(c3 == "k=v", "会话 cookie 不写 Max-Age/Path")
+    assert(cookie_attrs(false, false, "") == "", "空属性")
+    assert(cookie_attrs(false, false, "Strict") == "; SameSite=Strict", "仅 SameSite")
+
+    // 4) 删除 cookie
+    let del = cookie_set("sid", "", "/", 0, cookie_attrs(true, false, ""))
+    assert(del == "sid=; Max-Age=0; Path=/; HttpOnly", "删除写法")
+
+    // 5) 多次调用同一函数（钉住 v1.70 的 7 参 str 缺陷的替代路径）
+    let a = cookie_set("a", "1", "/", 10, "")
+    let b = cookie_set("b", "2", "/", 20, "")
+    assert(a == "a=1; Max-Age=10; Path=/" && b == "b=2; Max-Age=20; Path=/",
+           "多次调用互不影响")
+
+    print("cookie ok")
+}

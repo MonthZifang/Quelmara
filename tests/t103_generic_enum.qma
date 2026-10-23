@@ -1,0 +1,134 @@
+// t103_generic_enum.qma：泛型 enum（v1.63）
+//
+// 覆盖：
+//   1) 单类型参数 enum Opt[T]：Some(v: T) / None，int / str / struct 载荷
+//   2) 多类型参数 enum Either[A, B]：Left/Right
+//   3) match 穷尽性 + 通配臂，模式里写 Opt[int].Some(x)
+//   4) 作形参 / 返回值（聚合 ABI）
+//   5) 嵌套实例 Opt[Opt[int]]
+//   6) vec[Opt[int]] 容器元素
+//   7) 无载荷变体（T 未被使用）
+//
+// 负向（必须编译失败）见 tests/bad/genum_*.qma。
+module t103
+
+enum Opt[T] {
+    Some(v: T)
+    None
+}
+
+enum Either[A, B] {
+    Left(a: A)
+    Right(b: B)
+}
+
+enum Flag[T] {
+    Yes
+    No
+}
+
+struct Point { x: int, y: int }
+
+fn unwrap_or(o: Opt[int], dflt: int) -> int {
+    return match o {
+        Opt[int].Some(v) => v
+        Opt[int].None => dflt
+    }
+}
+
+fn pick(e: Either[int, str]) -> str {
+    return match e {
+        Either[int, str].Left(n) => "L" + n.to_str()
+        Either[int, str].Right(s) => "R" + s
+    }
+}
+
+fn main() {
+    // 1) 单参数 + 三种载荷
+    let a: Opt[int] = Opt[int].Some(v: 42)
+    let b: Opt[int] = Opt[int].None
+    assert(unwrap_or(a, -1) == 42, "Opt[int].Some")
+    assert(unwrap_or(b, -1) == -1, "Opt[int].None")
+
+    let s: Opt[str] = Opt[str].Some(v: "hi")
+    let got_s = match s {
+        Opt[str].Some(v) => v
+        Opt[str].None => "?"
+    }
+    assert(got_s == "hi", "Opt[str]")
+
+    let p: Opt[Point] = Opt[Point].Some(v: Point { x: 3, y: 4 })
+    let got_p = match p {
+        Opt[Point].Some(v) => v.x * 10 + v.y
+        Opt[Point].None => 0
+    }
+    assert(got_p == 34, "Opt[Point] 结构体载荷")
+
+    // 1b) f64 载荷（v1.65 起绑定后带浮点标记，不再输出位模式）
+    let f: Opt[f64] = Opt[f64].Some(v: 1.5)
+    let got_f = match f {
+        Opt[f64].Some(v) => v.to_str()
+        Opt[f64].None => "?"
+    }
+    assert(got_f == "1.5", "Opt[f64] 载荷 to_str")
+    let doubled = match f {
+        Opt[f64].Some(v) => v * 2.0
+        Opt[f64].None => 0.0
+    }
+    assert(doubled == 3.0, "Opt[f64] 载荷参与算术")
+
+    // 2) 多类型参数
+    let l: Either[int, str] = Either[int, str].Left(a: 7)
+    let r: Either[int, str] = Either[int, str].Right(b: "x")
+    assert(pick(l) == "L7", "Either.Left")
+    assert(pick(r) == "Rx", "Either.Right")
+
+    // 3) 通配臂
+    let any: Opt[int] = Opt[int].Some(v: 9)
+    let w = match any {
+        Opt[int].Some(v) => v
+        _ => 0
+    }
+    assert(w == 9, "通配臂")
+
+    // 4) 返回值：函数返回泛型枚举实例
+    let back = make(5)
+    assert(unwrap_or(back, 0) == 5, "返回 Opt[int]")
+
+    // 5) 嵌套实例
+    let nested: Opt[Opt[int]] = Opt[Opt[int]].Some(v: Opt[int].Some(v: 1))
+    let deep = match nested {
+        Opt[Opt[int]].Some(inner) => match inner {
+            Opt[int].Some(v) => v
+            Opt[int].None => -1
+        }
+        Opt[Opt[int]].None => -2
+    }
+    assert(deep == 1, "Opt[Opt[int]] 嵌套")
+
+    // 6) 容器元素
+    let v = vec[Opt[int]].new(4)
+    v.push(Opt[int].Some(v: 1))
+    v.push(Opt[int].None)
+    v.push(Opt[int].Some(v: 3))
+    assert(len(v) == 3, "vec[Opt[int]] 长度")
+    assert(unwrap_or(v.get(0), 0) == 1, "vec 元素 0")
+    assert(unwrap_or(v.get(1), 0) == 0, "vec 元素 1")
+
+    // 7) 无载荷变体
+    let f: Flag[int] = Flag[int].Yes
+    let yes = match f {
+        Flag[int].Yes => true
+        Flag[int].No => false
+    }
+    assert(yes, "无载荷变体")
+
+    print("generic enum ok")
+}
+
+fn make(n: int) -> Opt[int] {
+    if n > 0 {
+        return Opt[int].Some(v: n)
+    }
+    return Opt[int].None
+}

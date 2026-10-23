@@ -68,6 +68,28 @@ true  false
 
 字符串是**长度前缀 ABI**：值指向 `[len:8][bytes][NUL]`，`len(s)` / `s[i]` 为 O(1)。
 
+**插值字符串（v1.61）**：前缀 `f`，`{expr}` 段在运行时求值并转成文本：
+
+```quelmara
+let n = 42
+let s = "hi"
+f"n={n}, s={s}"        // "n=42, s=hi"
+f"{{}}"                // "{}"（{{ / }} 是转义）
+f"{n * 2}"             // 段内可以是任意表达式
+f"p=({p.x},{p.y})"     // 字段访问也可以
+```
+
+| 项 | 语义 |
+|---|---|
+| 支持类型 | `int` / `bool` / `f64` / `str`（结构体值拒绝：先转成 str） |
+| 分配 | **整条结果一次分配**；整数直接 `__fmt_u64` 写进缓冲，不生成临时 str |
+| 与手写拼接 | 语义等价（`f"n={n}" == "n=" + n.to_str()`），300k 次实测比手写链快约 10% |
+| 普通字符串 | 不带 `f` 前缀的字符串里 `{` `}` 仍是字面量（JSON 不受影响） |
+| C 后端 | 不支持（fail-fast，只进原生后端） |
+
+证据：`tests/t100_interp.qma`（21 条断言）、`bench/interp_bench.qma`、
+`tests/bad/interp_*.qma`（必须编译失败）。
+
 ### 2.4 注释
 
 ```quelmara
@@ -125,6 +147,7 @@ print(r.w.to_str())
 ```quelmara
 struct Box[T] { value: T }
 struct Pair[A, B] { first: A, second: B }
+struct Slot[T: Ord] { value: T }        // 类型约束（v1.61，见 §4.5.1）
 
 let a = Box[int] { value: 42 }          // 类型实参必须显式写
 let p = Pair[int, str] { first: 7, second: "x" }
@@ -138,10 +161,27 @@ fn unwrap(b: Box[int]) -> int { return b.value }   // 类型位置同样可用
 | 字段类型 | `T` 本身，或 `vec[T]` / `map[K]T` / `[]T` / `[N]T` / `chan[T]` |
 | 类型实参 | 只能是具名类型（标量 / struct / enum / 另一实例如 `Box[Box[int]]`） |
 | 字面量 | `Box[int] { ... }`——**不做类型推导**（字段值推不出 T） |
+| 约束 | `struct Slot[T: Ord]`——**只支持能力约束**（`Ord`/`Eq`/`Num`/`Bit`），实例化时校验 |
 | 拒绝 | 裸写 `Box`（缺实参）、容器实参 `Box[vec[int]]`、实参个数不符、模板字段里嵌套泛型 struct |
-| 未做 | 泛型方法 / `impl` 泛型 struct、泛型 enum |
+| 未做 | 泛型 enum |
 
-证据：`tests/t99_generic_struct.qma`（20 条断言）、`tests/bad/gstruct_*.qma`（必须编译失败）。
+**方法（v1.62）**：泛型 struct 的方法写在 `impl` 里，两种写法等价于同一套产物：
+
+```quelmara
+interface Show { fn show(self) -> str }
+
+impl Box[int] : Show { fn show(b: Box[int]) -> str { ... } }   // 只给一个实例
+impl Box[T]   : Show { fn show(b: Box[T])   -> str { ... } }   // 模板：每个实例各一份
+```
+
+`impl Box[T] : Iface` 在解析期按**已实例化的**每个 `Box__X` 展开成普通方法
+`Box__X__show`——布局、聚合 ABI、静态派发、vtable 全部复用既有路径，方法体里的
+`T` / `Box[T]` / `T { ... }` 都按实例替换。静态调用 `b.show()` 直接 `call`
+（与手写函数同速），`let s: Show = b` 之后走 vtable（实测约 2× 于直接调用）。
+泛型函数里**不能**把类型参数用作泛型 struct 的类型实参（`fn f[T](x: Box[T])` 编译期拒绝）。
+
+证据：`tests/t99_generic_struct.qma`（20 条断言）、`tests/bad/gstruct_*.qma`（必须编译失败）、
+`tests/bad/bound_struct_param.qma`（约束违反）。
 
 ### 4.3 枚举与 match
 
@@ -167,6 +207,34 @@ let warn = Light.Flashing(rate: 4)     // 载荷用「名: 值」
 `match` 可以作表达式（`return match ...`）或语句；**必须穷尽**，否则编译报错
 （负向夹具 `tests/bad/nonexhaustive.qma`）。通配 `_` 只能放最后。
 
+**泛型 enum（v1.63）**：`enum Opt[T] { Some(v: T), None }`——与泛型 struct 同款，
+解析期单态化：类型位置写 `Opt[int]` 现场合成普通枚举 `Opt__int`，构造与模式都带类型实参。
+
+```quelmara
+enum Opt[T] { Some(v: T), None }
+enum Either[A, B] { Left(a: A), Right(b: B) }
+
+let a: Opt[int] = Opt[int].Some(v: 7)
+let b: Opt[int] = Opt[int].None
+let s = match a {
+    Opt[int].Some(v) => v.to_str()
+    Opt[int].None => "-"
+}
+let nested: Opt[Opt[int]] = Opt[Opt[int]].Some(v: Opt[int].Some(v: 1))
+```
+
+| 项 | 范围 |
+|---|---|
+| 变体载荷 | `T` 本身或容器（`vec[T]` 等），按实参替换 |
+| 嵌套实例 | `Opt[Opt[int]]`、`Either[int, Opt[str]]` 都可用 |
+| 容器元素 | `vec[Opt[int]]`（元素按实例枚举布局） |
+| 穷尽性 | 按**实例**的变体表检查（`Opt__int` 与 `Opt__str` 各自穷尽） |
+| 拒绝 | 裸写 `Opt`、实参个数不符、泛型函数里 `Opt[T]`（fail-fast） |
+| 方法 | `impl Opt[T: Show] : Show { ... }`（v1.64，按每个实例展开成 `Opt__int__show`） |
+| 拒绝 | 裸写 `Opt`、实参个数不符、泛型函数里 `Opt[T]`（fail-fast）、实参不满足 impl 模板约束 |
+
+证据：`tests/t103_generic_enum.qma`、`tests/bad/genum_*.qma`（必须编译失败）。
+
 ### 4.4 接口与实现
 
 ```quelmara
@@ -187,6 +255,8 @@ print(s.area())                    // vt[slot] -> callr，运行期派发
 ```
 
 - `impl` 的方法**第一个参数就是接收者**，类型必须与 `impl` 左侧一致。
+- `impl` 左侧（v1.62）也可以是泛型 struct：`impl Box[int] : Show`（具体实例）或
+  `impl Box[T] : Show`（模板，按每个已实例化实例展开）——见 §4.2。
 - 编译器校验：方法齐全、参数个数、返回类型；缺方法/签名不符 → 编译失败
   （`tests/bad/iface_missing.qma` 等）。
 - 隐式装箱四处：`let` 标注、函数实参、`vec[Shape].push`、`return`。
@@ -218,10 +288,56 @@ let m = pair[int, str](1, "x")      // 显式多参
 结构体字段类型。推导是**流不敏感**的（按语句序收集变量类型、后写覆盖）；推不出
 全部类型参数时编译期报错并提示显式实例化，实参互相矛盾（如 `same(1, "s")`）报冲突。
 
-边界：类型实参只接受具名类型（标量 / struct / enum，容器类型实参不做）；无约束
-（where / trait bound）、无泛型 struct、无泛型方法；模板不支持注解（@simd/@extern）；
-跨文件调用时若被调用方在调用方之后解析，仍需显式方括号（解析期还不知道它是泛型）。
+边界：类型实参只接受具名类型（标量 / struct / enum，容器类型实参不做）；无泛型方法；
+模板不支持注解（@simd/@extern）；跨文件调用时若被调用方在调用方之后解析，仍需显式方括号
+（解析期还不知道它是泛型）。类型约束见 §4.5.1，泛型 struct 见 §4.2。
 开箱即用的泛型算法（min/max/clamp/contains/index_of/reverse）见 `std/gen`。
+
+### 4.5.1 类型约束（trait bound，v1.61）
+
+```quelmara
+fn my_min[T: Ord](a: T, b: T) -> T { ... }
+fn max3[T: Num + Ord](a: T, b: T, c: T) -> T { ... }
+fn keep[A: Eq, B: Num + Ord](a: A, b: B) -> B { ... }   // 多类型参数各自带约束
+
+interface Shape { fn area(self) -> int }
+fn area_twice[T: Shape](s: T) -> int { return s.area() + s.area() }
+```
+
+约束写在类型参数后，`+` 连接多条。两类约束：
+
+| 约束 | 授权的运算符 | 满足它的类型 |
+|---|---|---|
+| `Ord` | `<` `<=` `>` `>=` | 整数族 + `f64`/`f32` + `str`（v1.66 起按字节字典序） |
+| `Eq` | `==` `!=` | 整数族 + `f64`/`f32` + `bool` + `str` |
+| `Num` | `+` `-` `*` `/` `%` | 整数族 + `f64`/`f32` |
+| `Bit` | `&` \| `^` `<<` `>>` `>>>` `~` | 整数族 |
+| `Show` | `x.to_str()` | 整数族 + `f64`/`f32` + `bool` + `str` |
+| 任意 interface 名 | 该接口声明的方法（单态化后静态派发） | 有 `impl T : Iface` 的类型 |
+
+`Eq` **不含聚合**：`struct`/`enum` 的 `==` 在降级期是地址比较（`Color.Red == Color.Red`
+为 `false`，见 §9 陷阱 12 与 `07-gaps.md` §7.6），所以它们不满足 `Eq`。
+`str` 自 v1.66 起 `<` `<=` `>` `>=` 按**字节字典序**（`__str_cmp`，表达式与条件两条
+降级路径都接了），因此 `Ord` 覆盖 `str`——`gen_min[str]`、字符串排序都能用了。
+
+三层检查，全部编译期：
+
+| 时机 | 检查 | 违反时 |
+|---|---|---|
+| 声明期 | 模板体对 `T` 用到的每个运算符，都必须被**声明的**约束覆盖——契约不能撒谎 | `[T: Eq]` 体内用 `<` → 报"约束只声明了 Eq" |
+| 实例化期 | 类型实参必须满足声明的约束（能力表 / `impl` 表） | `my_min[P](...)` → 报"实参 P 不满足 Ord" |
+| 实例化期 | **没写约束的模板**：体内实际用到的运算，具体类型必须支持 | `any_min[P]` → 报"体内对 P 使用了 `<`，但 P 不支持" |
+
+第三层是安全网：没有它，struct 实参会被静默按地址比较（v1.61 之前就是这样）。
+约束**零运行时成本**——单态化在解析期完成，约束在实例生成前已被擦除，
+`bench/bound_bench.qma` 里带约束 / 不带约束 / 手写 int 三个版本同速（差值在噪声内）。
+
+边界：约束只作用于类型参数，不能约束单个形参；泛型 struct 只接受能力约束（接口约束
+需要 `impl` 表，而 struct 实例化发生在解析期，`impl` 可能还没解析到）；没有泛型方法，
+因此也没有"方法级"约束。接口约束只校验 `impl T : Iface` **是否存在**——模板体里调用的
+方法名是否属于该接口，仍由 Lower 在实例化期按具体类型解析（报"方法 X 未定义"）。
+
+证据：`tests/t101_bounds.qma`、`tests/bad/bound_*.qma`（六种违反形态）、`bench/bound_bench.qma`。
 
 ### 4.6 常量与 `const fn`（编译期求值）
 
@@ -266,6 +382,92 @@ const EVEN = is_even(10)        // 返回 bool 的 const fn
 | `@simd` | 函数或 `for` 语句 | 触发 SSE2 归约（形状不匹配则静默回落标量） |
 | `@no_preempt` | 函数 | 不插入让出点 |
 | `@extern("C")` | 函数声明 | C 后端用；自研后端显式拒绝 |
+| `@derive(...)` | `struct` 声明前 | 按字段表生成序列化 / 等价 / 展示函数（见 §4.8） |
+
+### 4.8 属性宏 `@derive` 与编译期反射（v1.77）
+
+这两件事都是**纯编译期**的：没有运行时元数据段，也没有通用 token 宏。
+类型信息只存在于编译器里，产物是普通函数与常量字面量。
+
+#### 4.8.1 `@derive(Json, Eq, Show)`
+
+```quelmara
+@derive(Json, Eq, Show)
+struct Point { x: int, y: int, label: str }
+
+fn main() {
+    let p = Point { x: 1, y: -2, label: "a\"b" }
+    print(p.json())          // {"x":1,"y":-2,"label":"a\"b"}
+    print(p.show())          // Point { x: 1, y: -2, label: a"b }
+    let q = Point_from_json(p.json())
+    assert(p.eq(q))          // 按值相等（原生 == 对聚合是地址比较）
+}
+```
+
+派生项各自生成的函数（全是普通顶层函数，可当自由函数直接调用）：
+
+| 派生项 | 生成的函数 | 说明 |
+|---|---|---|
+| `Json` | `<T>__json(self) -> str`、`<T>__json_into(self, h)`、`<T>_from_json(s) -> <T>`、`<T>__from_node(d, n)` | 编解码都走 `std/json` 的 builder / DOM；`@derive(Json)` 会自动补 `import std.json` |
+| `Eq` | `<T>__eq(self, o) -> bool` | 逐字段比较（str 按内容、嵌套 struct 递归、vec 逐元素） |
+| `Show` | `<T>__show(self) -> str` | 人读文本；bool 输出 `true`/`false` |
+
+语义要点：
+
+- **字段顺序 = 声明顺序**，JSON key 顺序稳定（可作对拍依据）。
+- 编码复用 `std/json` 的转义与数字格式，因此 `"` `\` `\n` 与 UTF-8 的处理和手写一致。
+- 解码前先 `assert(json_ok(d))`：非法 JSON **fail-fast**，不返回半成品。
+- 只派生写到的项：`@derive(Json)` 不会生成 `show`/`eq`（调用即"方法未定义"）。
+- 派生函数是**普通函数**，可以被其他函数、泛型模板、`impl` 直接调用。
+
+字段类型支持面（其余一律编译期报错，不静默跳过）：
+
+| 字段类型 | Json | Eq | Show |
+|---|---|---|---|
+| `int` / `i8`–`i64` / `u8`–`u64` / `byte` | ✅ | ✅ | ✅ |
+| `bool` / `str` | ✅ | ✅ | ✅ |
+| 本文件声明的 struct（自身也派生对应项） | ✅ 递归 | ✅ 递归 | ✅ 递归 |
+| `vec[上述标量或 struct]` | ✅ | ✅ 逐元素 | ✅ 逐元素 |
+| `f64` / `f32` | ❌ 缺 str→浮点解析原语（`07-gaps.md` §7.10） | — | — |
+| `enum` 字段 / `map` / 定长数组 / `rc` | ❌ | — | — |
+
+#### 4.8.2 编译期反射 `refl_*[T](...)`
+
+```quelmara
+struct Point { x: int, y: int }
+enum Shape { Dot, Circle(r: int), Rect(w: int, h: int) }
+
+print(refl_type_name[Point]())        // Point
+print(refl_field_count[Point]())      // 2
+print(refl_field_name[Point](1))      // y
+print(refl_field_type[Point](1))      // int
+print(refl_variant_name[Shape](1))    // Circle
+print(refl_variant_arity[Shape](2))   // 2
+```
+
+| 函数 | 返回 | 适用 |
+|---|---|---|
+| `refl_type_name[T]()` | `str` | struct / enum |
+| `refl_field_count[T]()` | `int` | struct |
+| `refl_field_name[T](i)` | `str` | struct，`i` 编译期常量 |
+| `refl_field_type[T](i)` | `str`（`int` / `vec[str]` / `Point` 这类源码写法） | struct，`i` 编译期常量 |
+| `refl_variant_count[E]()` | `int` | enum |
+| `refl_variant_name[E](i)` | `str` | enum，`i` 编译期常量 |
+| `refl_variant_arity[E](i)` | `int`（载荷字段数） | enum，`i` 编译期常量 |
+
+边界（每一条都有负向夹具）：
+
+- **下标必须是编译期常量**——没有运行时类型元数据，写不出"遍历字段"的循环
+  （`tests/bad/refl_dynidx.qma`）。
+- 越界、类型不是 struct/enum、未知反射函数，全部编译期报错。
+- `const` 右值暂不认 `refl_*`：const 求值器是独立的整数算术求值器，
+  反射只能写在**表达式位置**（可作循环上界、可参与算术，因为它折叠成字面量）。
+- 反射可以写在使用点之前（类型在文件后面声明）——折叠发生在整个文件解析完之后。
+
+证据：`tests/t115_derive.qma`（39 条断言，含往返 / 嵌套 / 容器 / 反射 / 前向引用）；
+`tests/bad/derive_*.qma` 与 `tests/bad/refl_*.qma`（10 种必须编译失败的形态）；
+性能对照见 `bench/derive_bench.qma`（派生 vs 手写字段表，数字见 `06-status.md`）。
+
 
 ## 5. 语句
 
@@ -553,3 +755,7 @@ fn use(log: vec[int]) {
     是句柄，随值拷贝、底层共享（陷阱 7 同款）。
 11. **`substr(s, start, count)` 的第二参是长度，不是结束位置**——`substr("abcde", 1, 4)` 得
     `"bcde"`（4 个字符），不是 `"bcd"`。切片语法 `s[lo..hi]` 才是左闭右开。
+12. **`==` 对 `struct`/`enum` 是地址比较**——`Color.Red == Color.Red` 实测为 `false`；
+    聚合判等/排序要按字段、按变体手写（`match`），泛型里请声明 `Eq`，让编译器在调用点
+    拦下（§4.5.1、`07-gaps.md` §7.6）。
+    （`str` 的 `<` 曾经也是地址比较，v1.66 起改成按字节字典序，见 §4.5.1。）

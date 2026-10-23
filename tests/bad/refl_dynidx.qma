@@ -1,0 +1,12 @@
+// 负向（v1.72）：反射下标必须是编译期常量（没有运行时类型元数据）
+module refl_dynidx
+
+struct P { x: int, y: int }
+
+fn main() {
+    let mut i = 0
+    while i < refl_field_count[P]() {
+        print(refl_field_name[P](i))
+        i = i + 1
+    }
+}

@@ -1,0 +1,13 @@
+// 负向（v1.62）：只有泛型 struct 才能写 impl Name[...] : ...
+module gimpl_notgeneric
+
+interface Show { fn show(self) -> str }
+struct Plain { v: int }
+
+impl Plain[int] : Show {
+    fn show(p: Plain) -> str { return "p" }
+}
+
+fn main() {
+    print(Plain { v: 1 }.show())
+}

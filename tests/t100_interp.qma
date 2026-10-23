@@ -1,0 +1,64 @@
+// t100_interp.qma：插值字符串 f"..."（v1.61，字符串插值行翻绿）
+// 覆盖：
+//   1) 整数 / str / f64 / bool 四种类型混排
+//   2) 负数（符号与数字一起写进缓冲）
+//   3) 转义 {{ 与 }}
+//   4) 段内表达式：算术、结构体字段
+//   5) 与手写 `+` 拼接逐字节相同（语义等价）
+//   6) len() 走的是长度前缀 ABI
+//   7) 只有一个段（无字面量）
+// 语义纪律：插值是**单次分配**——整数直接 __fmt_u64 写进结果缓冲，不生成
+//           临时 str；浮点/布尔/str 段各自成串但结果只分配一次。
+//           普通字符串（不含 f 前缀）里的 { } 保持字面量，不受影响。
+module t100
+
+struct P { x: int, y: int }
+
+const N = 7
+
+fn main() {
+    // 1) 四种类型
+    let n = 42
+    let s = "hi"
+    let f = 1.5
+    let b = true
+    assert(f"n={n}" == "n=42", "int")
+    assert(f"s={s}" == "s=hi", "str")
+    assert(f"f={f}" == "f=1.5", "f64")
+    assert(f"b={b}" == "b=true", "bool")
+    assert(f"{n}|{s}|{f}|{b}" == "42|hi|1.5|true", "mixed")
+
+    // 2) 负数
+    let neg = -7
+    assert(f"{neg}" == "-7", "negative")
+    assert(f"a{neg}b" == "a-7b", "negative embedded")
+
+    // 3) 转义
+    assert(f"{{}}" == "{}", "escaped braces")
+    assert(f"{{{n}}}" == "{42}", "escaped around value")
+
+    // 4) 段内表达式
+    let a = 3
+    let c = 4
+    assert(f"{a + c}" == "7", "arithmetic in segment")
+    let p = P { x: 1, y: 2 }
+    assert(f"p=({p.x},{p.y})" == "p=(1,2)", "field access in segment")
+    assert(f"{N}" == "7", "const in segment")
+
+    // 5) 与手写拼接等价
+    assert(f"n={n}" == "n=" + n.to_str(), "same as manual concat")
+    assert(f"{s}!" == s + "!", "same as manual str concat")
+
+    // 6) 长度前缀
+    assert(len(f"n={n}") == 4, "len via prefix")
+    assert(len(f"{n}{n}{n}") == 6, "len three ints")
+
+    // 7) 单段
+    assert(f"{n}" == "42", "single segment")
+    assert(f"{s}" == "hi", "single str segment")
+
+    // 普通字符串里的花括号仍是字面量（JSON 之类不受影响）
+    assert("{\"a\":1}" == "{\"a\":1}", "plain braces untouched")
+
+    print("interp ok")
+}

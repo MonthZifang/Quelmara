@@ -1,0 +1,271 @@
+// std/staticfile.qma —— 静态文件服务的安全解析层（v1.68）
+//
+// 为什么需要：v1.67 给了 MIME 与路由，但要真把文件发出去，还差"URL -> 磁盘路径"
+// 这一段最容易出安全事故的逻辑。本模块只做**纯函数**（不碰 socket、不读文件），
+// 所以能在任何后端上测；I/O 由调用方接（`read_text(path)` 整文件读入）。
+//
+// 语义：
+//   * static_url_decode：%XX 解码，非法序列原样保留（与浏览器一致）；
+//   * static_path_safe：解码后拒绝 `..` / `.` 段、反斜杠、NUL——**先解码再判**，
+//     否则 `%2e%2e%2f` 能绕过；
+//   * static_resolve：root + '/' + 相对路径；root 尾部多余 '/' 会被合并；
+//   * static_index_for：以 '/' 结尾（或空路径）时补 index.html；
+//   * static_content_type / static_cache_control：委托 std/mime，HTML 不缓存、
+//     带指纹的静态资源长缓存；
+//   * static_etag：`"<size>-<mtime>"`，可直接当 ETag 头；
+//   * static_range：解析 `Range: bytes=...`（三种形态），返回 [start, end] 闭区间；
+//     非法 / 多段 / 越界一律返回空 vec（调用方按 200 全量回，或 416）。
+//
+// 边界：不做符号链接检查、不做 gzip 预压缩协商、不做 Last-Modified 时间格式化。
+
+import std.str
+import std.mime
+
+fn sf_is_digit(c: int) -> bool {
+    return c >= 48 && c <= 57
+}
+
+fn sf_all_digits(s: str) -> bool {
+    if len(s) == 0 {
+        return false
+    }
+    let mut i = 0
+    while i < len(s) {
+        if !sf_is_digit(s[i]) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn sf_hex(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return -1
+}
+
+// 百分号解码；没有 '%' 时直接返回原串（快路径）
+pub fn static_url_decode(s: str) -> str {
+    if str_find(s, "%") < 0 {
+        return s
+    }
+    let out = vec[int].new(len(s) + 1)
+    let mut i = 0
+    while i < len(s) {
+        let c = s[i]
+        if c == 37 && i + 2 < len(s) {
+            let h = sf_hex(s[i + 1])
+            let l = sf_hex(s[i + 2])
+            if h >= 0 && l >= 0 {
+                out.push(h * 16 + l)
+                i = i + 3
+                continue
+            }
+        }
+        out.push(c)
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+// 解码后是否安全（无目录穿越、无反斜杠、无 NUL）
+pub fn static_path_safe(url: str) -> bool {
+    let d = static_url_decode(url)
+    if len(d) == 0 {
+        return true
+    }
+    if str_find(d, "\\") >= 0 {
+        return false
+    }
+    let mut i = 0
+    while i < len(d) {
+        if d[i] == 0 {
+            return false
+        }
+        i = i + 1
+    }
+    let segs = str_split(d, "/")
+    let mut k = 0
+    while k < len(segs) {
+        let sg = segs.get(k)
+        if sg == ".." || sg == "." {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+// URL -> 磁盘路径；不安全返回空串（调用方回 403/404）
+pub fn static_resolve(root: str, url: str) -> str {
+    if !static_path_safe(url) {
+        return ""
+    }
+    let d = static_url_decode(url)
+    let mut p = d
+    while len(p) > 0 && p[0] == 47 {          // 去首部 '/'
+        p = substr(p, 1, len(p) - 1)
+    }
+    let mut r = root
+    while len(r) > 1 && r[len(r) - 1] == 47 {  // 去尾部 '/'
+        r = substr(r, 0, len(r) - 1)
+    }
+    if len(p) == 0 {
+        return r + "/"
+    }
+    return r + "/" + p
+}
+
+// 目录请求补 index.html（空路径也算目录）
+pub fn static_index_for(path: str) -> str {
+    if len(path) == 0 {
+        return "index.html"
+    }
+    if path[len(path) - 1] == 47 {
+        return path + "index.html"
+    }
+    return path
+}
+
+pub fn static_content_type(path: str) -> str {
+    return mime_of(path)
+}
+
+// HTML 不缓存（改一次立刻生效）；其余静态资源按一年长缓存
+pub fn static_cache_control(path: str) -> str {
+    let ct = mime_of(path)
+    if str_starts_with(ct, "text/html") {
+        return "no-cache"
+    }
+    return "public, max-age=31536000, immutable"
+}
+
+pub fn static_etag(size: int, mtime: int) -> str {
+    return "\"" + size.to_str() + "-" + mtime.to_str() + "\""
+}
+
+// Range: bytes=... -> [start, end]；空 vec 表示"按全量处理"
+pub fn static_range(hdr: str, size: int) -> vec[int] {
+    let out = vec[int].new(2)
+    if size <= 0 {
+        return out
+    }
+    if !str_starts_with(hdr, "bytes=") {
+        return out
+    }
+    let spec = str_trim(substr(hdr, 6, len(hdr) - 6))
+    if str_find(spec, ",") >= 0 {
+        return out                      // 多段不支持
+    }
+    let dash = str_find(spec, "-")
+    if dash < 0 {
+        return out
+    }
+    let a = substr(spec, 0, dash)
+    let b = substr(spec, dash + 1, len(spec) - dash - 1)
+    if len(a) == 0 {
+        // bytes=-N：最后 N 字节
+        if !sf_all_digits(b) {
+            return out
+        }
+        let n = b.to_int()
+        if n <= 0 {
+            return out
+        }
+        let mut start = size - n
+        if start < 0 {
+            start = 0
+        }
+        out.push(start)
+        out.push(size - 1)
+        return out
+    }
+    if !sf_all_digits(a) {
+        return out
+    }
+    let start = a.to_int()
+    if start >= size {
+        return out
+    }
+    let mut end = size - 1
+    if len(b) > 0 {
+        if !sf_all_digits(b) {
+            return out
+        }
+        end = b.to_int()
+        if end >= size {
+            end = size - 1
+        }
+    }
+    if end < start {
+        return out
+    }
+    out.push(start)
+    out.push(end)
+    return out
+}
+
+// ---- HTTP 响应拼装（v1.69）----
+
+fn sf_head(status: str, ct: str, cc: str, etag: str, extra: str) -> str {
+    return "HTTP/1.1 " + status + "\r\n" +
+           "Content-Type: " + ct + "\r\n" +
+           "Cache-Control: " + cc + "\r\n" +
+           "ETag: " + etag + "\r\n" +
+           "Accept-Ranges: bytes\r\n" +
+           extra +
+           "Connection: close\r\n\r\n"
+}
+
+fn sf_error(code: int, reason: str, msg: str) -> str {
+    let ct = "text/plain; charset=utf-8"
+    let head = sf_head(code.to_str() + " " + reason, ct, "no-cache", "", 
+                       "Content-Length: " + len(msg).to_str() + "\r\n")
+    return head + msg
+}
+
+// 生成完整 HTTP/1.1 响应；调用方把返回串写给 fd 即可
+//   root  —— 站点根目录（磁盘路径）
+//   url   —— 请求路径（可带 query/fragment，内部会归一化）
+//   range —— 请求的 Range 头（没有就传空串）
+pub fn static_serve(root: str, url: str, range: str) -> str {
+    let p = static_resolve(root, url)
+    if len(p) == 0 {
+        return sf_error(403, "Forbidden", "forbidden\n")
+    }
+    // 目录判定：URL 以 '/' 结尾就是目录（直接 index.html）；
+    // 否则先按文件探测（file_size < 0 说明不是可读文件，多半是目录或不存在）
+    let mut file = static_index_for(p)
+    if file_size(file) < 0 {
+        let alt = file + "/index.html"
+        if file_size(alt) < 0 {
+            return sf_error(404, "Not Found", "not found\n")
+        }
+        file = alt
+    }
+    let body = read_text(file)
+    let size = len(body)
+    let ct = static_content_type(file)
+    let cc = static_cache_control(file)
+    let tag = static_etag(size, 0)
+    let rg = static_range(range, size)
+    if len(rg) == 2 {
+        let s = rg.get(0)
+        let e = rg.get(1)
+        let part = substr(body, s, e - s + 1)
+        let extra = "Content-Length: " + len(part).to_str() + "\r\n" +
+                    "Content-Range: bytes " + s.to_str() + "-" + e.to_str() +
+                    "/" + size.to_str() + "\r\n"
+        return sf_head("206 Partial Content", ct, cc, tag, extra) + part
+    }
+    let extra2 = "Content-Length: " + size.to_str() + "\r\n"
+    return sf_head("200 OK", ct, cc, tag, extra2) + body
+}

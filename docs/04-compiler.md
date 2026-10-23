@@ -13,7 +13,7 @@
    │  parse_program   qlm.py        递归下降 → AST
    ▼
    AST
-   │  常量求值 / 泛型展开 / 接口校验 / 类型标注推断
+   │  常量求值 / 泛型展开（含类型约束校验）/ 接口校验 / 类型标注推断
    ▼
    AST（已单态化、已校验）
    │  Lower           qlm_native.py AST → QuIR（每个函数一张指令表）
@@ -36,12 +36,12 @@
 
 | 文件 | 行数 | 职责 | 要改它当…… |
 |---|---|---|---|
-| `tools/stage0/qlm.py` | ~4546 | 词法、语法、类型推断、常量求值、泛型展开、接口校验、模块加载、C99 后端 | 加语法、改类型规则、改 import 解析 |
-| `tools/stage0/qlm_opt.py` | ~1716 | 优化 pass、范围分析、调度、边界消除 | 改优化效果 |
-| `tools/stage0/qlm_native.py` | ~8730 | AST→QuIR、x86-64 编码器、ELF64 写出、运行时、内建函数 | 加内建、改指令编码、改运行时 |
+| `tools/stage0/qlm.py` | ~6009 | 词法、语法、类型推断、常量求值、泛型展开（含类型约束校验）、接口校验、模块加载、C99 后端 | 加语法、改类型规则、改 import 解析 |
+| `tools/stage0/qlm_opt.py` | ~1742 | 优化 pass、范围分析、调度、边界消除 | 改优化效果 |
+| `tools/stage0/qlm_native.py` | ~9892 | AST→QuIR、x86-64 编码器、ELF64 写出、运行时、内建函数 | 加内建、改指令编码、改运行时 |
 | `tools/stage0/qlm_pe.py` | ~390 | PE32+ 头、节表、导入表、DIR64 重定位 | 改 Windows 产物 |
 | `tools/stage0/qlm_arm64.py` | ~656 | AArch64 编码与发射 | 补 AArch64 特性 |
-| `tools/stage0/qlm_cli.py` | ~509 | build/run/test/fmt/lex/bench/version | 加命令 |
+| `tools/stage0/qlm_cli.py` | ~510 | build/run/test/fmt/lex/bench/version | 加命令 |
 | `tools/stage0/qlm_mem.py` | ~904 | 内存相关运行时（QuIR 片段） | 改分配器 |
 | `tools/stage0/qlm_mt.py` | ~936 | 多线程/任务运行时 | 改 spawn/parfor |
 | `tools/stage0/qlm_store.py` | ~1186 | 存储/持久化运行时 | 改存储层 |
@@ -130,6 +130,24 @@ SHA     cpuid_sha  sha_rnds2  sha_msg1  sha_msg2  sha_nexte
   （`qlm_pe.py:150` `WS2_32_FUNCS` 白名单——新增网络 API 必须加进去，否则归到 kernel32，
   加载时报 `0xC0000139`）。
 - 堆：`VirtualAlloc` 保留 + 按需 `MEM_COMMIT`；512 MB 上限只在真正写到时才消耗物理内存。
+
+### 6.2.1 调试信息发射（`--dbg-info`，v1.79/v1.80）
+
+| 阶段 | 做什么 | 文件 |
+|---|---|---|
+| 解析 | `parse_stmt` 包一层，语句元组尾部追加 `("__line__", n)`（钩子成对安装/卸载，不改 parser 本体） | `qlm_dbinfo.py` |
+| 降级 | 语句边界发 `('line', n)`；let 发 `('dbgvar', name, vreg)`；形参发 `('dbgparam', …)` | `qlm_native.py` `Lower` |
+| 优化 | 三种标记登记进 `vreg_mentions` / `_EFF`（可浮动 = 断点落在语句执行之后） | `qlm_opt.py` |
+| 编码 | `Codegen._dbg_finish` 把 vreg 映射成 `("r", 寄存器)` / `("m", 帧槽)`，带 `bind`/`last` 活跃区间 | `qlm_native.py` `Codegen` |
+| 写节 | `.qlmdbg`（JSON）+ `.debug_*` 四节（DWARF v4），长节名走 COFF 字符串表 | `qlm_pe.py` `build_pe` |
+| 编码 DWARF | 行表 / 变量 DIE / `.debug_loc` 区间，地址用 RVA | `qlm_dwarf.py` |
+
+新增一种**语句形态**时，若它自己生成多条指令，必须确认 `line` 标记在该语句的
+第一条指令之前（否则断点会落在语句中间，看到"执行了一半"的状态）。
+
+调试构建默认关内联（`lower_and_optimize` 里 `prog is None` 才 inline）：
+内联会把被调函数变成死代码，源码断点静默不命中。默认构建完全不受影响
+（标记指令根本不进 IR）。
 
 ### 6.3 AArch64（`--target arm64`）
 

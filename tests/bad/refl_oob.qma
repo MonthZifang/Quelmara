@@ -1,0 +1,8 @@
+// 负向（v1.72）：反射下标越界必须编译期拦下
+module refl_oob
+
+struct P { x: int }
+
+fn main() {
+    print(refl_field_name[P](1))
+}

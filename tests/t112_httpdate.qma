@@ -1,0 +1,52 @@
+// t112_httpdate.qma：HTTP 日期格式化与解析（v1.73）
+//
+// 覆盖：
+//   1) 已知时间点的格式化（纪元、1994 样例、2023 样例）
+//   2) 闰年 / 月末 / 年末边界
+//   3) 解析：合法值、往返一致、非法输入
+//   4) If-Modified-Since 判定（等于可 304、资源更新则不行）
+module t112
+
+import std.httpdate
+
+fn main() {
+    // 1) 已知点
+    assert(httpdate_format(0) == "Thu, 01 Jan 1970 00:00:00 GMT", "纪元")
+    assert(httpdate_format(784111777) == "Sun, 06 Nov 1994 08:49:37 GMT", "RFC 样例")
+    assert(httpdate_format(1700000000) == "Tue, 14 Nov 2023 22:13:20 GMT", "2023")
+    assert(httpdate_format(86399) == "Thu, 01 Jan 1970 23:59:59 GMT", "当天最后一秒")
+
+    // 2) 边界
+    assert(httpdate_format(951782400) == "Tue, 29 Feb 2000 00:00:00 GMT", "闰日 2000-02-29")
+    assert(httpdate_format(1583020800) == "Sun, 01 Mar 2020 00:00:00 GMT", "闰年后一天")
+    assert(httpdate_format(946684800) == "Sat, 01 Jan 2000 00:00:00 GMT", "千年")
+    assert(httpdate_format(1230767999) == "Wed, 31 Dec 2008 23:59:59 GMT", "年末最后一秒")
+    assert(httpdate_format(1078012800) == "Sun, 29 Feb 2004 00:00:00 GMT", "闰日 2004")
+
+    // 3) 解析
+    assert(httpdate_parse("Sun, 06 Nov 1994 08:49:37 GMT") == 784111777, "解析样例")
+    assert(httpdate_parse("Thu, 01 Jan 1970 00:00:00 GMT") == 0, "解析纪元")
+    assert(httpdate_parse("garbage") == -1, "垃圾输入")
+    assert(httpdate_parse("") == -1, "空串")
+    assert(httpdate_parse("Sun, 06 Xxx 1994 08:49:37 GMT") == -1, "非法月份")
+    assert(httpdate_parse("Sun, 06 Nov 19x4 08:49:37 GMT") == -1, "非法年份")
+
+    // 往返一致（覆盖多个年份）
+    let mut t = 0
+    let mut k = 0
+    while k < 12 {
+        let s = httpdate_format(t)
+        assert(httpdate_parse(s) == t, "往返 " + s)
+        t = t + 86400 * 37
+        k = k + 1
+    }
+
+    // 4) If-Modified-Since
+    let since = httpdate_format(784111777)
+    assert(httpdate_not_modified(784111777, since), "同一时刻 -> 304")
+    assert(httpdate_not_modified(784111776, since), "资源更旧 -> 304")
+    assert(!httpdate_not_modified(784111778, since), "资源更新 -> 200")
+    assert(!httpdate_not_modified(784111777, "garbage"), "非法头 -> 200")
+
+    print("httpdate ok")
+}

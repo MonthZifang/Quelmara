@@ -1065,7 +1065,7 @@ pub fn json_val_str(h: int, v: str) -> int {
     return 0
 }
 
-fn json_val_int(h: int, v: int) -> int {
+pub fn json_val_int(h: int, v: int) -> int {
     _pre_value(h)
     let s = v.to_str()
     _put_str(h, s)

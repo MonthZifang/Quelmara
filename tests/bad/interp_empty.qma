@@ -1,0 +1,6 @@
+// 负向夹具：插值段为空（f"{}" 不是合法插值；字面量花括号要写 f"{{}}"）
+module interp_empty
+
+fn main() {
+    print(f"{}")
+}

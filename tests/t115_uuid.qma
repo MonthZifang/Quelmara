@@ -1,0 +1,66 @@
+// t115_uuid.qma：UUID v4 生成与校验（v1.78）
+//
+// 覆盖：
+//   1) 格式：长度 36、连字符位置、版本位 4、变体位 8/9/a/b
+//   2) 唯一性：连续生成 64 个互不相同
+//   3) uuid_valid：nil / 大写 / 长度错 / 连字符错 / 非十六进制
+//   4) uuid_version / uuid_variant_ok：手工构造的 v1/v4/v5 样例
+module t115
+
+import std.uuid
+import std.str
+
+fn main() {
+    rand_seed(20261023)
+
+    // 1) 格式
+    let u = uuid_v4()
+    assert(len(u) == 36, "长度 36")
+    assert(substr(u, 8, 1) == "-", "第 8 位连字符")
+    assert(substr(u, 13, 1) == "-", "第 13 位连字符")
+    assert(substr(u, 18, 1) == "-", "第 18 位连字符")
+    assert(substr(u, 23, 1) == "-", "第 23 位连字符")
+    assert(substr(u, 14, 1) == "4", "版本位是 4")
+    assert(uuid_version(u) == 4, "uuid_version 读出 4")
+    assert(uuid_variant_ok(u), "变体位合法")
+    assert(uuid_valid(u), "uuid_valid 通过")
+    assert(!str_contains(u, "g"), "全小写十六进制")
+
+    // 2) 唯一性（64 个）
+    let seen = vec[str].new(64)
+    let mut i = 0
+    while i < 64 {
+        let g = uuid_v4()
+        let mut j = 0
+        while j < len(seen) {
+            assert(seen.get(j) != g, "重复 UUID")
+            j = j + 1
+        }
+        seen.push(g)
+        i = i + 1
+    }
+    assert(len(seen) == 64, "生成了 64 个")
+
+    // 3) 校验
+    assert(uuid_valid(uuid_nil()), "nil 合法")
+    assert(uuid_nil() == "00000000-0000-0000-0000-000000000000", "nil 字面值")
+    assert(uuid_valid("00000000-0000-4000-8000-000000000000"), "大写/数字混排合法")
+    assert(uuid_valid("ABCDEF00-0000-4000-8000-000000000000"), "全大写也收")
+    assert(!uuid_valid(""), "空串")
+    assert(!uuid_valid("00000000-0000-4000-8000-00000000000"), "少一位")
+    assert(!uuid_valid("00000000-0000-4000-8000-0000000000000"), "多一位")
+    assert(!uuid_valid("00000000000040008000000000000000"), "没有连字符")
+    assert(!uuid_valid("00000000_0000-4000-8000-000000000000"), "连字符位置错")
+    assert(!uuid_valid("00000000-0000-4000-8000-00000000000g"), "非十六进制字符")
+
+    // 4) 版本与变体
+    assert(uuid_version("00000000-0000-1000-8000-000000000000") == 1, "v1")
+    assert(uuid_version("00000000-0000-5000-8000-000000000000") == 5, "v5")
+    assert(uuid_version("not-a-uuid") == -1, "非法输入版本 -1")
+    assert(uuid_variant_ok("00000000-0000-4000-8000-000000000000"), "变体 10xx")
+    assert(uuid_variant_ok("00000000-0000-4000-b000-000000000000"), "变体 1011")
+    assert(!uuid_variant_ok("00000000-0000-4000-c000-000000000000"), "变体 1100 不合法")
+    assert(!uuid_variant_ok("garbage"), "非法输入变体 false")
+
+    print("uuid ok")
+}

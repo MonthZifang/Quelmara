@@ -1,0 +1,10 @@
+// 负向（v1.61）：模板体用了 < 但只声明了 Eq——契约撒谎，声明期就拦
+module bound_body_exceed
+
+fn less[T: Eq](a: T, b: T) -> bool {
+    return a < b
+}
+
+fn main() {
+    print(less(1, 2).to_str())
+}

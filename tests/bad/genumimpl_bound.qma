@@ -1,0 +1,19 @@
+// 负向（v1.64）：impl 模板的类型约束在实例化时校验（struct 不能 to_str）
+module genumimpl_bound
+
+interface Show { fn show(self) -> str }
+struct P { x: int }
+enum Opt[T] { Some(v: T), None }
+
+impl Opt[T: Show] : Show {
+    fn show(o: Opt[T]) -> str {
+        return match o {
+            Opt[T].Some(v) => v.to_str()
+            Opt[T].None => "none"
+        }
+    }
+}
+
+fn main() {
+    print(Opt[P].Some(v: P { x: 1 }).show())
+}

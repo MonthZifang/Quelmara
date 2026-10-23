@@ -1,0 +1,99 @@
+// bound_bench.qma：类型约束的运行时成本（v1.61）
+//
+// 三个函数做同一件事（取较小值），只有声明不同：
+//   bmin  —— 带约束的泛型 [T: Ord]
+//   umin  —— 不带约束的泛型 [T]
+//   imin  —— 手写 int 专用
+// 单态化之后三者是同一份机器码，所以耗时差应当落在噪声里。
+// 输出：三个结果（必须相等）+ 各自的 ns/次 ×1000（避免小数）
+module bound_bench
+
+fn bmin[T: Ord](a: T, b: T) -> T {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn umin[T](a: T, b: T) -> T {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn imin(a: int, b: int) -> int {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn run_bounded(n: int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        s = s + bmin(i, n - i)
+        i = i + 1
+    }
+    return s
+}
+
+fn run_unbounded(n: int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        s = s + umin(i, n - i)
+        i = i + 1
+    }
+    return s
+}
+
+fn run_hand(n: int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        s = s + imin(i, n - i)
+        i = i + 1
+    }
+    return s
+}
+
+fn main() {
+    let n = 20000000
+    // 预热（首轮含页提交）
+    let w = run_bounded(1000000) + run_unbounded(1000000) + run_hand(1000000)
+
+    let mut best_b = 0
+    let mut best_u = 0
+    let mut best_h = 0
+    let mut r = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let a = run_bounded(n)
+        let t1 = now_ns()
+        let b = run_unbounded(n)
+        let t2 = now_ns()
+        let c = run_hand(n)
+        let t3 = now_ns()
+        assert(a == b && b == c, "三种写法结果必须相同")
+        if r == 0 || t1 - t0 < best_b {
+            best_b = t1 - t0
+        }
+        if r == 0 || t2 - t1 < best_u {
+            best_u = t2 - t1
+        }
+        if r == 0 || t3 - t2 < best_h {
+            best_h = t3 - t2
+        }
+        r = r + 1
+    }
+    print(w)
+    print(best_b)
+    print(best_u)
+    print(best_h)
+    // ns/次 ×1000：bounded / unbounded / hand-written
+    print(best_b * 1000 / n)
+    print(best_u * 1000 / n)
+    print(best_h * 1000 / n)
+}

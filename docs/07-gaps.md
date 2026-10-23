@@ -10,14 +10,14 @@
 | 能力 | 状态 | 缺什么 | 影响 |
 |---|---|---|---|
 | 用户泛型 | ✅ v1.36 | 多类型参数 + 调用点推导（流不敏感、尽力而为）；显式实例化仍在 | 调用点不再啰嗦；推不出编译期报错并提示显式 |
-| 泛型 struct / 泛型方法 | 🟡 v1.59 | **泛型 struct ✅**（解析期单态化：`Box[int]` → `Box__int`，多类型参数、容器字段、嵌套实例、形参/返回值/字面量全覆盖；实参须具名类型、字面量不做推导）；**泛型方法 / `impl` 泛型 struct / 泛型 enum 仍未做** | 通用容器（Box/Pair/Stack）能写了；带类型的方法还要手写特化 |
-| 类型约束（trait bound） | ❌ | — | “T 须支持 <”是文档性的，违反它在 Lower 报类型错 |
+| 泛型 struct / 泛型方法 / 泛型 enum | ✅ v1.63 | **泛型 struct**（解析期单态化 `Box[int]` → `Box__int`）；**泛型方法**（`impl Box[int] : Iface` 具体实例 + `impl Box[T] : Iface` 模板按实例展开成 `Box__X__m`，静态派发与 vtable 都通）；**泛型 enum**（`Opt[int]` 现场合成枚举，构造/模式/穷尽性按实例检查，嵌套实例与容器元素可用）。边界：实参须具名类型；泛型函数里 `Box[T]`/`Opt[T]` fail-fast；泛型 impl 泛型 enum 未做 | 通用容器与自定义和类型（Opt/Either/Tree）都能写；库层不用再按类型手写特化 |
+| 类型约束（trait bound） | ✅ v1.61 | **能力约束** `Ord`/`Eq`/`Num`/`Bit` + **接口约束**（`impl T : Iface` 表校验）：声明期查"模板体不超过约束"，实例化期查"实参满足约束"，没写约束的模板按体内实际运算核对具体类型；泛型 struct 只接受能力约束 | 违反在调用点编译失败（此前"T 须支持 <"只是文档约定，struct 实参被静默按地址比较）；聚合（struct/enum）不满足 `Eq`，见 §7.6 |
 | `map[K]V` | ✅ v1.41 | V 支持 int/bool/str + 具名 struct/enum（值槽按 agg 布局 N 字，set/get 按值拷入拷出）；**键仍限标量**；复合容器（vec/map）作值不做（需 mapinner 标签链） | 配置表/符号表不再拆平行 map |
 | `vec[T]` | ✅ v1.37 | 标量/str/具名聚合/嵌套 vec（任意深度）/map 句柄全支持 | 元素即用即取，无扁平化成本 |
 | struct 内嵌套聚合 | ✅ v1.39 | 字段可装 vec/map/chan/slice/struct——vec/map/chan 按句柄 1 槽、slice 按 2 槽视图；方法/下标/派发全部可用 | 无（句柄语义即设计） |
 | 函数值 | ✅ v1.42 | `callr` 8 参 + struct/slice 实参（x86-64 第 7 参起走栈传参；A64 用满 X0-X7，>8 fail-fast）；**无捕获**（见下行"闭包 / 捕获"）；聚合返回值的目标不可间接调用 | 回调带聚合载荷可行；闭包是独立条目 |
 | 所有权检查 | 🟡 | **只查 `rc[T]` 句柄**；struct/数组/str 的别名与生命周期不查，并发竞争不查 | 不能对外宣称"Rust 那套借用检查" |
-| `interface` | 🟡 | 装箱不释放；同类型跨接口同名方法报错；接口与 impl 必须同源文件；AArch64 未接 vtable | 热点循环装箱会涨堆 |
+| `interface` | 🟡 | 装箱不释放；同类型跨接口同名方法报错；接口与 impl 必须同源文件；AArch64 未接 vtable（enum 装箱 v1.65 起可用） | 热点循环装箱会涨堆 |
 | 错误处理 | ✅ v1.38 | result/option 载荷支持具名 struct/enum——库层可把 errno+上下文装入 Err（std 库尚未批量改造为富错误，属标准库工作） | 错误对象成为可能 |
 | 模块系统 | 🟡 | **`pub` 可见性 ✅ v1.43** + **限定语法 ✅ v1.44**（`lib.fn()` / `lib.Enum.Variant` / 限定模式——头段须匹配本文件 import，指向 + pub 双重校验）；仍无**跨模块同名声明**（放开需 per-module mangling）、无版本 | 调用点自带来源信息；第三方库仍靠前缀约定共存 |
 | 整数宽度 | ✅ v1.40/v1.56 | **语义全覆盖**：窄值在所有存储点截断（let / 形参 / 返回值 / 赋值 / struct 字段 / enum 载荷 / vec 元素 / 定长数组 / **切片别名写入**）；表达式内部按 C 提升不截断。`vec[u8]` 槽仍 8 字节属**内存打包**，已移到 §5 性能专项 | 不用再自己 mask；二进制格式读写窄值安全 |
@@ -27,8 +27,8 @@
 | 闭包 / 捕获 | ❌ | — | 只能传函数名 |
 | FFI（自研后端） | ❌ | 无动态链接器；`@extern` 只有 C 后端原型 | 无法调用系统库 |
 | `defer` / RAII / `Drop` | 🟡 v1.48 | **`defer` 语句 ✅**：块级作用域、LIFO、执行到才登记（`break` 早于 defer 的路径不跑）、取退出时的值；形态限表达式/赋值（`defer let` 编译期拒绝）；C 后端不支持（fail-fast）。仍无 `Drop`/析构——清理必须显式写 | fd/锁/缓冲释放可写清理；资源生命周期仍靠约定 |
-| 宏 / 反射 | ❌ | 前置：编译期 AST API、类型元数据段 | 序列化只能手写字段表 |
-| 字符串插值 / `format` | ❌ | 无可变参数机制 | 拼接冗长，`+` 链是 O(n²) |
+| 宏 / 反射 | 🟡 v1.77 | **属性宏 `@derive(Json, Eq, Show)` ✅**：按字段表生成编解码 / 逐字段等价 / 展示文本，产物是普通函数（无运行时元数据、无动态派发）；**编译期反射 `refl_*[T](i)` ✅**：字段数/名/类型、枚举变体数/名/载荷数，解析期折叠成字面量。仍无：通用 token 宏（`macro` 声明）、enum 的派生、`f64` 字段（§7.10）、运行时反射（按下标遍历字段做不到，下标必须编译期常量） | 序列化不再手抄字段表；聚合可按值判等（原生 `==` 仍是地址比较，§7.6） |
+| 字符串插值 / `format` | ✅ v1.61 | **插值字符串 ✅**（`f"n={n}"`：int/bool/f64/str，段内任意表达式，`{{`/`}}` 转义，单次分配；比手写 `+` 链快约 10%）；`format(fmt, ...)` 变参仍无——插值已覆盖该用途 | 拼接不再冗长；`+` 链已被 v1.3 融合成单次分配，不存在 O(n²) |
 | `switch` | — | 用 `match` 代替（设计选择） | — |
 
 ## 2. 标准库
@@ -38,8 +38,8 @@
 | 压缩 | ✅ v1.32：多 member gzip 拼接流 + **zlib 容器**（RFC 1950，含 adler32 校验）；`adler32` 也可单独用 | 仍无 zlib 预置字典（FDICT）与 raw inflate 的窗口复用 |
 | TLS | **根证书库**（信任锚管理）、**P-384 / SHA-384**；RSA（PKCS#1 + PSS）与链校验 v1.27 已实现 | 无法自动信任公网证书；部分站点链验不过 |
 | HTTP 客户端 | ✅ v1.50：`std/httpc`（URL 拆分 / 请求构造 / 响应解析 content-length+chunked / 重定向判定，纯函数）+ `std/httpc_net`（get / get_tls / get_follow，Windows，loopback E2E 实测） | 仍缺：连接池 / 流水线、自动解压 Content-Encoding、HTTP/2、Linux DNS |
-| 路由 / 中间件 | `std/http` 只有单回调，path 匹配要自己写 if 链 | 稍大的服务都要手写路由表 |
-| 静态文件 / MIME / cookie / session / multipart | 全缺 | 文件上传、登录态 |
+| 路由 / 中间件 | ✅ v1.67：`std/router`（`/users/:id` 参数段、尾部 `*` 通配、query/尾斜杠归一化、参数捕获、方法白名单）；`std/http` 仍是单回调，无中间件链 | 路径分发不用再手写 if 链；中间件（日志/鉴权/压缩）还没有 |
+| 静态文件 / MIME / cookie / session / multipart | **MIME ✅ v1.67**（`std/mime`）；**静态文件 ✅ v1.69**（`std/staticfile`：URL 解码 / 穿越防护 / index / Cache-Control / ETag / Range + `static_serve` 直接产出 200/206/403/404 完整响应）；剩 If-None-Match / Last-Modified / 分块发送 / gzip 协商；**Cookie ✅ v1.70**（`std/cookie`）；**Session ✅ v1.71**（`std/session`：TTL 惰性过期 / 滑动续期 / 墓碑销毁；sid 可预测、无后台 GC、无并发保护）；**multipart ✅ v1.72**（`std/multipart`：boundary / 字段与文件 / CRLF 正文） | 这条 §2 行已全绿 |
 | `chunked` 请求体 | 回 501 | 部分客户端上传 |
 | DNS | Windows 走系统 `getaddrinfo`（v1.25）；Linux 无解析器 | Linux 只能写 IPv4 字面量 |
 | IPv6 | socket 家族改造（AF_INET6 + sockaddr_in6 + 字面量解析） | 现代部署基本要求 |
@@ -59,7 +59,7 @@
 
 | 项 | 状态 | 缺什么 |
 |---|---|---|
-| 调试器 | 🟡 | 无 DWARF/PDB、无源码断点、无变量查看；靠 `capstone` / `--dump-ir` / `readelf` |
+| 调试器 | ✅ v1.79 / v1.80 | **两种调试信息一份数据源**：`.qlmdbg`（自研 JSON，带 `bind`/`last` 活跃区间，调试器读它）+ **标准 DWARF v4**（`.debug_abbrev`/`info`/`line`/`loc`，外部工具读它，地址用 RVA）。`quelmara debug` 源码断点（`break 文件:行` / `break 函数`）/ `step` / `next` / `finish` / `print a.b.c` / `locals` / `bt` / `list`（Windows 调试 API，int3 软断点 + RBP 帧链，零外部依赖）。边界：仅 Windows PE（ELF 后端未接节写出）；**不发 PDB**（无 MSVC 工具链可验证）；库函数帧无行号（`<library>`）；调试构建默认不内联（否则源码断点静默不命中）；变量只在"最后一次使用之前"可见；`print` 限变量与字段路径。测试 `tests/debugger_test.py` + `tests/dbg_test.py` + `tests/dwarf_test.py` |
 | LSP / 补全 | ❌ | 无语义索引、跳转、重命名 |
 | 文档生成 | ❌ | 无 doc comment 语法 |
 | 库归档 `.qla` | 🚧 | 无目标文件格式 → 无法增量编译、无法分发二进制库 |
@@ -135,10 +135,10 @@
 
 ### P2 —— 生态
 
-1. 宏（前置：编译期 AST API）→ 反射（前置：类型元数据段）
+1. ~~宏 / 反射~~ 🟡 v1.77：派生宏 + 编译期反射已落地（§1）；剩余 **enum 派生**、**通用 token 宏**、`f64` 字段（§7.10）、运行时反射
 2. 所有权/借用检查扩到 vec 与引用
 3. FFI：PE 导入表已有白名单机制，推广到"用户声明库 + 符号白名单"
-4. DWARF/PDB → LSP → 文档生成
+4. ~~DWARF~~ ✅ v1.80 → PDB（可选，需 MSVC 链路验证）→ LSP → 文档生成
 5. 自举 **9/9**（目标）+ 三轮固定点闭环
 6. macOS Mach-O + kqueue、wasm
 
@@ -219,8 +219,106 @@ CSE 的 `_cse_key` 对 xmm 族返回 `None`（不参与）。
 - 下一步：和 §7.4 合并成一轮"分配器正确性"专项——先用 `QLM_SKIP_PASSES`
   二分定位到具体 pass，再对照 `--no-opt` 的分配结果。
 
-## 8. 推进顺序（2026-10-22 调整）
+### 7.6 待查：聚合的 `==` 是地址比较（v1.61 发现；str 的有序比较 v1.66 已修）
 
+写类型约束时为了确定 `Eq` 的口径实测到的**既有**缺陷（与约束功能无关，v1.60 及以前同样存在）：
+
+```quelmara
+enum Color { Red, Green }
+let a = Color.Red
+print((a == a).to_str())        // 期望 true，实测 false
+struct P { x: int }
+print((P { x: 1 } == P { x: 1 }).to_str())   // 实测 false
+```
+
+- 根因：聚合值在 `arith()` 里走整数 `cmpset`，比较的是聚合的**地址**（栈槽不同 →
+  永远不等）。
+- **`str` 的有序比较 v1.66 已修**：运行时新增 `__str_cmp`（字节字典序；长度前缀让
+  "公共前缀 + 长度差"这条尾巴常数时间），`arith()` 与 `branch()` **两条路径都接了**，
+  `Ord` 因此覆盖 `str`。回归：`tests/t105_strorder.qma`（表达式 / if / while 三条路径，
+  外加前缀、空串、≥0x80 字节）。
+- 影响面（仍未修的部分）：聚合判等在语言层**没有正确实现**，库层一律按字段/变体手写；
+  泛型模板里会被约束检查拦下（`Eq` 不含聚合），不会静默错。
+- 回归：`tests/bad/bound_enum_eq.qma`（负向，钉住"enum 不满足 Eq"）。
+- 下一步：在 Lower 给聚合比较发结构比较（按字段宽度展开），或明确禁止聚合 `==`
+  并给"按字段比较"的内建。改动面不小，单开一版。
+
+### 7.7 已修（v1.65）：enum 的 `f64` 载荷与 `match` 的浮点结果
+
+写泛型 enum 的方法时实测到的**既有**缺陷（与泛型无关）：
+
+```quelmara
+enum Num { I(v: int), F(v: f64) }
+let a = Num.F(v: 1.5)
+match a { Num.F(v) => print(v.to_str()) ... }    // 实测 4609434218613702656（位模式）
+```
+
+- 根因（两处，同一类"漏传标记"）：① `lower_match` 绑定载荷时只给 `str`/`bool`
+  打标记，f64 载荷按字搬运后**丢了浮点标记**；② `match` 作表达式时结果 vreg
+  只继承 `str`/`bool` 标记，同样漏了浮点。
+- 修法：两处各补一次 `_mark_float`（载荷按字段声明类型，结果按臂表达式的浮点宽度）。
+- 回归：`tests/t103_generic_enum.qma` 的 `Opt[f64]` 用例（`to_str` 与 `* 2.0`）。
+- 顺带修：`box_iface` 取宽度改用 `agg_size`，枚举从此能装箱成接口值
+  （`let s: Show = some_enum` 以前直接报"未声明的结构体"）——
+  回归在 `tests/t104_generic_enum_impl.qma` 的动态派发段。
+
+### 7.8 待查：第 7 个参数是 `str` 且函数被调用两次 → 整段程序静默不执行（v1.70 发现）
+
+写 `std/cookie` 时撞到的**既有**代码生成缺陷（与 cookie 无关，最小复现如下）：
+
+```quelmara
+fn s7(a: int, b: int, c: int, d: int, e: int, f: int, s: str) -> str {
+    return s + a.to_str()
+}
+fn main() {
+    print(s7(1, 2, 3, 4, 5, 6, "x"))   // 只调一次：正常输出 x1
+    print(s7(7, 8, 9, 10, 11, 12, "y")) // 调两次：整段程序无任何输出、退出码 0
+}
+```
+
+- 触发条件（已二分）：**参数个数 = 7 且第 7 个是 `str`**（栈上传参的指针），
+  且该函数被调用 **≥2 次**。7 个 int 参数、8 个 int 参数、5 个参数都正常。
+- 症状：不是崩溃、不是报错——整段 `main` 一行都不输出，退出码 0（静默丢代码）。
+- 影响面：任何"参数多于 6 个、最后一个是字符串"的 API 都不能调两次。
+  `std/cookie` 因此把 `cookie_set` 设计成 5 参 + 属性串（`cookie_attrs`）。
+- 下一步：`--dump-ir` 对照单次/两次调用的差异，重点看栈传参的 `push`/`pop` 与
+  调用点栈平衡；大概率是调用点未恢复栈偏移（与 §7.4/§7.5 的分配器布局敏感同源）。
+
+### 7.9 待查：结构体字面量里直接调用函数 → "未定义函数"（v1.72 发现）
+
+写 `std/multipart` 时撞到的 Lower 缺陷（最小复现）：
+
+```quelmara
+struct P { a: str, b: str }
+fn helper(x: str) -> str { return x + "!" }
+fn build(x: str) -> P {
+    return P { a: helper(x), b: "lit" }     // SyntaxError: 未定义函数 helper
+}
+```
+
+- 绕开：先落到局部变量再进字面量（`let v = helper(x)` 然后 `P { a: v }`），已验证可用。
+- 影响面：任何"字面量字段值来自函数调用"的写法（很常见的构造器风格）。
+- 下一步：看 `lower_struct_lit` 里 `self.fns_ast` 的可见性——大概率是字面量降级时
+  函数表还没填充（或用了另一份作用域）。改动在 `qlm_native.py`。
+
+### 7.10 待查：`to_float(str)` 返回垃圾值（v1.77 发现）
+
+写 `@derive(Json)` 的 f64 字段解码时撞到——语言里**没有** str→浮点的解析原语，
+而 `to_float` 看起来像：
+
+```quelmara
+let g = to_float("2.25")
+print(g.to_str())        // 实测 1.407002e+14（不是 2.25）
+```
+
+- 现状：`to_float` 在自研后端只接受数值实参；传 `str` 时把**指针**当位模式转，
+  得到的是地址量级的值，不报错、不崩——典型静默错。
+- 影响面：`@derive(Json)` 因此对 `f64`/`f32` 字段显式 fail-fast
+  （`tests/bad/derive_f64.qma`），JSON 里的浮点目前只能取 `json_num_raw` 原文本。
+- 下一步：要么把 `to_float(str)` 实现成真正的十进制解析（含指数、符号、inf/nan），
+  要么在类型检查阶段直接拒绝 str 实参——**先选后者止血**，再补解析器。
+
+## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
 当前顺序：
 
@@ -233,11 +331,11 @@ CSE 的 `_cse_key` 对 xmm 族返回 `None`（不参与）。
    ~~`map[K]Struct` 值扩容~~（v1.41）→ ~~函数值放宽（8 参 + 聚合实参）~~（v1.42）→
    ~~`pub` 可见性~~（v1.43）→ ~~限定语法 lib.fn()~~（v1.44）→ ~~`defer`~~（v1.48）→
    黄标逐项（`@simd` 形状、并发原语、接口装箱、所有权范围 …）→
-   红标逐项 红→黄→绿（~~泛型 struct~~ 黄 v1.59；泛型方法 / 类型约束）
+   红标逐项 红→黄→绿（~~泛型 struct~~ 黄 v1.59；~~类型约束~~ ✅ v1.61；~~泛型方法~~ ✅ v1.62；~~泛型 enum~~ ✅ v1.63）
 3. **标准库（§2）**：红标剩余项——**MD5**（只差旧协议兼容）、HTTP 客户端封装
    （重定向/chunked/连接池）、路由/静态文件/MIME/cookie/session/multipart、
    多 member gzip + zlib 容器、正则、持久化（KV/SQLite）、`exp/log/sin/cos`
-4. **工具链（§3）**：`.qla`、registry/发布、增量编译、覆盖率（~~semver~~ ✅ v1.45）
+4. **工具链（§3）**：~~调试器~~ ✅ v1.79/v1.80 → `.qla`、registry/发布、增量编译、覆盖率
 
 > 2026-10-23 起语言层与工具链**双轨并行**：语言层由另一会话负责（v1.44 命名空间
 > 限定语法即其成果），工具链从 v1.45（qpm semver）起推进。两轨共享连续版本号，

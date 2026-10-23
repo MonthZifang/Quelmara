@@ -1,0 +1,11 @@
+// 负向（v1.72）：@derive 后面必须紧跟 struct/enum 声明
+module derive_orphan
+
+@derive(Json)
+fn helper() -> int {
+    return 1
+}
+
+fn main() {
+    print(helper().to_str())
+}

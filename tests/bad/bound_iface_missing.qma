@@ -1,0 +1,16 @@
+// 负向（v1.61）：声明了接口约束，但实参类型没有 impl
+module bound_iface_missing
+
+interface Shape {
+    fn area(self) -> int
+}
+
+struct Plain { z: int }
+
+fn twice_area[T: Shape](s: T) -> int {
+    return s.area() + s.area()
+}
+
+fn main() {
+    print(twice_area(Plain { z: 1 }).to_str())
+}

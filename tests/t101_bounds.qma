@@ -1,0 +1,132 @@
+// t101_bounds.qma：类型约束（trait bound，v1.61）
+//
+// 覆盖：
+//   1) 能力约束 Ord / Eq / Num / Bit 的正例（int / f64 / str / bool）
+//      聚合（struct/enum）不在 Eq 里：`Color.Red == Color.Red` 实测为 false
+//      （比较的是地址），见 docs/07-gaps.md §7.6 与 tests/bad/bound_enum_eq.qma
+//   2) 多约束 [T: Num + Ord]；多类型参数各自带约束
+//   3) 接口约束 [T: Shape]：impl 表校验 + 单态化后的静态派发
+//   4) 泛型 struct 约束：struct Box[T: Ord]
+//   5) 显式实例化 my_min[int](...) 与调用点推导 my_min(...) 都走同一套校验
+//   6) 约束在模板体内传递：有约束的模板可以调用另一个有约束的模板
+//   7) 约束是编译期的：运行时结果与手写 int 版本逐位一致
+//
+// 负向（必须编译失败）见 tests/bad/bound_*.qma：
+//   bound_unknown / bound_struct_ord / bound_body_exceed /
+//   bound_iface_missing / bound_struct_param
+module t101
+
+interface Shape {
+    fn area(self) -> int
+}
+
+struct Circle { r: int }
+struct Rect { w: int, h: int }
+
+impl Circle : Shape {
+    fn area(c: Circle) -> int { return 3 * c.r * c.r }
+}
+
+impl Rect : Shape {
+    fn area(r: Rect) -> int { return r.w * r.h }
+}
+
+struct Box[T: Ord] { value: T }
+
+fn my_min[T: Ord](a: T, b: T) -> T {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn same[T: Eq](a: T, b: T) -> bool {
+    return a == b
+}
+
+fn max3[T: Num + Ord](a: T, b: T, c: T) -> T {
+    let mut m = a
+    if b > m {
+        m = b
+    }
+    if c > m {
+        m = c
+    }
+    return m
+}
+
+fn low_byte[T: Bit](v: T) -> T {
+    return v & 0xFF
+}
+
+fn area_twice[T: Shape](s: T) -> int {
+    return s.area() + s.area()
+}
+
+// 多类型参数各自带约束：A 只要求可判等，B 要求可四则且可比较
+fn keep_max[A: Eq, B: Num + Ord](a: A, b: B) -> B {
+    if same(a, a) {
+        return b
+    }
+    return b - b
+}
+
+// 约束在模板体内传递：min3 的 T 满足 Ord，才能调 my_min[T]
+fn min3[T: Ord](a: T, b: T, c: T) -> T {
+    return my_min(my_min(a, b), c)
+}
+
+// 手写 int 版（第 7 条：与 my_min[int] 结果逐位一致）
+fn int_min(a: int, b: int) -> int {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn main() {
+    // 1) 能力约束：Ord
+    assert(my_min(3, 5) == 3, "Ord int")
+    assert(my_min(2.5, 1.5) == 1.5, "Ord f64")
+    assert(my_min(-7, -9) == -9, "Ord 负数")
+
+    // 1) 能力约束：Eq（str / bool / 无载荷 enum）
+    assert(same("abc", "abc"), "Eq str 相同")
+    assert(!same("abc", "abd"), "Eq str 不同")
+    assert(same(true, true), "Eq bool")
+
+    // 1) 能力约束：Num + Ord / Bit
+    assert(max3(1, 7, 3) == 7, "Num+Ord int")
+    assert(max3(1.5, 0.5, 2.5) == 2.5, "Num+Ord f64")
+    assert(low_byte(0x1234) == 0x34, "Bit 掩码")
+
+    // 2) 多类型参数各自的约束
+    assert(keep_max(1, 9) == 9, "多参数 A=int B=int")
+    assert(keep_max("k", 2.5) == 2.5, "多参数 A=str B=f64")
+
+    // 3) 接口约束：两个 impl 各自静态派发
+    assert(area_twice(Circle { r: 2 }) == 24, "iface 约束 Circle")
+    assert(area_twice(Rect { w: 2, h: 3 }) == 12, "iface 约束 Rect")
+
+    // 4) 泛型 struct 的约束
+    let bi = Box[int] { value: 42 }
+    assert(bi.value == 42, "Box[int]")
+    let bf = Box[f64] { value: 0.5 }
+    assert(bf.value == 0.5, "Box[f64]")
+
+    // 5) 显式实例化与推导同一条路径
+    assert(my_min[int](7, 9) == 7, "显式实例化")
+    assert(same[str]("q", "q"), "显式实例化 str")
+
+    // 6) 约束在模板体内传递
+    assert(min3(9, 4, 6) == 4, "嵌套有约束的泛型调用")
+
+    // 7) 与手写版本逐位一致
+    let mut i = -50
+    while i < 50 {
+        assert(my_min(i, i * 3) == int_min(i, i * 3), "与手写 int_min 一致")
+        i = i + 1
+    }
+
+    print("bounds ok")
+}

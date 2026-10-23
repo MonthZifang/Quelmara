@@ -461,6 +461,32 @@ def test_net_reactor():
             proc.kill()
 
 
+def test_debug_chain():
+    """v1.71：调试链路两条子回归各算一项（脚本内部逐条断言）。
+
+    dwarf_test：独立 DWARF 读取器对照 .qlmdbg（行表/变量位置/结构体布局）
+    dbg_test  ：qlm_dbg 跑完整命令链（断点/求值/单步/bt/退出码）
+    """
+    if not IS_WIN:
+        skip("调试链路：仅 Windows（Windows 调试 API）")
+        return
+    for name, script in (("DWARF 互操作", "tests/dwarf_test.py"),
+                         ("调试器端到端", "tests/dbg_test.py")):
+        try:
+            r = subprocess.run([sys.executable,
+                                os.path.join(ROOT, script)],
+                               cwd=ROOT, capture_output=True, text=True,
+                               timeout=600)
+        except subprocess.TimeoutExpired:
+            bad(f"{name}：超时")
+            continue
+        tail = (r.stdout or "").strip().splitlines()[-1:] or [""]
+        if r.returncode == 0:
+            ok(f"{name}：{tail[0]}")
+        else:
+            bad(f"{name}：{tail[0]}  {r.stdout[-400:]}{r.stderr[-300:]}")
+
+
 def main():
     print("== [1] PE/COFF 结构（自研写出器，无 CRT） ==")
     out = os.path.join(ROOT, "build", "win_hello.exe")
@@ -628,7 +654,41 @@ def main():
             ("constfn_call", "const 右值调普通函数", "只能调用 const fn"),
             ("gstruct_noarg", "泛型 struct 裸写", "必须带类型实参"),
             ("gstruct_vecarg", "泛型 struct 容器实参", "只支持具名类型"),
-            ("gstruct_arity", "泛型 struct 实参个数", "个类型实参")):
+            ("gstruct_arity", "泛型 struct 实参个数", "个类型实参"),
+            ("interp_unclosed", "插值缺右花括号", "缺少右花括号"),
+            ("interp_empty", "插值段为空", "插值表达式为空"),
+            # 类型约束（v1.61）：六条负向，各自钉住一种违反形态
+            ("bound_unknown", "未知约束名", "未知约束"),
+            ("bound_struct_ord", "struct 不满足 Ord", "实参 P 不满足"),
+            ("bound_body_exceed", "模板体超出声明约束", "约束只声明了"),
+            ("bound_iface_missing", "接口约束缺 impl", "没有 `impl"),
+            ("bound_struct_param", "泛型 struct 约束不满足", "泛型 struct Box"),
+            ("bound_enum_eq", "enum 不满足 Eq", "实参 Color 不满足"),
+            # 泛型 impl（v1.62）：五种违反形态
+            ("gimpl_missing", "模板 impl 缺方法", "缺少方法"),
+            ("gimpl_dup", "同一接口重复实现", "重复"),
+            ("gimpl_rettype", "模板 impl 返回类型不符", "返回类型与接口声明不一致"),
+            ("gimpl_notgeneric", "非泛型 struct 带类型实参", "不是泛型类型"),
+            ("gimpl_generic_fn", "泛型函数里的 Box[T]", "暂不支持把类型参数"),
+            # 泛型 enum（v1.63）
+            ("genum_noarg", "泛型 enum 裸写", "必须带类型实参"),
+            ("genum_arity", "泛型 enum 实参个数", "个类型实参"),
+            ("genum_tparam", "泛型函数里的 Opt[T]", "暂不支持把类型参数"),
+            ("genum_nonexhaustive", "泛型 enum match 不穷尽", "不穷尽"),
+            # 泛型 enum 的 impl（v1.64）
+            ("genumimpl_bound", "impl 模板约束不满足", "不满足 Show"),
+            ("genumimpl_missing", "enum 模板 impl 缺方法", "缺少方法"),
+            # 属性宏 @derive + 编译期反射（v1.77）：十种违反形态
+            ("derive_unknown", "未知派生项", "未知派生项"),
+            ("derive_enum", "enum 上派生", "只支持 struct"),
+            ("derive_generic", "泛型 struct 上派生", "不能直接 @derive"),
+            ("derive_f64", "f64 字段派生", "暂无 str→浮点解析原语"),
+            ("derive_orphan", "@derive 后面不是声明", "只能用于紧随其后"),
+            ("derive_field_enum", "enum 字段派生", "enum 字段暂不支持"),
+            ("derive_partial", "未派生项不生成", "方法 show 未定义"),
+            ("refl_oob", "反射下标越界", "越界"),
+            ("refl_notstruct", "对 enum 做字段反射", "不是 struct"),
+            ("refl_dynidx", "反射下标不是常量", "编译期整数常量")):
         try:
             build(os.path.join(ROOT, f"tests/bad/{nm}.qma"),
                   os.path.join(ROOT, "build", f"bad_{nm}.exe"))
@@ -659,6 +719,41 @@ def main():
     case_selfcheck("t96_simddot", "tests/t96_simddot.qma")
     case_selfcheck("t98_constfn", "tests/t98_constfn.qma")
     case_selfcheck("t99_generic_struct", "tests/t99_generic_struct.qma")
+    case_selfcheck("t100_interp", "tests/t100_interp.qma")
+    # 类型约束（v1.61）：能力约束 + 接口约束 + 泛型 struct 约束
+    case_selfcheck("t101_bounds", "tests/t101_bounds.qma")
+    # 泛型 struct 的方法（v1.62）：模板 impl + 具体实例 impl + 动态派发
+    case_selfcheck("t102_generic_impl", "tests/t102_generic_impl.qma")
+    # 泛型 enum（v1.63）：Opt[T] / Either[A,B] / 嵌套实例 / vec 元素
+    case_selfcheck("t103_generic_enum", "tests/t103_generic_enum.qma")
+    # 泛型 enum 的方法（v1.64）：模板 impl + 类型约束 + 具体实例 impl
+    case_selfcheck("t104_generic_enum_impl", "tests/t104_generic_enum_impl.qma")
+    # 字符串有序比较（v1.66）：表达式路径 + 条件路径 + Ord 覆盖 str
+    case_selfcheck("t105_strorder", "tests/t105_strorder.qma")
+    # 静态文件服务的两块（v1.67）：std/mime + std/router
+    case_selfcheck("t106_weblib", "tests/t106_weblib.qma")
+    # 静态文件解析层（v1.68）：URL 解码 / 穿越防护 / Range
+    case_selfcheck("t107_staticfile", "tests/t107_staticfile.qma")
+    # 静态文件端到端（v1.69）：200/206/404/403 + 目录 index + 二进制正文
+    case_selfcheck("t108_staticserve", "tests/t108_staticserve.qma")
+    # Cookie（v1.70）：解析 / 编解码 / Set-Cookie 拼装
+    case_selfcheck("t109_cookie", "tests/t109_cookie.qma")
+    # 属性宏 @derive + 编译期反射（v1.72）：序列化 / 等价 / 展示 / refl_*
+    case_selfcheck("t115_derive", "tests/t115_derive.qma")
+    # 跨模块派生（v1.73）：pub struct 的派生函数必须继承 pub
+    case_selfcheck("derivepub", "fixtures/derivepub/dpub_main.qma")
+    # 会话存储（v1.71）：TTL / 惰性过期 / 墓碑销毁
+    case_selfcheck("t110_session", "tests/t110_session.qma")
+    # multipart 解析（v1.72）：boundary / 字段与文件 / CRLF 正文
+    case_selfcheck("t111_multipart", "tests/t111_multipart.qma")
+    # HTTP 日期（v1.73）：IMF-fixdate 格式化 / 解析 / If-Modified-Since
+    case_selfcheck("t112_httpdate", "tests/t112_httpdate.qma")
+    # CSV（v1.74）：RFC 4180 解析 / 生成 / 往返
+    case_selfcheck("t113_csv", "tests/t113_csv.qma")
+    # 路径处理（v1.75）：join / clean / dir / base / ext / stem
+    case_selfcheck("t114_path", "tests/t114_path.qma")
+    # UUID（v1.77）：v4 生成 / 校验 / 版本与变体位
+    case_selfcheck("t115_uuid", "tests/t115_uuid.qma")
     case_selfcheck("t99_regex", "tests/t99_regex.qma")
     # pub + 限定语法负向（多文件）：非 pub 跨模块引用必须编译失败
     # （限定调用可能先被通用 pub 检查或指向校验拦下，两种消息都算对）
@@ -713,6 +808,9 @@ def main():
 
     print("== [7] Windows PE × Linux ELF 交叉验证 ==")
     test_cross_verify()
+
+    print("== [8] 调试链路（--dbg-info / DWARF / qlm_dbg） ==")
+    test_debug_chain()
 
     print("-" * 52)
     print(f"PASS={PASS} FAIL={FAIL} SKIP={SKIP}")

@@ -9,11 +9,11 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=172 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
-| 词法器对拍 | **PASS=157 FAIL=0**（157 个源文件） | `python tests/lexdiff.py` |
-| 声明级 AST 对拍 | **PASS=129 FAIL=0**（跳过 5 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer` / `t99_generic_struct`，自举 parser 未做 interface/impl/泛型单态化） | `python tests/parsediff.py` |
-| 函数体 dump 对拍 | **一致 1380 / 分叉 1268 / SKIP 同步 25 / SKIP 不同步 35**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |
-| IR 架构无关对拍 | **PASS=73 FAIL=0 SKIP=53**，并行后 **60 s**（原串行 5 min 41 s；SKIP 全是 arm64 未接的特性，t85 的 `trunc` / t86 的 map 聚合值 / t90_mathfn 的 f64 二元运算属此类；t87 的 8 参、t91 的 `defer`、t94 的窄切片写入已接，t96 点积 A64 未接） | `python tests/irdiff.py` |
+| PE 回归（主回归） | **PASS=221 FAIL=0 SKIP=1**（SKIP 为 WSL 交叉验证，本机被沙箱拦） | `python tests/run_win_tests.py` |
+| 词法器对拍 | **PASS=201 FAIL=0**（204 个源文件；SKIP 3 个含 `f"..."` 插值的文件——stage-1 词法器不认 `FSTR`，v1.61 插值未移植） | `python tests/lexdiff.py` |
+| 声明级 AST 对拍 | **PASS=142 FAIL=0**（跳过 12 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer` / `t99_generic_struct` / `t101_bounds` / `t102_generic_impl` / `t103_generic_enum` / `t104_generic_enum_impl` / `t115_derive` / `dpub_main` / `dpub_model`，自举 parser 未做 interface/impl/泛型单态化、类型约束、泛型 impl、泛型 enum 与 `@derive`） | `python tests/parsediff.py` |
+| 函数体 dump 对拍 | **一致 1719 / 分叉 1608 / SKIP 同步 26 / SKIP 不同步 44**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |
+| IR 架构无关对拍 | **PASS=78 FAIL=0 SKIP=66**，并行后 **91 s**（原串行 5 min 41 s；SKIP 全是 arm64 未接的特性，t85 的 `trunc` / t86 的 map 聚合值 / t90_mathfn 的 f64 二元运算属此类；t87 的 8 参、t91 的 `defer`、t94 的窄切片写入已接，t96 点积 A64 未接） | `python tests/irdiff.py` |
 | 发射层确定性对拍 | **PASS=10 FAIL=0** | `python tests/emitdiff.py` |
 | gzip 解码互操作 | **PASS=86 FAIL=0**（12 种编码组合 × 7 类输入 + 多 member 拼接）+ **损坏输入拒绝 5/5** | `python tests/gzip_inflate_test.py` |
 | ECDSA P-256 验签互操作 | **PASS=32 FAIL=0**（20 正向 + 12 负向，Python bigint 参考实现） | `python tests/ecdsa_p256_test.py` |
@@ -23,11 +23,15 @@
 | RSA 验签（PKCS#1 v1.5 / PSS） | **t71 / t72 全绿**（1024 位正负向量 + PSS + 2048 位） | `python tests/run_win_tests.py` |
 | X.509 证书链 / 有效期 / 域名 | **PASS=13 FAIL=0**（EC 三级链 + RSA 根混合链 + 通配符/过期/篡改/缺中间证书） | `python tests/x509_chain_test.py` |
 | X.509 解析 + 自签验签互操作 | **PASS=7 FAIL=0**（4 正向：v3/v1/长 CN/大序列号；3 负向：篡改 TBS/篡改签名/截断） | `python tests/x509_test.py` |
-| 三道门禁 | check_names / check_origin / check_docs 全 PASS；`gen_stdlib_doc.py --check` 在合并工作区因另一轨在途的 `std/httpc*.qma` 未登记 DESC 而红（本版文件面无关） | `python tools/dev/check_*.py` + `python tools/dev/gen_stdlib_doc.py --check` |
+| 调试器脚本化会话（v1.79） | **PASS**（18 项：断点行号/源码文本、int·bool·f64·str·struct 求值、`a.b` 字段、step/next 行推进、bt 帧链、退出码；外加调试构建与非调试构建输出逐字节相同） | `python tests/debugger_test.py` |
+| DWARF v4 互操作（v1.80） | **PASS=20 FAIL=0**（CU 头 / 行表 40 条逐项 / subprogram 的 low_pc·high_pc / 变量位置多重集 / `Point` 布局 / DataDirectory[6] 为空） | `python tests/dwarf_test.py` |
+| 调试器端到端命令链（v1.80） | **PASS=40 FAIL=0**（断点编号与命中计数、三种不可读语义、next/finish、bt、删除断点、程序输出与退出码） | `python tests/dbg_test.py` |
+| 四道门禁 | check_names / check_origin / check_docs 全 PASS；`gen_stdlib_doc.py --check` PASS（57 个模块 / 379 个公开函数） | `python tools/dev/check_*.py` + `python tools/dev/gen_stdlib_doc.py --check` |
 
-`run_win_tests.py` 的 7 组覆盖：PE 结构（MZ/PE32+/AMD64/无 CRT 符号）、基础语义、
+`run_win_tests.py` 的 8 组覆盖：PE 结构（MZ/PE32+/AMD64/无 CRT 符号）、基础语义、
 语言特性（struct/enum/match/宽度/@simd/rc/所有权/vec/map/切片/函数值）、多核
-（CreateThread 归约）、单核降级、arena 帧级回收、assert 失败路径、交叉验证。
+（CreateThread 归约）、单核降级、arena 帧级回收、assert 失败路径、交叉验证、
+调试链路（DWARF 互操作 + 调试器端到端）。
 
 ## 2. 产物
 
@@ -97,6 +101,52 @@
 | `@simd` 点积（`acc += a[i] * b[i]`） | 约 535 ns |
 | 加速比 | **3.5×** |
 
+### 3.4c 类型约束（`bench/bound_bench.qma`，v1.61）
+
+20M 次取小值，三个版本只差声明：带约束泛型 `[T: Ord]` / 不带约束泛型 `[T]` / 手写 int。
+同一次运行内 min of 3：
+
+| 版本 | ns/次 |
+|---|---|
+| `bmin[T: Ord]` | 1273 |
+| `umin[T]` | 1273 |
+| `imin`（手写 int） | 1264 |
+
+差值在噪声内（±10%）：约束在单态化后**完全擦除**，三者落成同一份机器码。
+编译期开销也在噪声内——220 个实例（20 个模板 × 11 种类型）构建 min-of-5：
+带约束 **2639 ms** / 不带约束 **2662 ms**。
+
+### 3.4d 泛型 struct 方法的派发成本（`bench/gimpl_bench.qma`，v1.62）
+
+20M 次 `b.get()`，三份等价实现（同一次运行内 min of 3）：
+
+| 派发方式 | ns/次 |
+|---|---|
+| 静态派发 `b.get()`（单态化后直接 call `Box__int__get`） | 1.7 |
+| 手写普通函数 `direct(b)`（基线） | 1.7 |
+| 动态派发 `let s: Val = b; s.get()`（vtable + callr） | 3.4 |
+
+静态派发与手写函数同速（差值在噪声内）；动态派发约 2×——多一次 vtable 槽读取
+与间接调用，与 v1.9 的接口派发口径一致。
+
+### 3.4e 派生宏的运行时成本（`bench/derive_bench.qma`，v1.77）
+
+4 字段 struct（`int` ×2 + `str` ×2），20000 次 × min of 3，三次运行取中位：
+
+| 路 | ns/次 | 相对手写 |
+|---|---|---|
+| 编码 `r.json()`（`@derive(Json)` 生成） | 890 | +0.3% |
+| 编码手写字段表（基线） | 887 | — |
+| 解码 `Row_from_json`（派生） | 2171 | −0.6% |
+| 解码手写（基线） | 2184 | — |
+
+派生层是**编译期**展开，产物就是手写那段代码（基准里断言两者逐字节一致），
+所以耗时差落在本机 VBS 噪声里、方向不稳定。
+
+编译期代价（8 字段 struct，只派生 `Json`，编译 3 次取最小）：派生 447 ms /
+29184 B，手写 448 ms / 28672 B——编译时间相同，体积差 +512 B 是解码函数本身
+（`T_from_json` + `T__from_node`），不是元数据：运行时**零元数据**。
+
 ### 3.5 并发原语（`bench/sync_bench.qma`，rdtsc，n=2e6，单线程）
 
 | 操作 | cycles/iter |
@@ -128,9 +178,33 @@ python tools/stage0/qlm_cli.py run bench/find_bench.qma --target win
 python tools/stage0/qlm_cli.py run bench/simd_bench.qma --target win
 python tools/stage0/qlm_cli.py run bench/dot_bench.qma  --target win
 python tools/stage0/qlm_cli.py run bench/sync_bench.qma --target win
+python tools/stage0/qlm_cli.py run bench/bound_bench.qma --target win
+python tools/stage0/qlm_cli.py run bench/gimpl_bench.qma --target win
 ```
 
 `bench/*.qma` 已内置 min-of-N；单次跑不可比。
+
+### 3.8 调试链路（`tools/dev/dbg_bench.py`，min of 3）
+
+`fixtures/dbgdemo/main.qma`，目标 `win`，2026-10-23 实测：
+
+| 项 | 数值 |
+|---|---|
+| 默认构建 | 2163 ms |
+| `--dbg-info` 构建 | 2211 ms（**+48 ms，×1.02**；调试构建不内联，与"多编码一份 DWARF"基本抵消） |
+| 产物总计 | 14901 B |
+| └ `.text` | 6353 B |
+| └ `.qlmdbg`（自研） | 2742 B（**18.4%**） |
+| └ `.debug_*`（DWARF 四节） | 1008 B（**6.8%**） |
+| 调试会话固定开销（启动+加载+跑到退出） | 1540 ms（其中 Python 解释器启动 ~1.4 s） |
+| 每次断点命中净开销（5000 次 continue 穿循环体） | **139–159 µs** |
+| 每次源码行单步净开销（2000 次 next） | **0.96–1.05 ms** |
+
+> 单步比命中贵一个量级：一行通常 3–6 条指令，每条指令一个单步事件
+> （WaitForDebugEvent + Get/SetThreadContext 各一次）。`next`/`finish` 跨调用
+> 已改成"返回地址临时断点"，否则一次 `next` 穿过 `print` 会逐指令爬几千步
+> （实测 51 万步 / 231 秒）。线程句柄按 tid 缓存后，单步开销从 3.8 ms 降到 1 ms。
+> VBS 噪声 ±50%，**只做纵向比较**。
 
 ## 4. 自举
 

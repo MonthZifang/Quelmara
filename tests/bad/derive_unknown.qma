@@ -1,0 +1,9 @@
+// 负向（v1.72）：未知派生项
+module derive_unknown
+
+@derive(Serde)
+struct P { x: int }
+
+fn main() {
+    print(P { x: 1 }.json())
+}

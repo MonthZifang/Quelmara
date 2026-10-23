@@ -1,0 +1,15 @@
+// dbgdemo/loop.qma：调试器性能探针靶（v1.71）
+// 单层循环 5000 次：断点打在循环体里，`continue` 每次都真执行一段代码，
+// 用来量"每次断点命中"和"每次源码行单步"的净开销。
+// 本文件是工具链性能夹具，不进 parser 对拍语料（fixtures/ 不被收集）。
+module dbgdemo_loop
+
+fn main() {
+    let mut acc = 0
+    let mut i = 0
+    while i < 5000 {
+        acc = acc + i
+        i = i + 1
+    }
+    print(acc.to_str())
+}

@@ -1,0 +1,75 @@
+// t108_staticserve.qma：静态文件服务端到端（v1.69）
+//
+// 覆盖：
+//   1) 200：状态行 / Content-Type / Content-Length / Cache-Control / ETag / 正文
+//   2) 206：Range 命中（Content-Range + 片段正文）
+//   3) 404：文件不存在（先 file_exists 判断，不会让 read_text fail-fast）
+//   4) 403：目录穿越
+//   5) 目录："/" 与 "/sub"（无尾斜杠）都落到 index.html
+//   6) 二进制正文原样返回（长度前缀，不被 NUL 截断）
+module t108
+
+import std.staticfile
+import std.str
+
+fn has(s: str, needle: str) -> bool {
+    return str_contains(s, needle)
+}
+
+fn main() {
+    let root = "build/t108_root"
+    fs_mkdir(root)
+    fs_mkdir(root + "/sub")
+    write_text(root + "/a.txt", "hello world")
+    write_text(root + "/index.html", "<h1>root</h1>")
+    write_text(root + "/sub/index.html", "<h1>sub</h1>")
+    write_text(root + "/bin.dat", "a\x00b")
+
+    // 1) 200
+    let r = static_serve(root, "/a.txt", "")
+    assert(has(r, "HTTP/1.1 200 OK\r\n"), "200 状态行")
+    assert(has(r, "Content-Type: text/plain; charset=utf-8\r\n"), "text/plain 类型")
+    assert(has(r, "Content-Length: 11\r\n"), "长度 11")
+    assert(has(r, "Cache-Control: public, max-age=31536000, immutable\r\n"), "长缓存")
+    assert(has(r, "ETag: \"11-0\"\r\n"), "ETag")
+    assert(has(r, "\r\n\r\nhello world"), "正文")
+
+    // 2) 206
+    let r2 = static_serve(root, "/a.txt", "bytes=0-4")
+    assert(has(r2, "HTTP/1.1 206 Partial Content\r\n"), "206 状态行")
+    assert(has(r2, "Content-Range: bytes 0-4/11\r\n"), "Content-Range")
+    assert(has(r2, "Content-Length: 5\r\n"), "片段长度")
+    assert(has(r2, "\r\n\r\nhello"), "片段正文")
+    let r2b = static_serve(root, "/a.txt", "bytes=6-")
+    assert(has(r2b, "Content-Range: bytes 6-10/11\r\n"), "开区间 Range")
+    assert(has(r2b, "\r\n\r\nworld"), "开区间正文")
+
+    // 3) 404
+    let r3 = static_serve(root, "/nope.txt", "")
+    assert(has(r3, "HTTP/1.1 404 Not Found\r\n"), "404 状态行")
+    assert(has(r3, "not found"), "404 正文")
+
+    // 4) 403
+    let r4 = static_serve(root, "/../etc/passwd", "")
+    assert(has(r4, "HTTP/1.1 403 Forbidden\r\n"), "穿越 403")
+    let r4b = static_serve(root, "/%2e%2e/secret", "")
+    assert(has(r4b, "HTTP/1.1 403 Forbidden\r\n"), "编码穿越 403")
+
+    // 5) 目录 index
+    let r5 = static_serve(root, "/", "")
+    assert(has(r5, "HTTP/1.1 200 OK\r\n"), "根目录 200")
+    assert(has(r5, "Content-Type: text/html; charset=utf-8\r\n"), "index 是 html")
+    assert(has(r5, "Cache-Control: no-cache\r\n"), "html 不缓存")
+    assert(has(r5, "\r\n\r\n<h1>root</h1>"), "根 index 正文")
+    let r6 = static_serve(root, "/sub", "")
+    assert(has(r6, "\r\n\r\n<h1>sub</h1>"), "无尾斜杠目录也补 index")
+    let r7 = static_serve(root, "/sub/", "")
+    assert(has(r7, "\r\n\r\n<h1>sub</h1>"), "尾斜杠目录")
+
+    // 6) 二进制（含 NUL）按长度原样返回
+    let r8 = static_serve(root, "/bin.dat", "")
+    assert(has(r8, "Content-Length: 3\r\n"), "二进制长度 3")
+    assert(has(r8, "\r\n\r\na\x00b"), "NUL 不被截断")
+
+    print("static serve ok")
+}

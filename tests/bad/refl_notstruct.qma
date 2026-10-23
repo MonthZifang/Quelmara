@@ -1,0 +1,8 @@
+// 负向（v1.72）：字段反射只能用于 struct
+module refl_notstruct
+
+enum Color { Red, Green }
+
+fn main() {
+    print(refl_field_count[Color]().to_str())
+}

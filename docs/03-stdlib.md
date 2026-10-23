@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-47 个模块，**323 个公开函数**（另有 481 个内部函数）
+57 个模块，**379 个公开函数**（另有 510 个内部函数）
 
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
@@ -123,6 +123,19 @@ fn cli_int(name: str, def: int) -> int
 fn cli_positionals() -> vec[str]
 ```
 
+### `std/cookie.qma`
+
+Cookie 头解析与 Set-Cookie 生成（取值 / 百分号编解码 / Max-Age / SameSite / HttpOnly / Secure）
+
+```quelmara
+fn cookie_value_encode(s: str) -> str
+fn cookie_value_decode(s: str) -> str
+fn cookie_get(header: str, name: str) -> str
+fn cookie_has(header: str, name: str) -> bool
+fn cookie_attrs(http_only: bool, secure: bool, same_site: str) -> str
+fn cookie_set(name: str, value: str, path: str, max_age: int,
+```
+
 ### `std/core.qma`
 
 标量小工具
@@ -140,6 +153,17 @@ CRC-64/XZ（ECMA-182 反射多项式，xz/zlib 容器的 64 位校验）
 fn crc64(s: str) -> int
 /// CRC-64/XZ 十六进制（16 位小写）
 fn crc64_hex(s: str) -> str
+```
+
+### `std/csv.qma`
+
+CSV 解析与生成（RFC 4180：引号包裹 / "" 转义 / 字段内换行 / CRLF 或 LF）
+
+```quelmara
+fn csv_parse(text: str) -> vec[vec[str]]
+fn csv_build(rows: vec[vec[str]]) -> str
+fn csv_col(row: vec[str], i: int) -> str
+fn csv_find_row(rows: vec[vec[str]], col: int, value: str) -> int
 ```
 
 ### `std/deque.qma`
@@ -265,6 +289,16 @@ fn httpc_get_tls(url: str) -> HttpResponse
 fn httpc_get_follow(url: str, max_hops: int) -> HttpResponse
 ```
 
+### `std/httpdate.qma`
+
+HTTP 日期（RFC 7231 IMF-fixdate）格式化与解析 + If-Modified-Since 判定
+
+```quelmara
+fn httpdate_format(epoch: int) -> str
+fn httpdate_parse(s: str) -> int
+fn httpdate_not_modified(mtime: int, since: str) -> bool
+```
+
 ### `std/json.qma`
 
 DOM 式 JSON 解析与 builder
@@ -293,6 +327,7 @@ fn json_begin_arr(h: int) -> int
 fn json_end_arr(h: int) -> int
 fn json_key(h: int, k: str) -> int
 fn json_val_str(h: int, v: str) -> int
+fn json_val_int(h: int, v: int) -> int
 fn json_val_bool(h: int, v: bool) -> int
 fn json_val_null(h: int) -> int
 fn json_key_str(h: int, k: str, v: str) -> int
@@ -444,6 +479,28 @@ fn pool_free(h: int, p: int) -> int
 fn pool_empty(h: int) -> bool
 ```
 
+### `std/mime.qma`
+
+扩展名 ↔ Content-Type（内置 30 项表，大小写不敏感，带 charset 参数反查）
+
+```quelmara
+fn mime_ext_of(path: str) -> str
+fn mime_of(path: str) -> str
+fn mime_ext(ctype: str) -> str
+fn mime_is_text(ctype: str) -> bool
+```
+
+### `std/multipart.qma`
+
+multipart/form-data 解析（boundary 提取 / 表单字段与文件部分 / 头字段大小写不敏感）
+
+```quelmara
+fn multipart_boundary(ctype: str) -> str
+fn multipart_parse(body: str, boundary: str) -> vec[Part]
+fn multipart_field(body: str, boundary: str, name: str) -> str
+fn multipart_file(body: str, boundary: str, name: str) -> str
+```
+
 ### `std/net.qma`
 
 阻塞 TCP 便捷层
@@ -482,6 +539,20 @@ fn p256_on_curve(pub_x: str, pub_y: str) -> int
 fn ecdsa_p256_verify(pub_x: str, pub_y: str, hash: str, r_sig: str, s_sig: str) -> int
 ```
 
+### `std/path.qma`
+
+路径处理（join / clean / dir / base / ext / stem；'/' 与 '\' 都认）
+
+```quelmara
+fn path_is_abs(p: str) -> bool
+fn path_join(a: str, b: str) -> str
+fn path_clean(p: str) -> str
+fn path_dir(p: str) -> str
+fn path_base(p: str) -> str
+fn path_ext(p: str) -> str
+fn path_stem(p: str) -> str
+```
+
 ### `std/rand.qma`
 
 xorshift64* 伪随机
@@ -514,6 +585,18 @@ fn regex_replace(prog: vec[int], s: str, rep: str) -> str
 fn regex_replace_all(prog: vec[int], s: str, rep: str) -> str
 ```
 
+### `std/router.qma`
+
+路径模板匹配（/users/:id、尾部 * 通配、query/尾斜杠归一化、方法白名单）
+
+```quelmara
+fn route_norm(target: str) -> str
+fn route_segs(target: str) -> vec[str]
+fn route_match(pattern: str, path: str) -> bool
+fn route_params(pattern: str, path: str) -> vec[str]
+fn route_method_allowed(allowed: str, method: str) -> bool
+```
+
 ### `std/rsa.qma`
 
 RSA PKCS#1 v1.5 / PSS 验签（SHA-256，证书链与 TLS 用）
@@ -529,6 +612,21 @@ LEB128 varint / 定长整数 / 长度前缀帧
 
 ```quelmara
 // 无公开函数
+```
+
+### `std/session.qma`
+
+内存会话存储（sid 生成 / TTL 惰性过期 / 滑动续期 / 墓碑销毁）
+
+```quelmara
+fn session_new() -> SessionStore
+fn session_create(st: SessionStore, ttl: int, now: int) -> str
+fn session_alive(st: SessionStore, sid: str, now: int) -> bool
+fn session_get(st: SessionStore, sid: str, key: str, now: int) -> str
+fn session_set(st: SessionStore, sid: str, key: str, value: str,
+fn session_touch(st: SessionStore, sid: str, ttl: int, now: int) -> bool
+fn session_destroy(st: SessionStore, sid: str)
+fn session_count(st: SessionStore) -> int
 ```
 
 ### `std/set.qma`
@@ -603,6 +701,22 @@ Server-Sent Events 服务端
 
 ```quelmara
 // 无公开函数
+```
+
+### `std/staticfile.qma`
+
+静态文件服务的安全解析层（URL 解码 / 目录穿越防护 / index 补全 / Cache-Control / ETag / Range 解析）
+
+```quelmara
+fn static_url_decode(s: str) -> str
+fn static_path_safe(url: str) -> bool
+fn static_resolve(root: str, url: str) -> str
+fn static_index_for(path: str) -> str
+fn static_content_type(path: str) -> str
+fn static_cache_control(path: str) -> str
+fn static_etag(size: int, mtime: int) -> str
+fn static_range(hdr: str, size: int) -> vec[int]
+fn static_serve(root: str, url: str, range: str) -> str
 ```
 
 ### `std/str.qma`
@@ -756,6 +870,18 @@ fn utf8_count(s: str) -> int
 fn utf8_byte_of_char(s: str, ci: int) -> int
 fn utf8_slice(s: str, lo: int, hi: int) -> str
 fn utf8_to_chars(s: str) -> vec[int]
+```
+
+### `std/uuid.qma`
+
+UUID v4 生成 + nil + 校验/版本/变体位（随机源为 std/rand，非密码学）
+
+```quelmara
+fn uuid_v4() -> str
+fn uuid_nil() -> str
+fn uuid_valid(s: str) -> bool
+fn uuid_version(s: str) -> int
+fn uuid_variant_ok(s: str) -> bool
 ```
 
 ### `std/ws.qma`

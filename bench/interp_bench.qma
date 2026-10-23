@@ -1,0 +1,31 @@
+// bench/interp_bench.qma：插值字符串 vs 手写 + 拼接（v1.61）
+// 两者语义相同：手写链走 v1.3 的 concat 链融合（一次分配 + n 次 to_str），
+// 插值把整数直接 __fmt_u64 写进结果缓冲（少 n 次分配 + 拷贝）。
+module interp_bench
+
+fn main() {
+    let n = 300000
+
+    let t0 = now_ns()
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        let s = f"i={i}, sq={i * i}"
+        acc = acc + len(s)
+        i = i + 1
+    }
+    let t1 = now_ns()
+
+    let mut j = 0
+    let mut acc2 = 0
+    while j < n {
+        let s = "i=" + j.to_str() + ", sq=" + (j * j).to_str()
+        acc2 = acc2 + len(s)
+        j = j + 1
+    }
+    let t2 = now_ns()
+
+    print("interp ms=" + ((t1 - t0) / 1000000).to_str())
+    print("manual ms=" + ((t2 - t1) / 1000000).to_str())
+    assert(acc == acc2, "same total length")
+}

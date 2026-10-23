@@ -1,0 +1,257 @@
+// std/httpdate.qma —— HTTP 日期（IMF-fixdate）格式化与解析（v1.73）
+//
+// 为什么需要：`Last-Modified` / `If-Modified-Since` 都要 RFC 7231 的固定格式
+// `Sun, 06 Nov 1994 08:49:37 GMT`。静态文件那版只能用 size 做弱 ETag，
+// 就是因为没有日期格式化（07-gaps §2 的遗留）。
+//
+// 语义：
+//   * httpdate_format(epoch)：UTC 秒 -> IMF-fixdate；
+//   * httpdate_parse(s)：IMF-fixdate -> UTC 秒；格式不对返回 -1；
+//   * httpdate_modified(mtime, since)：`mtime <= since` 时返回 true
+//     （调用方据此回 304 Not Modified）；
+//   * 日期换算用 Howard Hinnant 的 days-from-civil 算法，纯整数、无表、无时区。
+//
+// 边界：只认 IMF-fixdate（RFC 1123 形式）；不认废弃的 RFC 850（`Sunday, 06-Nov-94`）
+// 与 asctime（`Sun Nov  6 08:49:37 1994`）；不处理闰秒。
+
+fn hd_is_digit(c: int) -> bool {
+    return c >= 48 && c <= 57
+}
+
+fn hd_num2(s: str) -> int {
+    if len(s) != 2 || !hd_is_digit(s[0]) || !hd_is_digit(s[1]) {
+        return -1
+    }
+    return (s[0] - 48) * 10 + (s[1] - 48)
+}
+
+fn hd_num4(s: str) -> int {
+    if len(s) != 4 {
+        return -1
+    }
+    let mut v = 0
+    let mut i = 0
+    while i < 4 {
+        if !hd_is_digit(s[i]) {
+            return -1
+        }
+        v = v * 10 + (s[i] - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn hd_pad2(n: int) -> str {
+    if n < 10 {
+        return "0" + n.to_str()
+    }
+    return n.to_str()
+}
+
+fn hd_pad4(n: int) -> str {
+    let s = n.to_str()
+    while len(s) < 4 {
+        s = "0" + s
+    }
+    return s
+}
+
+// 公历年月日 -> 1970-01-01 起的天数
+fn hd_days_from_civil(y: int, m: int, d: int) -> int {
+    let mut yy = y
+    if m <= 2 {
+        yy = yy - 1
+    }
+    let era = (yy / 400)
+    let mut e = era
+    if yy < 0 && yy % 400 != 0 {
+        e = e - 1
+    }
+    let yoe = yy - e * 400
+    let mut mp = m + 9
+    if m > 2 {
+        mp = m - 3
+    }
+    let doy = (153 * mp + 2) / 5 + d - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return e * 146097 + doe - 719468
+}
+
+// 天数 -> 公历年月日，返回 [y, m, d]
+fn hd_civil_from_days(z: int) -> vec[int] {
+    let out = vec[int].new(3)
+    let mut zz = z + 719468
+    let mut era = zz / 146097
+    if zz < 0 && zz % 146097 != 0 {
+        era = era - 1
+    }
+    let doe = zz - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let mut y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let mut m = mp + 3
+    if mp >= 10 {
+        m = mp - 9
+    }
+    if m <= 2 {
+        y = y + 1
+    }
+    out.push(y)
+    out.push(m)
+    out.push(d)
+    return out
+}
+
+fn hd_wday(days: int) -> str {
+    // 1970-01-01 是周四；以周日为 0 偏移
+    let mut i = (days + 4) % 7
+    if i < 0 {
+        i = i + 7
+    }
+    if i == 0 {
+        return "Sun"
+    }
+    if i == 1 {
+        return "Mon"
+    }
+    if i == 2 {
+        return "Tue"
+    }
+    if i == 3 {
+        return "Wed"
+    }
+    if i == 4 {
+        return "Thu"
+    }
+    if i == 5 {
+        return "Fri"
+    }
+    return "Sat"
+}
+
+fn hd_month_name(m: int) -> str {
+    if m == 1 {
+        return "Jan"
+    }
+    if m == 2 {
+        return "Feb"
+    }
+    if m == 3 {
+        return "Mar"
+    }
+    if m == 4 {
+        return "Apr"
+    }
+    if m == 5 {
+        return "May"
+    }
+    if m == 6 {
+        return "Jun"
+    }
+    if m == 7 {
+        return "Jul"
+    }
+    if m == 8 {
+        return "Aug"
+    }
+    if m == 9 {
+        return "Sep"
+    }
+    if m == 10 {
+        return "Oct"
+    }
+    if m == 11 {
+        return "Nov"
+    }
+    return "Dec"
+}
+
+fn hd_month_num(s: str) -> int {
+    if s == "Jan" {
+        return 1
+    }
+    if s == "Feb" {
+        return 2
+    }
+    if s == "Mar" {
+        return 3
+    }
+    if s == "Apr" {
+        return 4
+    }
+    if s == "May" {
+        return 5
+    }
+    if s == "Jun" {
+        return 6
+    }
+    if s == "Jul" {
+        return 7
+    }
+    if s == "Aug" {
+        return 8
+    }
+    if s == "Sep" {
+        return 9
+    }
+    if s == "Oct" {
+        return 10
+    }
+    if s == "Nov" {
+        return 11
+    }
+    if s == "Dec" {
+        return 12
+    }
+    return -1
+}
+
+// UTC 秒 -> "Sun, 06 Nov 1994 08:49:37 GMT"
+pub fn httpdate_format(epoch: int) -> str {
+    let mut e = epoch
+    if e < 0 {
+        e = 0
+    }
+    let days = e / 86400
+    let secs = e % 86400
+    let ymd = hd_civil_from_days(days)
+    let hh = secs / 3600
+    let mm = (secs % 3600) / 60
+    let ss = secs % 60
+    return hd_wday(days) + ", " + hd_pad2(ymd.get(2)) + " " +
+           hd_month_name(ymd.get(1)) + " " + hd_pad4(ymd.get(0)) + " " +
+           hd_pad2(hh) + ":" + hd_pad2(mm) + ":" + hd_pad2(ss) + " GMT"
+}
+
+// "Sun, 06 Nov 1994 08:49:37 GMT" -> UTC 秒；格式不对返回 -1
+pub fn httpdate_parse(s: str) -> int {
+    if len(s) < 29 {
+        return -1
+    }
+    let day = hd_num2(substr(s, 5, 2))
+    let mon = hd_month_num(substr(s, 8, 3))
+    let yh = hd_num4(substr(s, 12, 4))
+    let hh = hd_num2(substr(s, 17, 2))
+    let mm = hd_num2(substr(s, 20, 2))
+    let ss = hd_num2(substr(s, 23, 2))
+    if day < 0 || mon < 0 || hh < 0 || mm < 0 || ss < 0 {
+        return -1
+    }
+    if yh < 0 {
+        return -1
+    }
+    let year = yh
+    let days = hd_days_from_civil(year, mon, day)
+    return days * 86400 + hh * 3600 + mm * 60 + ss
+}
+
+// 资源 mtime <= 客户端持有的时间 -> 可以回 304
+pub fn httpdate_not_modified(mtime: int, since: str) -> bool {
+    let t = httpdate_parse(since)
+    if t < 0 {
+        return false
+    }
+    return mtime <= t
+}

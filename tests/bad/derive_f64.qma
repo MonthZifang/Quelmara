@@ -1,0 +1,10 @@
+// 负向（v1.72）：f64 字段暂不支持（缺 str→浮点解析原语，07-gaps §7.10）
+module derive_f64
+
+@derive(Json)
+struct M { x: f64 }
+
+fn main() {
+    let m = M { x: 1.5 }
+    print(m.json())
+}

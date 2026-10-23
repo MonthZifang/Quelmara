@@ -1,0 +1,95 @@
+// gimpl_bench.qma：泛型 struct 方法的派发成本（v1.62）
+//
+// 三份等价实现：
+//   static  —— b.get()      静态派发（单态化后是直接 call Box__int__get）
+//   direct  —— direct(b)    手写普通函数（对照基线）
+//   dyn     —— v.get()      动态派发（接口值 {data,vt} + callr 间接调用）
+// 前两者应当同速；dyn 的差值是 vtable 派发的真实代价。
+// 输出：三个结果（必须相等）+ ns/次 ×1000
+module gimpl_bench
+
+interface Val {
+    fn get(self) -> int
+}
+
+struct Box[T] { value: T }
+
+impl Box[T] : Val {
+    fn get(b: Box[T]) -> int {
+        return b.value
+    }
+}
+
+fn direct(b: Box[int]) -> int {
+    return b.value
+}
+
+fn run_static(n: int) -> int {
+    let b = Box[int] { value: 7 }
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        s = s + b.get()
+        i = i + 1
+    }
+    return s
+}
+
+fn run_direct(n: int) -> int {
+    let b = Box[int] { value: 7 }
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        s = s + direct(b)
+        i = i + 1
+    }
+    return s
+}
+
+fn run_dyn(n: int) -> int {
+    let b = Box[int] { value: 7 }
+    let v: Val = b
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        s = s + v.get()
+        i = i + 1
+    }
+    return s
+}
+
+fn main() {
+    let n = 20000000
+    // 预热（首轮含页提交）
+    let w = run_static(1000000) + run_direct(1000000) + run_dyn(1000000)
+
+    let mut best_s = 0
+    let mut best_d = 0
+    let mut best_v = 0
+    let mut r = 0
+    while r < 3 {
+        let t0 = now_ns()
+        let a = run_static(n)
+        let t1 = now_ns()
+        let b = run_direct(n)
+        let t2 = now_ns()
+        let c = run_dyn(n)
+        let t3 = now_ns()
+        assert(a == b && b == c, "三种派发结果必须相同")
+        if r == 0 || t1 - t0 < best_s {
+            best_s = t1 - t0
+        }
+        if r == 0 || t2 - t1 < best_d {
+            best_d = t2 - t1
+        }
+        if r == 0 || t3 - t2 < best_v {
+            best_v = t3 - t2
+        }
+        r = r + 1
+    }
+    print(w)
+    // ns/次 ×1000
+    print(best_s * 1000 / n)
+    print(best_d * 1000 / n)
+    print(best_v * 1000 / n)
+}

@@ -1,0 +1,66 @@
+// t110_session.qma：内存会话存储（v1.71）
+//
+// 覆盖：
+//   1) 新建会话：sid 单调递增、互不相同
+//   2) 存活判定：ttl 到期、ttl=0 永不过期、空 sid
+//   3) 键值读写：同一会话多键、两个会话互不串
+//   4) 过期后读空 / 写失败
+//   5) 续期（滑动过期）
+//   6) 销毁：打墓碑，之后 alive 为假、读空、写失败
+//   7) 计数
+module t110
+
+import std.session
+
+fn main() {
+    let st = session_new()
+
+    // 1) 新建
+    let a = session_create(st, 100, 1000)
+    let b = session_create(st, 100, 1000)
+    let c = session_create(st, 0, 1000)
+    assert(a == "s1", "第一个 sid")
+    assert(b == "s2", "第二个 sid")
+    assert(c == "s3", "第三个 sid")
+    assert(session_count(st) == 3, "计数 3")
+
+    // 2) 存活
+    assert(session_alive(st, a, 1050), "未到期")
+    assert(!session_alive(st, a, 1100), "正好到期视为过期")
+    assert(!session_alive(st, a, 1200), "到期后")
+    assert(session_alive(st, c, 999999), "ttl=0 永不过期")
+    assert(!session_alive(st, "", 1000), "空 sid")
+    assert(!session_alive(st, "nope", 1000), "不存在的 sid")
+
+    // 3) 键值
+    assert(session_set(st, a, "user", "alice", 1050), "写入 a")
+    assert(session_set(st, a, "role", "admin", 1050), "写入第二个键")
+    assert(session_set(st, b, "user", "bob", 1050), "写入 b")
+    assert(session_get(st, a, "user", 1050) == "alice", "读 a.user")
+    assert(session_get(st, a, "role", 1050) == "admin", "读 a.role")
+    assert(session_get(st, b, "user", 1050) == "bob", "读 b.user 不串")
+    assert(session_get(st, a, "missing", 1050) == "", "不存在的键")
+
+    // 4) 过期后
+    assert(session_get(st, a, "user", 1200) == "", "过期后读空")
+    assert(!session_set(st, a, "user", "x", 1200), "过期后写失败")
+    assert(!session_touch(st, a, 100, 1200), "过期后不能续期")
+
+    // 5) 续期
+    assert(session_touch(st, c, 100, 5000), "续期成功")
+    assert(session_alive(st, c, 5050), "续期后未到期")
+    assert(!session_alive(st, c, 5150), "续期后仍会到期")
+
+    // 6) 销毁
+    session_destroy(st, b)
+    assert(!session_alive(st, b, 1000), "销毁后不存活")
+    assert(session_get(st, b, "user", 1000) == "", "销毁后读空")
+    assert(!session_set(st, b, "user", "x", 1000), "销毁后写失败")
+    assert(session_count(st) == 3, "销毁不减少条目（墓碑）")
+
+    // 7) 新建的 sid 仍单调（不复用墓碑）
+    let d = session_create(st, 60, 2000)
+    assert(d == "s4", "销毁后新建 sid 不复用")
+
+    print("session ok")
+}

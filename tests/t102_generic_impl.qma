@@ -1,0 +1,127 @@
+// t102_generic_impl.qma：泛型 struct 的方法（v1.62）
+//
+// 覆盖：
+//   1) 泛型 impl 模板 impl Box[T] : Show —— 一次声明，按每个已实例化的
+//      Box__int / Box__str / Box__f64 各展开一份普通方法
+//   2) 具体实例 impl Box[int] : Show —— 只给某一个实例实现
+//   3) 多类型参数模板 impl Pair[A, B] : Show
+//   4) 容器字段：struct Stack[T] { items: vec[T] }
+//   4b) 方法体里的"部分具体"泛型 struct：Pair[T, int]
+//   5) 静态派发（b.show() 直接调用）与动态派发（let s: Show = b; s.show() 走 vtable）
+//   6) 泛型函数返回/接收泛型 struct 的**具体实例**（Box[int] 可以，Box[T] 不行）
+//
+// 负向（必须编译失败）见 tests/bad/gimpl_*.qma。
+module t102
+
+interface Show {
+    fn show(self) -> str
+}
+
+struct Box[T] { value: T }
+struct Cell { v: int }
+struct Pair[A, B] { first: A, second: B }
+struct Stack[T] { items: vec[T] }
+struct Wrap[T] { inner: T }
+
+// 1) 模板 impl：所有 Box 实例共用同一份方法声明
+impl Box[T] : Show {
+    fn show(b: Box[T]) -> str {
+        return "Box(" + b.value.to_str() + ")"
+    }
+}
+
+// 2) 具体实例 impl：只给 Cell 实现（非泛型），验证两条路径共存
+impl Cell : Show {
+    fn show(c: Cell) -> str {
+        return "Cell[" + c.v.to_str() + "]"
+    }
+}
+
+// 3) 多类型参数模板
+impl Pair[A, B] : Show {
+    fn show(p: Pair[A, B]) -> str {
+        return "(" + p.first.to_str() + "," + p.second.to_str() + ")"
+    }
+}
+
+// 4) 容器字段：方法体里用 vec 内建方法，元素类型仍是 T
+impl Stack[T] : Show {
+    fn show(s: Stack[T]) -> str {
+        let mut out = "[" + len(s.items).to_str() + "]"
+        let mut i = 0
+        while i < len(s.items) {
+            out = out + s.items.get(i).to_str()
+            if i + 1 < len(s.items) {
+                out = out + ","
+            }
+            i = i + 1
+        }
+        return out
+    }
+}
+
+// 4b) 方法体里出现"部分具体"的泛型 struct：Pair[T, int] 也要按实例替换
+impl Wrap[T] : Show {
+    fn show(w: Wrap[T]) -> str {
+        let p = Pair[T, int] { first: w.inner, second: 9 }
+        return "<" + p.first.to_str() + "/" + p.second.to_str() + ">"
+    }
+}
+
+// 6) 泛型函数用具体实例类型（Box[int] 是普通类型名）
+fn bump(b: Box[int]) -> Box[int] {
+    return Box[int] { value: b.value + 1 }
+}
+
+fn main() {
+    // 1) 模板 impl：三种实参各自展开
+    let bi = Box[int] { value: 42 }
+    let bs = Box[str] { value: "hi" }
+    let bf = Box[f64] { value: 2.5 }
+    assert(bi.show() == "Box(42)", "模板 impl int")
+    assert(bs.show() == "Box(hi)", "模板 impl str")
+    assert(bf.show() == "Box(2.5)", "模板 impl f64")
+
+    // 2) 非泛型 impl 与模板 impl 共存
+    let c = Cell { v: 9 }
+    assert(c.show() == "Cell[9]", "非泛型 impl")
+
+    // 3) 多类型参数
+    let p = Pair[int, str] { first: 1, second: "x" }
+    assert(p.show() == "(1,x)", "多参数模板 impl")
+    let q = Pair[str, f64] { first: "a", second: 0.5 }
+    assert(q.show() == "(a,0.5)", "多参数模板 impl 另一组实参")
+
+    // 4) 容器字段
+    let st = Stack[int] { items: vec[int].new(4) }
+    st.items.push(3)
+    st.items.push(5)
+    assert(st.show() == "[2]3,5", "容器字段方法")
+
+    // 4b) 方法体里的"部分具体"泛型 struct（Pair[T, int]）
+    assert(Wrap[int] { inner: 4 }.show() == "<4/9>", "部分具体 int")
+    assert(Wrap[str] { inner: "k" }.show() == "<k/9>", "部分具体 str")
+
+    // 5) 动态派发：接口值走 vtable，静态派发走直接调用
+    let s: Show = bi
+    assert(s.show() == "Box(42)", "动态派发 Box")
+    let s2: Show = c
+    assert(s2.show() == "Cell[9]", "动态派发 Cell")
+
+    // 异构容器：vec[Show] 里放不同实现
+    let shapes = vec[Show].new(4)
+    shapes.push(bi)
+    shapes.push(c)
+    shapes.push(p)
+    assert(len(shapes) == 3, "vec[Show] 长度")
+    assert(shapes.get(0).show() == "Box(42)", "vec[Show] 元素 0")
+    assert(shapes.get(1).show() == "Cell[9]", "vec[Show] 元素 1")
+    assert(shapes.get(2).show() == "(1,x)", "vec[Show] 元素 2")
+
+    // 6) 具体实例作形参/返回值
+    let b2 = bump(bi)
+    assert(b2.value == 43, "Box[int] 形参与返回")
+    assert(b2.show() == "Box(43)", "返回值仍可调方法")
+
+    print("generic impl ok")
+}

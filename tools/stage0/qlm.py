@@ -154,6 +154,13 @@ def tokenize(src, keep_comments=False):
     toks, i, line, n = [], 0, 1, len(src)
     while i < n:
         c = src[i]
+        # 插值字符串 f"..."（v1.61）：吞掉前缀 f，按普通字符串扫描，
+        # 记号种类记 FSTR。放在标识符分支之前，`f` 作变量名不受影响。
+        fstr = False
+        if c == "f" and i + 1 < n and src[i + 1] == '"':
+            fstr = True
+            i += 1
+            c = src[i]
         if c == "\n":
             if keep_comments:
                 toks.append(Tok("NL", "\n", line))
@@ -272,7 +279,7 @@ def tokenize(src, keep_comments=False):
                     j += 1
             if j >= n:
                 raise SyntaxError(f"line {line}: 字符串未闭合")
-            toks.append(Tok("STR", "".join(buf), line))
+            toks.append(Tok("FSTR" if fstr else "STR", "".join(buf), line))
             i = j + 1
             continue
         for sym in SYMBOLS:
@@ -337,7 +344,24 @@ class Parser:
         # 泛型 struct 模板（v1.59）：name -> {"params": [T...], "fields": [(f, ty)]}。
         # 不进 structs 表——只有实例化产物（Box__int）才是真正的结构体。
         self.generic_structs = {}
+        self.generic_enums = {}
         self._cur_struct_tparams = None
+        # 泛型 struct 的 impl 模板（v1.62）：(struct 名, 接口名) -> 模板方法。
+        # 解析期按每个已实例化的 Box__X 物化成普通方法 Box__X__m。
+        self.generic_impls = {}
+        self._in_gimpl = False     # 正在解析泛型 impl 模板的方法体
+        self._cur_tparams = []     # 当前作用域的类型参数（签名与体都认，v1.62）
+        self.impl_labels = {}      # (接口, 实例名) -> 源码写法（报错用）
+        self.symbolic_structs = {}  # 符号类型名 -> (模板名, 实参名表)（v1.62）
+        self.struct_instances = []  # [(模板名, 实参名元组, 实例名)]，按生成顺序
+        self.enum_instances = []    # 同上，泛型 enum 的实例（v1.64）
+        # 本文件定义的泛型模板（种子里的不算）：类型约束名要等 interface
+        # 全部解析完才能校验（v1.61），所以在 parse_program 末尾统一查。
+        self._own_templates = []
+        # 属性宏 @derive（v1.71）：类型名 -> (派生项列表, 行号)。
+        # 在 _scan_derives 里从记号流中摘掉注解，parse_program 只看到普通声明。
+        self.derives = {}
+        self._scan_derives()
         self._prescan()
 
     def _prescan(self):
@@ -782,6 +806,7 @@ class Parser:
                             f"line ?: 泛型函数 {fdef['name']!r} 暂不支持注解"
                             "（@simd/@extern 等只用于具体函数）")
                     self.generic_fns[fdef["name"]] = fdef
+                    self._own_templates.append(fdef)
                 else:
                     fns.append(fdef)
             elif self.at("SYM", "@"):
@@ -860,14 +885,88 @@ class Parser:
                 self.decl_order.append(("interface", iname))
             elif self.at("impl"):
                 # impl Type : Interface { fn m(...) { ... } ... }
-                self.next()
-                tname = self.eat("NAME").val
+                # Type（v1.62）：`Name`（普通类型）、`Name[args]`（泛型 struct 的
+                #   具体实例，如 impl Box[int] : Show）、`Name[T]`（泛型 impl 模板，
+                #   如 impl Box[T] : Show——按每个已实例化的 Box__X 展开）。
+                impl_tok = self.next()
+                sname = self.eat("NAME").val
+                targs = None
+                if self.at("SYM", "["):
+                    # 类型实参：具体类型，或类型参数（可带能力约束 T: Show）
+                    self.next()
+                    targs, ibounds = [], {}
+                    while True:
+                        tk = self.peek()
+                        if tk.kind == "NAME" and not self._is_known_type(tk.val):
+                            self.next()
+                            targs.append(("named", tk.val))
+                            if self.at("SYM", ":"):
+                                self.next()
+                                bl = [self.eat("NAME").val]
+                                while self.at("SYM", "+"):
+                                    self.next()
+                                    bl.append(self.eat("NAME").val)
+                                ibounds[tk.val] = bl
+                        else:
+                            targs.append(self.parse_type())
+                        if self.at("SYM", ","):
+                            self.next()
+                            continue
+                        break
+                    self.eat("SYM", "]")
                 self.eat("SYM", ":")
                 iname = self.eat("NAME").val
                 if iname not in self.interfaces:
                     raise SyntaxError(f"line {self.peek().line}: 未声明的接口 {iname}")
+                if targs is not None and sname not in self.generic_structs \
+                        and sname not in self.generic_enums:
+                    raise SyntaxError(
+                        f"line {impl_tok.line}: {sname} 不是泛型类型"
+                        "（只有 struct/enum Name[T] 才能写 impl Name[...] : ...）")
+                gimpl_kind = ("enum" if targs is not None
+                              and sname in self.generic_enums else "struct")
+                gimpl_tps = []
+                if targs is not None:
+                    gimpl_tps = [t[1] for t in targs
+                                 if t[0] == "named" and not self._is_known_type(t[1])]
+                    if len(gimpl_tps) != len(set(gimpl_tps)):
+                        raise SyntaxError(
+                            f"line {impl_tok.line}: impl {sname}[...] 的类型参数重名："
+                            f"{gimpl_tps}")
+                    if gimpl_tps and len(gimpl_tps) != len(targs):
+                        raise SyntaxError(
+                            f"line {impl_tok.line}: impl {sname}[...] 不能混用类型参数与"
+                            "具体类型（要么全写 T，要么全写具体类型）")
                 self.eat("SYM", "{")
                 bodies = {}
+                if gimpl_tps:
+                    # 泛型 impl 模板：方法体按模板解析（`T { ... }` 是占位字面量），
+                    # 具体实例在 parse_program 末尾物化。
+                    saved_tp = getattr(self, "_cur_tparams", None)
+                    saved_gi = getattr(self, "_in_gimpl", False)
+                    self._cur_tparams = gimpl_tps
+                    self._in_gimpl = True
+                    while not self.at("SYM", "}"):
+                        fd = self.parse_fn()
+                        bodies[fd["name"]] = fd
+                    self._cur_tparams = saved_tp
+                    self._in_gimpl = saved_gi
+                    self.eat("SYM", "}")
+                    self.generic_impls[(sname, iname)] = {
+                        "tparams": gimpl_tps, "methods": bodies,
+                        "kind": gimpl_kind, "bounds": ibounds,
+                        "sig": {m: (pt, rt) for m, pt, rt in self.interfaces[iname]},
+                        "line": impl_tok.line}
+                    continue
+                if targs is not None:
+                    if gimpl_kind == "enum":
+                        tname = self._instantiate_enum(sname, targs, impl_tok.line)
+                    else:
+                        tname = self._instantiate_struct(sname, targs, impl_tok.line)
+                    self.impl_labels[(iname, tname)] = (
+                        f"{sname}[{', '.join(_ty_str(t) for t in targs)}]")
+                else:
+                    tname = sname
                 while not self.at("SYM", "}"):
                     fd = self.parse_fn()
                     bodies[fd["name"]] = fd
@@ -904,12 +1003,39 @@ class Parser:
                 # 模板不进 structs 表；类型位置写 Box[int] 时现场单态化出
                 # 普通结构体 Box__int，下游布局/ABI/方法全部零改动。
                 stparams = None
+                sbounds = {}
                 if self.at("SYM", "["):
                     bracket = self.next()
-                    stparams = [self.eat("NAME").val]
-                    while self.at("SYM", ","):
-                        self.next()
-                        stparams.append(self.eat("NAME").val)
+                    stparams = []
+                    while True:
+                        pname = self.eat("NAME").val
+                        stparams.append(pname)
+                        if self.at("SYM", ":"):
+                            # 类型约束（v1.61）：泛型 struct 只支持能力约束
+                            # （Ord/Eq/Num/Bit）——接口约束需要 impl 表，而
+                            # 实例化发生在解析期，impl 可能还没解析到。
+                            self.next()
+                            bl = [self.eat("NAME").val]
+                            while self.at("SYM", "+"):
+                                self.next()
+                                bl.append(self.eat("NAME").val)
+                            for b in bl:
+                                if b not in _BOUND_CAPS:
+                                    raise SyntaxError(
+                                        f"line {bracket.line}: 泛型 struct "
+                                        f"{name} 的类型参数 {pname} 用了约束 {b}"
+                                        "——struct 只支持能力约束 "
+                                        + " / ".join(_BOUND_CAPS)
+                                        + "（接口约束请写在泛型函数上）")
+                            if len(set(bl)) != len(bl):
+                                raise SyntaxError(
+                                    f"line {bracket.line}: 类型参数 {pname} "
+                                    f"的约束重复：{bl}")
+                            sbounds[pname] = bl
+                        if self.at("SYM", ","):
+                            self.next()
+                            continue
+                        break
                     if len(set(stparams)) != len(stparams):
                         raise SyntaxError(
                             f"line {bracket.line}: 泛型 struct 类型参数重名：{stparams}")
@@ -929,17 +1055,42 @@ class Parser:
                     # _prescan 把 `struct NAME` 当普通结构体登记了空字段占位，
                     # 模板必须摘掉——否则 `Box { }` 会被当成零字段结构体
                     self.structs.pop(name, None)
+                    if name in self.derives:
+                        raise SyntaxError(
+                            f"line {self.derives[name][1]}: 泛型 struct {name} "
+                            "不能直接 @derive（字段类型还是类型参数）——"
+                            "请对具体实例派生，或在 impl 里手写")
                     self.generic_structs[name] = {
-                        "params": stparams, "fields": fields}
+                        "params": stparams, "fields": fields,
+                        "bounds": sbounds}
                 else:
                     self.structs[name] = fields
                     self.decl_order.append(("struct", name))
+                    if name in self.derives:
+                        # 属性宏展开（v1.71）：字段表刚齐，就地生成派生函数。
+                        # 放在这里而不是 parse_program 末尾——生成的方法要能
+                        # 被**同一文件后面**的函数直接调用（无前向引用问题）。
+                        self._expand_derive(name, fields, "struct",
+                                            self.derives[name][1], fns, imports)
             elif self.at("enum"):
                 self.next()
                 name = self.eat("NAME").val
                 if self._pending_pub:
                     self.pub_types.add(name)
                     self._pending_pub = False
+                # 泛型 enum（v1.63）：enum Opt[T] { Some(v: T), None }
+                # 与泛型 struct 同款——解析期单态化，模板不进 enums 表。
+                eparams = None
+                if self.at("SYM", "["):
+                    bracket = self.next()
+                    eparams = [self.eat("NAME").val]
+                    while self.at("SYM", ","):
+                        self.next()
+                        eparams.append(self.eat("NAME").val)
+                    if len(set(eparams)) != len(eparams):
+                        raise SyntaxError(
+                            f"line {bracket.line}: 泛型 enum 类型参数重名：{eparams}")
+                    self.eat("SYM", "]")
                 self.eat("SYM", "{")
                 variants = []
                 while not self.at("SYM", "}"):
@@ -963,8 +1114,17 @@ class Parser:
                     if vn in seen:
                         raise SyntaxError(f"enum {name} 变体 {vn} 重复声明")
                     seen.add(vn)
-                self.enums[name] = variants
-                self.decl_order.append(("enum", name))
+                if eparams:
+                    self.enums.pop(name, None)   # _prescan 的占位登记要摘掉
+                    self.generic_enums[name] = {
+                        "params": eparams, "variants": variants}
+                else:
+                    self.enums[name] = variants
+                    self.decl_order.append(("enum", name))
+                    if name in self.derives:
+                        # 枚举派生尚未实现：明确拒绝，不静默忽略
+                        self._expand_derive(name, variants, "enum",
+                                            self.derives[name][1], fns, imports)
             elif self.at("test"):
                 # 内建测试块：test "名字" { ... }（SPEC §8 `quelmara test`）
                 self.next()
@@ -974,26 +1134,132 @@ class Parser:
                 t = self.peek()
                 raise SyntaxError(
                     f"line {t.line}: 顶层期望 fn/struct/test/module/import，得到 {t.val!r}")
+        # ---- 泛型 impl 模板物化（v1.62）----
+        # impl Box[T] : Show 按每个已实例化的 Box__int / Box__str 展开成普通方法
+        # Box__int__show——与手写 impl Box[int] : Show 的产物完全一致（同一套
+        # 布局/派发/ABI）。物化后登记进 self.impls，下面既有的接口一致性检查
+        # 会顺带把它们也校验一遍（方法齐全 / 参数个数 / 接收者 / 返回类型）。
+        import copy as _copy
+        for (gsname, iface), tmpl in self.generic_impls.items():
+            tps = tmpl["tparams"]
+            sym = gsname + "__" + "_".join(tps)
+            done = set()
+            # 模板目标是泛型 enum 还是 struct：各自的实例表不同（v1.64）
+            insts = (self.enum_instances if tmpl.get("kind") == "enum"
+                     else self.struct_instances)
+            for (gname, tags, iname) in insts:
+                if gname != gsname or iname in done:
+                    continue
+                done.add(iname)
+                key = (iface, iname)
+                if key in self.impls:
+                    raise SyntaxError(
+                        f"line {tmpl['line']}: {self.impl_labels.get(key, iname)} 已有 "
+                        f"impl {self.impl_labels.get(key, iname)} : {iface}，"
+                        f"与泛型 impl {gsname}[{', '.join(tps)}] : {iface} 重复"
+                        "（同一接口对同一类型只能实现一次）")
+                tp_map = dict(zip(tps, tags))
+                tp_map[sym] = iname
+                # 类型约束（v1.64）：impl Opt[T: Show] 的实参必须满足约束
+                for tp, bl in (tmpl.get("bounds") or {}).items():
+                    tyn = tp_map[tp]
+                    for cap in bl:
+                        if cap not in _BOUND_CAPS:
+                            raise SyntaxError(
+                                f"line {tmpl['line']}: impl "
+                                f"{gsname}[{tp}: {cap}] —— impl 模板的类型参数"
+                                "只支持能力约束 "
+                                + " / ".join(_BOUND_CAPS))
+                        if not _cap_supports(cap, tyn):
+                            raise SyntaxError(
+                                f"line {tmpl['line']}: impl "
+                                f"{gsname}[{tp}: {cap}] 的实参 {tyn} 不满足 {cap}"
+                                f"（{_cap_desc(cap)}）")
+                # 方法体里其他泛型 struct 的符号名（Pair[T, int] 之类）：
+                # 先按具体实参落实例（否则字面量指向一个不存在的类型），再换名
+                for sname2, (gname2, argnames, kind2) in self.symbolic_structs.items():
+                    if not all(a in tp_map or self._is_known_type(a)
+                               for a in argnames):
+                        continue
+                    concrete = [("named", tp_map.get(a, a)) for a in argnames]
+                    tp_map[sname2] = (
+                        self._instantiate_enum(gname2, concrete, tmpl["line"])
+                        if kind2 == "enum"
+                        else self._instantiate_struct(gname2, concrete,
+                                                      tmpl["line"]))
+                bodies = {}
+                for mname, fd in tmpl["methods"].items():
+                    inst = _copy.deepcopy(fd)
+                    inst["name"] = f"{iname}__{mname}"
+                    inst["params"] = [(n, _subst_gimpl(t, tp_map))
+                                      for n, t in inst["params"]]
+                    inst["ret"] = _subst_gimpl(inst["ret"], tp_map)
+                    inst["body"] = _subst_gimpl(inst["body"], tp_map)
+                    inst["self_type"] = iname
+                    inst["impl_iface"] = iface
+                    inst["impl_method"] = mname
+                    inst["iface_order"] = [m for m, _p, _r
+                                           in self.interfaces[iface]]
+                    inst["iface_sig"] = tmpl["sig"]
+                    prev = self.methods.get((iname, mname))
+                    if prev is not None:
+                        raise SyntaxError(
+                            f"{iname}.{mname} 同时出现在 impl {iname} : "
+                            f"{prev.get('impl_iface')} 与泛型 impl {gsname}[...] : "
+                            f"{iface} 里；同名方法跨接口暂不支持（请改名）")
+                    self.methods[(iname, mname)] = inst
+                    bodies[mname] = inst
+                    fns.append(inst)
+                self.impls[key] = bodies
+                self.impl_labels[key] = f"{gsname}[{', '.join(tps)}]"
+
+        # ---- 类型约束名校验（v1.61）----
+        # interface 可能声明在泛型函数之后，所以放到这里统一查：约束名必须
+        # 是能力约束（Ord/Eq/Num/Bit）或**本文件**声明的 interface。
+        for fd in self._own_templates:
+            for tp, bl in (fd.get("type_bounds") or {}).items():
+                for b in bl:
+                    if b in _BOUND_CAPS:
+                        continue
+                    if b in self.interfaces:
+                        continue
+                    raise SyntaxError(
+                        f"line {fd.get('line', 0)}: 泛型函数 {fd['name']} 的类型参数 "
+                        f"{tp} 用了未知约束 {b}——可用："
+                        + " / ".join(_BOUND_CAPS)
+                        + "，或本文件声明的 interface（interface 与 impl "
+                        "必须同源文件）")
         # ---- interface 一致性检查（v1.8）----
         for (iname, tname), bodies in self.impls.items():
-            if tname not in self.structs:
-                raise SyntaxError(f"impl {tname} : {iname} —— 未声明的结构体 {tname}")
+            # 泛型 impl 模板物化出来的实例，报错用源码里的写法（Box[T]）而不是
+            # 单态化名（Box__T）——v1.62
+            label = self.impl_labels.get((iname, tname), tname)
+            if tname not in self.structs and tname not in self.enums:
+                raise SyntaxError(
+                    f"impl {label} : {iname} —— 未声明的类型 {tname}")
             for mname, ptypes, rty in self.interfaces[iname]:
                 if mname not in bodies:
-                    raise SyntaxError(f"impl {tname} : {iname} 缺少方法 {mname}")
+                    raise SyntaxError(f"impl {label} : {iname} 缺少方法 {mname}")
                 fd = bodies[mname]
                 got = [t for _, t in fd["params"]]
                 if len(got) != len(ptypes):
                     raise SyntaxError(
-                        f"{tname}.{mname}: 接口要求 {len(ptypes)} 个参数，实现给了 {len(got)}")
+                        f"{label}.{mname}: 接口要求 {len(ptypes)} 个参数，实现给了 {len(got)}")
                 if got and got[0] != ("named", tname):
                     raise SyntaxError(
-                        f"{tname}.{mname}: 第一个参数必须是接收者 {tname}")
+                        f"{label}.{mname}: 第一个参数必须是接收者 {label}")
                 for i, (a, b) in enumerate(zip(got[1:], ptypes[1:]), start=1):
                     if a != b:
-                        raise SyntaxError(f"{tname}.{mname}: 第 {i} 个参数类型与接口不一致")
+                        raise SyntaxError(f"{label}.{mname}: 第 {i} 个参数类型与接口不一致")
                 if fd["ret"] != rty:
-                    raise SyntaxError(f"{tname}.{mname}: 返回类型与接口声明不一致")
+                    raise SyntaxError(f"{label}.{mname}: 返回类型与接口声明不一致")
+        # ---- 编译期反射折叠（v1.71）----
+        # 到这里 struct/enum 表已完整，refl_*[T](i) 全部换成字面量。
+        for fd in fns:
+            if fd.get("body") is not None:
+                fd["body"] = self._refl_resolve(fd["body"])
+        for tdef in tests:
+            tdef["body"] = self._refl_resolve(tdef["body"])
         self._methods = self.methods
         return mod, imports, fns, tests, self.structs, self.enums, self.decl_order
 
@@ -1060,21 +1326,26 @@ class Parser:
             return ("named", self.ensure_result_enum(tt, et, rt.line))
         name = self.eat("NAME").val
         if self.at("SYM", "[") and "." not in name:
-            # 泛型 struct 实例化（v1.59）：Box[int] -> ("named","Box__int")
-            if name not in self.generic_structs:
+            # 泛型类型实例化：Box[int] -> ("named","Box__int")（v1.59 struct，
+            # v1.63 enum）
+            if name not in self.generic_structs and name not in self.generic_enums:
                 raise SyntaxError(
-                    f"line {self.peek().line}: {name} 不是泛型 struct"
-                    "（只有 struct Name[T] 才能带类型实参）")
+                    f"line {self.peek().line}: {name} 不是泛型类型"
+                    "（只有 struct/enum Name[T] 才能带类型实参）")
             self.next()
             targs = [self.parse_type()]
             while self.at("SYM", ","):
                 self.next()
                 targs.append(self.parse_type())
             self.eat("SYM", "]")
-            return ("named", self._instantiate_struct(name, targs, self.peek().line))
-        if name in self.generic_structs:
+            if name in self.generic_structs:
+                return ("named",
+                        self._instantiate_struct(name, targs, self.peek().line))
+            return ("named",
+                    self._instantiate_enum(name, targs, self.peek().line))
+        if name in self.generic_structs or name in self.generic_enums:
             raise SyntaxError(
-                f"line {self.peek().line}: 泛型 struct {name} 必须带类型实参"
+                f"line {self.peek().line}: 泛型类型 {name} 必须带类型实参"
                 f"（写成 {name}[int] 这种形式）")
         while self.at("SYM", "."):
             self.next()
@@ -1100,6 +1371,453 @@ class Parser:
             return ("array", t[1], self._subst_type(t[2], tp_map))
         return t
 
+    def _is_known_type(self, name):
+        """name 是否是一个已知的具体类型名（标量 / struct / enum / 泛型 struct 模板）。
+        泛型 impl 的 `impl Box[T]` 用"不认识的具名类型 = 类型参数"来区分模板与实例。"""
+        return (name in _GEN_SCALARS or name in self.structs
+                or name in self.enums or name in self.generic_structs)
+
+    def _scan_derives(self):
+        """`@derive(A, B)` 属性宏扫描（v1.71）——在语法分析**之前**跑。
+
+        把注解从记号流里摘掉，登记 `self.derives[类型名] = (派生项, 行号)`。
+        摘除之后 parse_program 完全不知道宏存在：它看到的是普通 struct/enum
+        声明，字段表由下面的 `_expand_derive` 在声明解析完后按需展开成普通
+        函数——宏只影响"写了哪些函数"，不影响语法。
+
+        只在花括号深度 0（顶层）识别，函数体里的 `@derive` 不当作宏；
+        注解后面必须紧跟 struct/enum 声明，否则 fail-fast（不猜）。
+        """
+        toks, out = self.toks, []
+        depth, i = 0, 0
+        while i < len(toks):
+            t = toks[i]
+            if t.kind == "SYM" and t.val == "{":
+                depth += 1
+            elif t.kind == "SYM" and t.val == "}":
+                depth -= 1
+            if (depth == 0 and t.kind == "SYM" and t.val == "@"
+                    and i + 1 < len(toks) and toks[i + 1].kind == "NAME"
+                    and toks[i + 1].val == "derive"):
+                j = i + 2
+                if j >= len(toks) or not (toks[j].kind == "SYM"
+                                          and toks[j].val == "("):
+                    raise SyntaxError(
+                        f"line {t.line}: @derive 需要括号：@derive(Json, Eq)")
+                j += 1
+                items = []
+                while j < len(toks) and not (toks[j].kind == "SYM"
+                                             and toks[j].val == ")"):
+                    if toks[j].kind == "NAME":
+                        items.append(toks[j].val)
+                    elif not (toks[j].kind == "SYM" and toks[j].val == ","):
+                        raise SyntaxError(
+                            f"line {t.line}: @derive(...) 里只接受派生项名字，"
+                            f"得到 {toks[j].val!r}")
+                    j += 1
+                if j >= len(toks):
+                    raise SyntaxError(f"line {t.line}: @derive( 没有闭合")
+                if not items:
+                    raise SyntaxError(f"line {t.line}: @derive() 至少要一个派生项")
+                j += 1                      # 吃掉 ')'
+                if not (j + 1 < len(toks)
+                        and toks[j].kind in ("struct", "enum")
+                        and toks[j + 1].kind == "NAME"):
+                    raise SyntaxError(
+                        f"line {t.line}: @derive 只能用于紧随其后的 "
+                        "struct / enum 声明")
+                tname = toks[j + 1].val
+                if tname in self.derives:
+                    raise SyntaxError(
+                        f"line {t.line}: 类型 {tname} 有多个 @derive")
+                self.derives[tname] = (items, t.line)
+                i = j
+                continue
+            out.append(t)
+            i += 1
+        self.toks = out
+
+    # ---- 类型文本（反射返回值 / 文档 / 报错统一口径）----
+    def _type_text(self, ty):
+        """类型元组 -> 源码写法（`vec[int]` / `Point` / `map[str]int`）。"""
+        if not isinstance(ty, tuple) or not ty:
+            return str(ty)
+        k = ty[0]
+        if k == "named":
+            return ty[1]
+        if k == "vec":
+            return f"vec[{self._type_text(ty[1])}]"
+        if k == "slice":
+            return f"[]{self._type_text(ty[1])}"
+        if k == "array":
+            return f"[{ty[1]}]{self._type_text(ty[2])}"
+        if k == "chan":
+            return f"chan[{self._type_text(ty[1])}]"
+        if k == "rc":
+            return f"rc[{self._type_text(ty[1])}]"
+        if k == "map":
+            return f"map[{self._type_text(ty[1])}]{self._type_text(ty[2])}"
+        return str(ty)
+
+    # ---- @derive：字段分类 ----
+    def _derive_field_kind(self, ty, tname, line):
+        """字段类型 -> (kind, info)。kind ∈ int/bool/str/struct/vec。
+
+        不支持的形状一律 fail-fast 并说清"为什么不支持"——静默跳过某个字段
+        会让 JSON 少一个键，比编译不过危险得多。
+        """
+        def bad(why):
+            raise SyntaxError(
+                f"line {line}: @derive 作用在 {tname} 上，字段类型 "
+                f"{self._type_text(ty)} 不支持——{why}")
+
+        if not isinstance(ty, tuple) or not ty:
+            bad("不是合法类型")
+        if ty[0] == "named":
+            t = ty[1]
+            if t in _DERIVE_INT_TYPES:
+                return ("int", t)
+            if t == "bool":
+                return ("bool", t)
+            if t == "str":
+                return ("str", t)
+            if t in _FLOAT_NAMES:
+                bad("f64/f32 暂无 str→浮点解析原语，见 docs/07-gaps.md §7.10")
+            if t in self.structs:
+                return ("struct", t)
+            if t in self.enums:
+                bad("enum 字段暂不支持（enum 自身的 derive 也还没有）")
+            bad("既不是标量也不是本文件声明的 struct")
+        if ty[0] == "vec":
+            ek, einfo = self._derive_field_kind(ty[1], tname, line)
+            if ek == "vec":
+                bad("vec[vec[...]] 暂不支持")
+            return ("vec", (ek, einfo))
+        bad("只支持标量 / struct / vec[标量或 struct]")
+
+    def _zero_lit(self, ty, tname, line):
+        """字段类型的零值字面量（解码函数先用它构造完整 struct 再逐字段赋值）。"""
+        k, info = self._derive_field_kind(ty, tname, line)
+        if k == "int":
+            return "0"
+        if k == "bool":
+            return "false"
+        if k == "str":
+            return '""'
+        if k == "vec":
+            return f"vec[{self._type_text(ty[1])}].new(0)"
+        flds = self.structs[info]
+        if not flds:
+            return f"{info} {{}}"
+        inner = ", ".join(f"{n}: {self._zero_lit(t, tname, line)}"
+                          for n, t in flds)
+        return f"{info} {{ {inner} }}"
+
+    # ---- @derive：代码生成（三个派生项各自产出一段源码文本）----
+    def _gen_json(self, name, fields, line):
+        """derive(Json)：编码 `<T>__json` / `<T>__json_into` + 解码 `<T>_from_json`。
+
+        走 std/json 的 builder / DOM API——转义、数字格式、逗号状态机全部复用
+        已有实现，派生层只负责"字段名 + 字段类型"这两件声明里已有的事实。
+        """
+        L = [f"fn {name}__json(self: {name}) -> str {{",
+             "    let h = json_new(64)",
+             f"    {name}__json_into(self, h)",
+             "    return json_done(h)",
+             "}",
+             "",
+             f"fn {name}__json_into(self: {name}, h: int) -> int {{",
+             "    json_begin_obj(h)"]
+        for i, (fname, fty) in enumerate(fields):
+            k, info = self._derive_field_kind(fty, name, line)
+            if k == "int":
+                L.append(f'    json_key_int(h, "{fname}", self.{fname})')
+            elif k == "bool":
+                L.append(f'    json_key_bool(h, "{fname}", self.{fname})')
+            elif k == "str":
+                L.append(f'    json_key_str(h, "{fname}", self.{fname})')
+            elif k == "struct":
+                L.append(f'    json_key(h, "{fname}")')
+                L.append(f"    {info}__json_into(self.{fname}, h)")
+            else:
+                ek, einfo = info
+                L.append(f'    json_key(h, "{fname}")')
+                L.append("    json_begin_arr(h)")
+                L.append(f"    let mut j{i} = 0")
+                L.append(f"    while j{i} < self.{fname}.len() {{")
+                if ek == "int":
+                    L.append(f"        json_val_int(h, self.{fname}.get(j{i}))")
+                elif ek == "bool":
+                    L.append(f"        json_val_bool(h, self.{fname}.get(j{i}))")
+                elif ek == "str":
+                    L.append(f"        json_val_str(h, self.{fname}.get(j{i}))")
+                else:
+                    L.append(f"        {einfo}__json_into(self.{fname}.get(j{i}), h)")
+                L.append(f"        j{i} = j{i} + 1")
+                L.append("    }")
+                L.append("    json_end_arr(h)")
+        L += ["    json_end_obj(h)",
+              "    return 0",
+              "}",
+              "",
+              f"fn {name}_from_json(s: str) -> {name} {{",
+              "    let d = json_parse(s)",
+              f'    assert(json_ok(d), "{name}_from_json: 非法 JSON")',
+              f"    return {name}__from_node(d, json_root(d))",
+              "}",
+              "",
+              f"fn {name}__from_node(d: int, n: int) -> {name} {{"]
+        zeros = ", ".join(f"{fn}: {self._zero_lit(ft, name, line)}"
+                          for fn, ft in fields)
+        L.append(f"    let mut out = {name} {{ {zeros} }}")
+        for i, (fname, fty) in enumerate(fields):
+            k, info = self._derive_field_kind(fty, name, line)
+            if k == "int":
+                L.append(f'    out.{fname} = json_int(d, json_obj_get(d, n, "{fname}"))')
+            elif k == "bool":
+                L.append(f'    out.{fname} = json_bool(d, json_obj_get(d, n, "{fname}"))')
+            elif k == "str":
+                L.append(f'    out.{fname} = json_str(d, json_obj_get(d, n, "{fname}"))')
+            elif k == "struct":
+                L.append(f'    out.{fname} = {info}__from_node(d, '
+                         f'json_obj_get(d, n, "{fname}"))')
+            else:
+                ek, einfo = info
+                L.append(f'    let a{i} = json_obj_get(d, n, "{fname}")')
+                L.append(f"    let mut j{i} = 0")
+                L.append(f"    while j{i} < json_arr_len(d, a{i}) {{")
+                if ek == "int":
+                    L.append(f"        out.{fname}.push(json_int(d, json_arr_at(d, a{i}, j{i})))")
+                elif ek == "bool":
+                    L.append(f"        out.{fname}.push(json_bool(d, json_arr_at(d, a{i}, j{i})))")
+                elif ek == "str":
+                    L.append(f"        out.{fname}.push(json_str(d, json_arr_at(d, a{i}, j{i})))")
+                else:
+                    L.append(f"        out.{fname}.push({einfo}__from_node(d, "
+                             f"json_arr_at(d, a{i}, j{i})))")
+                L.append(f"        j{i} = j{i} + 1")
+                L.append("    }")
+        L += ["    return out",
+              "}"]
+        return "\n".join(L)
+
+    def _gen_eq(self, name, fields, line):
+        """derive(Eq)：结构等价。
+
+        为什么需要：聚合的 `==` 在 Lower 里是**地址比较**（07-gaps §7.6），
+        `Point{x:1} == Point{x:1}` 为 false。派生出的 `<T>__eq` 逐字段比，
+        是语言里第一个"聚合按值相等"的实现。
+        """
+        L = [f"fn {name}__eq(self: {name}, o: {name}) -> bool {{"]
+        for i, (fname, fty) in enumerate(fields):
+            k, info = self._derive_field_kind(fty, name, line)
+            if k == "struct":
+                L.append(f"    if !{info}__eq(self.{fname}, o.{fname}) {{")
+                L.append("        return false")
+                L.append("    }")
+            elif k == "vec":
+                ek, einfo = info
+                L.append(f"    if self.{fname}.len() != o.{fname}.len() {{")
+                L.append("        return false")
+                L.append("    }")
+                L.append(f"    let mut i{i} = 0")
+                L.append(f"    while i{i} < self.{fname}.len() {{")
+                if ek == "struct":
+                    L.append(f"        if !{einfo}__eq(self.{fname}.get(i{i}), "
+                             f"o.{fname}.get(i{i})) {{")
+                else:
+                    L.append(f"        if self.{fname}.get(i{i}) != "
+                             f"o.{fname}.get(i{i}) {{")
+                L.append("            return false")
+                L.append("        }")
+                L.append(f"        i{i} = i{i} + 1")
+                L.append("    }")
+            else:
+                L.append(f"    if self.{fname} != o.{fname} {{")
+                L.append("        return false")
+                L.append("    }")
+        L += ["    return true", "}"]
+        return "\n".join(L)
+
+    def _gen_show(self, name, fields, line):
+        """derive(Show)：`Point { x: 1, y: 2 }` 形态的文本（非 JSON，给人看）。
+
+        bool 单独走 if/else 拼字面量：`b.to_str()` 对**字段访问**走的是整数
+        路径（打印 1/0），只有字面量位置才认 bool（Lower 的既有口径）。
+        派生层不赌这个差异，直接拼 "true"/"false"。
+        """
+        if not fields:
+            return (f"fn {name}__show(self: {name}) -> str {{\n"
+                    f'    return "{name} {{}}"\n}}')
+        L = [f'    let mut s = "{name} {{"']
+        for i, (fname, fty) in enumerate(fields):
+            k, info = self._derive_field_kind(fty, name, line)
+            sep = f" {fname}: " if i == 0 else f", {fname}: "
+            if k == "bool":
+                L.append(f'    s = s + "{sep}"')
+                L.append(f"    if self.{fname} {{")
+                L.append('        s = s + "true"')
+                L.append("    } else {")
+                L.append('        s = s + "false"')
+                L.append("    }")
+            elif k == "vec":
+                L.append(f'    s = s + "{sep}["')
+                L += self._show_vec_into(fname, fty, i, name, line)
+                L.append('    s = s + "]"')
+            else:
+                L.append(f'    s = s + "{sep}"'
+                         f" + {self._show_expr('self.' + fname, k, info)}")
+        L.append('    return s + " }"')
+        head = f"fn {name}__show(self: {name}) -> str {{"
+        return "\n".join([head] + L + ["}"])
+
+    def _show_vec_into(self, fname, fty, idx, tname, line):
+        k, info = self._derive_field_kind(fty, tname, line)
+        ek, einfo = info
+        body = [f"    let mut i{idx} = 0",
+                f"    while i{idx} < self.{fname}.len() {{",
+                f"        if i{idx} > 0 {{",
+                '            s = s + ", "',
+                "        }"]
+        if ek == "str":
+            body.append(f"        s = s + self.{fname}.get(i{idx})")
+        else:
+            body.append(f"        s = s + "
+                        f"{self._show_expr('self.' + fname + f'.get(i{idx})', ek, einfo)}")
+        body += [f"        i{idx} = i{idx} + 1", "    }"]
+        return body
+
+    def _show_expr(self, expr, kind, info):
+        if kind == "int":
+            return f"{expr}.to_str()"
+        if kind == "bool":
+            return f"{expr}.to_str()"
+        if kind == "str":
+            return expr
+        return f"{info}__show({expr})"
+
+    def _expand_derive(self, name, fields, kind, line, fns, imports):
+        """按 `@derive` 列表展开成普通函数，追加进本文件的函数列表。
+
+        实现方式是**生成源码再解析**（不是手工拼 AST）：生成的代码走的是
+        与用户手写完全相同的解析/推断/降级路径，宏不可能造出后端没见过的
+        节点形状。子解析器共享本文件的 struct/enum 符号表，所以字段类型
+        能照常解析。
+        """
+        items, dline = self.derives[name]
+        seen = set()
+        for it in items:
+            if it not in _DERIVE_ITEMS:
+                raise SyntaxError(
+                    f"line {dline}: 未知派生项 {it!r}——支持 "
+                    + " / ".join(_DERIVE_ITEMS))
+            if it in seen:
+                raise SyntaxError(f"line {dline}: @derive 重复写了 {it}")
+            seen.add(it)
+        if kind != "struct":
+            raise SyntaxError(
+                f"line {dline}: @derive 目前只支持 struct（{name} 是 {kind}）")
+        if name in self.generic_structs:
+            raise SyntaxError(
+                f"line {dline}: 泛型 struct {name} 不能直接 @derive——"
+                "请对实例化后的类型派生，或在 impl 里手写")
+        parts = []
+        for it in _DERIVE_ITEMS:
+            if it in seen:
+                parts.append(getattr(self, "_gen_" + it.lower())(name, fields,
+                                                                 dline))
+        src = "\n\n".join(parts)
+        if "Json" in seen and "std.json" not in imports:
+            # derive(Json) 的产物调用 std/json 的 builder/DOM API：
+            # 自动补 import，用户不必知道派生实现依赖哪个模块。
+            imports.append("std.json")
+        sub = Parser(tokenize(src), consts=self.consts,
+                     generic_fns=self.generic_fns)
+        sub.structs, sub.enums = self.structs, self.enums
+        sub.const_fns = self.const_fns
+        res = sub.parse_program()
+        for fd in res[2]:
+            fd["derive_of"] = name
+            fd["derive_line"] = dline
+            if name in self.pub_types:
+                # 派生函数继承类型的可见性：pub struct 的 json/eq/show 也要能
+                # 被别的模块调用（否则库导出的类型在调用方一用就撞 pub 检查）
+                fd["pub"] = True
+        fns.extend(res[2])
+
+    # ---- 编译期反射：refl_*[T](i) 的折叠 ----
+    def _refl_value(self, node):
+        _, what, ty, args, line = node
+        if not (isinstance(ty, tuple) and ty[0] == "named"):
+            raise SyntaxError(
+                f"line {line}: {what} 的类型实参必须是具名类型"
+                f"（得到 {self._type_text(ty)}）")
+        tname = ty[1]
+
+        def const_int(k=0):
+            if len(args) <= k:
+                raise SyntaxError(f"line {line}: {what} 缺少下标实参")
+            a = args[k]
+            if not (isinstance(a, tuple) and a[0] == "num"):
+                raise SyntaxError(
+                    f"line {line}: {what} 的下标必须是编译期整数常量"
+                    "（字面量或 const）")
+            return a[1]
+
+        if len(args) > 1:
+            raise SyntaxError(f"line {line}: {what} 最多一个下标实参")
+        if what == "refl_type_name":
+            if args:
+                raise SyntaxError(f"line {line}: refl_type_name 不接受实参")
+            return ("str", tname)
+        if what in ("refl_field_count", "refl_field_name", "refl_field_type"):
+            if tname not in self.structs:
+                raise SyntaxError(
+                    f"line {line}: {what}[{tname}] —— {tname} 不是 struct"
+                    "（字段反射只支持 struct）")
+            flds = self.structs[tname]
+            if what == "refl_field_count":
+                if args:
+                    raise SyntaxError(f"line {line}: refl_field_count 不接受实参")
+                return ("num", len(flds))
+            i = const_int()
+            if not 0 <= i < len(flds):
+                raise SyntaxError(
+                    f"line {line}: {what}[{tname}]({i}) 越界——"
+                    f"{tname} 有 {len(flds)} 个字段")
+            return ("str", flds[i][0]) if what == "refl_field_name" \
+                else ("str", self._type_text(flds[i][1]))
+        if what in ("refl_variant_count", "refl_variant_name",
+                    "refl_variant_arity"):
+            if tname not in self.enums:
+                raise SyntaxError(
+                    f"line {line}: {what}[{tname}] —— {tname} 不是 enum")
+            vs = self.enums[tname]
+            if what == "refl_variant_count":
+                if args:
+                    raise SyntaxError(f"line {line}: refl_variant_count 不接受实参")
+                return ("num", len(vs))
+            i = const_int()
+            if not 0 <= i < len(vs):
+                raise SyntaxError(
+                    f"line {line}: {what}[{tname}]({i}) 越界——"
+                    f"{tname} 有 {len(vs)} 个变体")
+            return ("str", vs[i][0]) if what == "refl_variant_name" \
+                else ("num", len(vs[i][1]))
+        raise SyntaxError(f"line {line}: 未知反射函数 {what}")
+
+    def _refl_resolve(self, node):
+        """把 AST 里的 ("refl", ...) 节点整棵替换成常量字面量。"""
+        if isinstance(node, tuple):
+            if node and node[0] == "refl":
+                return self._refl_value(node)
+            return tuple(self._refl_resolve(x) for x in node)
+        if isinstance(node, list):
+            return [self._refl_resolve(x) for x in node]
+        if isinstance(node, dict):
+            return {k: self._refl_resolve(v) for k, v in node.items()}
+        return node
+
     def _instantiate_struct(self, gname, targs, line):
         """按类型实参现场合成具名结构体（受控单态化）。
 
@@ -1118,12 +1836,40 @@ class Parser:
                 raise SyntaxError(
                     f"line {line}: 泛型 struct {gname} 的类型实参暂只支持具名类型"
                     "（标量 / struct / enum / 其他实例），容器类型实参不做")
+            if self._in_gimpl and t[1] in (self._cur_tparams or []):
+                # 泛型 impl 模板里的符号类型（v1.62）：impl Box[T] 的 Box[T] 不
+                # 实例化，返回符号名 Box__T，物化时按具体实例名替换。
+                # 同时记下符号名的实参表——方法体里可能还出现 Pair[T, int]
+                # 这种"部分具体"的形态，物化时要逐个参数替换。
+                sym = gname + "__" + "_".join(
+                    x[1] for x in targs if x and x[0] == "named")
+                self.symbolic_structs[sym] = (
+                    gname, [x[1] for x in targs if x and x[0] == "named"], "struct")
+                return sym
+            if t[1] in (self._cur_tparams or []):
+                # 泛型函数里 Box[T] 以前会静默造出一个字段类型为 T 的假 struct
+                # Box__T（只有单字布局的实参才"碰巧能用"），v1.62 起 fail-fast。
+                raise SyntaxError(
+                    f"line {line}: 泛型函数里暂不支持把类型参数用作泛型 struct 的"
+                    f"类型实参（{gname}[{t[1]}]）——请用具体类型（{gname}[int]），"
+                    "或把逻辑写进泛型 impl 模板 impl "
+                    f"{gname}[{t[1]}] : <接口>")
             if self._cur_struct_tparams and t[1] in self._cur_struct_tparams:
                 raise SyntaxError(
                     f"line {line}: 泛型 struct 的字段里暂不支持嵌套泛型 struct"
                     f"（{gname}[{t[1]}] 的类型实参还是外层模板的类型参数）")
             tags.append(t[1])
         iname = gname + "__" + "_".join(tags)
+        # 类型约束（v1.61）：实例化时逐条核对能力约束。
+        # 放在 "已生成则复用" 之前——不同实参组合是不同实例，各查各的。
+        sbounds = tmpl.get("bounds") or {}
+        for tp, bl in sbounds.items():
+            tyn = tags[params.index(tp)]
+            for cap in bl:
+                if not _cap_supports(cap, tyn):
+                    raise SyntaxError(
+                        f"line {line}: 泛型 struct {gname} 的类型参数 {tp} "
+                        f"要求 {cap}（{_cap_desc(cap)}），但实参 {tyn} 不满足")
         if iname in self.structs:
             return iname
         tp_map = dict(zip(params, [("named", tg) for tg in tags]))
@@ -1131,27 +1877,93 @@ class Parser:
                   for fn, ft in tmpl["fields"]]
         self.structs[iname] = fields
         self.decl_order.append(("struct", iname))
+        self.struct_instances.append((gname, tuple(tags), iname))
+        return iname
+
+    def _instantiate_enum(self, gname, targs, line):
+        """泛型 enum 单态化（v1.63）：Opt[int] -> Opt__int（普通枚举）。
+
+        与泛型 struct 同一套纪律：解析期现场合成，布局/匹配/穷尽性检查全部
+        复用既有路径；变体载荷里的 T 按实参替换。
+        """
+        tmpl = self.generic_enums[gname]
+        params = tmpl["params"]
+        if len(targs) != len(params):
+            raise SyntaxError(
+                f"line {line}: 泛型 enum {gname} 需要 {len(params)} 个类型实参"
+                f"（[{'、'.join(params)}]），得到 {len(targs)} 个")
+        tags = []
+        for t in targs:
+            if not (t and t[0] == "named"):
+                raise SyntaxError(
+                    f"line {line}: 泛型 enum {gname} 的类型实参暂只支持具名类型"
+                    "（标量 / struct / enum / 其他实例）")
+            if self._in_gimpl and t[1] in (self._cur_tparams or []):
+                # 泛型 impl 模板里的符号类型（v1.64）：impl Opt[T] 的 Opt[T]
+                # 不实例化，返回符号名 Opt__T，物化时按具体实例名替换。
+                sym = gname + "__" + "_".join(
+                    x[1] for x in targs if x and x[0] == "named")
+                self.symbolic_structs[sym] = (
+                    gname, [x[1] for x in targs if x and x[0] == "named"], "enum")
+                return sym
+            if t[1] in (self._cur_tparams or []):
+                raise SyntaxError(
+                    f"line {line}: 泛型函数/impl 模板里暂不支持把类型参数用作泛型 "
+                    f"enum 的类型实参（{gname}[{t[1]}]）——请用具体类型")
+            tags.append(t[1])
+        iname = gname + "__" + "_".join(tags)
+        if iname in self.enums:
+            return iname
+        tp_map = dict(zip(params, [("named", tg) for tg in tags]))
+        variants = [(vn, [(fn, self._subst_type(ft, tp_map)) for fn, ft in fs])
+                    for vn, fs in tmpl["variants"]]
+        self.enums[iname] = variants
+        self.decl_order.append(("enum", iname))
+        self.enum_instances.append((gname, tuple(tags), iname))
         return iname
 
     def parse_fn(self):
-        self.eat("fn")
+        fn_tok = self.eat("fn")
         name = self.eat("NAME").val
         tparams = None
+        tbounds = {}
         if self.at("SYM", "["):
-            # 用户泛型（v1.11 起；v1.36 支持多类型参数）：
-            # fn name[A, B](a: A, b: B) -> ... { ... }。
+            # 用户泛型（v1.11 起；v1.36 支持多类型参数；v1.61 支持类型约束）：
+            # fn name[A, B](a: A, b: B) -> ... { ... }
+            # fn name[T: Ord + Num](...)        —— 能力约束
+            # fn name[T: Shape](...)            —— 接口约束（impl T : Shape 必须存在）
             # 调用点可显式实例化 f[int, str](...)，也可省略方括号由推导
             # 补全（v1.36，见 expand_generics / _GenInfer）。
             bracket = self.next()
-            tparams = [self.eat("NAME").val]
-            while self.at("SYM", ","):
-                self.next()
-                tparams.append(self.eat("NAME").val)
+            tparams = []
+            while True:
+                pname = self.eat("NAME").val
+                tparams.append(pname)
+                if self.at("SYM", ":"):
+                    self.next()
+                    bl = [self.eat("NAME").val]
+                    while self.at("SYM", "+"):
+                        self.next()
+                        bl.append(self.eat("NAME").val)
+                    if len(set(bl)) != len(bl):
+                        raise SyntaxError(
+                            f"line {bracket.line}: 类型参数 {pname} 的约束重复：{bl}")
+                    tbounds[pname] = bl
+                if self.at("SYM", ","):
+                    self.next()
+                    continue
+                break
             if len(set(tparams)) != len(tparams):
                 raise SyntaxError(
                     f"line {bracket.line}: 泛型类型参数重名：{tparams}")
             self.eat("SYM", "]")
         self.eat("SYM", "(")
+        # 类型参数作用域：形参/返回值/体内的 `T` 都要认（v1.62 起覆盖签名，
+        # 此前只有函数体——`fn f[T](x: Box[T])` 会在签名里静默造出假 struct）。
+        # 非泛型函数（如泛型 impl 里的方法）**继承**外层作用域，不能清空。
+        saved_tp = getattr(self, "_cur_tparams", None)
+        if tparams:
+            self._cur_tparams = tparams
         params = []
         while not self.at("SYM", ")"):
             pname = self.eat("NAME").val
@@ -1164,18 +1976,18 @@ class Parser:
         if self.at("SYM", "->"):
             self.next()
             ret = self.parse_type()
-        # 类型参数作用域：体解析期间 `T { ... }` 是泛型字面量占位（v1.11）
-        saved_tp = getattr(self, "_cur_tparams", None)
-        self._cur_tparams = tparams or []
         if self.at("SYM", "{"):
             body = self.parse_block()
         else:
             # 无函数体：仅 @extern("C") 声明允许（parse_program 校验注解存在）
             body = None
         self._cur_tparams = saved_tp
-        fd = {"name": name, "params": params, "ret": ret, "body": body}
+        fd = {"name": name, "params": params, "ret": ret, "body": body,
+              "line": fn_tok.line}
         if tparams:
             fd["type_params"] = tparams
+        if tbounds:
+            fd["type_bounds"] = tbounds
         return fd
 
     # ---- 语句 ----
@@ -1323,6 +2135,15 @@ class Parser:
             return ("wild",)
         name = self.eat("NAME").val
         path = [name]
+        if self.at("SYM", "[") and name in self.generic_enums:
+            # 泛型 enum 模式（v1.63）：Opt[int].Some(x) => ...
+            self.next()
+            targs = [self.parse_type()]
+            while self.at("SYM", ","):
+                self.next()
+                targs.append(self.parse_type())
+            self.eat("SYM", "]")
+            path = [self._instantiate_enum(name, targs, t.line)]
         while self.at("SYM", "."):
             self.next()
             path.append(self.eat("NAME").val)
@@ -1658,6 +2479,60 @@ class Parser:
             else:
                 return e
 
+    def _parse_interp(self, text, line):
+        """把 "a{x}b" 拆成 ("interp", [("str","a"), <expr>, ("str","b")])。
+
+        表达式段用**子解析器**（tokenize 子串 + parse_expr）解析，共享父解析器的
+        const / 泛型 / 结构体表；段内只允许表达式（不含语句），花括号不嵌套。
+        """
+        parts = []
+        buf = []
+        i, n = 0, len(text)
+        while i < n:
+            c = text[i]
+            if c == "{" and i + 1 < n and text[i + 1] == "{":
+                buf.append("{")
+                i += 2
+                continue
+            if c == "}" and i + 1 < n and text[i + 1] == "}":
+                buf.append("}")
+                i += 2
+                continue
+            if c == "{":
+                j = text.find("}", i + 1)
+                if j < 0:
+                    raise SyntaxError(f"line {line}: 字符串插值缺少右花括号")
+                if buf:
+                    parts.append(("str", "".join(buf)))
+                    buf = []
+                inner = text[i + 1:j].strip()
+                if not inner:
+                    raise SyntaxError(f"line {line}: 插值表达式为空")
+                parts.append(self._parse_interp_expr(inner, line))
+                i = j + 1
+                continue
+            buf.append(c)
+            i += 1
+        if buf:
+            parts.append(("str", "".join(buf)))
+        if not parts:
+            parts.append(("str", ""))
+        return ("interp", parts)
+
+    def _parse_interp_expr(self, text, line):
+        sub = Parser(tokenize(text), consts=self.consts,
+                     generic_fns=self.generic_fns)
+        sub.structs.update(self.structs)
+        sub.enums.update(self.enums)
+        sub.generic_structs.update(self.generic_structs)
+        sub.const_fns.update(self.const_fns)
+        e = sub.parse_expr()
+        if not sub.at("EOF"):
+            raise SyntaxError(
+                f"line {line}: 插值表达式有多余记号 {sub.peek().val!r}"
+                "（插值里只能放一个表达式）")
+        return e
+
     def _is_type_path(self, path):
         """路径是否是【类型】路径：
         - 末段是已声明的用户结构体名，或
@@ -1794,6 +2669,10 @@ class Parser:
         if t.kind == "STR":
             self.next()
             return ("str", t.val)
+        if t.kind == "FSTR":
+            # 插值字符串（v1.61）：f"x={x}, n={n}" —— {{ / }} 是转义
+            self.next()
+            return self._parse_interp(t.val, t.line)
         if t.kind == "true":
             self.next()
             return ("bool", True)
@@ -1813,6 +2692,16 @@ class Parser:
                 return self.consts[t.val]
             # 点路径（仅吸收非方法调用的 .NAME 段；NAME( 留给 postfix 处理方法调用）
             path = [t.val]
+            if self.at("SYM", "[") and t.val in self.generic_enums:
+                # 泛型 enum 构造（v1.63）：Opt[int].Some(v: 1) / Opt[int].None
+                # 先把类型实参单态化成 Opt__int，再交给 postfix 的枚举变体分支
+                self.next()
+                targs = [self.parse_type()]
+                while self.at("SYM", ","):
+                    self.next()
+                    targs.append(self.parse_type())
+                self.eat("SYM", "]")
+                path = [self._instantiate_enum(t.val, targs, t.line)]
             while self.at("SYM", ".") and self.peek(1).kind == "NAME":
                 nxt2 = self.peek(2)
                 if nxt2.kind == "SYM" and nxt2.val == "(":
@@ -1884,6 +2773,17 @@ class Parser:
                         self.next()
                 self.eat("SYM", "}")
                 return ("structlit", path, fields)
+            if self.at("SYM", "[") and len(path) == 1 \
+                    and path[0] in _REFL_FUNCS:
+                # 编译期反射（v1.71）：refl_field_count[Point]()
+                # 节点先原样留在 AST 里，parse_program 末尾统一折叠成常量——
+                # 这样反射可以写在使用点的**前面**（类型尚未解析完）。
+                g = self.next()
+                rty = self.parse_type()
+                self.eat("SYM", "]")
+                self.eat("SYM", "(")
+                rargs = self.parse_args()   # parse_args 自己吃掉 ')'
+                return ("refl", path[0], rty, rargs, g.line)
             if self.at("SYM", "[") and len(path) == 1 and path[0] in self.generic_fns:
                 # 泛型显式实例化：f[int, str](...)（v1.11 单参；v1.36 多参）。
                 # 之所以不歧义：语言没有"下标后调用"（函数指针数组），
@@ -1963,6 +2863,142 @@ _GEN_SCALARS = {"int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8",
                 "bool", "str", "float", "f64", "f32"}
 _GEN_INTS = {"int", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8"}
 
+# ---------------------------------------------------------------------------
+# 2d. 类型约束（trait bound，v1.61）
+# ---------------------------------------------------------------------------
+# 约束名 -> 它授权模板体使用的运算符。检查分三层：
+#   * 声明期（模板本身）：体内对 T 用到的每个运算符都必须被声明的约束覆盖，
+#     否则报"约束不足"——约束是给调用方的契约，必须诚实；
+#   * 实例化期：类型实参必须满足声明的约束；
+#   * 实例化期：未声明约束的模板也要按"体内实际用到的运算符"逐条核对具体
+#     类型（否则 struct 会被静默地按地址比较——v1.61 之前的真实坑）。
+# 具体类型口径与 Lower 的实际行为一致（tests/t101_bounds.qma 逐条钉住）：
+#   * Ord：整数族 + 浮点 + str（v1.66 起 str 按字典序）。struct 的 < 是地址比较，不算支持；
+#   * Eq ：整数族 + 浮点 + bool + str。**聚合（struct/enum）不算**——
+#          `Color.Red == Color.Red` 实测为 false，比较的是聚合的地址
+#          （见 docs/07-gaps.md §7.6）；
+#   * Num：整数族 + 浮点（str 只有 + 拼接，不算 Num）；
+#   * Bit：仅整数族。
+_BOUND_CAPS = ("Ord", "Eq", "Num", "Bit", "Show")
+
+_BOUND_OPS = {
+    "Ord": ("<", "<=", ">", ">="),
+    "Eq": ("==", "!="),
+    "Num": ("+", "-", "*", "/", "%"),
+    "Bit": ("&", "|", "^", "<<", ">>", ">>>", "~"),
+    # to_str 是方法不是运算符，但同样是"能力"：只有标量与 str 能转文本，
+    # 聚合值调 to_str 会拿到指针数字（v1.64 起用 Show 约束在编译期拦）
+    "Show": ("to_str",),
+}
+
+_FLOAT_NAMES = ("f64", "f32", "float")
+
+
+def _cap_supports(cap, tyname):
+    """具体类型 tyname 是否满足能力约束 cap（口径见上方注释）。"""
+    if cap == "Ord":
+        # str 自 v1.66 起按字节字典序比较（此前 < 是地址比较，故不在表里）
+        return (tyname in _GEN_INTS or tyname in _FLOAT_NAMES
+                or tyname == "str")
+    if cap == "Eq":
+        return (tyname in _GEN_INTS or tyname in _FLOAT_NAMES
+                or tyname in ("bool", "str"))
+    if cap == "Num":
+        return tyname in _GEN_INTS or tyname in _FLOAT_NAMES
+    if cap == "Bit":
+        return tyname in _GEN_INTS
+    if cap == "Show":
+        return (tyname in _GEN_INTS or tyname in _FLOAT_NAMES
+                or tyname in ("bool", "str"))
+    return False
+
+
+def _cap_for_op(op):
+    """运算符 -> 需要的能力约束；无对应约束（如 str 拼接之外的 ==）返回 None。"""
+    for cap in _BOUND_CAPS:
+        if op in _BOUND_OPS[cap]:
+            return cap
+    return None
+
+
+def _cap_desc(cap):
+    return {"Ord": "整数/浮点/str（可比较大小）",
+            "Eq": "整数/浮点/bool/str（可判等）",
+            "Num": "整数/浮点（可四则运算）",
+            "Bit": "整数（可位运算）",
+            "Show": "整数/浮点/bool/str（可 to_str）"}.get(cap, cap)
+
+
+# ---------------------------------------------------------------------------
+# 2e. 属性宏 @derive + 编译期反射（v1.71）
+# ---------------------------------------------------------------------------
+# 语言没有运行时元数据段，也没有通用 token 宏。这一层给的是**纯编译期**能力：
+#
+#   * `@derive(Json, Eq, Show)` 作用在 struct 声明上，按**字段表**生成
+#     `<T>__json` / `<T>__json_into` / `<T>_from_json` / `<T>__eq` / `<T>__show`
+#     等普通函数——产物与手写字段表逐字等价（同一套 AST、同一套 Lower，
+#     零运行时元数据、零动态派发）。序列化从此不用再抄字段名。
+#   * `refl_*[T](i)` 在解析期折叠成 int / str 字面量：类型元数据只存在于
+#     编译期，运行时不占一个字节。
+#
+# 边界（同步写在 docs/02-language.md §宏与反射）：
+#   * 只支持 struct；enum 与泛型 struct 模板 fail-fast（先实例化再派生）；
+#   * Json 支持 int 族 / bool / str / 嵌套 struct / vec[这些]；
+#     f64 暂不支持——缺 str→浮点解析原语（见 docs/07-gaps.md §7.10）。
+_DERIVE_ITEMS = ("Json", "Eq", "Show")
+_DERIVE_INT_TYPES = {"int", "i64", "i32", "i16", "i8",
+                     "u64", "u32", "u16", "u8", "byte"}
+_REFL_FUNCS = ("refl_type_name", "refl_field_count", "refl_field_name",
+               "refl_field_type", "refl_variant_count", "refl_variant_name",
+               "refl_variant_arity")
+
+
+def _iter_bound_ops(body, infer, env):
+    """遍历函数体，产出 (op, 左操作数类型, 右操作数类型)。
+
+    只产出**运算符**节点（binop / 复合赋值 / 一元 -~）；类型推断失败的
+    一侧给 None。语句与表达式统一递归——AST 里 tuple/list 不会成环。
+    """
+    def ty(e):
+        try:
+            return infer.infer(e, env)
+        except Exception:          # 推断是尽力而为：拿不到类型就跳过
+            return None
+
+    def walk(x):
+        if isinstance(x, list):
+            for v in x:
+                yield from walk(v)
+            return
+        if not isinstance(x, tuple) or not x:
+            return
+        k = x[0]
+        if k == "binop" and len(x) == 4:
+            yield (x[1], ty(x[2]), ty(x[3]))
+        elif k == "unop" and len(x) == 3:
+            yield (x[1], ty(x[2]), None)
+        elif k == "method" and len(x) == 4 and x[2] == "to_str":
+            # to_str 能力（Show 约束）：只对标量/str 成立
+            yield ("to_str", ty(x[1]), None)
+        elif k == "assign" and len(x) == 4 and x[2] != "=":
+            # 复合赋值 x += e 等价于 x = x + e
+            yield (x[2][:-1], ty(("name", x[1])), ty(x[3]))
+        for v in x[1:]:
+            yield from walk(v)
+
+    yield from walk(body)
+
+
+def _named(t):
+    """("named", X) -> X；其余返回 None。"""
+    if isinstance(t, tuple) and len(t) == 2 and t[0] == "named":
+        return t[1]
+    return None
+
+
+def _bound_list_str(bounds):
+    return " + ".join(bounds) if bounds else "（无）"
+
 
 def _ty_str(t):
     """类型 AST -> 可读串（错误信息用）"""
@@ -2009,6 +3045,38 @@ def _ty_subst(t, mapping):
     if k == "chan":
         return ("chan", _ty_subst(t[1], mapping))
     return t
+
+
+def _subst_gimpl(x, tp_map):
+    """泛型 impl 模板物化时的替换（v1.62）：类型参数名 -> 具体类型名。
+
+    与 expand_generics.subst 的分工：这里只做**纯改名**——impl 模板的方法体
+    在解析期就是完整 AST（没有 gcall 之外的类型痕迹），替换点只有三处：
+      * ("named", "T") / ("named", "Box__T")  类型位置与标注
+      * ("tp_lit", "T")                       `T { ... }` 占位字面量
+      * ("gcall", f, ("T",), ...)             显式实例化的类型方括号
+    变量名是 ("name", s)，与类型 ("named", s) 不同标签，天然不会被误替换。
+    """
+    if isinstance(x, tuple):
+        if x and x[0] == "named" and len(x) == 2 and x[1] in tp_map:
+            return ("named", tp_map[x[1]])
+        if x and x[0] == "tp_lit" and x[1] in tp_map:
+            return ("structlit", [tp_map[x[1]]],
+                    {k: _subst_gimpl(v, tp_map) for k, v in x[2].items()})
+        if x and x[0] in ("structlit", "enumlit", "pat") and len(x) >= 3 \
+                and isinstance(x[1], list):
+            # 字面量的类型名是**字符串列表**（不是 ("named", s)），
+            # Pair[T, int] { ... } 的路径要单独换名
+            return (x[0], [tp_map.get(p, p) for p in x[1]],
+                    _subst_gimpl(x[2], tp_map))
+        if x and x[0] == "gcall" and len(x) >= 4:
+            return ("gcall", x[1], tuple(tp_map.get(t, t) for t in x[2]),
+                    [_subst_gimpl(a, tp_map) for a in x[3]],
+                    x[4] if len(x) > 4 else 0)
+        return tuple(_subst_gimpl(v, tp_map) for v in x)
+    if isinstance(x, list):
+        return [_subst_gimpl(v, tp_map) for v in x]
+    return x
 
 
 class _GenInfer:
@@ -2074,12 +3142,12 @@ class _GenInfer:
         if k == "gcall":
             return self._gcall_ret(e[1], e[2], e[3])
         if k == "index":
-            at = self._infer(e[1])
+            at = self._infer(e[1], env)
             if at is not None and at[0] == "named" and at[1] == "str":
                 return ("named", "int")     # str 下标得字节值
             return self._elem(at)
         if k == "sliceof":
-            el = self._elem(self._infer(e[1]))
+            el = self._elem(self._infer(e[1], env))
             return ("slice", el) if el is not None else None
         if k == "field":
             st = self._infer(e[1])
@@ -2298,7 +3366,8 @@ def expand_generics(fns, generic_fns, structs, enums):
       * 泛型体内可调用其他泛型（含自递归，显式或推导）；
       * 泛型模板不支持注解（@simd/@extern），fail-fast 在 parse_program；
       * 推导是流不敏感的：分支里改绑类型可能推错，Lower 会抓住不匹配；
-      * 不支持：泛型 struct、泛型方法、类型约束（trait bound）。
+      * 类型约束（v1.61）：`[T: Ord + Eq]`（能力）与 `[T: Shape]`（接口）；
+      * 不支持：泛型方法、泛型 enum。
     """
     import copy
     instances = {}   # (fname, 类型实参元组) -> 实例 fn dict（先注册后填体）
@@ -2306,9 +3375,83 @@ def expand_generics(fns, generic_fns, structs, enums):
     infer = _GenInfer(generic_fns, structs, enums,
                       {f["name"]: f.get("ret") for f in fns})
 
+    # 接口约束的实现表：impl Type : Iface 落成的函数带 impl_iface/self_type。
+    impls = {(f.get("impl_iface"), f.get("self_type"))
+             for f in fns if f.get("impl_iface")}
+
     def legal(tyname):
         return (tyname in _GEN_SCALARS or tyname in structs
                 or tyname in enums)
+
+    def check_declared(fname, tmpl, tp_map, line):
+        """实例化期：类型实参必须满足模板声明的约束（v1.61）。"""
+        for tp, bl in (tmpl.get("type_bounds") or {}).items():
+            tyn = tp_map[tp]
+            for b in bl:
+                if b in _BOUND_CAPS:
+                    if not _cap_supports(b, tyn):
+                        raise SyntaxError(
+                            f"line {line}: 泛型 {fname} 的类型参数 {tp} 声明了"
+                            f"约束 {b}（{_cap_desc(b)}），实参 {tyn} 不满足")
+                elif (b, tyn) not in impls:
+                    raise SyntaxError(
+                        f"line {line}: 泛型 {fname} 的类型参数 {tp} 声明了接口"
+                        f"约束 {b}，但 {tyn} 没有 `impl {tyn} : {b}`"
+                        "（interface 与 impl 必须同源文件）")
+
+    def check_template_body(fname, tmpl):
+        """声明期：体内对 T 用到的运算符必须被声明的约束覆盖（v1.61）。
+
+        只在模板**声明了**约束时检查——没有约束的模板沿用旧行为（实例化
+        期再按具体类型核对），这样 v1.60 及以前的泛型库不需要改一行。
+        """
+        bounds = tmpl.get("type_bounds") or {}
+        if not bounds:
+            return
+        tps = set(tmpl.get("type_params") or [])
+        env = infer.compute_env(tmpl.get("body"), tmpl.get("params"))
+        for op, ta, tb in _iter_bound_ops(tmpl.get("body"), infer, env):
+            cap = _cap_for_op(op)
+            if cap is None:
+                continue
+            for t in (ta, tb):
+                tp = _named(t)
+                if tp not in tps:
+                    continue
+                if cap in bounds.get(tp, []):
+                    continue
+                raise SyntaxError(
+                    f"line {tmpl.get('line', 0)}: 泛型 {fname} 的模板体对 {tp} "
+                    f"使用了 {op}，但约束只声明了 {_bound_list_str(bounds.get(tp))}"
+                    f"——请写成 [{tp}: {_bound_list_str(bounds.get(tp))} + {cap}]"
+                    f"（{cap} = {_cap_desc(cap)}）")
+
+    def check_instance_body(fname, iname, inst, tp_map, line):
+        """实例化期：体内实际用到的运算，具体类型必须支持（v1.61）。
+
+        这是"没有约束声明"的模板的安全网：struct 的 < 和 == 在 Lower 里
+        是**地址比较**（静默算错），以前只有跑起来才发现。
+        """
+        targets = set(tp_map.values())
+        back = {v: k for k, v in tp_map.items()}
+        env = infer.compute_env(inst.get("body"), inst.get("params"))
+        for op, ta, tb in _iter_bound_ops(inst.get("body"), infer, env):
+            cap = _cap_for_op(op)
+            if cap is None:
+                continue
+            for t in (ta, tb):
+                tyn = _named(t)
+                if tyn not in targets:
+                    continue
+                if op == "+" and tyn == "str":
+                    continue                    # str 拼接：合法且常用
+                if _cap_supports(cap, tyn):
+                    continue
+                raise SyntaxError(
+                    f"line {line}: 泛型 {fname} 的实例 {iname}: 体内对 {tyn} "
+                    f"使用了 {op}，但 {tyn} 不支持（{cap} 需要 {_cap_desc(cap)}）"
+                    f"——请把模板的类型参数约束写成 [{back[tyn]}: {cap}]，"
+                    "让违反在调用点就报错；或换类型实参")
 
     def ensure(fname, tynames, line):
         key = (fname, tynames)
@@ -2327,6 +3470,8 @@ def expand_generics(fns, generic_fns, structs, enums):
                 raise SyntaxError(
                     f"line {line}: 泛型实参 {tyn!r} 不是已知类型"
                     "（标量 / struct / enum）")
+        tp_map = dict(zip(tps, tynames))
+        check_declared(fname, tmpl, tp_map, line)
         inst = copy.deepcopy(tmpl)
         iname = fname + "__" + "_".join(tynames)
         if iname in {f["name"] for f in fns}:
@@ -2334,12 +3479,13 @@ def expand_generics(fns, generic_fns, structs, enums):
                 f"泛型实例 {iname!r} 与已有函数重名（请改名）")
         inst["name"] = iname
         inst.pop("type_params", None)
+        inst.pop("type_bounds", None)
         instances[key] = inst            # 先注册：体内自递归直接引用
-        tp_map = dict(zip(tps, tynames))
         env = infer.compute_env(tmpl.get("body"), tmpl.get("params"))
         inst["params"] = [(n, _ty_subst(t, tp_map)) for n, t in inst["params"]]
         inst["ret"] = _ty_subst(inst.get("ret"), tp_map)
         inst["body"] = subst(inst.get("body"), tp_map, env)
+        check_instance_body(fname, iname, inst, tp_map, line)
         return inst
 
     def subst(x, tp_map, env):
@@ -2366,6 +3512,12 @@ def expand_generics(fns, generic_fns, structs, enums):
         if isinstance(x, list):
             return [subst(v, tp_map, env) for v in x]
         return x
+
+    # 声明期检查（v1.61）：带约束的模板即使一次都没被实例化，也必须自洽
+    # （约束是给调用方的契约——体内用了约束没覆盖的运算就是契约撒谎）。
+    for _t in generic_fns.values():
+        if isinstance(_t, dict) and _t.get("type_bounds"):
+            check_template_body(_t["name"], _t)
 
     out = []
     for f in fns:
@@ -4202,6 +5354,11 @@ class Codegen:
     # ---- 表达式 ----
     def gen_expr(self, e, env):
         k = e[0]
+        if k == "interp":
+            # 插值字符串的 C 侧要接 qlm_str_from_i64 / qlm_f64_to_str / 链式拼接，
+            # 与原生后端的单次分配语义对不齐；C 只做交叉验证，直接 fail-fast。
+            raise SyntaxError(
+                "C 后端不支持插值字符串 f\"...\"（v1.61 边界：只进原生后端）")
         if k == "num":
             return f"(int64_t)({e[1]})", "int64_t"
         if k == "fnum":

@@ -1,0 +1,10 @@
+// 负向（v1.61）：泛型 struct 的类型约束在实例化时校验
+module bound_struct_param
+
+struct P { x: int }
+struct Box[T: Ord] { value: T }
+
+fn main() {
+    let b = Box[P] { value: P { x: 1 } }
+    print(b.value.x.to_str())
+}

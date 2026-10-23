@@ -1,0 +1,100 @@
+// t104_generic_enum_impl.qma：泛型 enum 的方法（v1.64）
+//
+// 覆盖：
+//   1) 模板 impl + 类型约束：impl Opt[T: Show] : Show —— 只有能 to_str 的实参才有方法
+//      （f64 载荷目前取出来会当整数用，见 07-gaps §7.7，本用例不覆盖）
+//   2) 多类型参数 + 各自约束：impl Either[A: Show, B: Show] : Show
+//   3) 方法体里 match 自己的实例（Opt[T].Some/None 在模板里是符号类型，物化时替换）
+//   4) 具体实例 impl：impl Opt[int] : Tag（与模板 impl 共存于不同接口）
+//   5) 静态派发（o.show() 直接调用）
+//
+// 负向（必须编译失败）见 tests/bad/genumimpl_*.qma：
+//   genumimpl_bound（struct 实参不满足 Show）/ genumimpl_missing（缺方法）
+//
+//   5) 动态派发：let s: Show = o（枚举装箱，v1.65 起可用）
+module t104
+
+interface Show {
+    fn show(self) -> str
+}
+
+interface Tag {
+    fn tag(self) -> str
+}
+
+enum Opt[T] {
+    Some(v: T)
+    None
+}
+
+enum Either[A, B] {
+    Left(a: A)
+    Right(b: B)
+}
+
+// 1) 模板 impl + 约束：T 必须能 to_str，否则 show 里 v.to_str() 会拿到指针数字
+impl Opt[T: Show] : Show {
+    fn show(o: Opt[T]) -> str {
+        return match o {
+            Opt[T].Some(v) => "Some(" + v.to_str() + ")"
+            Opt[T].None => "None"
+        }
+    }
+}
+
+// 2) 多类型参数，各自带约束
+impl Either[A: Show, B: Show] : Show {
+    fn show(e: Either[A, B]) -> str {
+        return match e {
+            Either[A, B].Left(a) => "L(" + a.to_str() + ")"
+            Either[A, B].Right(b) => "R(" + b.to_str() + ")"
+        }
+    }
+}
+
+// 4) 具体实例 impl（另一个接口，避免与模板 impl 撞车）
+impl Opt[int] : Tag {
+    fn tag(o: Opt[int]) -> str {
+        return match o {
+            Opt[int].Some(v) => "int#" + v.to_str()
+            Opt[int].None => "int#none"
+        }
+    }
+}
+
+fn main() {
+    // 1) 模板 impl：三种标量实参各自展开
+    let a: Opt[int] = Opt[int].Some(v: 3)
+    let b: Opt[int] = Opt[int].None
+    let c: Opt[str] = Opt[str].Some(v: "hi")
+    assert(a.show() == "Some(3)", "Opt[int].Some 方法")
+    assert(b.show() == "None", "Opt[int].None 方法")
+    assert(c.show() == "Some(hi)", "Opt[str] 方法")
+
+    // 2) 多类型参数
+    let l: Either[int, str] = Either[int, str].Left(a: 7)
+    let r: Either[int, str] = Either[int, str].Right(b: "x")
+    assert(l.show() == "L(7)", "Either.Left 方法")
+    assert(r.show() == "R(x)", "Either.Right 方法")
+
+    // 3) 方法体里的 match 按实例替换（Opt[T] -> Opt__int / Opt__str）
+    let e: Opt[bool] = Opt[bool].Some(v: true)
+    assert(e.show() == "Some(true)", "bool 实参")
+
+    // 4) 具体实例 impl 与模板 impl 共存
+    assert(a.tag() == "int#3", "具体实例 impl")
+    assert(b.tag() == "int#none", "具体实例 impl None")
+
+    // 5) 动态派发：枚举装箱成接口值（v1.65 起 box_iface 按聚合宽度取）
+    let s: Show = a
+    assert(s.show() == "Some(3)", "枚举装箱后 vtable 派发")
+    let s2: Show = c
+    assert(s2.show() == "Some(hi)", "另一个实例装箱")
+    let boxed = vec[Show].new(4)
+    boxed.push(a)
+    boxed.push(l)
+    assert(boxed.get(0).show() == "Some(3)", "vec[Show] 里的枚举")
+    assert(boxed.get(1).show() == "L(7)", "vec[Show] 里的 Either")
+
+    print("generic enum impl ok")
+}

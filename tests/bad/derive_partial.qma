@@ -1,0 +1,10 @@
+// 负向（v1.72）：只派生 Json 时，show 不生成（派生项按需生成）
+module derive_partial
+
+@derive(Json)
+struct P { x: int }
+
+fn main() {
+    let p = P { x: 1 }
+    print(p.show())
+}

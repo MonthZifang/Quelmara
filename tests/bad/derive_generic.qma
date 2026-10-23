@@ -1,0 +1,10 @@
+// 负向（v1.72）：泛型 struct 模板不能直接派生（字段类型还是类型参数）
+module derive_generic
+
+@derive(Json)
+struct Box[T] { value: T }
+
+fn main() {
+    let b = Box[int] { value: 1 }
+    print(b.value.to_str())
+}

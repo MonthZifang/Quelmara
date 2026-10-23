@@ -1,0 +1,10 @@
+// 负向（v1.61）：约束名必须是能力约束（Ord/Eq/Num/Bit）或本文件声明的 interface
+module bound_unknown
+
+fn pick[T: Foo](a: T, b: T) -> T {
+    return a
+}
+
+fn main() {
+    print(pick(1, 2).to_str())
+}

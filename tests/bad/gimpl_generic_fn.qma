@@ -1,0 +1,12 @@
+// 负向（v1.62）：泛型函数里 Box[T] 不再静默造出假 struct Box__T，fail-fast
+module gimpl_generic_fn
+
+struct Box[T] { value: T }
+
+fn wrap[T](v: T) -> Box[T] {
+    return Box[T] { value: v }
+}
+
+fn main() {
+    print(wrap(1).value.to_str())
+}

@@ -1,0 +1,12 @@
+// 负向（v1.63）：泛型 enum 必须带类型实参
+module genum_noarg
+
+enum Opt[T] {
+    Some(v: T)
+    None
+}
+
+fn main() {
+    let o: Opt = Opt.None
+    print("x")
+}

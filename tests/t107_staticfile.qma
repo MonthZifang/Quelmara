@@ -1,0 +1,75 @@
+// t107_staticfile.qma：静态文件服务的安全解析层（v1.68）
+//
+// 覆盖：
+//   1) 百分号解码（含非法序列原样保留）
+//   2) 目录穿越防护：`..` / `%2e%2e` / 反斜杠 / NUL —— **先解码再判**
+//   3) URL -> 磁盘路径（root 尾部斜杠合并、根路径、去首斜杠）
+//   4) 目录补 index.html
+//   5) Content-Type 与 Cache-Control 策略
+//   6) ETag 生成
+//   7) Range 解析：`a-b` / `a-` / `-n` / 多段 / 越界 / 非法
+module t107
+
+import std.staticfile
+
+fn main() {
+    // 1) 解码
+    assert(static_url_decode("a%20b") == "a b", "空格")
+    assert(static_url_decode("a%2Fb") == "a/b", "%2F 解码成斜杠")
+    assert(static_url_decode("%e4%bd%a0") == "\xe4\xbd\xa0", "UTF-8 三字节")
+    assert(static_url_decode("100%") == "100%", "尾部裸 % 保留")
+    assert(static_url_decode("%zz") == "%zz", "非法十六进制保留")
+    assert(static_url_decode("plain") == "plain", "无 % 快路径")
+
+    // 2) 穿越防护
+    assert(static_path_safe("/a/b.txt"), "普通路径安全")
+    assert(static_path_safe(""), "空路径安全")
+    assert(!static_path_safe("/a/../etc/passwd"), "拒绝 ..")
+    assert(!static_path_safe("/a/%2e%2e/etc"), "拒绝编码后的 ..")
+    assert(!static_path_safe("../x"), "相对路径开头也拒绝")
+    assert(!static_path_safe("/a\\b"), "拒绝反斜杠")
+    assert(!static_path_safe("/a/./b"), "拒绝 . 段")
+    assert(static_path_safe("/a/..b/c"), "..b 不是 ..，安全")
+
+    // 3) URL -> 磁盘路径
+    assert(static_resolve("/srv/www", "/css/app.css") == "/srv/www/css/app.css", "拼接")
+    assert(static_resolve("/srv/www/", "/css/app.css") == "/srv/www/css/app.css", "root 尾斜杠")
+    assert(static_resolve("/srv/www", "/") == "/srv/www/", "根路径")
+    assert(static_resolve("/srv/www", "css/app.css") == "/srv/www/css/app.css", "无首斜杠")
+    assert(static_resolve("/srv/www", "/a%20b.txt") == "/srv/www/a b.txt", "解码后再拼")
+    assert(static_resolve("/srv/www", "/../etc/passwd") == "", "不安全返回空串")
+
+    // 4) 目录补 index
+    assert(static_index_for("/srv/www/") == "/srv/www/index.html", "目录补 index")
+    assert(static_index_for("") == "index.html", "空路径补 index")
+    assert(static_index_for("/srv/www/a.txt") == "/srv/www/a.txt", "文件不动")
+
+    // 5) Content-Type / Cache-Control
+    assert(static_content_type("a.html") == "text/html; charset=utf-8", "html 类型")
+    assert(static_content_type("a.png") == "image/png", "png 类型")
+    assert(static_cache_control("a.html") == "no-cache", "html 不缓存")
+    assert(static_cache_control("a.css") == "public, max-age=31536000, immutable", "静态长缓存")
+
+    // 6) ETag
+    assert(static_etag(1234, 1700000000) == "\"1234-1700000000\"", "ETag 格式")
+
+    // 7) Range
+    let r1 = static_range("bytes=0-99", 1000)
+    assert(len(r1) == 2 && r1.get(0) == 0 && r1.get(1) == 99, "闭区间 a-b")
+    let r2 = static_range("bytes=900-", 1000)
+    assert(len(r2) == 2 && r2.get(0) == 900 && r2.get(1) == 999, "开区间 a-")
+    let r3 = static_range("bytes=-100", 1000)
+    assert(len(r3) == 2 && r3.get(0) == 900 && r3.get(1) == 999, "后缀 -n")
+    let r4 = static_range("bytes=-5000", 1000)
+    assert(len(r4) == 2 && r4.get(0) == 0 && r4.get(1) == 999, "后缀超过文件长度")
+    let r5 = static_range("bytes=0-5000", 1000)
+    assert(len(r5) == 2 && r5.get(1) == 999, "end 越界截到末尾")
+    assert(len(static_range("bytes=0-1,5-9", 1000)) == 0, "多段不支持")
+    assert(len(static_range("bytes=2000-", 1000)) == 0, "start 越界")
+    assert(len(static_range("bytes=abc-def", 1000)) == 0, "非数字")
+    assert(len(static_range("bytes=50-10", 1000)) == 0, "end < start")
+    assert(len(static_range("items=0-1", 1000)) == 0, "不是 bytes=")
+    assert(len(static_range("bytes=0-0", 0)) == 0, "空文件")
+
+    print("staticfile ok")
+}

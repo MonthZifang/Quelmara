@@ -1,0 +1,69 @@
+// t106_weblib.qma：静态文件服务的最小两块（v1.67）
+//
+// 覆盖：
+//   1) std/mime：扩展名 -> Content-Type（大小写、无扩展名、多点文件名）
+//   2) std/mime：Content-Type -> 扩展名（带 charset 参数）
+//   3) std/mime：mime_is_text（决定要不要加 charset / 能否按文本压缩）
+//   4) std/router：字面段、`:参数` 段、`*` 通配、段数不匹配
+//   5) std/router：归一化（query / fragment / 尾斜杠 / 首斜杠）
+//   6) std/router：参数捕获顺序
+//   7) std/router：方法白名单
+module t106
+
+import std.mime
+import std.router
+
+fn main() {
+    // 1) 扩展名 -> 类型
+    assert(mime_of("index.html") == "text/html; charset=utf-8", "html")
+    assert(mime_of("/srv/www/app.css") == "text/css; charset=utf-8", "css 带路径")
+    assert(mime_of("X.JSON") == "application/json; charset=utf-8", "大写扩展名")
+    assert(mime_of("a.tar.gz") == "application/gzip", "多点文件名取最后一段")
+    assert(mime_of("noext") == "application/octet-stream", "无扩展名")
+    assert(mime_of("dir.d/file") == "application/octet-stream", "点目录不算扩展名")
+    assert(mime_of("x.png") == "image/png", "png")
+    assert(mime_of("x.woff2") == "font/woff2", "woff2")
+
+    // 2) 类型 -> 扩展名
+    assert(mime_ext("text/html; charset=utf-8") == "html", "带参数反查")
+    assert(mime_ext("IMAGE/PNG") == "png", "反查大小写不敏感")
+    assert(mime_ext("application/x-nope") == "", "未知类型")
+
+    // 3) 是否文本
+    assert(mime_is_text("text/plain"), "text/*")
+    assert(mime_is_text("application/json"), "json 算文本")
+    assert(mime_is_text("image/svg+xml"), "svg 算文本")
+    assert(!mime_is_text("image/png"), "png 不算文本")
+
+    // 4) 路由匹配
+    assert(route_match("/users/:id", "/users/42"), "参数段")
+    assert(!route_match("/users/:id", "/users/42/posts"), "段数多")
+    assert(!route_match("/users/:id", "/users"), "段数少")
+    assert(route_match("/a/b", "/a/b"), "字面段")
+    assert(!route_match("/a/b", "/a/c"), "字面段不等")
+    assert(route_match("/static/*", "/static/css/app.css"), "通配剩余")
+    assert(route_match("/static/*", "/static"), "通配零段")
+    assert(route_match("/", "/"), "根路径")
+
+    // 5) 归一化
+    assert(route_match("/a/b", "/a/b/"), "尾斜杠")
+    assert(route_match("/a/b", "/a/b?x=1&y=2"), "query")
+    assert(route_match("/a/b", "/a/b#top"), "fragment")
+    assert(route_match("/a/b", "a/b"), "无首斜杠")
+    assert(route_norm("/x/y/?q=1") == "x/y", "route_norm 结果")
+
+    // 6) 参数捕获
+    let ps = route_params("/users/:id/posts/:pid", "/users/7/posts/9")
+    assert(len(ps) == 2, "两个参数")
+    assert(ps.get(0) == "7", "第一个参数")
+    assert(ps.get(1) == "9", "第二个参数")
+    let none = route_params("/users/:id", "/posts/9")
+    assert(len(none) == 0, "不匹配时无参数")
+
+    // 7) 方法白名单
+    assert(route_method_allowed("GET,POST", "POST"), "允许 POST")
+    assert(route_method_allowed("GET, POST", "POST"), "逗号后空格")
+    assert(!route_method_allowed("GET,POST", "PUT"), "不允许 PUT")
+
+    print("weblib ok")
+}

@@ -29,7 +29,14 @@ EXE = os.path.join(ROOT, "build", "qlm_parse.qex")
 PARSE1_PENDING = {"t52_iface.qma", "t54_iface_dyn.qma", "t56_generic.qma",
                   "t81_generic_infer.qma",
                   "iface_missing.qma", "iface_rettype.qma", "iface_no_impl.qma",
-                  "iface_dup_method.qma", "t99_generic_struct.qma"}
+                  "iface_dup_method.qma", "t99_generic_struct.qma",
+                  # 类型约束（v1.61）/ 泛型 impl（v1.62）：与泛型同源——stage-1
+                  # 不做单态化，约束与 impl 模板在解析期就被擦除，dump 对不上
+                  "t101_bounds.qma", "t102_generic_impl.qma",
+                  "t103_generic_enum.qma", "t104_generic_enum_impl.qma",
+                  # 属性宏 @derive（v1.77）：stage-1 不认 @derive，也不生成派生
+                  # 函数——声明级 dump 天然对不上（oracle 侧会多出 5 个函数）
+                  "t115_derive.qma", "dpub_main.qma", "dpub_model.qma"}
 
 
 def collect():

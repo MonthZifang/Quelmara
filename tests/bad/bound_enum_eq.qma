@@ -1,0 +1,13 @@
+// 负向（v1.61）：enum 的 == 是地址比较（Color.Red == Color.Red 为 false），
+// 所以聚合类型不在 Eq 能力里——必须显式 match 比较
+module bound_enum_eq
+
+enum Color { Red, Green }
+
+fn same[T: Eq](a: T, b: T) -> bool {
+    return a == b
+}
+
+fn main() {
+    print(same(Color.Red, Color.Red).to_str())
+}

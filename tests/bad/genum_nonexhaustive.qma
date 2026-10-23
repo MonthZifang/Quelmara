@@ -1,0 +1,15 @@
+// 负向（v1.63）：泛型 enum 的 match 同样必须穷尽
+module genum_nonexhaustive
+
+enum Opt[T] {
+    Some(v: T)
+    None
+}
+
+fn main() {
+    let o: Opt[int] = Opt[int].Some(v: 1)
+    let n = match o {
+        Opt[int].Some(v) => v
+    }
+    print(n.to_str())
+}

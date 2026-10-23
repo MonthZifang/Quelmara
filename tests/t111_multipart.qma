@@ -1,0 +1,67 @@
+// t111_multipart.qma：multipart/form-data 解析（v1.72）
+//
+// 覆盖：
+//   1) boundary 提取（带引号 / 不带引号 / 非 multipart）
+//   2) 表单字段与文件部分的区分（filename 有无）
+//   3) 文件正文里的 CRLF 不被截断
+//   4) 头字段大小写不敏感
+//   5) 空 body / 错误 boundary / 只有结束标记
+//   6) multipart_field / multipart_file 便捷取值
+module t111
+
+import std.multipart
+
+fn main() {
+    // 1) boundary
+    assert(multipart_boundary("multipart/form-data; boundary=abc") == "abc", "不带引号")
+    assert(multipart_boundary("multipart/form-data; boundary=\"a b\"") == "a b", "带引号")
+    assert(multipart_boundary("multipart/form-data; charset=utf-8; boundary=xyz") == "xyz",
+           "多参数")
+    assert(multipart_boundary("application/json") == "", "非 multipart")
+
+    let b = "BOUND"
+    let body = "--BOUND\r\n" +
+        "Content-Disposition: form-data; name=\"user\"\r\n\r\n" +
+        "alice\r\n" +
+        "--BOUND\r\n" +
+        "content-disposition: form-data; name=\"note\"\r\n\r\n" +
+        "line1\r\nline2\r\n" +
+        "--BOUND\r\n" +
+        "Content-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n" +
+        "Content-Type: text/plain\r\n\r\n" +
+        "hello\r\nworld\r\n" +
+        "--BOUND--\r\n"
+
+    // 2) 三部分
+    let parts = multipart_parse(body, b)
+    assert(len(parts) == 3, "三个部分")
+    assert(parts.get(0).name == "user", "第一段 name")
+    assert(parts.get(0).filename == "", "表单字段没有 filename")
+    assert(parts.get(0).data == "alice", "第一段 data")
+    assert(parts.get(1).name == "note", "小写头也能解析")
+    assert(parts.get(1).data == "line1\r\nline2", "正文里的 CRLF 保留")
+    assert(parts.get(2).filename == "a.txt", "文件名")
+    assert(parts.get(2).ctype == "text/plain", "部分 Content-Type")
+    assert(parts.get(2).data == "hello\r\nworld", "文件正文")
+
+    // 6) 便捷取值
+    assert(multipart_field(body, b, "user") == "alice", "取字段")
+    assert(multipart_field(body, b, "note") == "line1\r\nline2", "取多行字段")
+    assert(multipart_field(body, b, "missing") == "", "不存在的字段")
+    assert(multipart_file(body, b, "f") == "hello\r\nworld", "取文件")
+    assert(multipart_file(body, b, "user") == "", "字段不是文件")
+    assert(multipart_field(body, b, "f") == "", "文件不是字段")
+
+    // 5) 退化输入
+    assert(len(multipart_parse("", b)) == 0, "空 body")
+    assert(len(multipart_parse(body, "")) == 0, "空 boundary")
+    assert(len(multipart_parse(body, "OTHER")) == 0, "boundary 不匹配")
+    assert(len(multipart_parse("--BOUND--\r\n", b)) == 0, "只有结束标记")
+
+    // 单字段无尾 CRLF
+    let one = "--B\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nv\r\n--B--"
+    let p1 = multipart_parse(one, "B")
+    assert(len(p1) == 1 && p1.get(0).data == "v", "无尾 CRLF")
+
+    print("multipart ok")
+}

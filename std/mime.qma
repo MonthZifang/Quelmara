@@ -1,0 +1,213 @@
+// std/mime.qma —— 扩展名 ↔ Content-Type（v1.67）
+//
+// 为什么需要：静态文件服务 / HTTP 响应头都要 Content-Type，之前每个示例都
+// 手写一条 if 链。这张表是 P0「路由 / 静态文件 / MIME 最小层」的第一块。
+//
+// 语义：
+//   * mime_of(path)：按**最后一个点**之后的扩展名（大小写不敏感）查表，
+//     认不出返回 application/octet-stream；路径里的 '/' '\\' 之后才算扩展名；
+//   * mime_ext(ctype)：反查，返回不带点的扩展名（"text/html; charset=utf-8"
+//     这类带参数的写法会先截掉 ';' 之后）；认不出返回空串；
+//   * mime_is_text(ctype)：text/* 与 json/js/xml/css/svg 这些"人可读"的类型。
+//
+// 边界：只有一张内置表（30 项），不做 /etc/mime.types 那种全量表。
+
+import std.str
+
+fn mime_cut_params(ctype: str) -> str {
+    let mut i = 0
+    while i < len(ctype) {
+        if ctype[i] == 59 {                 // ';'
+            return str_lower(str_trim(substr(ctype, 0, i)))
+        }
+        i = i + 1
+    }
+    return str_lower(str_trim(ctype))
+}
+
+// 路径 -> 扩展名（不含点，小写）；没有扩展名返回空串
+pub fn mime_ext_of(path: str) -> str {
+    let mut i = len(path) - 1
+    while i >= 0 {
+        let c = path[i]
+        if c == 46 {                        // '.'
+            return str_lower(substr(path, i + 1, len(path) - i - 1))
+        }
+        if c == 47 || c == 92 {             // '/' '\'
+            return ""
+        }
+        i = i - 1
+    }
+    return ""
+}
+
+pub fn mime_of(path: str) -> str {
+    let e = mime_ext_of(path)
+    if e == "html" || e == "htm" {
+        return "text/html; charset=utf-8"
+    }
+    if e == "css" {
+        return "text/css; charset=utf-8"
+    }
+    if e == "js" || e == "mjs" {
+        return "text/javascript; charset=utf-8"
+    }
+    if e == "json" {
+        return "application/json; charset=utf-8"
+    }
+    if e == "txt" || e == "log" {
+        return "text/plain; charset=utf-8"
+    }
+    if e == "md" {
+        return "text/markdown; charset=utf-8"
+    }
+    if e == "csv" {
+        return "text/csv; charset=utf-8"
+    }
+    if e == "xml" {
+        return "application/xml; charset=utf-8"
+    }
+    if e == "svg" {
+        return "image/svg+xml"
+    }
+    if e == "png" {
+        return "image/png"
+    }
+    if e == "jpg" || e == "jpeg" {
+        return "image/jpeg"
+    }
+    if e == "gif" {
+        return "image/gif"
+    }
+    if e == "webp" {
+        return "image/webp"
+    }
+    if e == "ico" {
+        return "image/x-icon"
+    }
+    if e == "woff" {
+        return "font/woff"
+    }
+    if e == "woff2" {
+        return "font/woff2"
+    }
+    if e == "ttf" {
+        return "font/ttf"
+    }
+    if e == "pdf" {
+        return "application/pdf"
+    }
+    if e == "zip" {
+        return "application/zip"
+    }
+    if e == "gz" {
+        return "application/gzip"
+    }
+    if e == "wasm" {
+        return "application/wasm"
+    }
+    if e == "mp4" {
+        return "video/mp4"
+    }
+    if e == "webm" {
+        return "video/webm"
+    }
+    if e == "mp3" {
+        return "audio/mpeg"
+    }
+    if e == "ogg" {
+        return "audio/ogg"
+    }
+    return "application/octet-stream"
+}
+
+// Content-Type -> 扩展名（不带点）；认不出返回空串
+pub fn mime_ext(ctype: str) -> str {
+    let c = mime_cut_params(ctype)
+    if c == "text/html" {
+        return "html"
+    }
+    if c == "text/css" {
+        return "css"
+    }
+    if c == "text/javascript" {
+        return "js"
+    }
+    if c == "application/json" {
+        return "json"
+    }
+    if c == "text/plain" {
+        return "txt"
+    }
+    if c == "text/markdown" {
+        return "md"
+    }
+    if c == "text/csv" {
+        return "csv"
+    }
+    if c == "application/xml" {
+        return "xml"
+    }
+    if c == "image/svg+xml" {
+        return "svg"
+    }
+    if c == "image/png" {
+        return "png"
+    }
+    if c == "image/jpeg" {
+        return "jpg"
+    }
+    if c == "image/gif" {
+        return "gif"
+    }
+    if c == "image/webp" {
+        return "webp"
+    }
+    if c == "image/x-icon" {
+        return "ico"
+    }
+    if c == "font/woff" {
+        return "woff"
+    }
+    if c == "font/woff2" {
+        return "woff2"
+    }
+    if c == "font/ttf" {
+        return "ttf"
+    }
+    if c == "application/pdf" {
+        return "pdf"
+    }
+    if c == "application/zip" {
+        return "zip"
+    }
+    if c == "application/gzip" {
+        return "gz"
+    }
+    if c == "application/wasm" {
+        return "wasm"
+    }
+    if c == "video/mp4" {
+        return "mp4"
+    }
+    if c == "video/webm" {
+        return "webm"
+    }
+    if c == "audio/mpeg" {
+        return "mp3"
+    }
+    if c == "audio/ogg" {
+        return "ogg"
+    }
+    return ""
+}
+
+// 是否"人可读"的类型（决定要不要加 charset / 能不能按文本压缩）
+pub fn mime_is_text(ctype: str) -> bool {
+    let c = mime_cut_params(ctype)
+    if str_starts_with(c, "text/") {
+        return true
+    }
+    return c == "application/json" || c == "application/xml" ||
+           c == "application/javascript" || c == "image/svg+xml"
+}

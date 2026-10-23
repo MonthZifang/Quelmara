@@ -1,0 +1,102 @@
+// t105_strorder.qma：字符串有序比较（v1.66）
+//
+// 覆盖：
+//   1) 表达式路径：`let c = a < b`（走 arith -> __str_cmp）
+//   2) 条件路径：`if a < b` / `while a < b`（走 branch -> __str_cmp）
+//      ——v1.19 的浮点 bug 就是只有表达式路径改了，这里两条都钉住
+//   3) 四个运算符 < <= > >=
+//   4) 字典序细节：前缀（"ab" < "abc"）、空串、字节序（>=0x80 按无符号字节）
+//   5) Ord 能力约束现在覆盖 str：std/gen 的 gen_min/gen_max 可用于字符串
+module t105
+
+import std.gen
+
+fn lt(a: str, b: str) -> bool {
+    return a < b          // 表达式路径
+}
+
+fn le(a: str, b: str) -> bool {
+    return a <= b
+}
+
+fn gt(a: str, b: str) -> bool {
+    return a > b
+}
+
+fn ge(a: str, b: str) -> bool {
+    return a >= b
+}
+
+// 条件路径：while 循环里比较（branch）
+fn first_ge(items: vec[str], bound: str) -> int {
+    let mut i = 0
+    while i < len(items) {
+        if items.get(i) >= bound {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn main() {
+    let a = "zzz"
+    let b = "aaa"
+
+    // 1) 表达式路径
+    assert(!lt(a, b), "expr a<b 为假")
+    assert(lt(b, a), "expr b<a 为真")
+    assert(le("ab", "ab"), "expr ab<=ab")
+    assert(gt("b", "aaa"), "expr b>aaa")
+    assert(ge("b", "b"), "expr b>=b")
+
+    // 2) 条件路径
+    let mut hits = 0
+    if a < b {
+        hits = hits + 100
+    }
+    if b < a {
+        hits = hits + 1
+    }
+    if "abc" < "abd" {
+        hits = hits + 10
+    }
+    if "b" > "aaa" {
+        hits = hits + 1000
+    }
+    assert(hits == 1011, "if 条件路径")
+
+    let mut k = 0
+    let mut cur = "aa"
+    while cur < "ac" {
+        k = k + 1
+        cur = "ac"
+    }
+    assert(k == 1, "while 条件路径")
+
+    // 3) 四个运算符与 str 变量的组合
+    assert(lt("", "a"), "空串小于非空")
+    assert(!lt("a", ""), "非空不小于空串")
+    assert(le("", ""), "空串 <= 空串")
+    assert(!gt("", ""), "空串不 > 空串")
+
+    // 4) 字典序细节
+    assert(lt("ab", "abc"), "前缀更短者更小")
+    assert(lt("abc", "abd"), "末字节比较")
+    assert(lt("Z", "a"), "大写在前（字节序 0x5A < 0x61）")
+    assert(gt("\xff", "a"), ">=0x80 按无符号字节")
+
+    // 5) Ord 覆盖 str：泛型算法可用于字符串
+    assert(gen_min("banana", "apple") == "apple", "gen_min[str]")
+    assert(gen_max("banana", "apple") == "banana", "gen_max[str]")
+    assert(gen_clamp("m", "a", "z") == "m", "gen_clamp[str]")
+
+    // 条件路径在容器元素上同样成立
+    let v = vec[str].new(4)
+    v.push("aa")
+    v.push("bb")
+    v.push("cc")
+    assert(first_ge(v, "bb") == 1, "vec 元素的条件比较")
+
+    print("str order ok")
+}

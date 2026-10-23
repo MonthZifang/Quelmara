@@ -20,9 +20,12 @@ python tools/stage0/qlm_cli.py <cmd> [参数]            :: 任意平台
 | `fmt` | 格式化 | `paths`、`--check`（只检查）、`-q/--quiet` |
 | `lex` | 词法分析 | `src`、`--stage0`（默认优先用自举词法器） |
 | `bench` | 基准 + 回归对比 | `src`、`--runs`（默认 5）、`--baseline`、`--update-baseline`、`--threshold`（默认 10%）、`--targets` |
+| `debug` | 源码级调试器（v1.75） | `src`（.qma 自动带调试信息构建）或产物、`--script`（命令脚本）、`--` 之后传给程序 |
 | `version` | 版本与能力 | — |
 
 `--target` 取值：`native`（ELF64）/ `win`（PE32+）/ `arm64`（AArch64 ELF）/ `c`（C99，仅交叉验证）。
+
+`build` / `run` 支持 `--dbg-info`：随 PE 发射 `.qlmdbg` 调试节（行表 + 变量位置表 + 结构体布局）。**只支持 `--target win`**；不带该开关的默认构建代码生成路径与开启前完全一致（标记指令根本不进 IR；改动全是新增指令分支）。
 
 ```bash
 python tools/stage0/qlm_cli.py run examples/hello.qma --target win
@@ -30,6 +33,83 @@ python tools/stage0/qlm_cli.py test tests/selftest.qma --targets all
 python tools/stage0/qlm_cli.py build examples/loop_sum.qma --target win -o build/ls.exe
 python tools/stage0/qlm_cli.py bench bench/p0_bench.qma --runs 5
 ```
+
+### 1.1 源码级调试器（v1.75 / v1.80）
+
+自研链路：编译器把语句行号与变量位置随 PE 写进 `.qlmdbg` 节（自研 JSON 格式），
+`qlm_dbg.py` 用 Windows 调试 API 做源码断点 / 单步 / 变量查看 / 调用栈。
+零外部依赖（无 gdb / capstone / WinDbg / SDK）。同一份调试表还会编码一份
+**标准 DWARF v4**（v1.80），供外部工具消费。
+
+```bash
+python tools/stage0/qlm_cli.py debug fixtures/dbgdemo/main.qma        # 构建+调试
+python tools/stage0/qlm_cli.py debug build/x.qex                      # 直接调试产物
+python tools/stage0/qlm_dbg.py build/x.qex --script cmds.txt          # 无人值守（测试用）
+```
+
+会话命令（`--script` 每行一条，`#` 注释；交互时同样输入）：
+
+| 命令 | 作用 |
+|---|---|
+| `break 文件:行` / `break 函数名` | 下断点（源码行取该行第一个语句边界；函数名取入口） |
+| `run` / `continue` / `c` | 继续到下一个断点或退出 |
+| `step` / `s` | 单步进入（行粒度，进行函数同样停） |
+| `next` / `n` | 单步跨过（被调函数用返回地址临时断点跳过，不逐指令爬） |
+| `finish` / `f` | 运行到当前函数返回（返回地址临时断点） |
+| `print 表达式` / `p` | 变量求值：`x`、`p.x`、`p.sub.y`（int/bool/f64/str/struct） |
+| `locals` | 当前帧全部存活变量 |
+| `bt` | 调用栈（RBP 帧链，修正了序言多压 callee-saved 的偏移） |
+| `list [行]` | 看当前行附近源码 |
+| `info break` / `delete N` | 断点列表 / 删除 |
+| `quit` / `q` | 结束（杀掉被调试进程） |
+
+```
+[dbg] breakpoint 1: main.qma:35 -> rva 0x11a1
+[dbg] stopped: fixtures/dbgdemo/main.qma:35 in main()
+[dbg]   35|     let r = work(x, y)
+[dbg] print p.x
+[dbg] p.x = 7 (0x7)
+[dbg] bt
+[dbg] bt #0 main() fixtures/dbgdemo/main.qma:35
+[dbg] bt #1 <entry>() <library>
+```
+
+**两种调试信息，一份数据源**（`--dbg-info` 时同时发出）：
+
+| 节 | 格式 | 谁用 |
+|---|---|---|
+| `.qlmdbg` | 自研 JSON：行表 + 变量位置表（含活跃区间 `bind`/`last`）+ 结构体布局 | `qlm_dbg.py`（要活跃区间，判"已超出生命周期"） |
+| `.debug_abbrev` / `.debug_info` / `.debug_line` / `.debug_loc` | **标准 DWARF v4** | 外部工具（llvm-dwarfdump / objdump / IDE） |
+
+DWARF 三条口径（细节见 `tools/stage0/qlm_dwarf.py` 模块头）：
+
+1. **地址是 RVA（镜像相对）**：PE 调试节不参与基址重定位，写绝对地址就得给
+   调试节造重定位表；RVA 与调试器的 `PC - image_base` 同口径。
+2. **帧基址是 RBP**（`DW_AT_frame_base = DW_OP_breg6 0`），栈槽写
+   `DW_OP_fbreg -off`，与 codegen 的 `[rbp-off]` 同源。
+3. **寄存器号要翻译**：内部编号是 Rax/Rcx/Rdx/… 的声明顺序，DWARF x86-64 是
+   rax/rdx/rcx/rbx/rsi/rdi/rbp/rsp/…——照抄会读到错的寄存器。
+
+自研边界（做不到的写在这里，不粉饰）：
+
+- **只支持 Windows PE**：`--dbg-info` 对 `native`/`arm64`/`c` 目标 fail-fast
+  （ELF 后端不发射调试节，ptrace 前端未做）。
+- **不发 PDB**：Windows 原生链路要 MSF 容器 + CodeView 记录，与 DWARF 是两套；
+  本机没有 MSVC 工具链可验证，宁可不做。DWARF 侧已经可用。
+- **库函数帧无行号**：import 的文件行号属于别的文件，显示 `<library>`。
+- **调试构建默认不内联**（v1.80）：内联后被调函数变成死代码，`break 文件:行`
+  静默不命中、`bt` 看不到那一帧。调试构建以断点语义优先（`QLM_NO_INLINE=1`
+  仍可显式关）。因此"内联帧"不再是需要解释的现象。
+- **`print` 限变量与 `a.b.c` 字段路径**：数组下标、算术表达式未做。
+- **变量可见区间 = 最后一次使用之前**：之后寄存器/帧槽可能被复用，报
+  "已超出生命周期"而不显示过期值（宁缺勿错）。
+- **入口停点上下文不完整**：初始断点处内核返回的整数上下文缺 Rip，
+  `step`/`print`/`bt` 要求先 `run` 到真实断点。
+- 带 `--dbg-info` 的构建，调度/循环展开决策会变（标记计入指令数）——
+  与 `gcc -g` 同理；默认构建不受影响（标记不进 IR，代码生成路径与开启前一致）。
+
+性能口径见 `06-status.md` §3.8（构建开销、产物体积占比、每命中/每步延迟）；
+复现脚本 `python tools/dev/dbg_bench.py`。
 
 ## 2. 配置文件 `Quelmara.toml`
 
@@ -162,6 +242,10 @@ newest  = "https://github.com/u/r#^1.2.0"       # git + semver 区间（选最�
 | `tests/x509_chain_test.py` | 证书链 + 有效期 + 域名（含通配符）验证，Python 手工三级链 | 全平台 |
 | `tools/dev/tls_probe.py` | 真实服务器 TLS 1.3 握手探针（Python 提供 socket，手动运行） | 全平台（需网络） |
 | `tests/a64_emu.py` | AArch64 指令模拟器 | 全平台 |
+| `tests/debugger_test.py` | 调试器脚本化会话（18 项期望 + 调试/非调试构建输出逐字节相同） | Windows |
+| `tests/dbg_test.py` | 调试器端到端命令链（断点/三种不可读语义/单步/bt/退出码） | Windows |
+| `tests/dwarf_test.py` | DWARF v4 互操作：独立读取器解析四个节，逐项对照 `.qlmdbg` | 全平台 |
+| `tools/dev/dbg_bench.py` | 调试链路性能探针（构建开销 / 体积占比 / 每命中 / 每步，手动） | Windows |
 
 ### 5.3 门禁（CI 双平台都跑）
 

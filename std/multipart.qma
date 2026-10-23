@@ -1,0 +1,170 @@
+// std/multipart.qma —— multipart/form-data 解析（v1.72）
+//
+// 为什么需要：§2 的最后一块。文件上传 / 混合表单都走 multipart，之前只能整段
+// 塞给业务代码自己 split。
+//
+// 语义：
+//   * multipart_boundary(ctype)：从 `multipart/form-data; boundary=----X` 里取
+//     边界串（去引号）；不是 multipart 或没有 boundary 返回空串；
+//   * multipart_parse(body, boundary)：解析成 vec[Part]，每部分有
+//     name / filename / ctype / data（缺省为空串）；
+//   * 分隔符按 RFC 7578：`--boundary` 开头，`\r\n--boundary` 分隔，`--boundary--` 结束；
+//   * 头字段大小写不敏感（`Content-Disposition` / `content-disposition` 都认）。
+//
+// 边界：不做 Content-Transfer-Encoding（base64/quoted-printable）解码、不做嵌套
+// multipart/mixed、不校验 part 数量上限（超大 body 由调用方限制）。
+
+import std.str
+
+struct Part {
+    name: str
+    filename: str
+    ctype: str
+    data: str
+}
+
+// 从 Content-Type 头里取 boundary（去引号）
+pub fn multipart_boundary(ctype: str) -> str {
+    let low = str_lower(ctype)
+    let i = str_find(low, "boundary=")
+    if i < 0 {
+        return ""
+    }
+    let rest = substr(ctype, i + 9, len(ctype) - i - 9)
+    let mut end = len(rest)
+    let mut k = 0
+    while k < len(rest) {
+        if rest[k] == 59 {                 // ';'
+            end = k
+            break
+        }
+        k = k + 1
+    }
+    let v = str_trim(substr(rest, 0, end))
+    if len(v) >= 2 && v[0] == 34 && v[len(v) - 1] == 34 {   // 两端引号
+        return substr(v, 1, len(v) - 2)
+    }
+    return v
+}
+
+// 在头块里找某个头字段的值（大小写不敏感）；没有返回空串
+fn mp_header(headers: str, name: str) -> str {
+    let low = str_lower(headers)
+    let nl = "\n" + name + ":"
+    let nl2 = "\n" + name + " "
+    let mut i = str_find(low, nl)
+    let mut off = 1
+    if i < 0 {
+        i = str_find(low, nl2)
+        off = 1
+    }
+    if i < 0 {
+        // 头块第一行没有前导 \n
+        if str_starts_with(low, name + ":") || str_starts_with(low, name + " ") {
+            i = -1
+            off = 0
+        } else {
+            return ""
+        }
+    }
+    let mut start = i + off + len(name) + 1
+    if start > len(headers) {
+        return ""
+    }
+    while start < len(headers) && (headers[start] == 32 || headers[start] == 9) {
+        start = start + 1
+    }
+    let mut end = start
+    while end < len(headers) && headers[end] != 13 && headers[end] != 10 {
+        end = end + 1
+    }
+    return str_trim(substr(headers, start, end - start))
+}
+
+// 从 Content-Disposition 里取 name= / filename= 的值（去引号）
+fn mp_attr(disp: str, attr: str) -> str {
+    let low = str_lower(disp)
+    let i = str_find(low, attr + "=\"")
+    if i < 0 {
+        return ""
+    }
+    let start = i + len(attr) + 2
+    let mut end = start
+    while end < len(disp) {
+        if disp[end] == 34 {               // '"'
+            return substr(disp, start, end - start)
+        }
+        end = end + 1
+    }
+    return ""
+}
+
+pub fn multipart_parse(body: str, boundary: str) -> vec[Part] {
+    let out = vec[Part].new(4)
+    if len(boundary) == 0 {
+        return out
+    }
+    let delim = "--" + boundary
+    let mut pos = str_find(body, delim)
+    if pos < 0 {
+        return out
+    }
+    pos = pos + len(delim)
+    while pos < len(body) {
+        // 结束标记：--boundary--
+        if pos + 2 <= len(body) && substr(body, pos, 2) == "--" {
+            return out
+        }
+        while pos < len(body) && (body[pos] == 13 || body[pos] == 10) {
+            pos = pos + 1
+        }
+        let hdr_end = str_find_from(body, pos, "\r\n\r\n")
+        if hdr_end < 0 {
+            return out
+        }
+        let headers = substr(body, pos, hdr_end - pos)
+        let data_start = hdr_end + 4
+        let next = str_find_from(body, data_start, "\r\n" + delim)
+        if next < 0 {
+            return out
+        }
+        let disp = mp_header(headers, "content-disposition")
+        // 先落到局部变量再进字面量：结构体字面量里直接调用函数会报
+        // "未定义函数"（07-gaps §7.9 的 Lower 缺陷，v1.72 绕开）
+        let nm = mp_attr(disp, "name")
+        let fnm = mp_attr(disp, "filename")
+        let ct = mp_header(headers, "content-type")
+        let dt = substr(body, data_start, next - data_start)
+        out.push(Part { name: nm, filename: fnm, ctype: ct, data: dt })
+        pos = next + 2 + len(delim)
+    }
+    return out
+}
+
+// 取某个表单字段的值（同名取第一个）；没有返回空串
+pub fn multipart_field(body: str, boundary: str, name: str) -> str {
+    let parts = multipart_parse(body, boundary)
+    let mut i = 0
+    while i < len(parts) {
+        let p = parts.get(i)
+        if p.name == name && len(p.filename) == 0 {
+            return p.data
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// 取上传文件的正文（按 name 找带 filename 的 part）；没有返回空串
+pub fn multipart_file(body: str, boundary: str, name: str) -> str {
+    let parts = multipart_parse(body, boundary)
+    let mut i = 0
+    while i < len(parts) {
+        let p = parts.get(i)
+        if p.name == name && len(p.filename) > 0 {
+            return p.data
+        }
+        i = i + 1
+    }
+    return ""
+}

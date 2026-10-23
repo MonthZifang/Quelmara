@@ -1,0 +1,16 @@
+// 负向（v1.61）：struct 不支持 <（Lower 里是地址比较），不得作为 Ord 实参
+module bound_struct_ord
+
+struct P { x: int, y: int }
+
+fn my_min[T: Ord](a: T, b: T) -> T {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn main() {
+    let m = my_min(P { x: 1, y: 2 }, P { x: 3, y: 4 })
+    print(m.x.to_str())
+}

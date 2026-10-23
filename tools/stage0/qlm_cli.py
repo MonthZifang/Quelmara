@@ -8,6 +8,7 @@ Quelmara 统一命令行入口（SPEC §8）
   quelmara test  [path]     运行 test "name" { } 内建测试（默认当前平台自研后端）
   quelmara fmt   [path]     官方格式化器（--check 只检查）
   quelmara bench <src>      基准测试 + 回归对比（--baseline / --update-baseline）
+  quelmara debug <src|exe>  带调试信息构建 + 源码级调试器（v1.62，Windows PE）
   quelmara version          版本与后端能力
 
 通用选项：
@@ -15,6 +16,8 @@ Quelmara 统一命令行入口（SPEC §8）
   -o, --out PATH                 输出路径
   --dump-ir                      打印 QuIR
   --no-opt                       关闭优化管线
+  --dbg-info                     发射 .qlmdbg 调试节（仅 win 后端；默认构建
+                                  逐字节不变，见 06-status.md）
 
 设计原则：所有子命令都读取项目根目录的 Quelmara.toml（唯一全局资源开关）。
 """
@@ -36,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from qlm import SRC_EXT, require_source  # noqa: E402
 
 # 版本号口径：与 docs/versions/ 下的目录一致（vX.Y → "X.Y.0"，补丁 → "X.Y.Z"）
-VERSION = "1.60.0"
+VERSION = "1.80.0"
 
 def _default_target():
     """当前主机默认只选自研后端；不把 C99 当产品默认链路。"""
@@ -94,9 +97,9 @@ def _build_c(src, out, dump_ir=False, optimize=True, cc=True):
     return out, os.path.getsize(out), cfg
 
 
-def _build_win(src, out, dump_ir=False, optimize=True):
+def _build_win(src, out, dump_ir=False, optimize=True, dbg=False):
     import qlm_pe as W
-    pe, cfg = W.transpile_win(src, dump_ir=dump_ir, optimize=optimize)
+    pe, cfg = W.transpile_win(src, dump_ir=dump_ir, optimize=optimize, dbg=dbg)
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     W.write_exe(out, pe)
     return out, len(pe), cfg
@@ -113,13 +116,19 @@ BACKENDS = {
 }
 
 
-def build(src, target=DEFAULT_TARGET, out=None, dump_ir=False, optimize=True):
+def build(src, target=DEFAULT_TARGET, out=None, dump_ir=False, optimize=True,
+          dbg_info=False):
     base = os.path.splitext(os.path.basename(src))[0]
     if target is None:
         raise RuntimeError("当前主机没有自研默认后端；请显式指定 --target c（仅交叉验证/自举）或安装受支持的目标工具链")
     if out is None:
         out = os.path.join("build", base + OUT_EXT.get(target, ""))
     fn = BACKENDS[target]
+    if target == "win":
+        # --dbg-info 只对 Windows PE 有意义（.qlmdbg 调试节 + qlm_dbg）
+        return fn(src, out, dump_ir=dump_ir, optimize=optimize, dbg=dbg_info)
+    if dbg_info:
+        raise RuntimeError("--dbg-info 只支持 --target win（.qlmdbg 调试节目前只随 PE 发出）")
     return fn(src, out, dump_ir=dump_ir, optimize=optimize)
 
 
@@ -155,8 +164,10 @@ def cmd_lex(args):
 
 def cmd_build(args):
     out, size, cfg = build(args.src, args.target, args.out,
-                           dump_ir=args.dump_ir, optimize=not args.no_opt)
-    print(f"[qlm] {args.src} -> {out}  ({size} 字节, target={args.target})")
+                           dump_ir=args.dump_ir, optimize=not args.no_opt,
+                           dbg_info=args.dbg_info)
+    print(f"[qlm] {args.src} -> {out}  ({size} 字节, target={args.target}"
+          f"{', dbg-info' if args.dbg_info else ''})")
     print(f"[qlm] config: {cfg.get('_path') or '(默认)'} | "
           f"multicore={cfg['core']['multicore']} "
           f"threads={cfg['core']['threads'] or 'auto'} "
@@ -166,7 +177,8 @@ def cmd_build(args):
 
 def cmd_run(args):
     out, size, cfg = build(args.src, args.target, args.out,
-                           dump_ir=args.dump_ir, optimize=not args.no_opt)
+                           dump_ir=args.dump_ir, optimize=not args.no_opt,
+                           dbg_info=args.dbg_info)
     print(f"[qlm] exec {out}")
     if args.target == "arm64":
         # AArch64 ELF 不能在 x86/Windows 主机上直接跑：走 tests/a64_emu.py
@@ -427,13 +439,38 @@ def hashlib_short(hashes):
     return ",".join(sorted(hashes))
 
 
+def cmd_debug(args):
+    """quelmara debug（v1.70）：带调试信息构建 + 启动源码级调试器。
+
+    传 .qma 源文件 -> --dbg-info 构建（win 后端）后调试；
+    传构建产物（.qex/.exe）-> 直接调试（须已带 .qlmdbg 节）。
+    其余参数（--script / 程序参数）原样转给 qlm_dbg。"""
+    src = args.src
+    if src.endswith(SRC_EXT):
+        if (args.target or "win") != "win":
+            print("[qlm] 调试信息只支持 --target win（.qlmdbg 节目前只随 PE 发出）")
+            return 1
+        out, _size, _cfg = build(src, "win", args.out,
+                                 optimize=not args.no_opt, dbg_info=True)
+        print(f"[qlm] debug build -> {out}")
+    else:
+        out = src
+    import qlm_dbg
+    argv = [out]
+    if args.script:
+        argv += ["--script", args.script]
+    if args.args:
+        argv += ["--"] + args.args
+    return qlm_dbg.main(argv)
+
+
 def cmd_version(args):
     print(f"Quelmara {VERSION}  ——  自研后端优先 · 多核默认 · 网络原生 · 全平台")
     print(f"  后端: native(x86_64 裸 ELF64) / win(x86_64 PE/COFF，无 CRT) / "
           f"arm64(AArch64 ELF64) / c(C99 交叉验证，不是产品后端)")
     print(f"  优化: 常量折叠 / 强度削减 / 魔数除法 / 内联 / CSE-GVN / LICM / 循环展开 / "
           f"DCE / 复制传播 / 线性扫描寄存器分配")
-    print(f"  工具: build / run / test / fmt / bench")
+    print(f"  工具: build / run / test / fmt / bench / debug")
     return 0
 
 
@@ -458,6 +495,9 @@ def main(argv=None):
         p.add_argument("-o", "--out", default=None)
         p.add_argument("--no-opt", action="store_true", help="关闭优化管线")
         p.add_argument("--dump-ir", action="store_true", help="打印 QuIR")
+        p.add_argument("--dbg-info", action="store_true",
+                       help="发射 .qlmdbg 调试节（行表+变量表，仅 win 后端；"
+                            "不带此flag的默认构建逐字节不变）")
 
     p = sub.add_parser("build", help="编译")
     common(p)
@@ -497,11 +537,23 @@ def main(argv=None):
     p.add_argument("--targets", default=None,
                    help="跨平台基线：逗号分隔的多个后端，如 win,native,arm64")
 
+    p = sub.add_parser("debug", help="源码级调试器（v1.70，--dbg-info 构建后调试）")
+    p.add_argument("src", help=".qma 源文件（自动带调试信息构建）或构建产物")
+    p.add_argument("--target", default="win",
+                   choices=["native", "c", "arm64", "win", "both"],
+                   help="调试信息只支持 win（默认 win）")
+    p.add_argument("-o", "--out", default=None)
+    p.add_argument("--no-opt", action="store_true")
+    p.add_argument("--script", default=None,
+                   help="命令脚本文件（每行一条命令，# 注释；测试/无人值守用）")
+    p.add_argument("args", nargs="*", help="传给被调试程序的参数")
+
     sub.add_parser("version", help="版本与能力")
 
     args = ap.parse_args(argv)
     handler = {"build": cmd_build, "run": cmd_run, "test": cmd_test,
                "fmt": cmd_fmt, "bench": cmd_bench, "lex": cmd_lex,
+               "debug": cmd_debug,
                "version": cmd_version}[args.cmd]
     return handler(args)
 

@@ -1,0 +1,13 @@
+// 负向（v1.62）：模板 impl 的返回类型必须与接口声明一致
+module gimpl_rettype
+
+interface Show { fn show(self) -> str }
+struct Box[T] { value: T }
+
+impl Box[T] : Show {
+    fn show(b: Box[T]) -> int { return b.value }
+}
+
+fn main() {
+    print(Box[int] { value: 1 }.show())
+}

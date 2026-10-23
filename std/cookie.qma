@@ -1,0 +1,160 @@
+// std/cookie.qma —— Cookie 头解析与 Set-Cookie 生成（v1.70）
+//
+// 为什么需要：登录态的第一块砖。§2 的「cookie / session / multipart」一直全缺，
+// 每个 Web 示例都得自己 split(";") 再 split("=")。
+//
+// 语义：
+//   * cookie_get(header, name)：从 `Cookie:` 头里取值；不存在返回空串；
+//   * cookie_has：只判断存在（同名多次出现取第一个，与浏览器一致）；
+//   * cookie_value_encode：把值里的非 `A-Za-z0-9-_.~` 字节做 %XX（RFC 6265 的
+//     cookie-octet 子集），空格编码成 %20 而不是 '+'（cookie 不是 query）；
+//   * cookie_value_decode：%XX 还原，非法序列原样保留；
+//   * cookie_set：拼 `name=value; Path=...; Max-Age=...; HttpOnly; Secure; SameSite=...`
+//     —— 值为空串时输出 `name=; Max-Age=0`（删除 cookie 的标准写法）。
+//
+// 边界：不做签名/加密（session 层的事），不校验 Cookie 头长度，不处理 RFC 6265bis 的
+// Partitioned 属性。
+
+import std.str
+
+fn ck_is_unreserved(c: int) -> bool {
+    if c >= 48 && c <= 57 {        // 0-9
+        return true
+    }
+    if c >= 65 && c <= 90 {        // A-Z
+        return true
+    }
+    if c >= 97 && c <= 122 {       // a-z
+        return true
+    }
+    return c == 45 || c == 46 || c == 95 || c == 126   // - . _ ~
+}
+
+fn ck_hex(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return -1
+}
+
+// 0..15 -> '0'-'9' / 'a'-'f' 的字节值
+fn ck_hex_val(n: int) -> int {
+    if n < 10 {
+        return 48 + n
+    }
+    return 87 + n
+}
+
+pub fn cookie_value_encode(s: str) -> str {
+    let out = vec[int].new(len(s) * 3 + 1)
+    let mut i = 0
+    while i < len(s) {
+        let c = s[i]
+        if ck_is_unreserved(c) {
+            out.push(c)
+        } else {
+            out.push(37)                       // '%'
+            out.push(ck_hex_val(c / 16))
+            out.push(ck_hex_val(c % 16))
+        }
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+pub fn cookie_value_decode(s: str) -> str {
+    if str_find(s, "%") < 0 {
+        return s
+    }
+    let out = vec[int].new(len(s) + 1)
+    let mut i = 0
+    while i < len(s) {
+        let c = s[i]
+        if c == 37 && i + 2 < len(s) {
+            let h = ck_hex(s[i + 1])
+            let l = ck_hex(s[i + 2])
+            if h >= 0 && l >= 0 {
+                out.push(h * 16 + l)
+                i = i + 3
+                continue
+            }
+        }
+        out.push(c)
+        i = i + 1
+    }
+    return str_from_bytes(out)
+}
+
+// 从 Cookie 头里取 name 的值；不存在返回空串
+pub fn cookie_get(header: str, name: str) -> str {
+    let parts = str_split(header, ";")
+    let mut i = 0
+    while i < len(parts) {
+        let seg = str_trim(parts.get(i))
+        let eq = str_find(seg, "=")
+        if eq > 0 {
+            let k = str_trim(substr(seg, 0, eq))
+            if k == name {
+                return cookie_value_decode(
+                    str_trim(substr(seg, eq + 1, len(seg) - eq - 1)))
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+pub fn cookie_has(header: str, name: str) -> bool {
+    let parts = str_split(header, ";")
+    let mut i = 0
+    while i < len(parts) {
+        let seg = str_trim(parts.get(i))
+        let eq = str_find(seg, "=")
+        if eq > 0 {
+            if str_trim(substr(seg, 0, eq)) == name {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// 属性串：HttpOnly / Secure / SameSite（3 参，避开"第 7 个 str 参数"的 Lower 缺陷，
+// 见 07-gaps §7.8）
+pub fn cookie_attrs(http_only: bool, secure: bool, same_site: str) -> str {
+    let mut out = ""
+    if len(same_site) > 0 {
+        out = out + "; SameSite=" + same_site
+    }
+    if http_only {
+        out = out + "; HttpOnly"
+    }
+    if secure {
+        out = out + "; Secure"
+    }
+    return out
+}
+
+// 拼 Set-Cookie 值（不含 "Set-Cookie: " 前缀）
+//   max_age <= 0 表示会话 cookie；值为空串时输出 Max-Age=0（删除的标准写法）
+//   attrs 直接拼在末尾，通常来自 cookie_attrs(...)
+pub fn cookie_set(name: str, value: str, path: str, max_age: int,
+                  attrs: str) -> str {
+    let mut out = name + "=" + cookie_value_encode(value)
+    if max_age > 0 {
+        out = out + "; Max-Age=" + max_age.to_str()
+    } else if len(value) == 0 {
+        out = out + "; Max-Age=0"
+    }
+    if len(path) > 0 {
+        out = out + "; Path=" + path
+    }
+    return out + attrs
+}

@@ -662,7 +662,8 @@ _XMM_BUILTINS = ("cpu_sha", "cpu_aes", "xmm_load", "xmm_store",
 
 class Lower:
     def __init__(self, fns_ast, cfg, arch="x86_64", structs=None, enums=None,
-                 platform="linux", asset_root=None):
+                 platform="linux", asset_root=None, dbg=False, dbg_main=None,
+                 dbg_src=None):
         self.fns_ast = {f["name"]: f for f in fns_ast}
         self.cfg = cfg
         self.arch = arch
@@ -670,6 +671,12 @@ class Lower:
         self.sc = SYSCALLS[arch]
         self.structs = structs or {}
         self.enums = enums or {}
+        # v1.62 调试信息：dbg=True 时发射 ('line', n) / ('dbgvar', name, vreg)
+        # 标记（源码行表 + 变量位置表的数据源）。dbg_main = 主文件定义的
+        # 函数名集合（import 的库函数不给行号——行号属于别的文件）。
+        self.dbg = dbg
+        self.dbg_main = dbg_main or set()
+        self.dbg_src = dbg_src
         self.loop_stack = []       # [(cont_label, break_label, defer_depth)]，供 break/continue
         # v1.48 defer：每块一帧 {"slots": [登记标志], "entries": [(stmt, env, flag)], "cursor": n}
         # 标志位初始 0、执行到 defer 语句置 1，退出点按 LIFO 逐条"标志为 1 才执行"。
@@ -797,6 +804,31 @@ class Lower:
                 return off, t
             off += self.field_words(t)
         raise SyntaxError(f"结构体 {sname} 没有字段 {fname}")
+
+    def dbg_struct_layout(self):
+        """v1.62 调试信息：结构体布局表 {名字: {words, [[字段, 类型, 字偏移]]}}。
+
+        字段偏移规则与 struct_size/field_offset 同源（type_words），
+        不在调试器侧重算——避免两边规则漂移。"""
+        out = {}
+        for name, fields in self.structs.items():
+            fl, off = [], 0
+            for fname, fty in fields:
+                fl.append([fname, self.dbg_type_str(fty), off])
+                off += self.field_words(fty)
+            out[name] = {"words": off, "fields": fl}
+        return out
+
+    @staticmethod
+    def dbg_type_str(t):
+        """类型元组 -> 调试信息里的短类型名（struct/slice/标量）"""
+        if not isinstance(t, tuple) or not t:
+            return "?"
+        if t[0] == "named":
+            return t[1]
+        if t[0] == "slice":
+            return "slice"
+        return t[0]
 
     # ---- 结构体值跟踪 ----
     @staticmethod
@@ -1123,6 +1155,12 @@ class Lower:
                                 self._mark_str(fn, v)
                             elif ftype == ("named", "bool"):
                                 self._mark_bool(fn, v)
+                            elif ftype and ftype[0] == "named" \
+                                    and ftype[1] in ("f64", "float", "f32"):
+                                # 浮点载荷：绑定后必须打浮点标记，否则
+                                # to_str/算术会按整数位模式处理（v1.65 修复）
+                                self._mark_float(
+                                    fn, v, "f32" if ftype[1] == "f32" else "f64")
                             env2[b] = v
                     off += self.field_words(ftype)
             if body[0] == "expr":
@@ -1150,6 +1188,11 @@ class Lower:
                             self._mark_str(fn, d)
                         if isinstance(r, int) and r in getattr(fn, "boolv", set()):
                             self._mark_bool(fn, d)
+                        # 浮点结果同样要传标记（v1.65）：漏了它，match 表达式
+                        # 的 f64 结果会被当成整数位模式（print/to_str 输出乱码）
+                        wf = self._float_of(fn, r)
+                        if wf:
+                            self._mark_float(fn, d, wf)
             else:
                 self.block(body[1], fn, env2)
             fn.emit("jmp", l_end)
@@ -1297,6 +1340,9 @@ class Lower:
             fn.emit("movaddr", d, gid)
             fn.emit("bin", "add", d, d, ("imm", 8))
             return self._mark_str(fn, d)
+        if k == "interp":
+            # 字符串插值（v1.61）：单次分配 + 整数直写缓冲区
+            return self.lower_interp(e[1], fn, env)
         if k == "name":
             if e[1] not in env:
                 # 函数名作值：已知函数名 -> 代码地址操作数（fnaddr）。可作实参
@@ -1736,6 +1782,108 @@ class Lower:
             fn.emit("label", l_ok)
             return self.make_slice(fn, ptr, cnt, elem=elem)
         raise SyntaxError("子切片 a[lo..hi] 只支持 str、切片与定长数组")
+
+    def lower_interp(self, parts, fn, env):
+        """字符串插值（v1.61）：一次分配写完整条结果。
+
+        与手写 `"a" + x.to_str()` 的差别：整数不再先生成临时 str——直接
+        `__fmt_u64` 写进结果缓冲，省掉每段一次分配 + 一次拷贝。浮点/布尔/str
+        段仍各自成串，但结果只分配一次（手写 `+` 链是 1 次链分配 + n 次 to_str）。
+
+        容量 = 8(长度前缀) + 字面量字节 + 24*整数段 + Σ(str 段运行期长度) + 1(NUL)。
+        """
+        items = []          # ("lit", bytes) / ("int", vreg) / ("str", vreg)
+        fixed = 8 + 1
+        for p in parts:
+            if p[0] == "str":
+                raw = p[1].encode("utf-8")
+                items.append(("lit", raw))
+                fixed += len(raw)
+                continue
+            v = self.eval(p, fn, env)
+            if self._is_str(fn, v):
+                items.append(("str", v))
+                continue
+            w = self._float_of(fn, v)
+            if w:
+                self.uses_f64_str = True      # __f64_to_str 的发射守卫
+                s = fn.new_v()
+                fn.emit("call", s, "__f64_to_str", [v])
+                self._mark_str(fn, s)
+                items.append(("str", s))
+                continue
+            if isinstance(v, int) and v in getattr(fn, "boolv", set()):
+                self.uses_sfb = True          # __str_from_bool 的发射守卫
+                s = fn.new_v()
+                fn.emit("call", s, "__str_from_bool", [v])
+                self._mark_str(fn, s)
+                items.append(("str", s))
+                continue
+            if self._struct_of(fn, v) is not None:
+                raise SyntaxError("字符串插值不支持结构体值（先用方法转成 str）")
+            # 整数直接写缓冲区：__fmt_u64 与 f64 格式化同块发射，置同一守卫
+            self.uses_f64_str = True
+            items.append(("int", v))
+            fixed += 24          # 符号 + 20 位数字 + 余量
+
+        total = fn.new_v()
+        fn.emit("mov", total, ("imm", fixed))
+        for it in items:
+            if it[0] != "str":
+                continue
+            self.uses_memcpy = True
+            p8 = fn.new_v()
+            fn.emit("bin", "sub", p8, it[1], ("imm", 8))
+            ln = fn.new_v()
+            fn.emit("load", ln, p8, ("imm", 0))
+            fn.emit("bin", "add", total, total, ln)
+
+        buf = fn.new_v()
+        fn.emit("call", buf, "__alloc", [total])
+        pos = fn.new_v()
+        fn.emit("mov", pos, ("imm", 8))
+        for it in items:
+            if it[0] == "lit":
+                for by in it[1]:
+                    fn.emit("store8", buf, pos, ("imm", by))
+                    fn.emit("bin", "add", pos, pos, ("imm", 1))
+                continue
+            if it[0] == "int":
+                v = it[1]
+                neg = fn.new_v()
+                fn.emit("cmpset", "l", neg, v, ("imm", 0))
+                l_pos = fn.label("ipos")
+                fn.emit("jz", neg, l_pos)
+                fn.emit("store8", buf, pos, ("imm", 45))
+                fn.emit("bin", "add", pos, pos, ("imm", 1))
+                # 取负必须落到新 vreg（v 可能就是源变量的槽，原地 neg 会把
+                # 用户的变量改成相反数）；两条分支各发一次格式化调用，
+                # 不做"编译期改绑 v"那种假 phi。
+                av = fn.new_v()
+                fn.emit("neg", av, v)
+                fn.emit("call", pos, "__fmt_u64", [buf, pos, av, ("imm", 1)])
+                l_done = fn.label("idone")
+                fn.emit("jmp", l_done)
+                fn.emit("label", l_pos)
+                fn.emit("call", pos, "__fmt_u64", [buf, pos, v, ("imm", 1)])
+                fn.emit("label", l_done)
+                continue
+            s = it[1]
+            p8 = fn.new_v()
+            fn.emit("bin", "sub", p8, s, ("imm", 8))
+            ln = fn.new_v()
+            fn.emit("load", ln, p8, ("imm", 0))
+            dst = fn.new_v()
+            fn.emit("bin", "add", dst, buf, pos)
+            fn.emit("call", None, "__memcpy", [dst, s, ln])
+            fn.emit("bin", "add", pos, pos, ln)
+        fn.emit("store8", buf, pos, ("imm", 0))
+        ln = fn.new_v()
+        fn.emit("bin", "sub", ln, pos, ("imm", 8))
+        fn.emit("store", buf, ("imm", 0), ln)
+        r = fn.new_v()
+        fn.emit("bin", "add", r, buf, ("imm", 8))
+        return self._mark_str(fn, r)
 
     def lower_binop(self, e, fn, env):
         if e[1] == "+" and self._has_str_lit(e):
@@ -3437,7 +3585,9 @@ class Lower:
         if key not in self.vtables:
             raise SyntaxError(
                 f"{sname} 没有实现接口 {iname}（需要一个 `impl {sname} : {iname} {{ ... }}`）")
-        w = self.struct_size(sname)
+        # 装箱宽度按聚合布局取（struct 或 enum）：此前只认 struct，
+        # 把枚举装进接口值会报"未声明的结构体"（v1.65 修复）
+        w = self.agg_size(sname)
         raw = fn.new_v()
         fn.emit("call", raw, "__alloc", [("imm", 8 * w)])
         i = 0
@@ -3569,6 +3719,16 @@ class Lower:
                 fn.emit("jnz" if e[1] == "==" else "jz", eq, l_true)
                 fn.emit("jmp", l_false)
                 return
+            # str 有序比较（v1.66）：条件路径同样要走 __str_cmp——表达式路径
+            # 早就改了，分支路径曾漏掉（v1.19 浮点比较的同款双路径坑）
+            if e[1] in ("<", "<=", ">", ">=") \
+                    and (self._is_str(fn, a) or self._is_str(fn, b)):
+                c = fn.new_v()
+                fn.emit("call", c, "__str_cmp", [a, b])
+                cc2 = {"<": "l", "<=": "le", ">": "g", ">=": "ge"}[e[1]]
+                fn.emit("jcc", cc2, c, ("imm", 0), l_true)
+                fn.emit("jmp", l_false)
+                return
             cc = {"==": "e", "!=": "ne", "<": "l", "<=": "le", ">": "g", ">=": "ge"}[e[1]]
             # 浮点比较必须走 fcmpset（comisd + setcc），不能直接 jcc：
             # IEEE754 负数的位模式在整数序下是反的，直接 jcc 会让
@@ -3606,8 +3766,30 @@ class Lower:
         fn.emit("jmp", l_false)
 
     # ---- 语句 ----
+    def _dbg_bind(self, fn, name, v):
+        """v1.62 调试信息：let 绑定处发射"变量 -> vreg"标记。
+
+        只有 vreg（int）能发射：('imm', n) 这类编译期常量没有运行期位置。
+        标记位置即变量诞生点，调试器据此在断点处解析"当前值在哪"。"""
+        if isinstance(v, int):
+            fn.emit("dbgvar", name, v)
+
+    def _dbg_bind_param(self, fn, name, v):
+        """v1.62：形参绑定标记。与 let 的区别是**入口即可用**——codegen
+        把它的 bind 归到函数起点（偏移 0），断点落在函数任何一条语句上
+        都能查到（let 绑定则要求断点严格晚于绑定偏移：在 `let x = ...`
+        自己那条行上，x 还没赋值，报了反而是错的）。"""
+        if isinstance(v, int):
+            fn.emit("dbgparam", name, v)
+
     def stmt(self, s, fn, env):
         k = s[0]
+        # v1.62 调试信息：语句行号标记（qlm_dbinfo 的 parse_stmt 钩子追加的
+        # ("__line__", n) 尾部元素）。只在 --dbg-info 构建发射。
+        if self.dbg and len(s) > 1:
+            m = s[-1]
+            if isinstance(m, tuple) and len(m) == 2 and m[0] == "__line__":
+                fn.emit("line", m[1])
         if k == "annot":
             names = [a[0] for a in s[1]]
             inner = s[2]
@@ -3646,6 +3828,8 @@ class Lower:
                     # 字面量已经是在帧上新建的数组，直接绑定，不再多拷一次；
                     # 窄元素：字面量按 64 位存槽，就地把每个元素截到声明宽度（v1.40）
                     env[s[2]] = spec
+                    if self.dbg:
+                        self._dbg_bind(fn, s[2], env[s[2]])
                     if nb is not None:
                         self.arr_narrow[spec] = nb
                         self.arr_elem[spec] = ann[2][1]
@@ -3662,10 +3846,14 @@ class Lower:
                     self.arr_narrow[dst] = nb
                     self.arr_elem[dst] = ann[2][1]
                 env[s[2]] = dst
+                if self.dbg:
+                    self._dbg_bind(fn, s[2], env[s[2]])
                 return
             if self._rc_of(fn, spec) is not None:
                 # rc 句柄按句柄语义绑定（不拷贝 payload）；引用计数不变
                 env[s[2]] = spec
+                if self.dbg:
+                    self._dbg_bind(fn, s[2], env[s[2]])
                 return
             sname = self._struct_of(fn, spec)
             if sname is not None:
@@ -3673,6 +3861,8 @@ class Lower:
                 dst = self.alloc_struct(fn, sname)
                 self.struct_copy(fn, dst, spec, sname)
                 env[s[2]] = dst
+                if self.dbg:
+                    self._dbg_bind(fn, s[2], env[s[2]])
                 return
             if self._is_slice(fn, spec):
                 # 切片：{ptr,len} 两字值语义拷贝（仍共享底层存储）
@@ -3682,6 +3872,8 @@ class Lower:
                 if elem is not None:
                     self._mark_slice(fn, dst, elem)     # 元素标签要跟着拷贝走
                 env[s[2]] = dst
+                if self.dbg:
+                    self._dbg_bind(fn, s[2], env[s[2]])
                 return
             is_str = self._is_str(fn, spec)
             is_bool = s[3][0] == "bool" or (isinstance(spec, int) and spec in getattr(fn, "boolv", set()))
@@ -3715,6 +3907,8 @@ class Lower:
                         fn.narrow_v = {}
                     fn.narrow_v[d] = nb
             env[s[2]] = d
+            if self.dbg:
+                self._dbg_bind(fn, s[2], env[s[2]])
             return
         if k == "assign":
             if s[1] not in env:
@@ -4429,6 +4623,13 @@ class Lower:
     # ---- 函数 ----
     def lower_fn(self, f):
         fn = Fn(f["name"])
+        # v1.62 调试信息：只有主文件定义的函数配源码行号（import 的库函数
+        # 行号属于别的文件，本版不给——调试器对这些帧显示 <library>）。
+        # 路径统一成正斜杠：Windows 上传入的可能是反斜杠，调试器按正斜杠
+        # 做后缀匹配（basename 比较不受影响，endswith 会）
+        fn.dbg_file = (self.dbg_src.replace("\\", "/")
+                       if (self.dbg and f["name"] in self.dbg_main)
+                       else None)
         anns = [a for a, _ in f.get("annots", [])]
         self.no_preempt = "no_preempt" in anns
         fn.no_preempt = self.no_preempt
@@ -4509,6 +4710,10 @@ class Lower:
                 # 聚合形参：实参侧传入的是【副本地址】，值语义成立
                 self._mark_struct(fn, params[i], ty[1])
         self.fn_ret = f["ret"]
+        if self.dbg:
+            # 形参绑定标记：入口处即可查看（数组形参 env 已指向拷贝后的槽）
+            for name, _ty in f["params"]:
+                self._dbg_bind_param(fn, name, env[name])
         self.block(f["body"], fn, env)
         fn.emit("ret", ("imm", 0))     # 兜底返回
         self.out.append(fn)
@@ -8439,6 +8644,15 @@ def _map_ins(ins, f):
         return ("pause",)
     if op == "rdtsc":
         return ("rdtsc", V(ins[1]))
+    # v1.62 调试标记：line 的行号不是 vreg，原样穿过内联；dbgvar/
+    # dbgparam 的 vreg 要跟着重命名（否则内联后绑定指向 caller 空间里
+    # 不存在的 vreg）
+    if op == "line":
+        return ins
+    if op == "dbgvar":
+        return ("dbgvar", ins[1], V(ins[2]))
+    if op == "dbgparam":
+        return ("dbgparam", ins[1], V(ins[2]))
     raise AssertionError(f"_map_ins 缺少指令形态：{op}（内联会静默重命名错误）")
     if op == "winargs":
         return ("winargs", [V(x) for x in ins[1]])
@@ -8539,6 +8753,11 @@ def _inline_one(fn, callee, call_ins):
                         ren(ins[3]) if isinstance(ins[3], int) else ins[3], rlab(ins[4])))
         elif op == "args":
             continue
+        elif op == "dbgparam":
+            # v1.62 调试信息：内联函数的形参绑定降级成普通变量绑定——
+            # 它在调用点（实参搬迁之后）才诞生，不是"入口可用"；
+            # 否则内联参数会以 bind=0 泄漏成调用方全函数可见的幽灵变量
+            res.append(("dbgvar", ins[1], ren(ins[2]) if isinstance(ins[2], int) else ins[2]))
         elif op == "frameaddr":
             res.append(("frameaddr", ren(ins[1]), ins[2] + fbase))
         else:
@@ -8550,6 +8769,24 @@ def _inline_one(fn, callee, call_ins):
 # ---------------------------------------------------------------------------
 # 线性扫描寄存器分配（保守区间 + 调用感知）
 # ---------------------------------------------------------------------------
+
+
+def dbg_vreg_ranges(fn):
+    """vreg -> (first_ins, last_ins)：原始提及区间（v1.62 调试器判断变量
+    是否已死用）。不做 allocate() 的回边扩展——那是分配决策，不是作用域；
+    原始区间是"这个 vreg 在哪些指令之间被提及"的安全超集。"""
+    n = fn.nv
+    first = [10 ** 9] * n
+    last = [-1] * n
+    for idx, ins in enumerate(fn.instrs):
+        defs, uses = vreg_mentions(ins)
+        for v in defs + uses:
+            if 0 <= v < n:
+                if idx < first[v]:
+                    first[v] = idx
+                if idx > last[v]:
+                    last[v] = idx
+    return first, last
 
 
 def allocate(fn, pool=POOL, callee_saved=CALLEE_SAVED):
@@ -8692,6 +8929,77 @@ class Codegen:
         self.enc = Enc()
         self.global_fixups = []    # (patch_pos, gid) -> 数据区绝对地址
         self.code_fixups = []      # (patch_pos, label) -> 代码区绝对地址（线程入口等）
+        # v1.62 调试信息：{"funcs": [{name,file,rva,lines,vars}, ...]}
+        # lines/vars 的 offset 都是 .text 内偏移（RVA = TEXT_RVA + offset，
+        # 由 WinCodegen.gen_all_pe 统一补）；file=None 表示无源码行号
+        # （import 的库函数 / 运行库合成函数）。
+        self.dbg = {"funcs": []}
+        self._dbg = None           # 当前函数的收集态
+
+    # ---- v1.62 调试信息收集 ----
+    def _dbg_reset(self, fn):
+        self._dbg = {"name": fn.name, "file": getattr(fn, "dbg_file", None),
+                     "rva": None, "push": 1, "lines": [], "vars": []}
+
+    def _dbg_line(self, line):
+        self._dbg["lines"].append([self.enc.pos(), line])
+
+    def _dbg_var(self, ins):
+        if ins[0] == "dbgparam":
+            _, name, v = ins
+            self._dbg["vars"].append([self.enc.pos(), name, v, 1])
+        else:
+            _, name, v = ins
+            self._dbg["vars"].append([self.enc.pos(), name, v, 0])
+
+    def _dbg_kind(self, fn, v):
+        """vreg -> 显示类型。类型标记集合要等 lowering 全部结束才最终，
+        故在 codegen 期解析；优先级 struct > str > bool > f64 > int。"""
+        if v in getattr(fn, "structv", {}):
+            return ("struct", fn.structv[v])
+        if v in getattr(fn, "strv", set()):
+            return ("str", None)
+        if v in getattr(fn, "boolv", set()):
+            return ("bool", None)
+        fv = getattr(fn, "floatv", {}).get(v)
+        if fv:
+            return (fv, None)
+        return ("int", None)
+
+    def _dbg_finish(self, fn, ins_off):
+        """把当前函数的行表/变量绑定钉上机器码位置：
+        - loc = 线性扫描分配结果：("r", 寄存器号) 或 ("m", 帧槽字节距)，
+          地址即 [rbp - off]（与 fetch/commit 的寻址同源）；
+        - last = vreg 最后一次被提及的指令位置——之后的帧槽/寄存器可能
+          被复用，调试器据此标 <dead>，不显示过期值；
+        - entry=1（自身形参）：bind 取 args 之后第一条真实指令的偏移。
+          'args' 是函数第一条指令（把参数寄存器搬进形参 vreg），断点落在
+          第一条语句行首时它还没执行——那时形参不可读；
+        - let 绑定：bind = 绑定 mov 之后的位置（dbgvar 标记在 mov 之后）。
+          可用规则（调试器侧）：bind <= 当前 PC。在 `let x = ...` 自己
+          那条行上 PC 在 mov 之前 -> 不可用（赋值还没发生）；mov 之后的
+          任何断点 -> 可用。"""
+        first, last = dbg_vreg_ranges(fn)
+        # args 之后第一条真实指令的偏移（自身形参的可用起点）
+        after_args = ins_off[0]
+        for o in ins_off:
+            if o > ins_off[0]:
+                after_args = o
+                break
+        vars_out = []
+        for off, name, v, entry in self._dbg["vars"]:
+            loc = self.alloc.get(v)
+            if loc is None:
+                continue
+            kind, extra = self._dbg_kind(fn, v)
+            end = ins_off[last[v]] if 0 <= v < len(last) and last[v] >= 0 else off
+            vars_out.append({"name": name, "kind": kind, "s": extra,
+                             "bind": (after_args if entry else off), "entry": entry,
+                             "loc": [loc[0], loc[1]], "last": end})
+        self._dbg["vars"] = vars_out
+        self._dbg["lines"].sort(key=lambda e: e[0])
+        self.dbg["funcs"].append(self._dbg)
+        self._dbg = None
 
     # ---- 操作数 ----
     def fetch(self, target, spec):
@@ -8893,6 +9201,18 @@ class Codegen:
     def gen_instr(self, ins):
         enc = self.enc
         op = ins[0]
+        # v1.62 调试信息标记：不发射任何字节，只把位置记进行表/变量表。
+        # 标记被 qlm_opt._EFF 登记为效应指令，调度器不会把它浮走，
+        # 因此记录到的 enc.pos() 就是"语句边界"的真实机器码位置。
+        if op == "line":
+            self._dbg_line(ins[1])
+            return
+        if op == "dbgvar":
+            self._dbg_var(ins)
+            return
+        if op == "dbgparam":
+            self._dbg_var(ins)
+            return
         if op == "cpuid_pclmul":
             # PCLMULQDQ 特征探测：CPUID leaf 1（ECX=0）ECX[1]。
             _, dst = ins
@@ -9639,6 +9959,8 @@ class Codegen:
     def gen_functions(self):
         enc = self.enc
         for fn in self.fns:
+            self._dbg_reset(fn)
+            ins_off = []
             self.alloc, nslots, self.used_callee = allocate(fn)
             self.nslots = nslots
             self.frame_words = getattr(fn, "frame_words", 0)
@@ -9655,6 +9977,12 @@ class Codegen:
                 enc.push(r)
             enc.push(RBP)
             enc.mov_rr(RBP, RSP)
+            # v1.62 调试信息：序言在 rbp 之前压了 (used_callee + rbp [+线程
+            # 入口的 RDI/RSI]) 个寄存器——返回地址在 [rbp + 8*(n+1)]，
+            # 不在标准的 [rbp+8]。帧链（bt / next / finish 的深度）必须
+            # 知道每个函数压了几个，否则从第一个调用帧就断链。
+            self._dbg["push"] = (len(self.used_callee) + 1
+                                 + (2 if self.cur_fn_thread else 0))
             rbp_mod = (8 - 8 * (len(self.used_callee) + 1)) % 16
             frame = (nslots + self.frame_words) * 8
             while frame % 16 != rbp_mod:
@@ -9662,7 +9990,9 @@ class Codegen:
             if frame:
                 enc.alu_ri("sub", RSP, frame)
             for ins in fn.instrs:
+                ins_off.append(enc.pos())
                 self.gen_instr(ins)
+            self._dbg_finish(fn, ins_off)
             # 兜底返回
             self.emit_epilogue()
             enc.ret()
@@ -9718,25 +10048,42 @@ def write_elf(path, blob):
 
 def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
                   asset_root=None,
-                       platform="linux"):
-    """前端共享层：解析 + 降级 + 优化（x86_64 / aarch64 发射层共用）"""
+                       platform="linux", prog=None):
+    """前端共享层：解析 + 降级 + 优化（x86_64 / aarch64 发射层共用）
+
+    prog: v1.62 调试信息预加载程序（qlm_dbinfo.load_program_dbg 的产物：
+    带行号标记的 fns_ast + 主文件函数名集）。非 None 时跳过内部
+    load_program，并打开 Lower 的调试标记发射。"""
     require_source(src_path)
     cfg = load_config(src_path)
-    mod, _imports, fns_ast, tests, structs, enums, _order = load_program(src_path)
+    if prog is None:
+        mod, _imports, fns_ast, tests, structs, enums, _order = load_program(src_path)
+    else:
+        fns_ast, tests = prog["fns_ast"], prog["tests"]
+        structs, enums = prog["structs"], prog["enums"]
     fns_ast = with_test_runner(fns_ast, tests)   # test "name" { } -> 测试入口
     # 全局 DCE（v1.17d）：main 调用图可达性——import 大库只链接用到的。
     # 在测试合成之后（根含测试入口）、Lower 之前（AST 级，一次到位）
     fns_ast = global_dce(fns_ast)
     low = Lower(fns_ast, cfg, arch=arch, structs=structs, enums=enums,
                 asset_root=asset_root,
-                platform=platform)
+                platform=platform,
+                dbg=prog is not None,
+                dbg_main=(prog.get("main_fns") if prog else None),
+                dbg_src=(src_path if prog else None))
     fns = low.run(fns_ast)
     if optimize:
         # v0.2 管线：字符串求长外提 -> 内联 -> 逐函数收敛
         # （求长外提必须在内联之前：内联会把 __str_len 的扫描循环搬进循环体）
         for fn in fns:
             opt_strlen_hoist(fn)
-        if "1" not in os.environ.get("QLM_NO_INLINE", "").split(","):
+        # v1.71：调试构建（prog 非 None，即 --dbg-info）默认**不内联**。
+        # 内联后被调函数的语句行落在调用者函数体里，独立函数体成为死代码，
+        # 源码断点会静默不命中（实测：work 内联进 main 后
+        # `break main.qma:12` 永不触发，bt 也看不到 work 帧）。
+        # 调试构建以断点语义优先；QLM_NO_INLINE=1 仍可显式关。
+        if prog is None and "1" not in os.environ.get(
+                "QLM_NO_INLINE", "").split(","):
             opt_inline(fns)
         for fn in fns:
             opt_all(fn, unroll=True)

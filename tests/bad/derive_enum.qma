@@ -1,0 +1,10 @@
+// 负向（v1.72）：@derive 只能用在 struct 上（enum 派生尚未实现）
+module derive_enum
+
+@derive(Json)
+enum Color { Red, Green }
+
+fn main() {
+    let c = Color.Red
+    print("x")
+}

@@ -1,0 +1,18 @@
+// 负向（v1.62）：泛型 impl 模板必须实现接口的全部方法
+module gimpl_missing
+
+interface Show {
+    fn show(self) -> str
+    fn name(self) -> str
+}
+
+struct Box[T] { value: T }
+
+impl Box[T] : Show {
+    fn show(b: Box[T]) -> str { return "Box" }
+}
+
+fn main() {
+    let b = Box[int] { value: 1 }
+    print(b.show())
+}

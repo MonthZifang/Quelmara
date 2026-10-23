@@ -1,0 +1,139 @@
+// std/csv.qma —— CSV 解析与生成（v1.74）
+//
+// 为什么需要：导数据、读配置、测试夹具都用 CSV，之前每个示例自己 split(",")，
+// 一遇到引号里的逗号或换行就错。
+//
+// 语义（RFC 4180）：
+//   * 字段用 `,` 分隔，行用 CRLF 或 LF 结束（两种都接受）；
+//   * 字段可用双引号包裹，包裹内允许 `,` `CR` `LF`，`""` 表示一个字面双引号；
+//   * 空行跳过（不产生空行记录）；末尾没有换行也能正确收尾；
+//   * csv_build 只给"含 `,` / `"` / CR / LF"的字段加引号，其余原样输出，
+//     行间用 CRLF（与 Excel 一致）。
+//
+// 边界：不做列数校验（各行可以不等长）；不认 `;` 分隔（那是 locale 变体）；
+// 不做 BOM 剥离（UTF-8 BOM 会出现在第一个字段里，调用方自己 trim）。
+
+import std.str
+
+fn csv_need_quote(f: str) -> bool {
+    let mut i = 0
+    while i < len(f) {
+        let c = f[i]
+        if c == 44 || c == 34 || c == 13 || c == 10 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn csv_quote(f: str) -> str {
+    if !csv_need_quote(f) {
+        return f
+    }
+    return "\"" + str_replace(f, "\"", "\"\"") + "\""
+}
+
+pub fn csv_parse(text: str) -> vec[vec[str]] {
+    let rows = vec[vec[str]].new(8)
+    let mut row = vec[str].new(8)
+    let buf = vec[int].new(64)
+    let mut inq = false
+    let mut pending = false          // 当前行已有内容（含空字段）
+    let mut i = 0
+    while i < len(text) {
+        let c = text[i]
+        if inq {
+            if c == 34 {                             // '"'
+                if i + 1 < len(text) && text[i + 1] == 34 {
+                    buf.push(34)                     // "" -> 一个引号
+                    i = i + 2
+                    continue
+                }
+                inq = false
+                i = i + 1
+                continue
+            }
+            buf.push(c)
+            i = i + 1
+            continue
+        }
+        if c == 34 {
+            inq = true
+            pending = true
+            i = i + 1
+            continue
+        }
+        if c == 44 {                                 // ','
+            row.push(str_from_bytes(buf))
+            buf.clear()
+            pending = true
+            i = i + 1
+            continue
+        }
+        if c == 13 || c == 10 {
+            if c == 13 && i + 1 < len(text) && text[i + 1] == 10 {
+                i = i + 2
+            } else {
+                i = i + 1
+            }
+            if pending || len(row) > 0 || len(buf) > 0 {
+                row.push(str_from_bytes(buf))
+                buf.clear()
+                rows.push(row)
+                row = vec[str].new(8)
+                pending = false
+            }
+            continue
+        }
+        buf.push(c)
+        pending = true
+        i = i + 1
+    }
+    if pending || len(row) > 0 || len(buf) > 0 {
+        row.push(str_from_bytes(buf))
+        rows.push(row)
+    }
+    return rows
+}
+
+pub fn csv_build(rows: vec[vec[str]]) -> str {
+    let mut out = ""
+    let mut r = 0
+    while r < len(rows) {
+        let row = rows.get(r)
+        if r > 0 {
+            out = out + "\r\n"
+        }
+        let mut c = 0
+        while c < len(row) {
+            if c > 0 {
+                out = out + ","
+            }
+            out = out + csv_quote(row.get(c))
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return out
+}
+
+// 取第 i 列（越界返回空串）
+pub fn csv_col(row: vec[str], i: int) -> str {
+    if i < 0 || i >= len(row) {
+        return ""
+    }
+    return row.get(i)
+}
+
+// 在第 col 列里找第一个等于 value 的行号（找不到返回 -1）
+pub fn csv_find_row(rows: vec[vec[str]], col: int, value: str) -> int {
+    let mut r = 0
+    while r < len(rows) {
+        if csv_col(rows.get(r), col) == value {
+            return r
+        }
+        r = r + 1
+    }
+    return -1
+}
