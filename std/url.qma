@@ -281,60 +281,54 @@ pub fn url_host(u: str) -> str {
 
 /// 端口；缺省返回 -1
 pub fn url_port(u: str) -> int {
+    // v2.02：authority 一遍扫完（原来 _after_scheme + _authority_end + 找 '@' +
+    // 找 ']' + 找 ':' 共 5 遍），端口数字就地解析（不再 substr + to_int）。
     let start = _after_scheme(u)
-    let end = _authority_end(u, start)
-    if end <= start {
-        return -1
-    }
+    let n = len(u)
+    let mut end = n
     let mut at = -1
-    let mut i = start
-    while i < end {
-        if u[i] == 64 {
-            at = i
-        }
-        i = i + 1
-    }
-    let mut hs = start
-    if at >= 0 {
-        hs = at + 1
-    }
-    // IPv6：端口在 ']' 之后
-    let mut after = hs
-    if hs < end && u[hs] == 91 {
-        let mut j = hs
-        while j < end {
-            if u[j] == 93 {
-                after = j + 1
-                j = end
-            }
-            j = j + 1
-        }
-    }
     let mut colon = -1
-    let mut k = after
-    while k < end {
-        if u[k] == 58 {
-            colon = k
+    let mut br = 0
+    let mut i = start
+    while i < n {
+        let c = u[i]
+        if c == 47 || c == 63 || c == 35 {
+            end = i
+            i = n
+        } else {
+            if c == 64 {
+                at = i
+                colon = -1        // userinfo 里的 ':' 不算端口
+            } else if c == 91 {
+                br = 1            // IPv6 字面量起点
+            } else if c == 93 {
+                br = 0
+            } else if c == 58 && br == 0 {
+                colon = i
+            }
+            i = i + 1
         }
-        k = k + 1
+    }
+    if at >= 0 && colon >= 0 && colon < at {
+        colon = -1
     }
     if colon < 0 || colon + 1 >= end {
         return -1
     }
-    let digits = substr(u, colon + 1, end - colon - 1)
-    let dn = len(digits)
-    if dn == 0 {
-        return -1
-    }
-    let mut d = 0
-    while d < dn {
-        let c = digits[d]
+    let mut d = colon + 1
+    let mut port = 0
+    while d < end {
+        let c = u[d]
         if c < 48 || c > 57 {
             return -1         // 非法端口不 fail-fast，按"未指定"处理
         }
+        port = port * 10 + (c - 48)
         d = d + 1
     }
-    return digits.to_int()
+    if d == colon + 1 {
+        return -1
+    }
+    return port
 }
 
 /// path（不含 query/fragment）；没有 path 返回 "/" 之外的空串
@@ -396,58 +390,96 @@ pub fn url_fragment(u: str) -> str {
     return ""
 }
 
+/// 区间 [from, from+count) 里有没有 '%'——决定要不要走 decode（v2.02）
+fn _has_pct(s: str, from: int, count: int) -> int {
+    let mut i = from
+    let end = from + count
+    while i < end {
+        if s[i] == 37 {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 /// query 里取某个键（解码后返回）；不存在返回 ""
 /// 语义：同名键取第一个；键值以 '&' 分隔，'=' 可省略（值按 ""）
 pub fn url_query_get(u: str, key: str) -> str {
-    let q = url_query(u)
-    let n = len(q)
+    // v2.02：直接在 u 上扫（不再先 url_query 分配一份 query 子串），
+    // 且只有区间里真的含 '%' 才走 decode 比较——绝大多数 key/value 无编码，
+    // 这一条把"每个 _kv 都 substr + decode"的两份分配全省掉。
+    let n = len(u)
     let kn = len(key)
-    let mut start = 0
+    let mut qpos = -1
     let mut i = 0
-    while i <= n {
-        if i == n || q[i] == 38 {
-            // [start, i) 是一个 kv
+    while i < n {
+        if u[i] == 63 {
+            qpos = i
+            break
+        }
+        i = i + 1
+    }
+    if qpos < 0 {
+        return ""
+    }
+    let qs = qpos + 1
+    let mut qe = n
+    let mut k = qs
+    while k < n {
+        if u[k] == 35 {
+            qe = k
+            break
+        }
+        k = k + 1
+    }
+    let mut start = qs
+    let mut j = qs
+    while j <= qe {
+        if j == qe || u[j] == 38 {
             let mut eq = -1
             let mut k = start
-            while k < i {
-                if q[k] == 61 {
+            while k < j {
+                if u[k] == 61 {
                     eq = k
-                    break
+                    k = j
+                } else {
+                    k = k + 1
                 }
-                k = k + 1
             }
-            // v1.14：原始 kname 零分配比较（mem_cmp 直接比区间，不再
-            // substr + decode 各分配一份）；仅当未命中且 kname 含编码时
-            // 才走 decode 比较（语义保留：支持 key 本身 %XX 编码的罕见场景）
-            let mut hit = 0
             let mut has_eq = 0
             if eq >= 0 {
                 has_eq = 1
             }
-            let mut klen = i - start
+            let mut klen = j - start
             if has_eq == 1 {
                 klen = eq - start
             }
+            let mut hit = 0
             if klen == kn {
-                if mem_cmp(mem_ptr(q, start), key, kn) == 0 {
+                if mem_cmp(mem_ptr(u, start), key, kn) == 0 {
                     hit = 1
                 }
             }
-            if hit == 0 {
-                let kname = substr(q, start, klen)
-                if url_decode(kname) == key {
+            if hit == 0 && _has_pct(u, start, klen) == 1 {
+                if url_decode(substr(u, start, klen)) == key {
                     hit = 1
                 }
             }
             if hit == 1 {
-                if has_eq == 1 {
-                    return url_decode(substr(q, eq + 1, i - eq - 1))
+                if has_eq == 0 {
+                    return ""
                 }
-                return ""
+                let vs = eq + 1
+                let vn = j - vs
+                if _has_pct(u, vs, vn) == 1 {
+                    return url_decode(substr(u, vs, vn))
+                }
+                return substr(u, vs, vn)
             }
-            start = i + 1
+            start = j + 1
         }
-        i = i + 1
+        j = j + 1
     }
     return ""
 }

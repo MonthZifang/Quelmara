@@ -665,13 +665,29 @@ fn _parse_obj(d: int, depth: int) -> int {
 /// 句柄不自动回收（一个文档一个块）；长驻进程请 mem_free(doc, 72) 并在
 /// 之前释放 pool/buf/kids（当前不提供 json_free，见 docs/GAPS.md）。
 pub fn json_parse(s: str) -> int {
+    let n = len(s)
+    // v2.02：按输入长度预分配三个缓冲，省掉解析途中的十几次翻倍 + 全量拷贝。
+    // 1.35 MB 的 2 万对象文档：节点池从 32 翻到 17 万要走 13 次 realloc，
+    // 累计拷贝约 17 MB——比整个解析的算术还贵。估不出来就退回小初值让 _grow_* 长。
+    // 上限（26 万节点 / 4 MB 字节池）挡住超大输入，避免一次吃几百 MB。
+    let mut pcap = 32 * 6
+    let mut kcap = 32
+    let mut bcap = 256
+    let est = n / 8
+    if est > 32 && est < 262144 {
+        pcap = est * 6
+        kcap = est
+    }
+    if n / 2 > 256 && n / 2 < 4194304 {
+        bcap = n / 2
+    }
     let d = mem_alloc(136)
-    mem_store64(d, JDOM_PBUF, mem_alloc(32 * 6 * 8))
-    mem_store64(d, JDOM_PCAP, 32 * 6)
-    mem_store64(d, JDOM_BBUF, mem_alloc(256))
-    mem_store64(d, JDOM_BCAP, 256)
-    mem_store64(d, JDOM_KBUF, mem_alloc(32 * 8))
-    mem_store64(d, JDOM_KCAP, 32)
+    mem_store64(d, JDOM_PBUF, mem_alloc(pcap * 8))
+    mem_store64(d, JDOM_PCAP, pcap)
+    mem_store64(d, JDOM_BBUF, mem_alloc(bcap))
+    mem_store64(d, JDOM_BCAP, bcap)
+    mem_store64(d, JDOM_KBUF, mem_alloc(kcap * 8))
+    mem_store64(d, JDOM_KCAP, kcap)
     mem_store64(d, JDOM_PN, 0)
     mem_store64(d, JDOM_BN, 0)
     mem_store64(d, JDOM_KN, 0)
