@@ -1,0 +1,88 @@
+// s5_enum.qma —— stage-1 编译器（qlmc）子集 S4 的差分夹具（v2.18）
+//
+// 覆盖：enum 声明（无载荷 / 带载荷）、构造 `E.V` 与 `E.V(x)`、
+// match 作表达式与语句、载荷绑定、通配 `_`、循环内 match。
+// 与 stage-0 做**逐字节差分**（stdout + 退出码），见 tests/qlmc_test.py。
+enum Light {
+    Red
+    Yellow
+    Green
+    Flashing(rate: int)
+}
+
+enum Cmd {
+    Stop
+    Add(n: int)
+    Tag(s: str)
+}
+
+fn main() {
+    let a = Light.Red
+    let b = Light.Yellow
+    let g = Light.Green
+    let f = Light.Flashing(rate: 7)
+
+    print(match a {
+        Light.Red => 1
+        Light.Yellow => 2
+        Light.Green => 3
+        _ => 9
+    })
+    print(match b {
+        Light.Red => 1
+        Light.Yellow => 2
+        Light.Green => 3
+        _ => 9
+    })
+    print(match g {
+        Light.Red => 1
+        Light.Yellow => 2
+        Light.Green => 3
+        _ => 9
+    })
+    // 载荷绑定 + 运算
+    print(match f {
+        Light.Flashing(rate) => rate * 3
+        _ => -1
+    })
+
+    // match 作语句 + 循环
+    let mut total = 0
+    for i in 0..5 {
+        let c = Light.Green
+        match c {
+            Light.Green => {
+                total = total + i
+            }
+            _ => {
+                total = total - 100
+            }
+        }
+    }
+    print(total)
+
+    // 另一个 enum：带 int / str 载荷
+    let s = Cmd.Stop
+    let n = Cmd.Add(n: 41)
+    let t = Cmd.Tag(s: "hey")
+    print(match n {
+        Cmd.Add(n) => n + 1
+        _ => 0
+    })
+    match t {
+        Cmd.Tag(s) => {
+            print(len(s))
+        }
+        _ => {
+            print(-1)
+        }
+    }
+    match s {
+        Cmd.Stop => {
+            print(1000)
+        }
+        _ => {
+            print(-2)
+        }
+    }
+}

@@ -7,16 +7,17 @@
 //
 // ## 它不是什么（重要，别当成"自举完成"）
 //
-// 只覆盖**子集 S3**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
+// 只覆盖**子集 S4**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
 // "链路通 + 后端真"排在"语法全覆盖"前面：后端是自举的承重墙，语法是加法。
 //
 //   支持：fn（int/bool/str 形参与返回，≤4 参）、let/mut（可带类型标注）、赋值、
 //         if/else、while、**for 区间**、**break/continue**、return、exit、print、
 //         assert、len(str)、const（解析期内联）、算术 + - * / %、比较、
 //         && || !（短路）、str 拼接与内容比较、递归、**struct（声明/字面量/
-//         字段读写/值语义拷贝）**、**定长数组 [N]T（字面量/下标读写）**
-//   不支持：enum/match、vec/map、f64、泛型、闭包、切片、defer、import（多文件）、
-//         宏/反射、@ffi、接口、rc、struct 形参/返回值、嵌套聚合字段、聚合 print
+//         字段读写/值语义拷贝）**、**定长数组 [N]T（字面量/下标读写）**、
+//         **enum（声明/构造/载荷）与 match（表达式/语句/`_`/载荷绑定）**
+//   不支持：vec/map、f64、泛型、闭包、切片、defer、import（多文件）、宏/反射、
+//         @ffi、接口、rc、聚合形参/返回值、嵌套聚合字段、聚合 print
 //
 // ## 分层（v2.16 重写了后端，前端沿用）
 //
@@ -94,6 +95,8 @@ const K_IN = 16
 const K_BREAK = 17
 const K_CONTINUE = 18
 const K_STRUCT = 19
+const K_ENUM = 20
+const K_MATCH = 21
 
 // 标点 id（多字符的按"最长匹配"先行）
 const P_LPAREN = 1
@@ -123,6 +126,7 @@ const P_DOT = 24
 const P_DOTDOT = 25
 const P_LBRACK = 26
 const P_RBRACK = 27
+const P_FATARROW = 28
 
 struct Tok {
     k: int          // T_*
@@ -139,18 +143,21 @@ struct Tok {
 // ---------------------------------------------------------------------------
 
 // 表达式
-const E_NUM = 1
-const E_VAR = 2
-const E_BIN = 3      // a = 运算符(P_*)，b/c = 子节点
-const E_UN = 4       // a = P_MINUS / P_NOT，b = 子节点
-const E_CALL = 5     // a = 名字 id，b/c = 实参节点（-1 = 无）
-const E_STR = 6
-const E_FIELD = 7      // a = 基址表达式，b = 字段名 id
-const E_INDEX = 8      // a = 基址表达式，b = 下标表达式
-const E_STRUCTLIT = 9  // a = struct 序号，b = 首个 E_FINIT（nx 链）
-const E_ARRLIT = 10    // a = 首个 E_AINIT（nx 链），b = 元素个数
-const E_FINIT = 11     // a = 字段序号，b = 值
-const E_AINIT = 12     // a = 值      // a = 字符串表 id
+const E_NUM = 40
+const E_VAR = 41
+const E_BIN = 42      // a = 运算符(P_*)，b/c = 子节点
+const E_UN = 43       // a = P_MINUS / P_NOT，b = 子节点
+const E_CALL = 44     // a = 名字 id，b/c = 实参节点（-1 = 无）
+const E_STR = 45
+const E_FIELD = 46      // a = 基址表达式，b = 字段名 id
+const E_INDEX = 47      // a = 基址表达式，b = 下标表达式
+const E_STRUCTLIT = 48  // a = struct 序号，b = 首个 E_FINIT（nx 链）
+const E_ARRLIT = 49    // a = 首个 E_AINIT（nx 链），b = 元素个数
+const E_FINIT = 50     // a = 字段序号，b = 值
+const E_AINIT = 51     // a = 值
+const E_ENUMCTOR = 52  // a = enum 序号，b = 变体序号，c = 载荷表达式（-1 = 无）
+const E_MATCH = 53     // a = 被匹配表达式，b = 首个 E_ARM（nx 链），c = 结果类型
+const E_ARM = 54       // a = 变体序号（-1 = 通配），b = 绑定名 id（-1 = 不绑定），c = 体      // a = 字符串表 id
 
 // 语句
 const S_LET = 10     // a = 名字 id，b = 初值，n = mut(0/1)，slot = 帧槽号
@@ -165,7 +172,8 @@ const S_FOR = 18       // a = 循环变量名，b = lo，c = hi，n = 体
 const S_BREAK = 19
 const S_CONTINUE = 20
 const S_ASG_FIELD = 21   // a = 基址，b = 字段名 id，c = 值
-const S_ASG_INDEX = 22   // a = 基址，b = 下标，c = 值    // a = 值
+const S_ASG_INDEX = 22   // a = 基址，b = 下标，c = 值
+const S_MATCH = 23       // 同 E_MATCH，但按语句降级    // a = 值
 
 struct Node {
     op: int
@@ -187,9 +195,15 @@ const TY_STR = 2
 const TY_VOID = 3
 // 聚合类型编码（v2.17）：0x1000+si = struct；0x100000+(count<<8)+elem = 数组
 const TY_STRUCT = 0x1000
+const TY_ENUM = 0x2000
 const TY_ARRAY = 0x100000
 const ST_STRIDE = 18        // 每个 struct 在 stt 里占 18 字：name, nf, 8*(fname, fty)
 const MAX_FIELD = 8
+const MAX_STRUCT = 64
+const EN_HDR = 1200          // stt[EN_HDR] = enum 个数，enum 区从 EN_HDR+1 起
+const EN_STRIDE = 26         // name, nvar, 8×(变体名, 载荷名, 载荷类型)
+const MAX_VARIANT = 8
+const TBL_SIZE = EN_HDR + 1 + 64 * EN_STRIDE
 
 struct Fn {
     name: int       // 名字 id
@@ -253,6 +267,8 @@ fn _kw_id(w: str) -> int {
     if w == "break" { return K_BREAK }
     if w == "continue" { return K_CONTINUE }
     if w == "struct" { return K_STRUCT }
+    if w == "enum" { return K_ENUM }
+    if w == "match" { return K_MATCH }
     return 0
 }
 
@@ -363,6 +379,7 @@ fn lex(src: str, toks: vec[Tok]) -> int {
             else if two == "||" { pid = P_OR }
             else if two == "->" { pid = P_ARROW }
             else if two == ".." { pid = P_DOTDOT }
+            else if two == "=>" { pid = P_FATARROW }
             if pid != 0 {
                 _tok(toks, T_PUNCT, pid, "", line)
                 i = i + 2
@@ -451,6 +468,51 @@ fn _st_field(p: P, si: int, nid: int) -> int {
     return -1
 }
 
+fn _en_base(ei: int) -> int {
+    return EN_HDR + 1 + ei * EN_STRIDE
+}
+
+fn _enum_index(p: P, nid: int) -> int {
+    let n = p.stt.get(EN_HDR)
+    let mut i = 0
+    while i < n {
+        if p.stt.get(_en_base(i)) == nid {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn _en_nvar(p: P, ei: int) -> int {
+    return p.stt.get(_en_base(ei) + 1)
+}
+
+/// 变体名 → 序号（-1 = 没有）
+fn _en_variant(p: P, ei: int, nid: int) -> int {
+    let n = _en_nvar(p, ei)
+    let mut i = 0
+    while i < n {
+        if p.stt.get(_en_base(ei) + 2 + i * 3) == nid {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn _en_vname(p: P, ei: int, vi: int) -> int {
+    return p.stt.get(_en_base(ei) + 2 + vi * 3)
+}
+
+fn _en_pname(p: P, ei: int, vi: int) -> int {
+    return p.stt.get(_en_base(ei) + 2 + vi * 3 + 1)
+}
+
+fn _en_ptype(p: P, ei: int, vi: int) -> int {
+    return p.stt.get(_en_base(ei) + 2 + vi * 3 + 2)
+}
+
 /// 类型：`int|bool|str|StructName|[N]T`
 fn _type(p: P, pos: vec[int]) -> int {
     let t = _cur(p, pos)
@@ -473,11 +535,16 @@ fn _type(p: P, pos: vec[int]) -> int {
         if t.s == "int" { return TY_INT }
         if t.s == "bool" { return TY_BOOL }
         if t.s == "str" { return TY_STR }
-        let si = _struct_index(p, _name_id(p, t.s))
-        if si < 0 {
-            _fail(p, pos, "未知类型 " + t.s)
+        let nid = _name_id(p, t.s)
+        let si = _struct_index(p, nid)
+        if si >= 0 {
+            return TY_STRUCT + si
         }
-        return TY_STRUCT + si
+        let ei = _enum_index(p, nid)
+        if ei >= 0 {
+            return TY_ENUM + ei
+        }
+        _fail(p, pos, "未知类型 " + t.s)
     }
     _fail(p, pos, "期望类型")
     return TY_INT
@@ -623,6 +690,72 @@ fn _struct_lit(p: P, pos: vec[int], si: int) -> int {
     return _node(p, E_STRUCTLIT, si, first, -1)
 }
 
+/// match：`match e { Pat => expr ... }`；`block_mode=1` 时臂体是 `{ ... }` 块
+fn _match(p: P, pos: vec[int], block_mode: int) -> int {
+    _adv(pos)                       // 吃掉 match
+    let scrut = _expr(p, pos)
+    _eat_p(p, pos, P_LBRACE)
+    let mut first = -1
+    let mut last = -1
+    while !_is_p(p, pos, P_RBRACE) {
+        // 模式
+        let mut vi = -1
+        let mut bind = -1
+        let t = _cur(p, pos)
+        if t.k == T_NAME && t.s == "_" {
+            _adv(pos)
+        } else {
+            let en = _cur(p, pos)
+            if en.k != T_NAME {
+                _fail(p, pos, "match 模式期望 枚举名.变体 或 _")
+            }
+            _adv(pos)
+            let ei = _enum_index(p, _name_id(p, en.s))
+            if ei < 0 {
+                _fail(p, pos, "match 模式里的 " + en.s + " 不是 enum")
+            }
+            _eat_p(p, pos, P_DOT)
+            let vn = _cur(p, pos)
+            if vn.k != T_NAME {
+                _fail(p, pos, "match 模式期望变体名")
+            }
+            _adv(pos)
+            vi = _en_variant(p, ei, _name_id(p, vn.s))
+            if vi < 0 {
+                _fail(p, pos, "enum 没有变体 " + vn.s)
+            }
+            if _is_p(p, pos, P_LPAREN) {
+                _adv(pos)
+                let bn = _cur(p, pos)
+                if bn.k == T_NAME {
+                    bind = _name_id(p, bn.s)
+                    _adv(pos)
+                }
+                _eat_p(p, pos, P_RPAREN)
+            }
+        }
+        _eat_p(p, pos, P_FATARROW)
+        let mut body = -1
+        if block_mode == 1 && _is_p(p, pos, P_LBRACE) {
+            body = _block(p, pos)
+        } else {
+            body = _expr(p, pos)
+        }
+        let id = _node(p, E_ARM, vi, bind, body)
+        if first < 0 {
+            first = id
+        } else {
+            _set_nx(p, last, id)
+        }
+        last = id
+        if _is_p(p, pos, P_COMMA) {
+            _adv(pos)
+        }
+    }
+    _eat_p(p, pos, P_RBRACE)
+    return _node(p, E_MATCH, scrut, first, 0)
+}
+
 fn _expr(p: P, pos: vec[int]) -> int {
     return _or_e(p, pos)
 }
@@ -725,6 +858,9 @@ fn _primary(p: P, pos: vec[int]) -> int {
         }
         return _postfix(p, pos, _node(p, E_NUM, v, -1, -1))
     }
+    if t.k == T_KW && t.n == K_MATCH {
+        return _postfix(p, pos, _match(p, pos, 0))
+    }
     if t.k == T_PUNCT && t.n == P_LBRACK {
         // 数组字面量 [e1, e2, ...]
         _adv(pos)
@@ -757,6 +893,32 @@ fn _primary(p: P, pos: vec[int]) -> int {
     if t.k == T_NAME {
         _adv(pos)
         let nid = _name_id(p, t.s)
+        let ei = _enum_index(p, nid)
+        if ei >= 0 && _is_p(p, pos, P_DOT) {
+            _adv(pos)
+            let vn = _cur(p, pos)
+            if vn.k != T_NAME {
+                _fail(p, pos, "枚举变体名期望标识符")
+            }
+            _adv(pos)
+            let vi = _en_variant(p, ei, _name_id(p, vn.s))
+            if vi < 0 {
+                _fail(p, pos, "enum 没有变体 " + vn.s)
+            }
+            let mut pl = -1
+            if _is_p(p, pos, P_LPAREN) {
+                _adv(pos)
+                // 载荷可写 `变体(值)` 或 `变体(名: 值)`
+                if _cur(p, pos).k == T_NAME && _t(p, pos[0] + 1).k == T_PUNCT &&
+                   _t(p, pos[0] + 1).n == P_COLON {
+                    _adv(pos)
+                    _adv(pos)
+                }
+                pl = _expr(p, pos)
+                _eat_p(p, pos, P_RPAREN)
+            }
+            return _postfix(p, pos, _node(p, E_ENUMCTOR, ei, vi, pl))
+        }
         if _is_p(p, pos, P_LBRACE) {
             let si = _struct_index(p, nid)
             if si >= 0 {
@@ -833,6 +995,13 @@ fn _stmt(p: P, pos: vec[int]) -> int {
                                    n: eh, slot: 0, ty: TY_INT, nx: -1 })
         }
         return id
+    }
+    if t.k == T_KW && t.n == K_MATCH {
+        let m = _match(p, pos, 1)
+        let nd = p.nodes.get(m)
+        p.nodes.set(m, Node { op: S_MATCH, a: nd.a, b: nd.b, c: 0, n: 0,
+                              slot: 0, ty: TY_INT, nx: -1 })
+        return m
     }
     if t.k == T_KW && t.n == K_FOR {
         _adv(pos)
@@ -960,11 +1129,7 @@ fn _fn(p: P, pos: vec[int]) {
         let mut pt = TY_INT
         if _is_p(p, pos, P_COLON) {
             _adv(pos)
-            if _cur(p, pos).k != T_NAME {
-                _fail(p, pos, "形参类型期望类型名")
-            }
-            pt = _ty_id(_cur(p, pos).s)
-            _adv(pos)
+            pt = _type(p, pos)          // 支持 int/bool/str/struct/enum/[N]T
         }
         let pid = _name_id(p, pn.s)
         if np == 0 { q0 = pid }
@@ -985,11 +1150,7 @@ fn _fn(p: P, pos: vec[int]) {
     let mut rt = TY_VOID
     if _is_p(p, pos, P_ARROW) {
         _adv(pos)
-        if _cur(p, pos).k != T_NAME {
-            _fail(p, pos, "返回类型期望类型名")
-        }
-        rt = _ty_id(_cur(p, pos).s)
-        _adv(pos)
+        rt = _type(p, pos)
     }
     let body = _block(p, pos)
     p.fns.push(Fn { name: nid, np: np, p0: q0, p1: q1, p2: q2, p3: q3,
@@ -1060,6 +1221,64 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
             }
             _eat_p(p, pos, P_RBRACE)
             p.stt.set(_st_base(nst) + 1, nf)
+            continue
+        }
+        if t.k == T_KW && t.n == K_ENUM {
+            _adv(pos)
+            let nm = _cur(p, pos)
+            if nm.k != T_NAME {
+                _fail(p, pos, "enum 后期望名字")
+            }
+            _adv(pos)
+            let nid = _name_id(p, nm.s)
+            if _enum_index(p, nid) >= 0 {
+                _fail(p, pos, "enum 重复声明 " + nm.s)
+            }
+            if p.stt.get(EN_HDR) >= 64 {
+                _fail(p, pos, "enum 超过 64 个")
+            }
+            let ei = p.stt.get(EN_HDR)
+            p.stt.set(EN_HDR, ei + 1)
+            let base = _en_base(ei)
+            p.stt.set(base, nid)
+            _eat_p(p, pos, P_LBRACE)
+            let mut nv = 0
+            while !_is_p(p, pos, P_RBRACE) {
+                let vn = _cur(p, pos)
+                if vn.k != T_NAME {
+                    _fail(p, pos, "enum 变体名期望标识符")
+                }
+                _adv(pos)
+                if nv >= MAX_VARIANT {
+                    _fail(p, pos, "enum 变体超过 8 个")
+                }
+                let vbase = base + 2 + nv * 3
+                p.stt.set(vbase, _name_id(p, vn.s))
+                p.stt.set(vbase + 1, -1)
+                p.stt.set(vbase + 2, -1)
+                if _is_p(p, pos, P_LPAREN) {
+                    _adv(pos)
+                    let pn = _cur(p, pos)
+                    if pn.k != T_NAME {
+                        _fail(p, pos, "载荷字段名期望标识符")
+                    }
+                    _adv(pos)
+                    _eat_p(p, pos, P_COLON)
+                    let pt = _type(p, pos)
+                    if pt >= TY_STRUCT {
+                        _fail(p, pos, "本版 enum 载荷只支持 int/bool/str")
+                    }
+                    p.stt.set(vbase + 1, _name_id(p, pn.s))
+                    p.stt.set(vbase + 2, pt)
+                    _eat_p(p, pos, P_RPAREN)
+                }
+                nv = nv + 1
+                if _is_p(p, pos, P_COMMA) {
+                    _adv(pos)
+                }
+            }
+            _eat_p(p, pos, P_RBRACE)
+            p.stt.set(base + 1, nv)
             continue
         }
         if t.k == T_KW && t.n == K_FN {
@@ -1507,19 +1726,22 @@ struct FnCtx {
     vpin: vec[int]      // 1 = 变量（位置固定），0 = 临时值
     vmap: vec[int]      // 名字 id（与 vval 平行）
     vval: vec[int]      // 名字 → vreg
-    st: vec[int]        // [0] = 下一个变量槽号
-    nv: vec[int]        // [0] = 已固定到寄存器的变量数
-    ep: vec[int]        // [0] = 尾声标签 id
+    cells: vec[int]     // 计数器组：C_ST / C_NV / C_EP / C_LD / C_BD / C_ADDRTY
     rt: vec[int]        // 运行库例程位置（顺序段填好后共享）
     stt: vec[int]       // struct 表（只读，跨线程共享）
-    addrty: vec[int]    // [0] = `_addr_of` 返回地址所指向的类型
+    bind: vec[int]      // 臂内绑定栈：(名字 id, vreg) 成对
     loops: vec[int]     // 循环栈：(continue 标签, break 标签) 成对
-    ldepth: vec[int]    // [0] = 当前循环深度
     cp: vec[int]        // 复用缓冲：调用前缀和
     rend: vec[int]      // 复用缓冲：寄存器占用到的指令
     send: vec[int]      // 复用缓冲：临时槽占用到的指令
 }
 
+const C_ST = 0
+const C_NV = 1
+const C_EP = 2
+const C_LD = 3
+const C_BD = 4
+const C_ADDRTY = 5
 const FRAME = 4096          // 帧大小（512 个 8 字节槽）
 const MAX_VAR = 64          // 变量最多占 64 个寄存器位（其余落槽）
 const SLOT_TEMP = 256       // 0..255 给变量与聚合区域；256..511 给临时值溢出
@@ -1725,34 +1947,34 @@ fn _fc_reset(fc: FnCtx) {
     fc.vstart.push(0)
     fc.vend.push(0)
     fc.vpin.push(0)
-    fc.st.set(0, 0)
-    fc.nv.set(0, 0)
-    fc.ep.set(0, 0)
-    fc.ldepth.set(0, 0)
+    fc.cells.set(C_ST, 0)
+    fc.cells.set(C_NV, 0)
+    fc.cells.set(C_EP, 0)
+    fc.cells.set(C_LD, 0)
+    fc.cells.set(C_BD, 0)
+    fc.cells.set(C_ADDRTY, 0)
+    fc.bind.clear()
+    fc.cells.set(C_BD, 0)
 }
 
 /// 一个线程建一次，之后每个函数 `_fc_reset` 复用——并行时堆分配是争用点
 fn _new_fc(nodes: vec[Node], names: vec[str], fns: vec[Fn], rt: vec[int],
            stt: vec[int]) -> FnCtx {
-    let st = vec[int].new(1)
-    let nv = vec[int].new(1)
-    let ep = vec[int].new(1)
-    let ldepth = vec[int].new(1)
-    let addrty = vec[int].new(1)
-    addrty.push(0)
-    st.push(0)
-    nv.push(0)
-    ep.push(0)
-    ldepth.push(0)
+    let cells = vec[int].new(8)
+    let mut ci = 0
+    while ci < 8 {
+        cells.push(0)
+        ci = ci + 1
+    }
     let fc = FnCtx { code: vec[int].new(256), labs: vec[int].new(16),
                      fixes: vec[Fix].new(16), ir: vec[Ir].new(64),
                      nodes: nodes, names: names, fns: fns,
                      vloc: vec[int].new(32), vty: vec[int].new(32),
                      vstart: vec[int].new(32), vend: vec[int].new(32),
                      vpin: vec[int].new(32), vmap: vec[int].new(16),
-                     vval: vec[int].new(16), st: st, nv: nv, ep: ep,
-                     ldepth: ldepth, rt: rt, stt: stt, addrty: addrty,
-                     loops: vec[int].new(16),
+                     vval: vec[int].new(16), cells: cells,
+                     rt: rt, stt: stt,
+                     bind: vec[int].new(16), loops: vec[int].new(16),
                      cp: vec[int].new(64), rend: vec[int].new(4),
                      send: vec[int].new(64) }
     _fc_reset(fc)
@@ -1804,9 +2026,24 @@ fn _st_field_idx(fc: FnCtx, si: int, nid: int) -> int {
     return -1
 }
 
+fn _ent_base(ei: int) -> int {
+    return EN_HDR + 1 + ei * EN_STRIDE
+}
+
+fn _ent_nvar(fc: FnCtx, ei: int) -> int {
+    return fc.stt.get(_ent_base(ei) + 1)
+}
+
+fn _ent_ptype(fc: FnCtx, ei: int, vi: int) -> int {
+    return fc.stt.get(_ent_base(ei) + 2 + vi * 3 + 2)
+}
+
 fn _ty_size(fc: FnCtx, ty: int) -> int {
     if ty >= TY_ARRAY {
         return ((ty - TY_ARRAY) >> 8) * 8
+    }
+    if ty >= TY_ENUM {
+        return 16
     }
     if ty >= TY_STRUCT {
         return _st_nf(fc, ty - TY_STRUCT) * 8
@@ -1819,12 +2056,12 @@ fn _ty_elem(ty: int) -> int {
 }
 
 fn _st_units(fc: FnCtx, n: int) -> int {
-    let s = fc.st.get(0)
+    let s = fc.cells.get(C_ST)
     if s + n > SLOT_TEMP {
         eprint("qlmc: 局部变量/聚合超出帧（" + (SLOT_TEMP).to_str() + " 个 8 字节槽）")
         exit(2)
     }
-    fc.st.set(0, s + n)
+    fc.cells.set(C_ST, s + n)
     return s
 }
 
@@ -1844,10 +2081,10 @@ fn _new_var(fc: FnCtx, nid: int, ty: int) -> int {
         fc.vval.push(v)
         return v
     }
-    let n = fc.nv.get(0)
+    let n = fc.cells.get(C_NV)
     if n < 5 {
         fc.vloc.set(v, _cs_reg(n) + 1)
-        fc.nv.set(0, n + 1)
+        fc.cells.set(C_NV, n + 1)
     } else {
         fc.vloc.set(v, -(_st_slot(fc)) - 1)
     }
@@ -1856,7 +2093,30 @@ fn _new_var(fc: FnCtx, nid: int, ty: int) -> int {
     return v
 }
 
+fn _bind_push(fc: FnCtx, nid: int, v: int) {
+    let d = fc.cells.get(C_BD)
+    if len(fc.bind) > d * 2 {
+        fc.bind.set(d * 2, nid)
+        fc.bind.set(d * 2 + 1, v)
+    } else {
+        fc.bind.push(nid)
+        fc.bind.push(v)
+    }
+    fc.cells.set(C_BD, d + 1)
+}
+
+fn _bind_pop(fc: FnCtx) {
+    fc.cells.set(C_BD, fc.cells.get(C_BD) - 1)
+}
+
 fn _var_id(fc: FnCtx, nid: int) -> int {
+    let mut b = fc.cells.get(C_BD) - 1
+    while b >= 0 {
+        if fc.bind.get(b * 2) == nid {
+            return fc.bind.get(b * 2 + 1)
+        }
+        b = b - 1
+    }
     let mut i = len(fc.vmap) - 1
     while i >= 0 {
         if fc.vmap.get(i) == nid {
@@ -1977,7 +2237,7 @@ fn _addr_of(fc: FnCtx, nid: int) -> int {
         let d = _vnew(fc)
         fc.vty.set(d, TY_INT)
         _ir_emit(fc, OP_ADDRV, d, 0, 0, -loc - 1)
-        fc.addrty.set(0, fc.vty.get(v))
+        fc.cells.set(C_ADDRTY, fc.vty.get(v))
         return d
     }
     if nd.op == E_FIELD {
@@ -1993,7 +2253,7 @@ fn _addr_of(fc: FnCtx, nid: int) -> int {
 
 fn _addr_field(fc: FnCtx, base_nid: int, fname: int) -> int {
     let base = _addr_of(fc, base_nid)
-    let bty = fc.addrty.get(0)
+    let bty = fc.cells.get(C_ADDRTY)
     if bty < TY_STRUCT || bty >= TY_ARRAY {
         eprint("qlmc: 只有 struct 有字段：" + fc.names.get(fname))
         exit(2)
@@ -2007,13 +2267,13 @@ fn _addr_field(fc: FnCtx, base_nid: int, fname: int) -> int {
     let d = _vnew(fc)
     fc.vty.set(d, TY_INT)
     _ir_emit(fc, OP_ADDRF, d, base, 0, fi * 8)
-    fc.addrty.set(0, _st_field_type(fc, si, fi))
+    fc.cells.set(C_ADDRTY, _st_field_type(fc, si, fi))
     return d
 }
 
 fn _addr_index(fc: FnCtx, base_nid: int, ix_nid: int) -> int {
     let base = _addr_of(fc, base_nid)
-    let bty = fc.addrty.get(0)
+    let bty = fc.cells.get(C_ADDRTY)
     if bty < TY_ARRAY {
         eprint("qlmc: 只有定长数组能下标")
         exit(2)
@@ -2022,7 +2282,7 @@ fn _addr_index(fc: FnCtx, base_nid: int, ix_nid: int) -> int {
     let d = _vnew(fc)
     fc.vty.set(d, TY_INT)
     _ir_emit(fc, OP_ADDRX, d, base, ix, 8)
-    fc.addrty.set(0, _ty_elem(bty))
+    fc.cells.set(C_ADDRTY, _ty_elem(bty))
     return d
 }
 
@@ -2163,9 +2423,35 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         fc.vty.set(d, t)
         return d
     }
+    if nd.op == E_ENUMCTOR {
+        // 枚举值 = 一个 16 字节区域的地址：[tag][载荷]
+        let v = _new_var(fc, -1, TY_ENUM + nd.a)
+        let loc = fc.vloc.get(v)
+        let a0 = _vnew(fc)
+        fc.vty.set(a0, TY_ENUM + nd.a)
+        _ir_emit(fc, OP_ADDRV, a0, 0, 0, -loc - 1)
+        let t = _vnew(fc)
+        fc.vty.set(t, TY_INT)
+        _ir_emit(fc, OP_CONST, t, 0, 0, nd.b)
+        _ir_emit(fc, OP_STORE, 0, a0, t, 8)
+        if nd.c >= 0 {
+            let pv = _lower_expr(fc, nd.c)
+            let a1 = _vnew(fc)
+            fc.vty.set(a1, TY_INT)
+            _ir_emit(fc, OP_ADDRF, a1, a0, 0, 8)
+            _ir_emit(fc, OP_STORE, 0, a1, pv, 8)
+        }
+        return a0
+    }
+    if nd.op == E_MATCH {
+        let ty = _ty_of_expr(fc, fc.nodes.get(nd.b).c)
+        let d = _new_var(fc, -1, ty)
+        _lower_match(fc, nid, d, fc.cells.get(C_EP))
+        return d
+    }
     if nd.op == E_FIELD || nd.op == E_INDEX {
         let a = _addr_of(fc, nid)
-        let ty = fc.addrty.get(0)
+        let ty = fc.cells.get(C_ADDRTY)
         if _ty_is_agg(ty) {
             // 聚合值 = 它的地址（只用于赋值/初始化拷贝）
             fc.vty.set(a, ty)
@@ -2183,6 +2469,60 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
     eprint("qlmc: 不支持的表达式节点 " + nd.op.to_str())
     exit(2)
     return 0
+}
+
+/// match 降级：读 tag → 逐臂比较 → 命中就执行体。
+/// `dst > 0` 是表达式模式（体写进 dst），否则是语句模式（体是块）。
+fn _lower_match(fc: FnCtx, nid: int, dst: int, ep: int) {
+    let nd = fc.nodes.get(nid)
+    let scrut = _lower_expr(fc, nd.a)
+    let sty = fc.vty.get(scrut)
+    if sty < TY_ENUM || sty >= TY_ARRAY {
+        eprint("qlmc: match 的被匹配值必须是 enum（实际 " + sty.to_str() + "）")
+        exit(2)
+    }
+    let ei = sty - TY_ENUM
+    let lend = _newlab(fc.labs)
+    let mut arm = nd.b
+    while arm >= 0 {
+        let a = fc.nodes.get(arm)
+        let lnext = _newlab(fc.labs)
+        if a.a >= 0 {
+            let addr = _vnew(fc)
+            fc.vty.set(addr, TY_INT)
+            _ir_emit(fc, OP_ADDRF, addr, scrut, 0, 0)
+            let tag = _vnew(fc)
+            fc.vty.set(tag, TY_INT)
+            _ir_emit(fc, OP_LOAD, tag, addr, 0, 8)
+            let k = _vnew(fc)
+            fc.vty.set(k, TY_INT)
+            _ir_emit(fc, OP_CONST, k, 0, 0, a.a)
+            _ir_emit(fc, OP_JCMP, 0x85, tag, k, lnext)   // jne → 下一臂
+        }
+        if a.b >= 0 {
+            let paddr = _vnew(fc)
+            fc.vty.set(paddr, TY_INT)
+            _ir_emit(fc, OP_ADDRF, paddr, scrut, 0, 8)
+            let pv = _vnew(fc)
+            fc.vty.set(pv, TY_INT)
+            _ir_emit(fc, OP_LOAD, pv, paddr, 0, 8)
+            let bv = _new_var(fc, -1, _ent_ptype(fc, ei, a.a))
+            _ir_emit(fc, OP_MOV, bv, pv, 0, 0)
+            _bind_push(fc, a.b, bv)          // 只在臂体内可见
+        }
+        if dst > 0 {
+            _lower_into(fc, a.c, dst)
+        } else {
+            _lower_block(fc, a.c, ep)
+        }
+        if a.b >= 0 {
+            _bind_pop(fc)
+        }
+        _ir_emit(fc, OP_JMP, 0, 0, 0, lend)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, lnext)
+        arm = a.nx
+    }
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lend)
 }
 
 /// 聚合目标：字面量逐字段写，其余按地址整块拷贝
@@ -2210,6 +2550,23 @@ fn _lower_into_agg(fc: FnCtx, nid: int, dst: int, dty: int) {
             _ir_emit(fc, OP_ADDRF, a1, a0, 0, fi * 8)
             _ir_emit(fc, OP_STORE, 0, a1, v, 8)
             f = fd.nx
+        }
+        return
+    }
+    if nd.op == E_ENUMCTOR {
+        let a0 = _vnew(fc)
+        fc.vty.set(a0, TY_INT)
+        _ir_emit(fc, OP_ADDRV, a0, 0, 0, base_imm)
+        let t = _vnew(fc)
+        fc.vty.set(t, TY_INT)
+        _ir_emit(fc, OP_CONST, t, 0, 0, nd.b)
+        _ir_emit(fc, OP_STORE, 0, a0, t, 8)
+        if nd.c >= 0 {
+            let pv = _lower_expr(fc, nd.c)
+            let a1 = _vnew(fc)
+            fc.vty.set(a1, TY_INT)
+            _ir_emit(fc, OP_ADDRF, a1, a0, 0, 8)
+            _ir_emit(fc, OP_STORE, 0, a1, pv, 8)
         }
         return
     }
@@ -2271,6 +2628,12 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
     }
     if nd.op == E_STRUCTLIT {
         return TY_STRUCT + nd.a
+    }
+    if nd.op == E_ENUMCTOR {
+        return TY_ENUM + nd.a
+    }
+    if nd.op == E_MATCH {
+        return _ty_of_expr(fc, fc.nodes.get(nd.b).c)
     }
     if nd.op == E_ARRLIT {
         return TY_ARRAY + (nd.b << 8) + TY_INT
@@ -2347,7 +2710,7 @@ fn _lower_cond(fc: FnCtx, nid: int, lab: int, if_false: int) {
 }
 
 fn _loop_push(fc: FnCtx, cont: int, brk: int) {
-    let d = fc.ldepth.get(0)
+    let d = fc.cells.get(C_LD)
     if len(fc.loops) > d * 2 {
         fc.loops.set(d * 2, cont)
         fc.loops.set(d * 2 + 1, brk)
@@ -2355,11 +2718,11 @@ fn _loop_push(fc: FnCtx, cont: int, brk: int) {
         fc.loops.push(cont)
         fc.loops.push(brk)
     }
-    fc.ldepth.set(0, d + 1)
+    fc.cells.set(C_LD, d + 1)
 }
 
 fn _loop_pop(fc: FnCtx) {
-    fc.ldepth.set(0, fc.ldepth.get(0) - 1)
+    fc.cells.set(C_LD, fc.cells.get(C_LD) - 1)
 }
 
 fn _lower_block(fc: FnCtx, head: int, ep: int) {
@@ -2397,7 +2760,7 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
     }
     if nd.op == S_ASG_FIELD {
         let a = _addr_field(fc, nd.a, nd.b)
-        let fty = fc.addrty.get(0)
+        let fty = fc.cells.get(C_ADDRTY)
         let v = _lower_expr(fc, nd.c)
         if _ty_is_agg(fty) {
             _ir_emit(fc, OP_COPY, 0, a, v, _ty_size(fc, fty))
@@ -2440,6 +2803,10 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
         _ir_emit(fc, OP_LAB, 0, 0, 0, lend)
         return
     }
+    if nd.op == S_MATCH {
+        _lower_match(fc, id, 0, ep)
+        return
+    }
     if nd.op == S_FOR {
         // 与 stage-0 同口径：上下界各求值**一次**，循环变量是隐藏的 int 变量
         let lo = _lower_expr(fc, nd.b)
@@ -2468,7 +2835,7 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
         return
     }
     if nd.op == S_BREAK || nd.op == S_CONTINUE {
-        let d = fc.ldepth.get(0)
+        let d = fc.cells.get(C_LD)
         if d < 1 {
             eprint("qlmc: break / continue 不在循环里")
             exit(2)
@@ -2513,9 +2880,17 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
 fn _lower_fn(fc: FnCtx, fi: int) {
     let f = fc.fns.get(fi)
     let ep = _newlab(fc.labs)
-    fc.ep.set(0, ep)
+    fc.cells.set(C_EP, ep)
+    if _ty_is_agg(f.ret_t) {
+        eprint("qlmc: 本版不支持聚合返回值（" + fc.names.get(f.name) + "）")
+        exit(2)
+    }
     let mut k = 0
     while k < f.np {
+        if _ty_is_agg(_param_type(f, k)) {
+            eprint("qlmc: 本版不支持聚合形参（" + fc.names.get(f.name) + "）")
+            exit(2)
+        }
         let v = _new_var(fc, _param_name(f, k), _param_type(f, k))
         _ir_emit(fc, OP_PARAM, v, 0, 0, k)
         k = k + 1
@@ -2851,7 +3226,7 @@ fn _emit_ir(fc: FnCtx, i: int) {
             _mov_imm(code, RAX, 0)
         }
         let p = _jmp(code)
-        _addfix(fc.fixes, p, fc.ep.get(0), FK_LAB)
+        _addfix(fc.fixes, p, fc.cells.get(C_EP), FK_LAB)
         return
     }
     if op == OP_PRINT {
@@ -3879,7 +4254,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.4（Quelmara 写的 stage-1 编译器，子集 S3：int/bool/str + struct/数组 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S4：int/bool/str + struct/数组/enum/match + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
@@ -3914,8 +4289,12 @@ fn main() {
     let fns = vec[Fn].new(8)
     let cname = vec[int].new(8)
     let cval = vec[int].new(8)
-    let stt = vec[int].new(1)
-    stt.push(0)
+    let stt = vec[int].new(TBL_SIZE)
+    let mut ti = 0
+    while ti < TBL_SIZE {
+        stt.push(0)
+        ti = ti + 1
+    }
     parse(toks, nodes, names, strs, fns, cname, cval, stt)
 
     if cmd == "dump" {
@@ -3925,6 +4304,7 @@ fn main() {
         print("names    : " + len(names).to_str())
         print("strs     : " + len(strs).to_str())
         print("structs  : " + stt.get(0).to_str())
+        print("enums    : " + stt.get(EN_HDR).to_str())
         return
     }
     if len(fns) < 1 {
@@ -4058,7 +4438,7 @@ fn main() {
     }
     write_file(out, blob)
     let t_all = (now_ns() - t0) / 1000
-    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S3)" +
+    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S4)" +
           "  编译 " + t_all.to_str() + " us（进程内）  后端 " +
           ((fn_end - rt_end) / 1000).to_str() + " us  -j" + nt.to_str())
 }
