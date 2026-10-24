@@ -1,0 +1,368 @@
+// std/net/reactor.qma —— 高并发 reactor（Windows IOCP），**Quelmara 实现**（v2.12）
+//
+// v1.4 起 reactor 一直是 stage-0 里手搓的 IR（`qlm_native.py` 的 `__net_serve`
+// 一段 ~400 行 emit 调用）。那是整条服务端链路里最后一块"不是本语言写的"东西：
+// 库层（http/ws/sse/router）早就是 .qma，只有这个事件循环还在 Python 里拼指令。
+// v2.12 把它整体搬到这里，stage-0 只留三样东西——`thread_start`（OS 线程的
+// Win64 入口 ABI）、`net_config`（读 Quelmara.toml 的编译期常量）、`@ffi`（v1.87）。
+//
+// ## 模型
+//
+//   主线程 = acceptor：阻塞 accept -> 关联完成端口 -> 投递 WSARecv -> on_connect
+//   N 个 worker = GetQueuedCompletionStatus 循环 -> on_data / on_close
+//
+// N = `Quelmara.toml [net] io_threads`（0 = 物理核数），**多核默认**。
+//
+// **为什么是"一个完成端口 + N 个线程"而不是"每线程一个端口"**：
+// 每线程一个端口（per-reactor）也实现过、也测过——4 条连接时 RTT p50 从
+// 146 µs 涨到 175 µs（连接被摊到不同核，完成包的唤醒要跨核），32 条连接时
+// 两者落在噪声里（19.0–20.0k req/s）。IOCP 本来就是为"多线程抢同一个端口"
+// 设计的：内核按完成包的理想 CPU 挑一个正等着它的线程，本核命中率更高。
+// 所以这里保留共享端口；每请求路径上没有锁，唯一的共享结构是 rec 空闲链
+// （只在连接建立/关闭时碰一次）。
+//
+// ## 连接记录 rec（编译期定尺，字 = 8 字节）
+//
+//   w0 fd | w1..w4 OVERLAPPED(32B) | w5 WSABUF.len | w6 WSABUF.buf
+//   w7 nrecv | w8 flags | w9 str 长度前缀 | w10.. 数据区（recv_buffer 字节）
+//
+// 数据区前面那个长度前缀是刻意留的：回调拿到的是 `rec + 80` 这个**裸指针**，
+// 而 str 的 ABI 是"长度在 ptr-8"。所以投递 recv 前先把 recv_buffer 写进 w9，
+// 收完把本次字节数覆盖进去、末尾补 NUL，这个指针就是一条合法 str——
+// 全程零拷贝，不需要 mem_str 再复制一遍。
+//
+// ## 上限与开关
+//
+// max_conns / recv_buffer / io_threads / tcp_nodelay 全部来自根目录
+// Quelmara.toml 的 [net] 节（`net_config()` 内建在编译期取值）。超 max_conns
+// 的新连接直接关闭（fail-fast，不静默膨胀）；任何 socket 级失败都
+// eprint + exit(1)，不留半死不活的服务。
+import std.core
+import std.mem
+
+// ---------------------------------------------------------------------------
+// Win32 / Winsock 绑定（@ffi，v1.87；只有 Windows PE 有动态链接器）
+// ---------------------------------------------------------------------------
+
+@ffi("kernel32.dll", "CreateIoCompletionPort")
+fn _CreateIoCompletionPort(h: int, existing: int, key: int, threads: int) -> int
+
+@ffi("kernel32.dll", "GetQueuedCompletionStatus")
+fn _GetQueuedCompletionStatus(iocp: int, bytes: int, key: int, ov: int,
+                              ms: int) -> bool
+
+@ffi("ws2_32.dll", "WSARecv")
+fn _WSARecv(s: int, buf: int, cnt: int, got: int, flags: int, ov: int,
+            cr: int) -> int
+
+@ffi("ws2_32.dll", "WSASocketW")
+fn _WSASocketW(af: int, typ: int, proto: int, info: int, group: int,
+               flags: int) -> int
+
+@ffi("ws2_32.dll", "bind")
+fn _bind(s: int, addr: int, n: int) -> int
+
+@ffi("ws2_32.dll", "listen")
+fn _listen(s: int, backlog: int) -> int
+
+@ffi("ws2_32.dll", "accept")
+fn _accept(s: int, addr: int, n: int) -> int
+
+@ffi("ws2_32.dll", "closesocket")
+fn _closesocket(s: int) -> int
+
+@ffi("ws2_32.dll", "setsockopt")
+fn _setsockopt(s: int, level: int, opt: int, val: int, n: int) -> int
+
+@ffi("ws2_32.dll", "WSAStartup")
+fn _WSAStartup(ver: int, data: int) -> int
+
+@ffi("ws2_32.dll", "WSAGetLastError")
+fn _WSAGetLastError() -> int
+
+// ---------------------------------------------------------------------------
+// 布局常量
+// ---------------------------------------------------------------------------
+
+const R_STATE_W = 15          // static_word(15)：reactor 全局状态块指针
+
+// 全局状态块（字）
+const G_CBCONN = 0
+const G_CBDATA = 1
+const G_CBCLOSE = 2
+const G_IOCP = 3
+const G_ACTIVE = 4            // 活跃连接数（atomic_add，无锁）
+const G_MAXC = 5
+const G_CAP = 6
+const G_NODELAY = 7
+const G_NWORKER = 8
+const G_FREE = 9              // rec 空闲链头
+const G_LOCK = 10             // 空闲链自旋锁
+const G_RECB = 11
+
+// 连接记录 rec（字）
+const R_FD = 0
+const R_OV = 1                // OVERLAPPED 32 字节（w1..w4）
+const R_WLEN = 5
+const R_WBUF = 6
+const R_NRECV = 7
+const R_FLAGS = 8
+const R_PREFIX = 9            // str 长度前缀
+const R_DATA = 10
+
+const WSA_IO_PENDING = 997
+const INVALID_SOCKET = -1
+
+// ---------------------------------------------------------------------------
+// 小工具
+// ---------------------------------------------------------------------------
+
+// 32 位返回值的符号扩展：Win32 的 SOCKET 错误码只保证 EAX 有效，
+// 高 32 位是脏的。`(x << 32) >> 32` 与 stage-0 当年的 shl/sar 序列同义。
+fn _se32(v: int) -> int {
+    return (v << 32) >> 32
+}
+
+fn _state() -> int {
+    return mem_load64(static_word(R_STATE_W), 0)
+}
+
+// fail-fast：把 WSA 错误码一起打出来（没有它只能猜"为什么起不来"）
+fn _fail(what: str) {
+    eprint("quelmara: net_serve() reactor failed at " + what +
+           " (WSA=" + _WSAGetLastError().to_str() + ")")
+    exit(1)
+}
+
+// 空闲链自旋锁：只护"rec 空闲链"这一条 O(1) 链，持锁几个指令。
+// 用 mem_xchg（x86 隐含 lock）+ thread_yield 退让——与 std/net/core 同口径。
+fn _lock(lp: int) {
+    while mem_xchg(lp, 1) != 0 {
+        thread_yield()
+    }
+}
+
+fn _unlock(lp: int) {
+    mem_store64(lp, 0, 0)
+}
+
+// 取一个 rec；空闲链空则新分配（bump 分配器，首次落页是零页）。
+fn _rec_alloc(g: int) -> int {
+    let freep = g + G_FREE * 8
+    let lockp = g + G_LOCK * 8
+    _lock(lockp)
+    let h = mem_load64(freep, 0)
+    if h != 0 {
+        mem_store64(freep, 0, mem_load64(h, 0))
+        _unlock(lockp)
+        return h
+    }
+    _unlock(lockp)
+    let p = mem_alloc(mem_load64(g, G_RECB))
+    mem_zero(p, mem_load64(g, G_RECB))
+    return p
+}
+
+// 还回空闲链（w0 借用为 next，与 stage-0 版一致）
+fn _rec_free(g: int, rec: int) {
+    let freep = g + G_FREE * 8
+    let lockp = g + G_LOCK * 8
+    _lock(lockp)
+    mem_store64(rec, 0, mem_load64(freep, 0))
+    mem_store64(freep, 0, rec)
+    _unlock(lockp)
+}
+
+// 投递一条 WSARecv。OVERLAPPED 每次重用前清零（系统会往里写
+// Internal/InternalHigh，残留会让下一次完成包对不上）。
+fn _post(g: int, rec: int) {
+    mem_zero(rec + R_OV * 8, 32)
+    mem_store64(rec, R_WLEN, mem_load64(g, G_CAP))
+    mem_store64(rec, R_WBUF, rec + R_DATA * 8)
+    mem_store64(rec, R_NRECV, 0)
+    mem_store64(rec, R_FLAGS, 0)
+    let r = _WSARecv(mem_load64(rec, R_FD),
+                     rec + R_WLEN * 8,
+                     1,
+                     rec + R_NRECV * 8,
+                     rec + R_FLAGS * 8,
+                     rec + R_OV * 8,
+                     0)
+    if _se32(r) == -1 {
+        // SOCKET_ERROR 有两种含义：真失败，或 WSA_IO_PENDING（成功入队）。
+        // 不查这一步会把正常投递当成失败——当年第一条 WSARecv 就炸在这儿。
+        if _WSAGetLastError() != WSA_IO_PENDING {
+            _fail("WSARecv")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// worker：GQCS 循环 + 回调派发
+// ---------------------------------------------------------------------------
+
+fn _worker(_arg: int) {
+    let g = _state()
+    let iocp = mem_load64(g, G_IOCP)
+    let sc = mem_alloc(24)          // [bytes, key, ov]
+    mem_zero(sc, 24)
+    let activep = g + G_ACTIVE * 8
+    while true {
+        // GetQueuedCompletionStatus 只写低 32 位（DWORD），高 32 位留着上一次的
+        // 垃圾；先把整字清零，bytes 才是干净的。
+        mem_store64(sc, 0, 0)
+        let ok = _GetQueuedCompletionStatus(iocp, sc, sc + 8, sc + 16, -1)
+        let key = mem_load64(sc, 1)
+        let ov = mem_load64(sc, 2)
+        if key == 0 {
+            // 完成键 0 = 无意义的完成包（继续）；但"出队失败 + 没有 OVERLAPPED"
+            // 是端口级致命错误，继续下去就是空转烧核。
+            if ov == 0 {
+                if !ok {
+                    _fail("GetQueuedCompletionStatus")
+                }
+            }
+            continue
+        }
+        let bytes = mem_load64(sc, 0)
+        if bytes > 0 {
+            let fd = mem_load64(key, R_FD)
+            mem_store64(key, R_PREFIX, bytes)          // str 长度前缀
+            mem_store8(key, R_DATA * 8 + bytes, 0)     // NUL 结尾
+            let cb = mem_load64(g, G_CBDATA)
+            let keep = cb(fd, key + R_DATA * 8)
+            if keep != 0 {
+                _post(g, key)
+                continue
+            }
+        }
+        // 关闭路径：bytes == 0（对端关闭 / 该连接 IO 错误），或 on_data 返回 0
+        let cfd = mem_load64(key, R_FD)
+        _closesocket(cfd)
+        let cc = mem_load64(g, G_CBCLOSE)
+        if cc != 0 {
+            cc(cfd)
+        }
+        atomic_add(activep, -1)
+        _rec_free(g, key)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 对外入口
+// ---------------------------------------------------------------------------
+
+/// 高并发 reactor：`net_serve(port, backlog, on_connect, on_data, on_close)`，
+/// 阻塞运行到进程结束。回调传**裸函数名**（IR 层就是代码地址，经 `callr` 派发；
+/// 0 = 不回调）：
+///   `on_connect(fd: int)`、`on_data(fd: int, data: str) -> int`
+///   （1 = 保持连接继续收；0 = 关闭）、`on_close(fd: int)`。
+/// worker 线程数默认 = 物理核数（`Quelmara.toml [net] io_threads`，0 = 自动），
+/// 连接上限 / 收缓冲 / TCP_NODELAY 同样取自 `[net]`；超上限的新连接直接关闭，
+/// socket 级失败一律 fail-fast（stderr + 退出码 1）。仅 Windows PE（IOCP + `@ffi`）。
+pub fn net_serve(port: int, backlog: int,
+                 on_connect: int, on_data: int, on_close: int) -> int {
+    let mut nworker = net_config(2)
+    if nworker < 1 {
+        nworker = 1
+    }
+    let cap = net_config(1)
+    let maxc = net_config(0)
+    let nodelay = net_config(3)
+
+    // 状态块（一次性，进程级）
+    let g = mem_alloc(128)
+    mem_zero(g, 128)
+    mem_store64(g, G_CBCONN, on_connect)
+    mem_store64(g, G_CBDATA, on_data)
+    mem_store64(g, G_CBCLOSE, on_close)
+    mem_store64(g, G_ACTIVE, 0)
+    mem_store64(g, G_MAXC, maxc)
+    mem_store64(g, G_CAP, cap)
+    mem_store64(g, G_NODELAY, nodelay)
+    mem_store64(g, G_NWORKER, nworker)
+    mem_store64(g, G_FREE, 0)
+    mem_store64(g, G_LOCK, 0)
+    // rec 定尺：80 字节头 + 数据区 + 8（NUL 位），按 8 字节对齐
+    let recb = (R_DATA * 8 + cap + 8 + 7) / 8 * 8
+    mem_store64(g, G_RECB, recb)
+
+    // WSAStartup：0 = 成功
+    let wsa = mem_alloc(512)
+    mem_zero(wsa, 512)
+    if _WSAStartup(0x202, wsa) != 0 {
+        _fail("WSAStartup")
+    }
+    // 完成端口（创建态：INVALID_HANDLE_VALUE + 0）
+    let iocp = _CreateIoCompletionPort(-1, 0, 0, 0)
+    if iocp == 0 {
+        _fail("CreateIoCompletionPort")
+    }
+    mem_store64(g, G_IOCP, iocp)
+
+    // 监听 socket：显式 WSA_FLAG_OVERLAPPED（accept 出来的连接继承可重叠性）
+    let s = _WSASocketW(2, 1, 0, 0, 0, 1)
+    if _se32(s) == INVALID_SOCKET {
+        _fail("WSASocketW")
+    }
+    // sockaddr_in：w0 = family(2) | htons(port) << 16
+    let sinb = mem_alloc(16)
+    mem_zero(sinb, 16)
+    let lo = (port & 0xFF) << 8
+    let hi = (port >> 8) & 0xFF
+    mem_store64(sinb, 0, ((lo | hi) << 16) | 2)
+    if _se32(_bind(s, sinb, 16)) == INVALID_SOCKET {
+        _fail("bind")
+    }
+    if _se32(_listen(s, backlog)) == INVALID_SOCKET {
+        _fail("listen")
+    }
+
+    // 状态块必须在起线程之前可见（worker 第一件事就是读它）
+    mem_store64(static_word(R_STATE_W), 0, g)
+    let mut i = 0
+    while i < nworker {
+        thread_start(_worker, 0)
+        i = i + 1
+    }
+
+    // acceptor（主线程）
+    let activep = g + G_ACTIVE * 8
+    let nz = mem_alloc(8)
+    mem_store64(nz, 0, 1)
+    while true {
+        let c = _accept(s, 0, 0)
+        if _se32(c) == INVALID_SOCKET {
+            _fail("accept")
+        }
+        // max_conns：atomic_add 返回旧值，旧值 >= 上限就退回并拒绝
+        let n = atomic_add(activep, 1)
+        if n >= maxc {
+            atomic_add(activep, -1)
+            _closesocket(c)
+            continue
+        }
+        if nodelay != 0 {
+            // IPPROTO_TCP(6) / TCP_NODELAY(1)：echo/HTTP 小包不攒 Nagle
+            _setsockopt(c, 6, 1, nz, 4)
+        }
+        let rec = _rec_alloc(g)
+        mem_store64(rec, R_FD, c)
+        let a = _CreateIoCompletionPort(c, iocp, rec, 0)
+        if a == 0 {
+            _fail("associate socket")
+        }
+        if on_connect != 0 {
+            on_connect(c)
+        }
+        _post(g, rec)
+    }
+    return 0
+}
+
+/// `net_serve` 的同义入口（`import std.net.reactor` 后可直接 `serve(...)`，
+/// 与 `std/net.qma` 的过程式 API 并列）。
+pub fn serve(port: int, backlog: int,
+             on_connect: int, on_data: int, on_close: int) -> int {
+    return net_serve(port, backlog, on_connect, on_data, on_close)
+}

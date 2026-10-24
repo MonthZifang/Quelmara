@@ -12,7 +12,7 @@ Quelmara 是一门**从零实现的系统级编程语言**，包含语言规范�
 |---|---|---|
 | 后端 | 只允许自研后端进产品链路；C99 后端仅作交叉验证 | 无成熟优化器可借力，性能靠手写 pass |
 | 并发 | 多核默认开启（`parfor` / `spawn` / `chan`） | 运行时自带线程管理，栈固定 512 KB |
-| 网络 | 原生 `tcp_*` / `udp_*` 内建 + IOCP reactor | 目前仅 Windows 有 reactor，Linux 侧待补 |
+| 网络 | 原生 `tcp_*` / `udp_*` 内建 + IOCP reactor（`std/net/reactor.qma`，多核默认） | 目前仅 Windows 有 reactor，Linux 侧待补 |
 | 依赖 | 零第三方运行时，标准库纯 Quelmara 实现 | 库的成熟度要自己长 |
 | 表达力 | 有意收窄：泛型单参数显式实例化、`match` 必须穷尽、无闭包 | 写通用代码时略啰嗦 |
 
@@ -78,7 +78,7 @@ fn main() {
 ├── bench/                 # 基准 + baseline.json + loadgen.py
 ├── tests/                 # .qma 回归 + 负向夹具 + 对拍/回归脚本
 ├── std/                   # 标准库模块（.qma 源码，编译期合并）
-│   └── net/               # core.qma（槽位层）/ udp.qma
+│   └── net/               # core.qma（槽位层）/ reactor.qma（IOCP 事件循环）/ udp.qma
 ├── bootstrap/             # 自举层：lexer/ + parser/（Quelmara 写的）
 ├── tools/
 │   ├── stage0/            # Python 引导层（当前唯一完整编译器）
@@ -100,6 +100,7 @@ fn main() {
 | `tools/stage0/qlm_cli.py` | 命令行驱动 |
 | `bootstrap/lexer/qlm_lex.qma` | 自举词法器（已对拍通过） |
 | `bootstrap/parser/qlm_parse.qma` | 自举声明级 parser（已对拍通过） |
+| `std/net/reactor.qma` | 服务端事件循环（IOCP reactor，v2.12 起由 Quelmara 实现；`net_serve` 在这里，不再是内建） |
 
 各模块的**行数、职责边界、要改它当什么**见 [`04-compiler.md`](04-compiler.md) §2；
 夹具/示例/基准/模块的**数量**见 [`05-toolchain.md`](05-toolchain.md) §5.1。

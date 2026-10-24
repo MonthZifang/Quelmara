@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-61 个模块，**430 个公开函数**（另有 549 个内部函数）
+63 个模块，**529 个公开函数**（另有 523 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -22,14 +22,14 @@
 | `std/crc64` | CRC-64/XZ（ECMA-182 反射多项式，xz/zlib 容器的 64 位校验） | 2 / 3 |
 | `std/csv` | CSV 解析与生成（RFC 4180：引号包裹 / "" 转义 / 字段内换行 / CRLF 或 LF） | 4 / 6 |
 | `std/deque` | 双端队列（两端 O(1) + 自动扩容） | 13 / 21 |
-| `std/ds` | 环形缓冲与二叉最小堆 | 0 / 10 |
+| `std/ds` | 环形缓冲与二叉最小堆 | 13 / 13 |
 | `std/f64` | 十进制文本 ↔ f64（严格十进制解析 + Clinger 快路径，非十进制 fail-fast） | 3 / 16 |
 | `std/fs` | 文件读写（open/read/write/seek/size/sync/close/rename；Windows PE，@ffi 直调 kernel32） | 11 / 20 |
 | `std/gen` | 泛型算法库（min/max/clamp/dist/contains/index_of/reverse，调用点推导单态化） | 0 / 9 |
 | `std/gzip` | DEFLATE 编码 + gzip 包装 + CRC-32；v1.19 起含 inflate 解码 | 5 / 33 |
 | `std/hash` | FNV-1a 32/64 非密码学哈希（缓存键 / 分片） | 4 / 4 |
 | `std/hex` | 十六进制编解码 | 4 / 5 |
-| `std/http` | HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商） | 0 / 40 |
+| `std/http` | HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商） | 39 / 54 |
 | `std/httpc` | HTTP/1.1 客户端核心：URL 拆分 / 请求构造 / 响应解析（content-length / chunked）/ 重定向判定（纯函数，零 socket 依赖） | 6 / 11 |
 | `std/httpc_net` | HTTP 客户端传输层：httpc_get / httpc_get_tls / httpc_get_follow（Windows；TLS 走 std/tls_net） | 3 / 4 |
 | `std/httpdate` | HTTP 日期（RFC 7231 IMF-fixdate）格式化与解析 + If-Modified-Since 判定 | 3 / 13 |
@@ -43,14 +43,16 @@
 | `std/mem` | slab 分配 / fd 表 / 缓冲 / 对象池 | 21 / 30 |
 | `std/mime` | 扩展名 ↔ Content-Type（内置 30 项表，大小写不敏感，带 charset 参数反查） | 4 / 5 |
 | `std/multipart` | multipart/form-data 解析（boundary 提取 / 表单字段与文件部分 / 头字段大小写不敏感） | 4 / 6 |
-| `std/net` | 阻塞 TCP 便捷层 | 6 / 7 |
-| `std/net/core` | 连接槽位层（IOCP reactor 的底座） | 0 / 18 |
+| `std/net` | 阻塞 TCP 便捷层 | 7 / 7 |
+| `std/net/addr` | 地址文本层：IPv4/IPv6 字面量解析与 RFC 5952 格式化 + fd 对端地址 | 11 / 15 |
+| `std/net/core` | 连接槽位层（IOCP reactor 的底座） | 22 / 22 |
+| `std/net/reactor` | 高并发 reactor：IOCP 事件循环（Quelmara 实现，仅 Windows PE） | 2 / 22 |
 | `std/net/udp` | UDP 封装与地址解析 | 1 / 3 |
 | `std/p256` | NIST P-256 域运算 + ECDSA 验签（TLS 证书签名） | 2 / 45 |
 | `std/path` | 路径处理（join / clean / dir / base / ext / stem；'/' 与 '\' 都认） | 7 / 9 |
 | `std/rand` | xorshift64* 伪随机 | 4 / 5 |
 | `std/regex` | 正则引擎（回溯 VM）：字面/./字符类/转义类/量词 *+?{n,m}/交替/分组(?:)/锚点 ^$；compile+match/full/exec/find/replace[_all]，步数上限防病态回溯 | 7 / 24 |
-| `std/router` | 路径模板匹配（/users/:id、尾部 * 通配、query/尾斜杠归一化、方法白名单） | 5 / 5 |
+| `std/router` | 路径模板匹配（/users/:id、尾部 * 通配、query/尾斜杠归一化、方法白名单） | 11 / 14 |
 | `std/rsa` | RSA PKCS#1 v1.5 / PSS 验签（SHA-256，证书链与 TLS 用） | 2 / 12 |
 | `std/serialize` | LEB128 varint / 定长整数 / 长度前缀帧 | 0 / 10 |
 | `std/session` | 内存会话存储（sid 生成 / TTL 惰性过期 / 滑动续期 / 墓碑销毁） | 8 / 9 |
@@ -64,11 +66,11 @@
 | `std/str` | 字符串工具集 | 26 / 30 |
 | `std/sync` | 自旋锁 / Treiber 无锁栈 / WaitGroup | 11 / 11 |
 | `std/time` | 时间便捷层 | 0 / 2 |
-| `std/timer` | 轮询式定时器（MinHeap 驱动） | 0 / 4 |
+| `std/timer` | 轮询式定时器（mem 块上的二叉最小堆；无后台线程 / 无回调，主循环 poll） | 5 / 9 |
 | `std/tls13` | TLS 1.3 密钥调度（HKDF-Expand-Label）+ AEAD 记录层 | 23 / 29 |
 | `std/tls_client` | TLS 1.3 客户端握手核心 + 证书链入口（RFC 8448 逐字节） | 7 / 13 |
 | `std/tls_net` | TLS 1.3 网络层：TCP 建连 + 握手 + 应用数据（Windows） | 3 / 5 |
-| `std/url` | URL 解析 / query 取值 / 编码解码 | 12 / 18 |
+| `std/url` | URL 解析 / query 取值 / 编码解码 | 12 / 19 |
 | `std/utf8` | UTF-8 解码/编码/严格校验（RFC 3629） | 7 / 8 |
 | `std/uuid` | UUID v4 生成 + nil + 校验/版本/变体位（随机源为 std/rand，非密码学） | 5 / 9 |
 | `std/ws` | WebSocket 服务端（RFC 6455） | 0 / 24 |
@@ -305,8 +307,38 @@ fn dq_free(d: int) -> int
 环形缓冲与二叉最小堆
 
 ```quelmara
-// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
-// 编译失败（见 07-gaps.md §7.13）
+/// rb_new(cap) -> int：建一个容量 cap 的环形缓冲，返回句柄（cap <= 0 按 1 算）。
+/// 整个生命周期只在这里分配一次内存（24 + cap*8 字节）。
+fn rb_new(cap: int) -> int
+/// rb_count(rb) -> int：当前元素个数，O(1)。
+fn rb_count(rb: int) -> int
+/// rb_cap(rb) -> int：容量（建时定下，永不变化），O(1)。
+fn rb_cap(rb: int) -> int
+/// rb_push(rb, v) -> int：尾部入队。0 = 成功；-1 = 已满（**不覆盖最老的元素**）。
+fn rb_push(rb: int, v: int) -> int
+/// rb_pop(rb) -> int：头部出队。空返回 -1（先看 rb_count 才能与"值就是 -1"区分）。
+fn rb_pop(rb: int) -> int
+/// rb_peek(rb) -> int：看头部但不出队。空返回 -1。
+fn rb_peek(rb: int) -> int
+/// rb_clear(rb)：清空（count 与 head 归零），**不释放内存**——容量留给下次复用。
+fn rb_clear(rb: int)
+/// rb_free(rb)：释放整块内存（句柄之后不可再用；头与数据在同一块里，一次 mem_free 即可）。
+/// 注意 `mem_free` 是**两参**（指针 + 字节数），字节数由 rb_cap 反算，调用方不用记。
+fn rb_free(rb: int)
+/// heap_new(cap) -> vec[int]：建堆，cap 是预分配槽数（只影响扩容次数，不影响语义）。
+fn heap_new(cap: int) -> vec[int]
+/// heap_len(h) -> int：堆内元素个数，O(1)。
+fn heap_len(h: vec[int]) -> int
+/// heap_push(h, key)：插入一个 key，O(log n)。
+/// 挖洞上浮：key 先挂在末尾，父节点下移让位，最后一次性落到空位——
+/// 每层只读一次父、写一次子（朴素写法是"读父读子 + 写父写子"四次）。
+fn heap_push(h: vec[int], key: int)
+/// heap_peek(h) -> int：最小 key（不出堆）。空返回 -1。
+fn heap_peek(h: vec[int]) -> int
+/// heap_pop(h) -> int：弹出最小 key，O(log n)。空返回 -1。
+/// 同样是挖洞下沉：末元素先取出，逐层把较小孩子上提，最后一次性落位——
+/// 每层 2 次读（左右孩子）+ 1 次写，且**先 pop 再下沉**，不需要临时把末元素写回根。
+fn heap_pop(h: vec[int]) -> int
 ```
 
 ### `std/f64.qma`
@@ -430,8 +462,96 @@ fn hex_decode(s: str) -> str
 HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商）
 
 ```quelmara
-// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
-// 编译失败（见 07-gaps.md §7.13）
+/// 阻塞运行 HTTP 服务：`backlog` 是监听队列长度，`on_request` 是
+/// `fn(fd: int) -> int` 的裸函数名（返回 0 = 响应后关连接，1 = 按 keep-alive 继续）。
+/// 十万连接档的槽位在启动时一次预分配（640 B/连接）。
+fn http_serve(port: int, backlog: int, on_request: int) -> int
+/// 可调连接上限版：槽位层按 `max_conns` 预分配定长槽位
+/// （640 B/连接 × max_conns，十万连接 = 64 MB 常驻，无 GC、无停顿）。
+/// 超过上限的新连接被直接拒绝（fail-fast，不静默膨胀）。
+fn http_serve_max(port: int, backlog: int, on_request: int, max_conns: int) -> int
+/// 累计 accept 的连接数
+fn http_accepted() -> int
+/// 累计关闭的连接数
+fn http_closed() -> int
+/// 累计派发给 handler 的请求数
+fn http_reqs() -> int
+/// 累计收到的字节数
+fn http_bytes_in() -> int
+/// 累计发出的字节数
+fn http_bytes_out() -> int
+/// 请求方法（"GET" / "POST" …）
+fn http_method(fd: int) -> str
+/// 请求目标原样（含 query 串；归一化请用 std.router 的 route_norm）
+fn http_path(fd: int) -> str
+/// `?` 之后的 query 串（到 `#` 或行尾为止；没有 query 返回 ""）
+fn http_query(fd: int) -> str
+/// 零拷贝体访问（大请求体：拿到指针直接读，不构造 str）
+fn http_body_ptr(fd: int) -> int
+/// 请求体长度（= Content-Length；无体为 0）
+fn http_body_len(fd: int) -> int
+/// 请求体（拷成一个 str；大请求体用 http_body_ptr + http_body_len）
+fn http_body(fd: int) -> str
+/// 按名找请求头（name 传小写；比较大小写无关）。没有返回 ""。
+fn http_header(fd: int, name: str) -> str
+/// 强制本连接在本次响应后关闭（不等对端 Connection 头）
+fn http_set_close(fd: int) -> int
+/// 状态码 → 原因短语（未收录的返回 "Unknown"）
+fn http_reason(status: int) -> str
+/// 标准响应：状态行 + Content-Type/Length + Connection + 体，一次组包一次 send。
+/// `extra` 传 "" 表示没有附加头；要附加时每行自带 \r\n。
+fn http_respond_ext(fd: int, status: int, ctype: str, extra: str, body: str) -> int
+/// 标准响应（无附加头）
+fn http_respond(fd: int, status: int, ctype: str, body: str) -> int
+/// 响应后立即关闭（force close 不看对端头）
+fn http_respond_close(fd: int, status: int, ctype: str, body: str) -> int
+/// text/plain; charset=utf-8 响应
+fn http_text(fd: int, status: int, body: str) -> int
+/// text/html; charset=utf-8 响应
+fn http_html(fd: int, status: int, body: str) -> int
+/// application/json 响应
+fn http_json(fd: int, status: int, body: str) -> int
+/// 供库内解析失败路径用（此时槽位协议字未就绪，直接组包发送并关连接）
+fn http_respond_raw(fd: int, status: int, extra: str, body: str) -> int
+/// 客户端是否接受 gzip（看 Accept-Encoding）
+fn http_accepts_gzip(fd: int) -> bool
+/// 强制 gzip 响应（带 Content-Encoding 与 Vary）
+fn http_respond_gzip(fd: int, status: int, ctype: str, body: str) -> int
+/// 自动协商：客户端支持且体 ≥256 字节才压，否则原样发
+fn http_respond_auto(fd: int, status: int, ctype: str, body: str) -> int
+/// JSON + 自动 gzip 协商
+fn http_json_auto(fd: int, status: int, body: str) -> int
+/// HTML + 自动 gzip 协商
+fn http_html_auto(fd: int, status: int, body: str) -> int
+/// 404 响应（text/plain）
+fn http_not_found(fd: int) -> int
+/// 405 响应（text/plain）
+fn http_method_not_allowed(fd: int) -> int
+/// 清空路由表与中间件链（只清计数，不释放内存；测试与「重载配置」用）
+fn http_routes_reset() -> int
+/// 注册一条路由：`method` 传 "GET"/"POST"…，`"*"` 或 "" 表示任意方法；
+/// `pattern` 见 std.router（`/users/:id`、尾部 `*`）；`handler` 是裸函数名。
+/// 返回条目下标；表满返回 -1，方法/模板超长返回 -2（模板 ≤127 字节）。
+fn http_route(method: str, pattern: str, handler: int) -> int
+/// 注册一个中间件（`fn(fd: int) -> int`：1 = 继续，0 = 终止链路）。
+/// 执行顺序 = 注册顺序；返回槽位下标，满返回 -1。
+fn http_use(mw: int) -> int
+/// 已注册路由条数
+fn http_route_count() -> int
+/// 已注册中间件条数
+fn http_mw_count() -> int
+/// 纯查询版路由匹配（不碰连接、不发送）：返回条目下标 / -1 未匹配 / -2 方法不符。
+/// 用于单测与「先查再处理」的自定义派发。
+fn http_route_index(method: str, path: str) -> int
+/// 当前请求命中的第 `i` 个 `:参数`（从 0 起；不匹配/越界返回 ""）
+fn http_param(fd: int, i: int) -> str
+/// 当前请求命中的 `:参数` 个数（没命中返回 0）
+fn http_param_count(fd: int) -> int
+/// 内置派发器：中间件链 → 路由表 → handler；未命中回 404、方法不符回 405。
+/// 当 `http_serve(port, backlog, http_dispatch)` 的 handler 用。
+/// 永远返回 1（连接按 keep-alive 走），要关连接在 handler/中间件里调
+/// http_set_close。
+fn http_dispatch(fd: int) -> int
 ```
 
 ### `std/httpc.qma`
@@ -904,24 +1024,58 @@ fn multipart_file(body: str, boundary: str, name: str) -> str
 
 ```quelmara
 /// 在 port 上建监听 socket（tcp_listen 内建），返回监听 fd；失败直接 fail-fast。
+/// 只接 IPv4（绑 0.0.0.0）；要双栈用 listen6。
 fn listen(port: int) -> int
+/// 在 port 上建 **IPv6 双栈**监听（tcp_listen6 内建，AF_INET6 + IPV6_V6ONLY=0），
+/// 返回监听 fd；同一个 socket 同时接 IPv6 与 IPv4（映射成 ::ffff:a.b.c.d）连接。
+/// 失败直接 fail-fast（与 listen 同口径）。仅 Windows PE。
+fn listen6(port: int) -> int
 /// 阻塞接受一个连接，返回连接 fd。
 fn accept(fd: int) -> int
+/// 客户端连接（v1.25 / v2.07）：host 可以是域名、IPv4 字面量或 IPv6 字面量
+/// （"::1"，不带方括号）。Windows 走系统 DNS（getaddrinfo + hosts）并按返回的
+/// 地址家族逐个尝试；Linux 暂未实现（编译期报错）。失败 fail-fast。
+fn connect(host: str, port: int) -> int
 /// 把 str 的全部字节写到连接上，返回写入字节数（短写要自己续写）。
 fn send(conn: int, data: str) -> int
 /// 从连接读最多 cap 字节并返回 str；对端关闭时返回空串。
 fn recv(conn: int, cap: int) -> str
 /// 关闭连接 fd（不返回值）。
 fn close_conn(fd: int)
-/// 高并发 reactor（v1.4，Windows IOCP）：
-///   serve(port, backlog, on_connect, on_data, on_close) -> 阻塞运行
-/// 回调（传函数名即可，IR 层是代码地址，运行库经 callr 派发）：
-///   on_connect(fd: int)              新连接建立（传 0 = 不回调）
-///   on_data(fd: int, data: str) -> int   1 = 保持连接继续收；0 = 关闭
-///   on_close(fd: int)                连接关闭（对端关闭或 on_data 决定关闭）
-/// 资源上限（max_conns / recv_buffer / io_threads / tcp_nodelay）在根目录
-/// Quelmara.toml [net] 节声明，超限拒绝新连接（不静默膨胀）。
-fn serve(port: int, backlog: int, on_connect: int, on_data: int, on_close: int) -> int
+```
+
+### `std/net/addr.qma`
+
+地址文本层：IPv4/IPv6 字面量解析与 RFC 5952 格式化 + fd 对端地址
+
+```quelmara
+/// ip_family(s) -> int：字面量家族判定。4 = 点分 IPv4，6 = IPv6，0 = 不是字面量。
+/// 只看字面量不做解析：域名（含 "localhost"）一律 0，那是 tcp_connect 的活。
+fn ip_family(s: str) -> int
+/// ip6_parse(s) -> str：IPv6 字面量 -> 16 字节网络序原始串；非法返回空串。
+/// 支持 "::" 压缩（最多一处）与末尾点分四段（::ffff:1.2.3.4）。
+fn ip6_parse(s: str) -> str
+/// strip_brackets(host) -> str：URL 的 IPv6 host 是 "[::1]" 形态，去掉方括号；
+/// 没有方括号原样返回（IPv4 / 域名不受影响）。
+fn strip_brackets(host: str) -> str
+/// ip4_format(b) -> str：4 字节网络序 -> 点分四段。
+fn ip4_format(b: str) -> str
+/// ip6_format(b) -> str：16 字节网络序 -> RFC 5952 文本
+/// （小写、无前导零、最长连续 0 段压成 "::"，等长取最左）。
+fn ip6_format(b: str) -> str
+/// addr_family(raw) -> int：2 = IPv4，23 = IPv6，0 = 未知（fd 已关闭）。
+fn addr_family(raw: str) -> int
+/// addr_port(raw) -> int：对端端口（主机序）；raw 不合法返回 -1。
+fn addr_port(raw: str) -> int
+/// addr_text(raw) -> str：对端地址文本。IPv6 里 ::ffff:a.b.c.d（双栈 socket
+/// 上 IPv4 客户端的形态）还原成点分四段，其余走 ip6_format。
+fn addr_text(raw: str) -> str
+/// peer_raw(fd) -> str：对端地址的 20 字节原始视图（见本文件末尾布局说明）。
+fn peer_raw(fd: int) -> str
+/// peer_ip(fd) -> str：对端 IP 文本（IPv4 点分 / IPv6 压缩格式）。
+fn peer_ip(fd: int) -> str
+/// peer_port(fd) -> int：对端端口（主机序）。
+fn peer_port(fd: int) -> int
 ```
 
 ### `std/net/core.qma`
@@ -929,8 +1083,72 @@ fn serve(port: int, backlog: int, on_connect: int, on_data: int, on_close: int) 
 连接槽位层（IOCP reactor 的底座）
 
 ```quelmara
-// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
-// 编译失败（见 07-gaps.md §7.13）
+/// 新建协议状态块：`max_conns` 个定长槽位（每槽 `slot_words` 字）。
+/// 返回状态指针，交给 `conn_open` / `conn_*` 统计函数使用。
+fn conn_state_new(max_conns: int, slot_words: int) -> int
+/// 槽位上限（超过后 `conn_open` 返回 -1，由协议层拒绝连接）。
+fn conn_max_conns(st: int) -> int
+/// 累计 accept 的连接数（含已关闭）。
+fn conn_accepted(st: int) -> int
+/// 累计关闭的连接数。
+fn conn_closed(st: int) -> int
+/// 累计派发给协议层的消息/请求数（`conn_msg_inc` 加）。
+fn conn_msgs(st: int) -> int
+/// 累计收到的字节数。
+fn conn_bytes_in(st: int) -> int
+/// 累计发出的字节数。
+fn conn_bytes_out(st: int) -> int
+/// 取全局自旋锁（`static_word(11)`）。共享结构（槽位空闲链 / fd 表）改前必取。
+/// 持锁时间必须是 O(1)（几个指令），否则 io 线程会互相拖死。
+fn conn_lock() -> int
+/// 放全局自旋锁（与 `conn_lock` 成对）。
+fn conn_unlock() -> int
+/// 新连接：分配槽位、整槽清零、登记 fd→槽位。返回槽位下标；超上限返回 -1。
+fn conn_open(st: int, fd: int) -> int
+/// fd → 槽位指针（未登记返回 0）。协议私有字从 `SLOT_PROTO` 起，见 `std/net/core.qma` 头部布局。
+fn conn_slot(st: int, fd: int) -> int
+/// 关连接：归还溢出缓冲与槽位（O(1)，空闲链复用）。
+fn conn_close(st: int, fd: int) -> int
+/// 连接数据区指针：有溢出缓冲用堆，否则用槽位内联区。
+fn conn_buf_ptr(p: int) -> int
+/// 数据区当前容量（字节）。
+fn conn_buf_cap(st: int, p: int) -> int
+/// 把一段数据追加到连接缓冲，返回新的总长度；超 `CONN_MAX_BUF` 返回 -1。
+/// 内联区满时自动溢出到堆（倍增扩容），任意分片都不会丢数据。
+fn conn_append(st: int, p: int, data: str) -> int
+/// 已收到的字节数（协议层的解析游标读它，不必知道槽位布局）
+fn conn_recvlen(p: int) -> int
+/// 派发计数 +1（协议层每处理一条完整消息调用一次）
+fn conn_msg_inc(st: int) -> int
+/// 协议回调槽 0（`ST_H0`）：协议库把用户 handler 存这里，reactor 回调时取用
+fn conn_h0(st: int) -> int
+/// 写协议回调槽 0
+fn conn_set_h0(st: int, h: int) -> int
+/// 把 `[from, len)` 搬到缓冲头部（处理完一个请求后剩下的半包），返回剩余长度。
+fn conn_shift(p: int, from: int) -> int
+/// 发送一段缓冲区（指针 + 长度直接进 send，零拷贝）。返回实际写入字节数。
+fn conn_send(st: int, fd: int, ptr: int, n: int) -> int
+/// 发送一个 str（`len(s)` 字节）。返回实际写入字节数。
+fn conn_send_str(st: int, fd: int, s: str) -> int
+```
+
+### `std/net/reactor.qma`
+
+高并发 reactor：IOCP 事件循环（Quelmara 实现，仅 Windows PE）
+
+```quelmara
+/// 高并发 reactor：`net_serve(port, backlog, on_connect, on_data, on_close)`，
+/// 阻塞运行到进程结束。回调传**裸函数名**（IR 层就是代码地址，经 `callr` 派发；
+/// 0 = 不回调）：
+///   `on_connect(fd: int)`、`on_data(fd: int, data: str) -> int`
+///   （1 = 保持连接继续收；0 = 关闭）、`on_close(fd: int)`。
+/// worker 线程数默认 = 物理核数（`Quelmara.toml [net] io_threads`，0 = 自动），
+/// 连接上限 / 收缓冲 / TCP_NODELAY 同样取自 `[net]`；超上限的新连接直接关闭，
+/// socket 级失败一律 fail-fast（stderr + 退出码 1）。仅 Windows PE（IOCP + `@ffi`）。
+fn net_serve(port: int, backlog: int, on_connect: int, on_data: int, on_close: int) -> int
+/// `net_serve` 的同义入口（`import std.net.reactor` 后可直接 `serve(...)`，
+/// 与 `std/net.qma` 的过程式 API 并列）。
+fn serve(port: int, backlog: int, on_connect: int, on_data: int, on_close: int) -> int
 ```
 
 ### `std/net/udp.qma`
@@ -1027,6 +1245,21 @@ fn route_segs(target: str) -> vec[str]
 fn route_match(pattern: str, path: str) -> bool
 /// 捕获的参数（按出现顺序）；不匹配返回空 vec
 fn route_params(pattern: str, path: str) -> vec[str]
+/// 归一化后的有效长度（截掉 `?query` / `#frag`、去掉尾部 '/'）。
+/// 路由表在注册期用它把模板存成**归一化形态**，派发期用它把路径算一次。
+fn route_eff_len(buf: int, n: int) -> int
+/// 归一化缓冲的段数（'/' 分隔；空缓冲 0 段；连续 '/' 会产生空段，与 str_split 一致）
+fn route_seg_count(buf: int, n: int) -> int
+/// 模板匹配的字节级版：`pat`/`path` 是 (数据指针, 字节长度)。
+/// 归一化（query / fragment / 首尾斜杠）与 `route_match` 完全一致。
+fn route_match_bytes(pat: int, pat_len: int, path: int, path_len: int) -> bool
+/// 已归一化输入的匹配（两边都去过 query / 首尾斜杠）：纯逐段走，不再扫归一化。
+/// 路由表在注册期就把模板存成归一化形态、派发期把路径归一化一次，热路径走这里。
+fn route_match_norm(pat: int, pat_len: int, path: int, path_len: int) -> bool
+/// 第 idx 个 `:参数` 捕获（不匹配或越界返回 ""）。零分配匹配、只拷贝那一段。
+fn route_param_at(pat: int, pat_len: int, path: int, path_len: int, idx: int) -> str
+/// `:参数` 段个数（不匹配返回 0）
+fn route_param_count(pat: int, pat_len: int, path: int, path_len: int) -> int
 /// "GET,POST" 里是否允许 method（HTTP 方法区分大小写，按原样比）
 fn route_method_allowed(allowed: str, method: str) -> bool
 ```
@@ -1328,11 +1561,23 @@ fn wg_wait(w: int)
 
 ### `std/timer.qma`
 
-轮询式定时器（MinHeap 驱动）
+轮询式定时器（mem 块上的二叉最小堆；无后台线程 / 无回调，主循环 poll）
 
 ```quelmara
-// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
-// 编译失败（见 07-gaps.md §7.13）
+/// timer_after(ms) -> int：ms 毫秒后到期，返回句柄 id（从 1 递增，永不复用）。
+/// `ms <= 0` 表示"下一次 timer_poll 就到期"（到期时刻不晚于调用时刻）。
+fn timer_after(ms: int) -> int
+/// timer_cancel(id)：取消（O(1)，只清存活位）。到期时 timer_poll 静默丢弃。
+/// 已取消 / 已到期的 id 再取消一次是幂等的；越界 id 直接忽略。
+fn timer_cancel(id: int)
+/// timer_poll() -> int：弹出一个**已到期且未取消**的 id（没有则 -1）。
+/// 已取消的到期项静默跳过——所以一次调用可能弹掉多个堆项才返回。
+fn timer_poll() -> int
+/// timer_pending() -> int：还没到期/没取消的定时器个数（**O(n) 扫描**，诊断用）。
+fn timer_pending() -> int
+/// timer_clear()：释放两个块（下次 timer_after 重新建、id 从 1 起）。
+/// 主要给测试与"整轮重启"用；释放后旧 id 全部失效。
+fn timer_clear()
 ```
 
 ### `std/tls13.qma`
@@ -1575,8 +1820,9 @@ fn x509_rsa_exp(cert: str) -> int
 | `std/x509` | DER TLV、TBS/SPKI/签名提取、P-256 与 RSA 公钥解析、`x509_verify_chain`（链 + 有效期 + SAN，通配符只匹配一级）、`x509_is_ca` / `x509_san` / `x509_validity` | EC 只认 P-256 未压缩点；RSA 只认 PKCS#1 v1.5；不校验用途 / CRL / OCSP / 策略；无 P-384、Ed25519；无根证书库 |
 | `std/sha256` | SHA-256、HMAC-SHA256 | SHA-NI 硬件加速（基础设施已就绪，本机 CPU 无该扩展） |
 | `std/rsa` | PKCS#1 v1.5 与 PSS（SHA-256）验签，2048 位约几十毫秒 | 只验签；无 SHA-384/512；无密钥生成/签名；指数按 32 位 |
-| `std/net` | 阻塞 TCP 服务端（listen/accept）+ 客户端 `connect`（Windows 走系统 DNS） | Linux 客户端未实现（`tcp_connect` 编译期报错）；IPv6、批量收发 |
-| `std/net/udp` | open/bind/sendto/recvfrom + 地址解析 | 可靠 UDP、批量收发、IPv6 |
+| `std/net` | 阻塞 TCP 服务端（`listen` v4 / `listen6` **双栈**）+ 客户端 `connect`（Windows 走系统 DNS，v4/v6 字面量与域名都行） | Linux 客户端未实现（`tcp_connect` 编译期报错）；`net_serve` reactor 仍只绑 v4；批量收发 |
+| `std/net/addr` | IPv4/IPv6 字面量判定与解析（`ip_family` / `ip6_parse`）、RFC 5952 格式化（`ip6_format` / `ip4_format`）、fd 对端地址（`peer_raw` / `peer_ip` / `peer_port` / `addr_text`，`::ffff:a.b.c.d` 还原成点分） | 不解析域名（那是 `tcp_connect` 的活）；无 zone id（`%eth0`）；不做 `::a.b.c.d` 兼容地址归一 |
+| `std/net/udp` | open/bind/sendto/recvfrom + 地址解析 | 可靠 UDP、批量收发、**IPv6**（`udp_sendto` 的地址是 u32 网络序） |
 | `std/url` | scheme/host/port/path/query/fragment、query 取值、encode/decode | 规范化、相对路径解析 |
 | `std/str` | find/split/join/trim/replace/大小写/补齐/slice | `str_format`（无可变参数）、正则；**UTF-8 语义见 `std/utf8`**（`str_*` 一律按字节） |
 | `std/utf8` | 严格解码/编码/校验（RFC 3629）、字符数、按字符切片、码点序列 | 无 Unicode 规范化、无大小写折叠、无字符分类（标点/数字/字母） |

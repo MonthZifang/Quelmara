@@ -9,7 +9,7 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=280 FAIL=0 SKIP=1**（本版实测；SKIP 为 WSL 交叉验证，本机被沙箱拦。新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
+| PE 回归（主回归） | **PASS=284 FAIL=0 SKIP=1**（v2.12 在当前树实测：新增负向夹具 `net_serve_builtin`——reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断；v2.11 那条 `.qla` 沙箱删除 FAIL 已随夹具改「就地覆盖」收口。以下为 v2.10 口径的历史记录：本版新增项 `[3j2]`：`t130_router_dispatch`（路由表 / 参数 / 404·405 / 表满）+ `http_router_test.py`（20 项真实 socket E2E）。**唯一 FAIL 是 `.qla` 目标文件用例撞沙箱的批量删除策略**（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`：一次删 `build/_qlatest` 里 62 个文件，超过 50 个的阈值），与被测逻辑无关；`cache_test` 的 `build/` 争用失败本次未复现。v2.07 记录的那条 LSP FAIL 已收口（`tests/lsp_test.py` 的容错索引段改成 `std/sse` / `std/ws`（仍解析失败）负向 + `std/http` / `std/timer`（已修好）正向，内部断言 38 → 42）。SKIP 为 WSL 交叉验证，本机被沙箱拦。此前新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
 | 词法器对拍 | **PASS=238 FAIL=0**（241 个源文件；SKIP 3 个含 `f"..."` 插值的文件——stage-1 词法器不认 `FSTR`，v1.61 插值未移植。**闭包不再进 SKIP 名单**：`fn(x: int) -> int { ... }` 用的全是既有记号，`t126_closure` 逐记号一致（v1.95）） | `python tests/lexdiff.py` |
 | 声明级 AST 对拍 | **PASS=149 FAIL=1**（150 个源文件；唯一 FAIL 是 `tests/t115_derive.qma`——并行轨的 enum 派生让声明顺序变了、自举 parser 还没跟上，**与并发改动无关**。跳过 17 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer` / `t99_generic_struct` / `t101_bounds` / `t102_generic_impl` / `t103_generic_enum` / `t104_generic_enum_impl` / `t116_iface_multi` / `iface_rc` / `iface_rc_a64` / `t118_iface_own` / `t119_drop` / `t123_derive_enum` / `t124_macro` / `t125_refl_dyn`——自举 parser 未做 interface/impl/泛型单态化、类型约束、泛型 impl 与泛型 enum，v1.96 的 enum 派生 / token 宏 / 运行时下标反射也未移植；v1.97 把 `iface_rc_a64` 与 `t118_iface_own` 按同一口径记账，`t120_ffi` / `t115_derive` / `dpub_*` 两侧逐行一致） | `python tests/parsediff.py` |
 | 函数体 dump 对拍 | **一致 1719 / 分叉 1608 / SKIP 同步 26 / SKIP 不同步 44**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |
@@ -30,12 +30,12 @@
 | 覆盖率链路（行 + 分支，v1.83） | **PASS=23 FAIL=0**（`cov.qma` 行 4/5、分支 1/2 且列出未覆盖分支 `8->9`；`main.qma` 行/分支双 100%；行与分支两种阈值各退出码 1；`cov2.qma` 两次运行合并后行 8/8、分支 4/4；`--lines-only` 分支显示 `0/0`） | `python tests/cov_test.py` |
 | 模糊测试链路（v1.83） | **PASS=12 FAIL=0**（同 seed 逐字节一致 / 不同 seed 不同 / 变异生效且仍是合法 UTF-8 / built·rejected·bug 三分类口径 / 端到端 8 例 0 崩溃） | `python tests/fuzz_test.py` |
 | doc comment 链路（v1.92） | **PASS=31 FAIL=0**（语法规则 10 / 前端挂载 6 / 工具链 14 / 产物逐字节相同 1） | `python tests/doc_test.py` |
-| 文档生成门禁（v1.92） | **PASS**：61 个模块 / **433 个公开声明全部有 `///`**，0 个脱离块；`03-stdlib.md` 与源码一致 | `python tools/stage0/qlm_cli.py doc std --missing` + `python tools/dev/gen_stdlib_doc.py --check --require-doc` |
+| 文档生成门禁（v1.92） | **PASS**：62 个模块 / **531 个公开声明全部有 `///`**，0 个脱离块（v2.08 实测：`std/ds` 13 个 + `std/timer` 5 个 API 计入）；`03-stdlib.md` 与源码一致 | `python tools/stage0/qlm_cli.py doc std --missing` + `python tools/dev/gen_stdlib_doc.py --check --require-doc` |
 | 语言服务器（v1.91） | **PASS=38 FAIL=0**（五段：词法对拍 321 文件 / 213208 记号分叉 0；容错索引 2 个前端解析不了的文件；索引语义；真 JSON-RPC 协议；性能阈值） | `python tests/lsp_test.py` |
 | 性能门禁自测（v1.88） | **PASS=12 FAIL=0**（建基线 / 同产物判 PASS / 伪造 2× 回归必须 FAIL / 校验和与体积必须拦住） | `python tests/bench_gate_test.py` |
 | 闭包 / 捕获（v1.95） | **t126 的 11 组断言全过**（无捕获 / 单捕获 / str+f64 / 逃逸 / 快照 / 嵌套 / 捕获 vec 句柄 / 循环建多个 / 聚合返回 + 聚合形参 / 6·8 参走栈）；负向 3 个编译期拦下（捕获 struct、体内写捕获变量、裸函数名当闭包传）；`--no-opt` 与 `--dbg-info` 构建输出一致；AArch64 构建通过（同一条 `callr`）；C 后端 fail-fast | `python tools/stage0/qlm_cli.py run tests/t126_closure.qma --target win` （主回归总数见 §1 主行；本版新增 1 正 + 3 负用例） |
 | 包管理 qpm（v1.99） | **PASS=61 FAIL=0**（确定性打包逐字节一致 / 打包跳过产物 / 恶意 tar 拒绝 / spec 十一种形态 / registry 索引与包体落盘 / 同版本不可覆盖 / 传递依赖选版本 / 区间交集合并 / 无交集与跨来源冲突的诊断文案 / yank 后回退 / `--locked` 不升级且检出清单漂移 / `verify` 检出磁盘被改 / 依赖环可安装 / HTTP PUT 发布与 GET 安装 / 401 拒发 / 装完能被编译器 import 并跑出依赖里的字符串） | `python tests/qpm_test.py` |
-| 五道门禁 | check_names / check_origin / check_docs 全 PASS；`gen_stdlib_doc.py --check --require-doc` PASS（61 个模块 / 430 个公开函数） | `python tools/dev/check_*.py` + `python tools/dev/gen_stdlib_doc.py --check` |
+| 五道门禁 | check_names / check_origin / check_docs 全 PASS；`gen_stdlib_doc.py --check --require-doc` PASS（62 个模块 / 528 个公开函数） | `python tools/dev/check_*.py` + `python tools/dev/gen_stdlib_doc.py --check` |
 
 `run_win_tests.py` 的 10 组覆盖：PE 结构（MZ/PE32+/AMD64/无 CRT 符号）、基础语义、
 语言特性（struct/enum/match/宽度/@simd/rc/所有权/vec/map/切片/函数值/**@ffi**）、多核
@@ -724,6 +724,208 @@ p95 1.6–1.9 ms**（多次运行的区间，单次请求到出结果）。词�
 > 轮转（保留份数 / 单文件不超阈值 / 旧份被覆盖）与失败路径；`tests/log_streams.qma`
 > 单独钉住 stdout / stderr 不串流。
 
+### 3.19 `std/ds`（RingBuf / MinHeap）单价（`bench/ds_bench.qma`，v2.05）
+
+`std/ds` 从"0 个 `pub`、用户一引用就编译失败"补成公开模块（13 个 API），这是补完后
+第一次量到的单价。**口径**：进程内 `now_ns()`；RingBuf 跑稳态（cap 4096 先填到 cap-1，
+再循环 push+pop 配对，每轮都跨"尾部绕回 0"）；键由确定性 LCG 预先生成、不计时。
+下表是**同一条命令跑 10 次的中位**（括号里是最小–最大，能看出噪声有多宽）：
+
+| 负载 | 中位 | 区间 | 口径 |
+|---|---|---|---|
+| RingBuf push+pop 配对（跨绕回） | **32 ns/对** | 23–40 | 100 万对 |
+| RingBuf `peek` | **1.5 ns/次** | 1–2 | 100 万次 |
+| `vec[int]` push+pop 配对（同形状对照） | 12 ns/对 | 8–62 | 100 万对 |
+| `std/deque` push_back+pop_front 配对 | 41 ns/对 | 28–102 | 100 万对 |
+| MinHeap push（20 万，堆 1.6 MB） | **59 ns/次** | 36–75 | 20 万次 |
+| MinHeap pop（20 万，堆 1.6 MB） | **462 ns/次** | 295–588 | 20 万次 |
+| MinHeap push（1 万，堆 80 KB） | 52 ns/次 | 36–72 | 1 万次 |
+| MinHeap pop（1 万，堆 80 KB） | **271 ns/次** | 188–297 | 1 万次 |
+| `sort_int` 20 万（一次性排序对照） | 260 ns/元素 | 205–355 | 20 万元素 |
+| `heap_pop` 挖洞前 → 后（**同进程交错 A/B**） | **700 → 458 ns/次** | 670–730 → 450–465 | 20 万，3 轮 |
+
+> 只有最后一行是可当结论用的 A/B：其余各行是**跨进程**重复测量，别的轨道的编译负载
+> 直接进数字（同一行能差 2 倍）；A/B 在同一进程里交替跑新旧实现，漂移对两边同等生效。
+>
+> **RingBuf 比 `vec` 慢约 2.7 倍**是取模 + 句柄头读的代价（每轮多 2 次 `mem_load64` 与
+> 一次 `%`），换来的是"容量恒定、不扩容、不搬移"；`std/deque` 与它同量级但可扩容——
+> 两者不是快慢关系，是"有界"与"可长"的选择。
+>
+> **MinHeap 的 pop 比 push 贵 8 倍不是实现问题，是树高**：随机 key 上浮平均 1.4 层就停，
+> 下沉每一层都要走到底（20 万 = 17.6 层）。1 万（13.3 层）比 20 万快 1.7 倍，比树高比
+> （1.32）多出来的部分就是每层跨一条缓存行的访存延迟——所以换 mem 块承载也救不了，
+> 只有 4 叉堆（树高减半）或 B 树布局才动得了这块。
+>
+> **全量取空时堆比一次性排序慢约 1.8 倍**（462 ns × 20 万 ≈ 92 ms vs `sort_int` 52 ms）：
+> 优先队列的价值在**增量插入 + 只取前 k 个**，不在"把 n 个全排一遍"。只要排序结果就用
+> `sort_int`，要"边来边取最小"才用堆。
+
+### 3.20 `std/timer` 轮询式定时器（`bench/timer_bench.qma`，v2.08）
+
+重写前这个模块**根本编译不过**（四个顶层 `let` + 调不存在的 `now_ms()`），所以没有"改造前"
+可比——这里只有重写后的绝对数字（同一条命令 8 次的中位）。10 万个定时器，到期时刻打散在
+0–4 ms 十档；push 走"分配 + 存活位 + 挖洞上浮 + 扩容"，drain 走"弹堆 + 下沉"。
+
+| 负载 | 中位 | 区间 | 口径 |
+|---|---|---|---|
+| `timer_after`（10 万个，含 3 次 2 倍扩容） | **130 ns/次** | 112–139 | 10 万次 |
+| `timer_poll`（全部到期后弹空） | **454 ns/次** | 367–520 | 10 万次 |
+| `timer_cancel` | **7 ns/次** | 2–12 | 2 万次 |
+| `timer_pending`（O(n) 扫描存活位） | **168 µs** | 133–228 | 10 万项 |
+| 全取消后 drain（每项都跳过） | **236 ns/项** | 196–297 | 2 万项 |
+
+> `poll` 454 ns 与 `std/ds` 的 `heap_pop`（462 ns）几乎一样——两个模块的堆下沉是同一套
+> 挖洞写法，瓶颈也同一处：**17.6 层 × 每层跨一条缓存行**。`after` 只要 130 ns 是因为
+> 随机到期时刻上浮平均 1.4 层就停。
+>
+> `cancel` 7 ns 是"只清一个存活位"的代价（O(1) 不搬堆）；代价转移到了 drain：被取消的
+> 项仍留在堆里，到期时弹出来再丢掉（236 ns/项）。这是刻意取舍——取消通常零散发生，
+> 而"从堆里精确删除"要额外维护 id→位置的索引，复杂度换不来这个收益。
+>
+> `timer_pending` 168 µs 是 O(n) 扫描，**不是热路径**（诊断/测试用）；要 O(1) 就再维护
+> 一个计数器，等真有调用方再说。
+
+### 3.21 IPv6 / 双栈 socket（`bench/net6_bench.qma`，v2.07）
+
+**这一节的主要结论是"v6 不比 v4 贵"**，不是绝对数字——本机环回被 WFP 过滤拖慢，
+`connect` 的绝对值由平台主导，所以每行都配一条**同机同日的 CPython 基线**（同一份
+"connect+close 200 次 / send+recv 2000 次"负载），看的是两条轨之间的比例。
+
+口径：进程内 `now_ns()`；服务端在 `spawn` 出来的线程里，客户端在主线程，环回不经网卡；
+`connect` 一栏 = `connect` + `close` 一整圈（含 `WSAStartup`、`getaddrinfo`、`socket`、
+三次握手/四次挥手），服务端每圈 `accept` 一次；`pingpong` 一栏 = 已建连接上
+`send`+`recv` 一个来回。Quelmara 取 3 次运行的中位，CPython 单次 200/2000 次取平均。
+
+| 负载 | Quelmara v2.07 | 同机 CPython | 读法 |
+|---|---|---|---|
+| `connect`+`close`，`127.0.0.1` → v4 监听 | **948 µs/圈** | 1 146 µs/圈 | 平台成本主导；我们少一层解释开销 |
+| `connect`+`close`，`::1` → `listen6` 双栈 | **939 µs/圈** | — | **与 v4 同价（−1%）**：`sockaddr_in6` 28B 与 `AF_INET6` 没有额外代价 |
+| `connect`+`close`，`localhost` → `listen6` | **2.23 ms/圈** | `getaddrinfo("localhost")` 1 324 µs + 建连 1 146 µs | 多出来的就是**名字解析**（数字字面量 `getaddrinfo` 只要 7 µs） |
+| `send`+`recv` 往返，v4 | **145 µs/来回** | 139 µs/来回 | 协议栈往返为主，语言侧开销在噪声内 |
+| `send`+`recv` 往返，v6 | **134 µs/来回** | 138 µs/来回 | **v6 不慢于 v4**（3 次区间 123–138，与 v4 的 129–146 重叠） |
+
+> **"localhost 回退到 v4"不进基准**：`localhost` 若先解析到 `::1` 而服务端只监听 v4，
+> 第一次 `connect` 要**被拒**才回退。本沙箱里被拒连接固定 ~2.0 s（CPython 测同一目标
+> 也是 2.03 s，是 WFP 丢 SYN 而不是 RST），200 圈就是 400 s，基准没法跑。正确性由
+> `tests/t140_net6.qma` 的第 4 段断言（v4-only 监听 + `connect("localhost")` 必须连上）；
+> 代价口径：**一次被拒连接**，正常机器上 <1 ms。
+>
+> 双栈 socket 上 IPv4 客户端在内核里是 `::ffff:127.0.0.1`：`std/net/addr` 的
+> `addr_text` 把它还原成点分四段（t140 断言），日志里不会出现映射前缀。
+
+### 3.21 HTTP 路由表 + 中间件（`bench/http_router_bench.qma` / `tests/http_router_test.py`，v2.10）
+
+路由派发是本版新增的热路径，分两层量：**进程内**（查表 / 参数捕获，不受网络干扰）与
+**端到端**（真实 socket，同一 Python 客户端跑三个服务做对照）。
+
+**进程内**（`now_ns()`，每档 20 万次 × 3 轮取最小；路径字符串**预先生成、不计时**；
+路径按 `i % n` 轮转，命中的是最后一条——最坏情况）：
+
+| 负载 | 最小 | 口径 |
+|---|---|---|
+| 查表 1 条路由 | **109 ns** | 20 万次 |
+| 查表 4 条 | 142 ns | 20 万次 |
+| 查表 16 条 | 240 ns | 20 万次 |
+| 查表 64 条 | **609 ns** | 20 万次 |
+| `route_param_at`（取 1 个 `:参数`） | 172 ns | 20 万次 |
+| `route_match`（str 版，`str_split` 两次） | 188 ns | 20 万次 |
+| `route_match_bytes`（字节版，零分配） | 205 ns | 20 万次 |
+
+**端到端**（同机同日，keep-alive 单连接 × 2000 请求，各 3 次取最小；服务端 `--quiet`，
+否则一次控制台 `WriteFile` 就是几十微秒）：
+
+| 服务 | µs/往返 | 说明 |
+|---|---|---|
+| `echo_reactor`（基线） | **147.1** | 只有 IOCP 回环 + `tcp_send`，没有 HTTP |
+| `http_demo`（单回调，无路由/中间件） | 183.4 | HTTP 解析 + 响应组包 |
+| `http_router`（7 路由 + 2 中间件 + 参数捕获） | **178.5** | 本版形态 |
+| `http_router` 4 连接 × 1000 | 11.5k req/s（86.9 µs/往返） | 并发口径 |
+
+> **结论一：路由 + 中间件在端到端里测不出成本。** `http_router` 反而比单回调的
+> `http_demo` 快 5 µs——符号不可信，实际是"落在噪声内"（本机 VBS 噪声 ±50%）。与进程内
+> 单价一致：16 条路由 240 ns，只占 180 µs 往返的 **0.13%**。
+>
+> **结论二：HTTP 层比裸 reactor 贵 ~36 µs**（147.1 → 183.4）。这部分是请求行/头解析
+> （单遍字节扫描）+ 响应组包（多次字符串拼接）+ 一次 `WSASend`，本版没动它们——要动就
+> 得先量出拼接占多少，别拿"路由优化"去解释这 36 µs。
+>
+> **结论三：字节版匹配不比 str 版快**（205 vs 188 ns）。它的价值是**不分配**：每请求省
+> 掉 2 个 `vec[str]` + N 个段子串。单条 200 字节请求的往返是 180 µs，分配成本本来就看不见，
+> 所以别把"零拷贝"当性能卖点——它是"没有 GC 压力、堆不随请求数增长"的保证。
+>
+> 口径提醒：测量期间另一条轨在跑编译，跨进程比较只能看量级；上表每行都是 3 次最小值，
+> 且三个服务是**同一条命令、同一个客户端循环**跑出来的，横向可比。
+
+### 3.22 `.qla` 目标文件 / 函数级增量（`tools/dev/qla_bench.py`，v2.11）
+
+负载 `bench/qla_bench.qma`：import `json` / `regex` / `sha256` / `url` / `gzip` / `f64`
+六个模块，展开后 **98 个函数 / 14695 条 IR**。量的是**编译期**（进程内
+`perf_counter`，`min-of-5`，`QLM_NO_CACHE=1`）：
+
+| 场景 | ms | 倍数 | 复用 |
+|---|---|---|---|
+| 冷编译到 `.qla`（全量降级 + 优化 + 序列化） | 2255–2395 | 1.00× | — |
+| 无改动增量（全部函数复用） | **1025–1083** | **2.20–2.21×** | 69/69 函数、14695/14695 条 IR，**产物逐字节相同** |
+| 改一个函数体（`work`，被 `main` 内联） | 1565–1685 | 1.44–1.42× | 67/69（`work` + `main` 重编） |
+| 同上，只加一条语句 | 1487–1824 | 1.52–1.31× | 67/69 |
+| `link` 单档案（98 函数） | 432–435 | — | 100% 复用（纯发射） |
+
+档案 **555 KB**（14695 条 IR），同一份程序的 PE 151 KB——**IR 比机器码大约 3.7 倍**，
+这是"分发二进制库"的真实成本口径。
+
+**增量下限是解析，不是复用**：同一负载 `qlm.load_program()` 单独跑就是 **1059 ms**，
+而无改动增量总共 1083 ms——复用逻辑本身只占约 25 ms（2%）。解析器一个文件读三遍
+（宽松扫描 / 严格二次解析 / `_consts_of`），所以**下一步的收益在解析缓存，不在 IR 复用**。
+
+改小函数为什么会连带重编：`work` 被内联进 `main`，`main` 的 IR 里就是 `work` 的函数体
+副本，`work` 一变 `main` 必须重编（见 `05-toolchain.md` §1.8 的"内联传播"）。不被内联的
+大函数（>28 条 IR 且多调用点）改体只重编它自己——`tests/qla_test.py [B]` 钉住这一条。
+
+**往返一致**：`tests/*.qma` + `examples/` + `bench/` 里能独立编译的 **192 个源文件**，
+「直编 PE」与「档案 → 链接」的产物**逐字节相同**（192/192，diff 0，另 5 个不可独立编译）。
+
+> 口径提醒：本表是在**另一条轨同时在跑回归**时采的（本机 VBS + 并行编译负载），
+> 绝对毫秒会偏高 20–50%；倍数（同一进程内前后对照）受影响小。测绝对值请独占机器。
+
+### 3.23 服务端运行时：reactor 迁到 Quelmara + 多核标定（v2.12）
+
+口径：本机 20 核；客户端与服务端同机（回环本身 ~30–40 µs）；min-of-3；
+`tools/dev/net_bench.py`。测量时机器上还有别的编译负载，**绝对数只做纵向参考**。
+
+**echo 往返（4 连接 × 300 请求，单客户端线程）**
+
+| 实现 | req/s（3 次） | RTT p50 | p99 |
+|---|---|---|---|
+| 基线：stage-0 内建 reactor（v2.11） | 5,382 / 5,896 / 6,427 | 155 / 148 / 148 µs | 427 / 331 / 237 |
+| Quelmara reactor（共享完成端口） | 5,580 / 6,454 / 5,576 | 154 / 146 / 154 µs | 362 / 236 / 377 |
+| Quelmara reactor（per-reactor 端口，**已回退**） | 4,925 / 5,762 | 187 / 173 µs | 371 / 292 |
+
+**32 连接 × 4 客户端线程（吞吐，2 次）**
+
+| 实现 | req/s |
+|---|---|
+| 基线 4 worker | 19,014 / 19,762 |
+| Quelmara 4 worker | 20,063 / 19,602 |
+| 基线 20 worker | 20,001 / 19,826 |
+| Quelmara 20 worker | 19,466 / 19,817 |
+
+> 这一档**客户端先到顶**（4 条 Python 线程），测不出服务端上限——它只用来证明"没回归"。
+
+**多核标定（`bench/net_cpu_bench.qma`：handler 里 40 万次循环；20 连接 × 5 客户端线程）**
+
+| `[net] io_threads` | req/s | RTT p50 | 相对 1 worker |
+|---|---|---|---|
+| 1 | 2,203 | 1,904 µs | 1.0× |
+| 4 | 9,517 | 473 µs | **4.3×** |
+| 20 | 9,822 | 451 µs | 4.5×（客户端到顶） |
+
+p50 从 1,904 → 473 µs 是 **4.0×**，与 worker 数同阶——多核确实在干活，不是"配了 20 个
+线程其实一个在跑"。4 → 20 的收益被压测客户端吃掉，要更准的上限需要多进程压测（未做，
+`07-gaps.md` §3 已登记）。
+
+**结论**：reactor 换成 Quelmara 实现后与 stage-0 版本同档（差异落在噪声内）；
+`per-reactor` 端口方案在低并发下 p50 明显更差（146 → 175 µs），按数据回退到共享端口。
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |
@@ -739,7 +941,13 @@ p95 1.6–1.9 ms**（多次运行的区间，单次请求到出结果）。词�
 | AArch64 | stage-0 | ❌ 缺失（有 IR 对拍） |
 | C99 后端 | — | 不移植（仅交叉验证） |
 
-**组件自举 2/9；代码行数 自举 2024 / stage-0 26541 = 7.1%**（`python tools/dev/selfhost_status.py`）。
+**组件自举 2/9；代码行数 自举 2024 / stage-0 34413 = 5.6%**（`python tools/dev/selfhost_status.py`）。
+
+> v2.12 按当前树**重算**了这行：旧值 26541 是 v1.9x 的，之后 stage-0 陆续加了
+> `qlm_index`（LSP）/`qlm_dbg`/`qlm_uring`/`qlm_store`/`qlm_qla` 等模块，分母早就变了。
+> 同一次改动删掉 400 行手写 IR（reactor 搬进 `std/net/reactor.qma`），净减 ~310 行。
+> 这 9 个组件只统计**编译器**；服务端运行时（reactor）v2.12 起已 100% Quelmara，
+> 但它不在这个分母里——库层一直不计入自举口径。
 
 ## 5. 平台
 
@@ -761,4 +969,4 @@ p95 1.6–1.9 ms**（多次运行的区间，单次请求到出结果）。词�
 | 接口装箱不释放 | 热点循环频繁装箱会涨堆 | 无 rc/drop 路径 |
 | `and` 用 64 位立即数（≥2^63）曾算错 | SWAR 位运算踩过：改成 `>>7 & 0x0101…` 规避 | v1.29 已规避，根因未定位（见 `07-gaps.md` §7.2） |
 | `f64` 比较曾整型化 | `if a > b` 对负浮点给出相反结果（v1.19 已修） | 根因：`branch()` 直接发 `jcc` 未走 `fcmpset`；回归 `tests/t64_math.qma` |
-| `std` 里 10 个模块 0 个 `pub` 导出、4 个模块解析失败 | 用户代码一引用就编译失败；`examples/{http_demo,ws_demo,sse_demo}` 构建不过 | v2.01 审计发现，清单与复现见 `07-gaps.md` §7.13；修复要补 141 个声明的 `pub` + `///`，单开一版 |
+| `std` 里 6 个模块 0 个 `pub` 导出、2 个模块解析失败 | 用户代码一引用就编译失败；`examples/{ws_demo,sse_demo}` 构建不过 | v2.01 审计、**v2.08 重测**（`std/ds` 补 13 个 `pub`、`std/timer` 重写后 5 个 `pub`，`http`/`net/core` 由同期另一条轨补齐）：剩 `core`/`gen`/`serialize`/`sse`/`time`/`ws` 共 69 个声明。清单与复现见 `07-gaps.md` §7.13 |

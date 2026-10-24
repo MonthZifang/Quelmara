@@ -1,0 +1,18 @@
+// bench/echo_bench.qma —— reactor 探针服务端（v2.12）
+//
+// 为什么单独一个夹具：`examples/echo_reactor.qma` 每个连接都 print
+// （控制台 WriteFile 几十微秒），量到的是终端速度而不是 reactor 速度。
+// 这里三个回调里只留 on_data，且不做任何日志——测的是
+// 「IOCP 完成 -> 回调 -> 回写」这条链本身。
+import std.net
+import std.net.reactor
+
+fn on_data(fd: int, data: str) -> int {
+    send(fd, data)
+    return 1
+}
+
+fn main() {
+    // 端口 19532 固定（tools/dev/net_bench.py 的默认目标）；on_connect/on_close 传 0
+    serve(19532, 65535, 0, on_data, 0)
+}

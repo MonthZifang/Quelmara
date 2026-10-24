@@ -1,10 +1,23 @@
 // std/net.qma —— 网络第一格：tcp_* 内建的过程式包装（v1.3）
 // SPEC 的 net.TcpServer reactor（回调结构体 + epoll/IOCP）仍是目标模型；
 // 这一层先给阻塞式过程式 API，echo 类服务十行内可写。
+//
+// v2.07：IPv6 接入。listen6 建 AF_INET6 监听（IPV6_V6ONLY=0，同一端口同时接
+// IPv4 映射连接）；connect 的 family 放宽到 AF_UNSPEC，IPv6 字面量与 AAAA 记录
+// 直接可用，失败沿 getaddrinfo 链表回退（"localhost" 先给 ::1 时 v4 服务端仍可连）。
+// 对端地址文本在 std/net/addr.qma（peer_ip / peer_port，需单独 import）。
 
 /// 在 port 上建监听 socket（tcp_listen 内建），返回监听 fd；失败直接 fail-fast。
+/// 只接 IPv4（绑 0.0.0.0）；要双栈用 listen6。
 pub fn listen(port: int) -> int {
     return tcp_listen(port)
+}
+
+/// 在 port 上建 **IPv6 双栈**监听（tcp_listen6 内建，AF_INET6 + IPV6_V6ONLY=0），
+/// 返回监听 fd；同一个 socket 同时接 IPv6 与 IPv4（映射成 ::ffff:a.b.c.d）连接。
+/// 失败直接 fail-fast（与 listen 同口径）。仅 Windows PE。
+pub fn listen6(port: int) -> int {
+    return tcp_listen6(port)
 }
 
 /// 阻塞接受一个连接，返回连接 fd。
@@ -12,9 +25,10 @@ pub fn accept(fd: int) -> int {
     return tcp_accept(fd)
 }
 
-// 客户端连接（v1.25）：Windows 走系统 DNS（getaddrinfo + hosts），
-// Linux 暂未实现（编译期报错）。失败 fail-fast。
-fn connect(host: str, port: int) -> int {
+/// 客户端连接（v1.25 / v2.07）：host 可以是域名、IPv4 字面量或 IPv6 字面量
+/// （"::1"，不带方括号）。Windows 走系统 DNS（getaddrinfo + hosts）并按返回的
+/// 地址家族逐个尝试；Linux 暂未实现（编译期报错）。失败 fail-fast。
+pub fn connect(host: str, port: int) -> int {
     return tcp_connect(host, port)
 }
 
@@ -33,15 +47,11 @@ pub fn close_conn(fd: int) {
     tcp_close(fd)
 }
 
-/// 高并发 reactor（v1.4，Windows IOCP）：
-///   serve(port, backlog, on_connect, on_data, on_close) -> 阻塞运行
-/// 回调（传函数名即可，IR 层是代码地址，运行库经 callr 派发）：
-///   on_connect(fd: int)              新连接建立（传 0 = 不回调）
-///   on_data(fd: int, data: str) -> int   1 = 保持连接继续收；0 = 关闭
-///   on_close(fd: int)                连接关闭（对端关闭或 on_data 决定关闭）
-/// 资源上限（max_conns / recv_buffer / io_threads / tcp_nodelay）在根目录
-/// Quelmara.toml [net] 节声明，超限拒绝新连接（不静默膨胀）。
-pub fn serve(port: int, backlog: int,
-         on_connect: int, on_data: int, on_close: int) -> int {
-    return net_serve(port, backlog, on_connect, on_data, on_close)
-}
+// 高并发 reactor 不在本模块：v2.12 起它在 `std/net/reactor.qma`
+// （`import std.net.reactor` 拿 `serve` / `net_serve`）。
+// 分开的理由是**别把 IOCP 绑定钉进 net 模块**：reactor 的 `@ffi` 声明在非 Windows
+// 目标是**声明期**硬失败，一旦并进来，将来 Linux 侧接上 epoll 也永远编不过。
+// 如实说明：`tcp_*` 内建目前**也只有 Windows 实现**（`tcp_listen` 在 native 上
+// 会报"无法发射指令 ('winapi', … 'WSAStartup')"），所以 `import std.net` 现在编
+// native 一样失败——但失败点是"调用内建的发射期"，不是模块声明，Linux 侧补上
+// epoll 之后本模块立刻可用。与 `std/log` / `std/logfile` 的拆法同源。

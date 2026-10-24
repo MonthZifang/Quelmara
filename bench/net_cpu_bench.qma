@@ -1,0 +1,30 @@
+// bench/net_cpu_bench.qma —— reactor 多核标定夹具（v2.12）
+//
+// 为什么要"故意烧 CPU"：echo 的往返被回环延迟主导（~150 µs/往返，几乎全是
+// 内核与客户端的时间），量不出 reactor 到底用了几个核。这里让每个请求都跑
+// 一段固定的纯计算（`_spin`），吞吐上限就变成「核数 / 单请求 CPU」——
+// io_threads=1 / 4 / 20 的差别会直接体现在 req/s 上，而不是落在噪声里。
+//
+// 端口 19533；`_spin` 的圈数写死，改它会改变绝对数（改完要重测基线）。
+import std.net
+import std.net.reactor
+
+const SPIN = 400000
+
+fn _spin(n: int) -> int {
+    let mut x = 0
+    while x < n {
+        x = x + 1
+    }
+    return x
+}
+
+fn on_data(fd: int, data: str) -> int {
+    _spin(SPIN)
+    send(fd, data)
+    return 1
+}
+
+fn main() {
+    serve(19533, 65535, 0, on_data, 0)
+}

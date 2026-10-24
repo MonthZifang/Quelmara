@@ -76,7 +76,7 @@ DESC = {
     "std/str.qma": "字符串工具集",
     "std/sync.qma": "自旋锁 / Treiber 无锁栈 / WaitGroup",
     "std/time.qma": "时间便捷层",
-    "std/timer.qma": "轮询式定时器（MinHeap 驱动）",
+    "std/timer.qma": "轮询式定时器（mem 块上的二叉最小堆；无后台线程 / 无回调，主循环 poll）",
     "std/url.qma": "URL 解析 / query 取值 / 编码解码",
     "std/utf8.qma": "UTF-8 解码/编码/严格校验（RFC 3629）",
     "std/ws.qma": "WebSocket 服务端（RFC 6455）",
@@ -87,6 +87,8 @@ DESC = {
     "std/tls_client.qma": "TLS 1.3 客户端握手核心 + 证书链入口（RFC 8448 逐字节）",
     "std/tls_net.qma": "TLS 1.3 网络层：TCP 建连 + 握手 + 应用数据（Windows）",
     "std/net/core.qma": "连接槽位层（IOCP reactor 的底座）",
+    "std/net/reactor.qma": "高并发 reactor：IOCP 事件循环（Quelmara 实现，仅 Windows PE）",
+    "std/net/addr.qma": "地址文本层：IPv4/IPv6 字面量解析与 RFC 5952 格式化 + fd 对端地址",
     "std/net/udp.qma": "UDP 封装与地址解析",
 }
 

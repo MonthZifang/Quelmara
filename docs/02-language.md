@@ -874,7 +874,7 @@ fn make_adder(k: int) -> closure {          // 闭包逃逸：环境在堆上
 | `cstr(s)` | str -> **NUL 结尾**的 C 字符串指针（新分配，返回 int；FFI 传 `char*` 用它，v1.87） |
 | `cstr_read(p)` | C 字符串指针 -> str（扫到首个 NUL，无上界保护，v1.87） |
 | `mem_load8/32/64(p)`、`mem_store8/64(p, v)` | 裸读写（8/32 是字节偏移，64 是槽索引 ×8） |
-| `mem_alloc(n)` / `mem_free(p)` | 裸分配/释放 |
+| `mem_alloc(n)` / `mem_free(p, n)` | 裸分配/释放。**`mem_free` 要两个实参**（指针 + 与 alloc 对称的字节数）；写成 `mem_free(p)` 是编译期 `SyntaxError: mem_free(ptr, n) 需要两个实参`（`qlm_native.py:2918`，v2.05 修文档） |
 | `mem_xchg(p, v)` | 原子交换 |
 
 ### 7.3 并发 / 原子
@@ -890,7 +890,26 @@ fn make_adder(k: int) -> closure {          // 闭包逃逸：环境在堆上
 | `spin_hint()` | `pause` | `YIELD` | 自旋提示（纳秒级、不切线程） |
 | `thread_yield()` | `SwitchToThread` | `sched_yield` | 让出时间片（微秒级、会切上下文） |
 | `now_cycle()` | `rdtsc` | `CNTVCT_EL0` | 单调计数器（**不保证 = 核心周期**） |
-| `static_word(n)` | — | — | 静态字槽（库内部用于惰性表） |
+| `static_word(n)` | — | — | 静态字槽（库内部用于惰性表）。**共 32 个（0–31），手工分配、没有登记表**——见下方「静态字占用」 |
+| `thread_start(fn, arg)` | `CreateThread` | `clone` + 新栈 | **显式 OS 线程**（v2.12）：`arg` 按 int 传（句柄/指针，不做类型转换），返回线程句柄。与 `spawn` 的唯一区别是**不受 `multicore=false` 降级**——给 reactor 这类「循环永不返回」的线程用；`spawn` 在单核配置下会内联执行，主线程就再也回不到 accept |
+
+**静态字占用**（`static_word(i)` 是进程级 8 字节槽，库之间靠约定避让；撞了会静默改坏
+另一个库的指针，编译器不会报错）：
+
+| 槽 | 使用者 |
+|---|---|
+| 0–2 | 协议库：`std/sse`（0）、`std/ws`（0）、`std/http`（0 连接状态 / 1 解析失败码 / 2 路由中间件表） |
+| 6 | `std/gzip`（CRC-32 查表指针） |
+| 8 | `std/rand`（xorshift64* 状态） |
+| 9 | `std/log`（首条日志的 `now_ns` 基准） |
+| 11 | `std/net/core`（协议库全局自旋锁） |
+| 12 | `std/aes`（sbox / inv_sbox 表指针） |
+| 13 / 14 | `std/timer`（堆块指针 / 存活位块指针，v2.08） |
+| 15 | `std/net/reactor`（reactor 全局状态块指针，v2.12） |
+
+> 新增库请取**下一个空号**并在这里登记。v2.08 修掉过一个真实冲突：`std/timer` 原先也用
+> 12，与 `std/aes` 撞车——同时用 HTTPS 与定时器的进程会把 sbox 指针踩成堆指针。
+> 现在 timer 用 13/14。
 
 边界（v1.86 起双后端）：
 
@@ -926,9 +945,16 @@ fn make_adder(k: int) -> closure {          // 闭包逃逸：环境在堆上
 
 | 函数 | 说明 |
 |---|---|
-| `tcp_listen(port)` / `tcp_accept(fd)` / `tcp_send(fd, s)` / `tcp_recv(fd)` / `tcp_recv_n` / `tcp_send_n` / `tcp_close(fd)` | 阻塞 TCP（IPv4 字面量，无域名解析） |
+| `tcp_listen(port)` / `tcp_listen6(port)` / `tcp_accept(fd)` / `tcp_send(fd, s)` / `tcp_recv(fd)` / `tcp_recv_n` / `tcp_send_n` / `tcp_close(fd)` | 阻塞 TCP。`tcp_listen` 绑 `0.0.0.0`（只接 IPv4）；`tcp_listen6` 绑 `::` 且 `IPV6_V6ONLY=0`——同一个 socket 同时接 IPv6 与 IPv4 映射连接（v2.07，仅 Windows PE） |
+| `tcp_connect(host, port)` | 客户端连接：域名 / IPv4 / IPv6 字面量都行（`AF_UNSPEC` + `ai_next` 回退，Windows PE；Linux 编译期报错） |
+| `tcp_peer_raw(fd)` | 对端地址的 20 字节视图（端口网络序 / family / 地址），文本化交给 `std/net/addr`（v2.07） |
 | `udp_open()` / `udp_bind(fd, port)` / `udp_sendto(fd, ip, port, s)` / `udp_recvfrom(fd)` | UDP 四件 |
-| `net_serve(port, handler, threads)` | IOCP reactor（仅 Windows PE） |
+| `net_config(key)` | **编译期常量**（v2.12）：`0` = `max_conns`、`1` = `recv_buffer`、`2` = `io_threads`（已解析：`0` → 物理核数）、`3` = `tcp_nodelay`（0/1）。`key` 必须是编译期常量 |
+
+> `net_serve` **不再是内建**（v2.12）：reactor 已经用 Quelmara 写在
+> `std/net/reactor.qma`——`import std.net.reactor` 之后调 `net_serve(...)` 或
+> `serve(...)`（回调仍是裸函数名，IR 层是代码地址）。不 import 直接调会在
+> 编译期得到迁移诊断，`tests/bad/net_serve_builtin.qma` 钉住这条。
 
 ### 7.6 引用计数 / 指令级
 

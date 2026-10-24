@@ -585,6 +585,7 @@ def test_debug_chain():
     cov_test   ：行 + 分支覆盖率（含增量合并与两种阈值门禁）
     fuzz_test  ：编译器前端模糊测试（Quelmara 变异器 + 崩溃分类）
     cache_test ：增量缓存（命中/失效/损坏/串行=并行）
+    qla_test   ：`.qla` 目标文件（往返/函数级增量/二进制库/失败路径）
     """
     if not IS_WIN:
         skip("调试链路：仅 Windows（Windows 调试 API）")
@@ -594,7 +595,8 @@ def test_debug_chain():
                          ("行+分支覆盖率", "tests/cov_test.py"),
                          ("模糊测试", "tests/fuzz_test.py"),
                          ("增量缓存", "tests/cache_test.py"),
-                         ("持久化 KV", "tests/kv_test.py")):
+                         ("持久化 KV", "tests/kv_test.py"),
+                         ("qla 目标文件", "tests/qla_test.py")):
         try:
             r = subprocess.run([sys.executable,
                                 os.path.join(ROOT, script)],
@@ -803,6 +805,10 @@ def main():
     case_selfcheck("t75_utf8", "tests/t75_utf8.qma")
     case_selfcheck("t76_codec", "tests/t76_codec.qma")
     case_selfcheck("t78_lru", "tests/t78_lru.qma")
+    # 定容环形缓冲 + 最小堆（v2.05 补 pub）：绕回 / 哨兵 / 扩容 / 打包 key
+    case_selfcheck("t129_ds", "tests/t129_ds.qma")
+    # 轮询式定时器（v2.08 重写）：id 序列 / 到期顺序 / cancel / 2000 个扩容
+    case_selfcheck("t132_timer", "tests/t132_timer.qma")
     case_selfcheck("t79_sse", "tests/t79_sse.qma")
     case_selfcheck("t80_md5", "tests/t80_md5.qma")
     case_selfcheck("t81_generic_infer", "tests/t81_generic_infer.qma")
@@ -892,7 +898,9 @@ def main():
             # 当闭包传（代码地址 vs 两字聚合）三种形态必须拦下
             ("closure_capture_struct", "闭包捕获 struct", "暂不支持捕获聚合"),
             ("closure_assign_capture", "闭包内写捕获变量", "不能给捕获变量"),
-            ("closure_fnptr_param", "裸函数名当闭包传", "实参不是闭包")):
+            ("closure_fnptr_param", "裸函数名当闭包传", "实参不是闭包"),
+            # v2.12：reactor 搬进 std，内建 net_serve 必须给出迁移诊断
+            ("net_serve_builtin", "net_serve 内建已迁到标准库", "迁到标准库")):
         try:
             build(os.path.join(ROOT, f"tests/bad/{nm}.qma"),
                   os.path.join(ROOT, "build", f"bad_{nm}.exe"))

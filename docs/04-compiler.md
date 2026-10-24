@@ -22,6 +22,9 @@
    │  run_pipeline    qlm_opt.py     15 个 pass + 内联 + 循环展开
    ▼
   QuIR（已优化）
+   │  qlm_qla.py      ← v2.11：可在这里落盘成 .qla（目标文件）
+   ▼                  （函数记录 + 全局区 + 符号表 + 类型表，确定性字节）
+  QuIR（已优化）
    │  线性扫描寄存器分配            栈槽溢出
    ▼
   机器码
@@ -38,6 +41,12 @@
 闭包是编译期用审计钩子**观测**出来的（编译器 open 过哪些文件），不是重新推
 import 顺序——所以改 `load_program` 的解析规则不会让缓存失效判断出错
 （改它会让编译器指纹变，旧条目全废）。细节见 [`05-toolchain.md`](05-toolchain.md) §1.7。
+
+**流水线中间也有落盘点**：`build --emit-qla` 把「已优化 QuIR」写成 `.qla` 目标文件
+（v2.11）。它比缓存细一层——缓存是"整个单元的产物"，`.qla` 是"每个函数的 IR"，
+所以可以只重编变了的函数（`--incr`），也可以把它当二进制库分发（`--lib` +
+`--lib-input` + `link`）。档案里不含机器码，链接期才走"寄存器分配 + 编码"。
+细节见 [`05-toolchain.md`](05-toolchain.md) §1.8。
 
 ### 1.1 所有权检查（`Lower.check_ownership`，v1.84）
 
@@ -162,13 +171,14 @@ import 顺序——所以改 `load_program` 的解析规则不会让缓存失效
 |---|---|---|---|
 | `tools/stage0/qlm.py` | ~8005 | 词法、语法、类型推断、常量求值、泛型展开（含类型约束校验）、接口校验、模块加载与链接期 mangling、**doc comment 扫描**（`scan_doc_comments`）、C99 后端 | 加语法、改类型规则、改 import 解析、改 doc comment 规则 |
 | `tools/stage0/qlm_opt.py` | ~1786 | 优化 pass、范围分析、调度、边界消除 | 改优化效果 |
-| `tools/stage0/qlm_native.py` | ~11563 | AST→QuIR、x86-64 编码器、ELF64 写出、运行时、内建函数 | 加内建、改指令编码、改运行时 |
+| `tools/stage0/qlm_native.py` | ~11836 | AST→QuIR、x86-64 编码器、ELF64 写出、运行时、内建函数 | 加内建、改指令编码、改运行时 |
 | `tools/stage0/qlm_pe.py` | ~530 | PE32+ 头、节表、导入表、DIR64 重定位 | 改 Windows 产物 |
 | `tools/stage0/qlm_arm64.py` | ~798 | AArch64 编码与发射 | 补 AArch64 特性 |
 | `tools/stage0/qlm_cli.py` | ~954 | build/run/test/fmt/doc/lex/bench/debug/cov/fuzz/lsp/version | 加命令 |
 | `tools/stage0/qlm_index.py` | ~1847 | LSP 语义索引：位置感知词法 + 容错结构索引 + 补全/跳转/重命名 | 改补全/跳转语义 |
 | `tools/stage0/qlm_lsp.py` | ~586 | LSP 3.17 子集 stdio 服务（JSON-RPC 层） | 加 LSP 方法 |
 | `tools/stage0/qlm_cache.py` | ~532 | 增量编译缓存（内容寻址 + 精确依赖闭包） | 改缓存键/失效规则 |
+| `tools/stage0/qlm_qla.py` | ~647 | **`.qla` 目标文件**（v2.11）：容器读写 + 自校验、IR 序列化、多档案链接（gid 重编号 / 单例全局字共享 / 同名去重 / 未定义符号检查）、符号表渲染 | 改档案格式、改链接规则 |
 | `tools/stage0/qlm_mem.py` | ~904 | 内存相关运行时（QuIR 片段） | 改分配器 |
 | `tools/stage0/qlm_mt.py` | ~936 | 多线程/任务运行时 | 改 spawn/parfor |
 | `tools/stage0/qlm_store.py` | ~1186 | 存储/持久化运行时 | 改存储层 |
@@ -265,6 +275,9 @@ SHA     cpuid_sha  sha_rnds2  sha_msg1  sha_msg2  sha_nexte
   `qlm_pe.py` `WS2_32_FUNCS`——新增网络 API 必须加进去，否则归到 kernel32，
   加载时报 `0xC0000139`）；`@ffi` 声明则**自带 DLL 名**，见 §6.2.2。
 - 堆：`VirtualAlloc` 保留 + 按需 `MEM_COMMIT`；512 MB 上限只在真正写到时才消耗物理内存。
+- **reactor 不在编译器里**（v2.12）：IOCP 事件循环是 `std/net/reactor.qma` 的 Quelmara
+  源码（v1.4 起那 400 行 emit 调用已删除）。stage-0 只留两个原语——`thread_start`
+  （Win64 线程入口 ABI）与 `net_config`（编译期读 `[net]`）。改 reactor 行为改 `.qma`。
 
 ### 6.2.2 FFI 链路（`@ffi`，v1.87）
 
@@ -331,7 +344,7 @@ SHA     cpuid_sha  sha_rnds2  sha_msg1  sha_msg2  sha_nexte
 | arena | bump 指针回卷，整块回收 | `arena { }` 降级 |
 | 线程 | Linux `clone` / Windows `CreateThread` | `qlm_mt.py` + `qlm_native.py` |
 | 字符串 | `[len:8][bytes][NUL]`，`str_alloc` / `str_from_mem` 批量构造 | `std/str.qma` |
-| 网络 | IOCP reactor（Windows）+ 槽位层 640 B/连接 | `std/net/core.qma` |
+| 网络 | IOCP reactor（Windows；worker 数 = `[net] io_threads`，默认核数）+ 槽位层 640 B/连接 | `std/net/reactor.qma` / `std/net/core.qma` |
 | 存储 | WAL/视图运行时 | `qlm_store.py` |
 
 ## 8. 调试开关

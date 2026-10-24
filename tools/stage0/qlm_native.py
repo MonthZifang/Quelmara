@@ -20,6 +20,7 @@ Quelmara 源码 -> QuIR -> 优化passes -> 线性扫描寄存器分配 -> 自研
 """
 
 import argparse
+import hashlib
 import os
 import random
 import struct
@@ -634,6 +635,8 @@ class Fn:
         # 只在"同一函数内由 lambda 字面量直接创建"的闭包上有值——跨函数传递
         # 后签名不可知，调用点退回"按标量处理"（与 callr 同一口径）。
         self.closig = {}
+        # v2.03：本函数里被内联进来的 callee（增量失效要顺着这张表传播）
+        self.inlined_from = set()
     def new_v(self):
         self.nv += 1
         return self.nv - 1
@@ -678,7 +681,7 @@ _XMM_BUILTINS = ("cpu_sha", "cpu_aes", "xmm_load", "xmm_store",
 class Lower:
     def __init__(self, fns_ast, cfg, arch="x86_64", structs=None, enums=None,
                  platform="linux", asset_root=None, dbg=False, dbg_main=None,
-                 dbg_src=None, drop_fns=None):
+                 dbg_src=None, drop_fns=None, seed=None):
         self.fns_ast = {f["name"]: f for f in fns_ast}
         self.cfg = cfg
         self.arch = arch
@@ -710,9 +713,28 @@ class Lower:
         self.iface_scope = []
         self.uses_iface_rc = False
         self.out = []
-        self.globals = []          # bytes 列表
-        self.gid_of_str = {}
-        self.spawn_id = 0
+        # v2.03 `.qla` 复用：把档案里的全局数据区原样接过来（复用 IR 里的
+        # ("ga", gid) 就是按这张表编号的），新 intern 的块追加在后面。
+        # seed 为 None 时就是空表——默认构建一个字节都不变。
+        self.globals = [bytes(g) for g in (seed or {}).get("globals", ())]
+        # 字符串字面量 -> gid 也要接回来：否则重降级的函数会把同一份字面量
+        # 再 intern 一遍（数据区里出现重复块，产物与全量构建不一致）。
+        self.gid_of_str = dict((seed or {}).get("strmap") or {})
+        self._seed_special = dict((seed or {}).get("special") or {})
+        # 惰性创建的进程级单例（static_word / 空闲链 / args 拷贝标志）：
+        # 档案里已有就**预先挂上**，否则全量复用时不调用 getter 就会丢条目
+        for _nm, _attr in (("static", "_static_gid"), ("free", "free_gid"),
+                           ("args_copied", "_args_copied_gid")):
+            if _nm in self._seed_special:
+                setattr(self, _attr, self._seed_special[_nm])
+        _ctr = (seed or {}).get("counters") or {}
+        self.reuse_fns = {}        # name -> Fn（来自 .qla，已降级+已优化）
+        self.qla_stubs = {}        # name -> (params, ret)：只声明，链接期解析
+        self.fn_needs = {}         # name -> [uses_* 标志名]：增量复用的前提
+        self.fn_owner = {}         # 合成函数 -> 它属于哪个源码函数
+        self._cur_owner = None     # 正在降级的源码函数名（lambda 队列用）
+        self.lam_seq = _ctr.get("lam_seq", 0)
+        self.spawn_id = _ctr.get("spawn_id", 0)
         self.uses_chan = False
         self.uses_udp = False
         self.uses_wall = False
@@ -730,7 +752,7 @@ class Lower:
         self.uses_args = False
         self.uses_io = False
         self.uses_net = False
-        self.uses_net_serve = False
+        self.uses_threads = False   # v2.12：thread_start 起的线程 -> 分配器加锁
         self.uses_sfb = False
         self.uses_strmem = False
         self.uses_memcpy = False
@@ -744,8 +766,9 @@ class Lower:
         # v1.95 闭包：lambda 体在"外层函数降级完"之后统一降级（避免嵌套降级
         # 覆盖 fn_ret_agg / loop_stack 等按函数保存的状态）；计数器给合成名。
         self.pending_lambdas = []
-        self.lam_seq = 0
+        self.lam_seq = _ctr.get("lam_seq", 0)
         # v1.5 内存/时间内建：按需发射（未用到的程序体积零变化）
+        self.uses_peer = False           # v2.07 tcp_peer_raw（依赖 __str_from_mem）
         self.uses_memset = False
         self.uses_memcmp = False
         self.uses_memchr = False
@@ -756,30 +779,38 @@ class Lower:
         self.uses_now = False
         self.uses_cpu = False
         # 命令行参数（args()）：argc 字数 + argv 指针，入口期或惰性初始化填入
-        self.argc_gid = self.intern_array(1)
-        self.argv_gid = self.intern_array(1)
+        self.argc_gid = self._seed_gid("argc", 1)
+        self.argv_gid = self._seed_gid("argv", 1)
         if platform == "windows":
             # WriteFile 的 lpNumberOfBytesWritten 落点（Win32 必须给非空指针）
-            self.written_gid = self.intern_array(1)
+            self.written_gid = self._seed_gid("written", 1)
             # 已 MEM_COMMIT 的字节数（Windows 按 1MB 粒度按需提交）
-            self.committed_gid = self.intern_array(1)
+            self.committed_gid = self._seed_gid("committed", 1)
 
+    def _seed_gid(self, name, words):
+        """进程级单例全局字：档案里已有就沿用它的 gid（复用 IR 按老 gid
+        引用，重开一份会让 `args()` / `static_word` 读到两份不同的存储），
+        没有才新开一块。"""
+        gid = self._seed_special.get(name)
+        if isinstance(gid, int) and 0 <= gid < len(self.globals):
+            return gid
+        return self.intern_array(words)
     def static_gid(self):
         """进程级静态字区（static_word(i) 的落点，32 个字）。"""
         if getattr(self, "_static_gid", None) is None:
-            self._static_gid = self.intern_array(32)
+            self._static_gid = self._seed_gid("static", 32)
         return self._static_gid
 
     def free_list_gid(self):
         """尺寸类空闲链的表头数组（__alloc 与 __free 必须共用同一份）。"""
         if getattr(self, "free_gid", None) is None:
-            self.free_gid = self.intern_array(FREE_CLASSES)
+            self.free_gid = self._seed_gid("free", FREE_CLASSES)
         return self.free_gid
 
     def args_copied_gid(self):
         """unix argv 前缀拷贝的 once 标志（0 = 未拷贝）。"""
         if getattr(self, "_args_copied_gid", None) is None:
-            self._args_copied_gid = self.intern_array(1)
+            self._args_copied_gid = self._seed_gid("args_copied", 1)
         return self._args_copied_gid
 
     # ---- 结构体/枚举布局（字段一律占一个 8 字节槽；嵌套聚合占连续多个槽）----
@@ -2689,7 +2720,9 @@ class Lower:
         lname = f"__lam_{self.lam_seq}"
         self.pending_lambdas.append({
             "name": lname, "params": list(params), "ret": ret, "body": body,
-            "captures": caps, "line": line})
+            "captures": caps, "line": line,
+            # v2.03：记下它属于哪个源码函数——增量复用时按父函数决定去留
+            "owner": self._cur_owner})
         dst = self.alloc_struct(fn, "closure")
         code = fn.new_v()
         fn.emit("mov", code, ("fnaddr", lname))
@@ -2718,6 +2751,7 @@ class Lower:
             lam = self.pending_lambdas[i]
             i += 1
             body = list(lam["body"])
+            self._cur_owner = lam.get("owner")
             # 块尾表达式即返回值（ret 非 void 时）：`fn(x: int) -> int { x + 1 }`
             if lam["ret"] != ("named", "void") and body \
                     and isinstance(body[-1], tuple) and body[-1][0] == "expr":
@@ -2730,6 +2764,7 @@ class Lower:
                 "captures": lam["captures"],
                 "line": lam["line"],
             })
+            self.fn_owner.setdefault(lam["name"], lam.get("owner"))
 
     def lower_ffi(self, name, e, fn, env):
         """@ffi 调用（v1.87）：把实参按 Win64 寄存器类分好，发射一条 'ffi'。
@@ -3515,18 +3550,55 @@ class Lower:
             return d
         if name == "tcp_connect" and name not in self.fns_ast:
             # 客户端连接（v1.25）：tcp_connect(host, port) -> fd。
-            # Windows 走 getaddrinfo（系统 DNS + hosts），Linux 暂只支持
-            # IPv4 字面量（见运行时分支）。失败 fail-fast。
+            # Windows 走 getaddrinfo（系统 DNS + hosts）；v2.07 起 family 放宽
+            # 到 AF_UNSPEC，IPv6 字面量与 AAAA 记录直接可用，并按 ai_next
+            # 逐个尝试（"localhost" 先返回 ::1 时 v4-only 服务端仍能连上）。
+            # Linux 仍只支持 IPv4 字面量（见运行时分支）。失败 fail-fast。
             if self.platform != "windows":
                 raise SyntaxError(
                     "tcp_connect() 目前只在 Windows PE 后端实现（Linux DNS 未实现）")
             if len(e[2]) != 2:
                 raise SyntaxError("tcp_connect(host, port) 需要两个实参")
             self.uses_net = True
+            # 运行时按 ai_addrlen 整段拷 sockaddr（v4 16B / v6 28B）
+            self.uses_memcpy = True
             vals = [self.eval(a, fn, env) for a in e[2]]
             d = fn.new_v()
             fn.emit("call", d, "__tcp_connect", vals)
             return d
+        if name == "tcp_listen6" and name not in self.fns_ast:
+            # IPv6 监听（v2.07）：tcp_listen6(port) -> fd。
+            # AF_INET6 + sockaddr_in6（28B）+ IPV6_V6ONLY=0 —— 同一个 socket
+            # 同时接 IPv6 与 IPv4（映射成 ::ffff:a.b.c.d）连接。
+            # 仅 Windows PE（ELF 后端无动态链接器，与 tcp_connect 同边界）。
+            if self.platform != "windows":
+                raise SyntaxError(
+                    "tcp_listen6() 目前只在 Windows PE 后端实现")
+            if len(e[2]) != 1:
+                raise SyntaxError("tcp_listen6(port) 需要一个实参")
+            self.uses_net = True
+            pv = self.eval(e[2][0], fn, env)
+            d = fn.new_v()
+            fn.emit("call", d, "__tcp_listen6", [pv])
+            return d
+        if name == "tcp_peer_raw" and name not in self.fns_ast:
+            # 对端地址原始字节（v2.07）：tcp_peer_raw(fd) -> str（20 字节）。
+            # 布局：[0..1] 端口网络序 | [2] family（2=v4 / 23=v6 / 0=未知）
+            #       [3] 保留 0 | [4..19] 地址网络序（v4 占前 4 字节，其余 0）
+            # 文本化交给 std/net/addr.qma（IPv6 压缩格式要 8 组十六进制 + "::"，
+            # 放库层比放发射器好读，也不占运行时体积）。
+            if self.platform != "windows":
+                raise SyntaxError(
+                    "tcp_peer_raw() 目前只在 Windows PE 后端实现")
+            if len(e[2]) != 1:
+                raise SyntaxError("tcp_peer_raw(fd) 需要一个实参")
+            self.uses_net = True
+            self.uses_strmem = True          # __str_from_mem
+            self.uses_peer = True            # __tcp_peer_raw 本体
+            fv = self.eval(e[2][0], fn, env)
+            d = fn.new_v()
+            fn.emit("call", d, "__tcp_peer_raw", [fv])
+            return self._mark_str(fn, d)
         if name in ("tcp_send_n", "tcp_recv_n") and name not in self.fns_ast:
             # 零拷贝变体（v1.5）：直接给指针 + 长度，不构造 str、不扫 strlen。
             #   tcp_send_n(fd, ptr, n) -> 发送字节数
@@ -3554,31 +3626,105 @@ class Lower:
             fn.emit("bin", "add", d, ("ga", self.static_gid()), off)
             return d
         if name == "net_serve" and name not in self.fns_ast:
-            # 高并发 reactor 第一格（v1.4，Windows IOCP）：
-            #   net_serve(port, backlog, on_connect, on_data, on_close)
-            # 回调（IR 层代码地址，运行库里经 callr 派发）：
-            #   on_connect(fd)               新连接（可为 0 = 不回调）
-            #   on_data(fd, str) -> int      1 = 保持连接继续投递 recv；0 = 关闭
-            #   on_close(fd)                 连接关闭（对端关闭或 on_data 决定）
-            # 失败（socket/bind/listen/关联/accept）一律 fail-fast。
-            if self.platform != "windows":
-                raise SyntaxError(
-                    "net_serve() reactor 当前只在 Windows PE 后端实现（IOCP）；"
-                    "Linux epoll 后端在路线图上（PLATFORM.md 候选 A）")
-            if len(e[2]) != 5:
-                raise SyntaxError(
-                    "net_serve(port, backlog, on_connect, on_data, on_close) "
-                    "需要五个实参")
-            vals = [self.eval(a, fn, env) for a in e[2]]
-            for v in vals[2:]:
-                if not (isinstance(v, int) or
-                        (isinstance(v, tuple) and v[0] in ("imm", "fnaddr"))):
-                    raise SyntaxError(
-                        "net_serve 的回调实参必须是函数名（或 0 表示无回调）")
-            self.uses_net_serve = True
-            d = fn.new_v()
-            fn.emit("call", d, "__net_serve", vals)
-            return d
+            # v2.12：reactor 已整体迁到 std/net/reactor.qma（Quelmara 源码）。
+            # 内建只留一条有信息量的迁移诊断——直接报"未定义函数 net_serve"
+            # 会让老代码看不出发生了什么。
+            raise SyntaxError(
+                "net_serve 在 v2.12 迁到标准库了：import std.net.reactor 后调用 "
+                "net_serve(...) 或 serve(...)（见 docs/05-toolchain.md §1.9）")
+        if name == "thread_start" and name not in self.fns_ast:
+            # thread_start(fn, arg) -> int：显式 OS 线程（v2.12）。
+            # 与 spawn 的唯一区别：**不受 Quelmara.toml multicore=false 降级**。
+            # reactor 的 GQCS 循环必须真的跑在另一个线程上——单核配置下 spawn
+            # 会内联执行，主线程就永远卡在完成端口里、accept 再也不运行。
+            # arg 按 int 传（句柄/指针），不做类型转换（与被调方签名无关）。
+            if len(e[2]) != 2:
+                raise SyntaxError("thread_start(fn, arg) 需要两个实参")
+            if self.arch != "x86_64":
+                raise SyntaxError("thread_start 目前仅支持 x86_64 后端")
+            fv = self.eval(e[2][0], fn, env)
+            av = self.eval(e[2][1], fn, env)
+            self.uses_threads = True          # 多线程 -> __alloc 加锁
+            blk = fn.new_v()
+            fn.emit("call", blk, "__alloc", [("imm", 24)])
+            fn.emit("store", blk, ("imm", 0), ("imm", 0))    # 返回值槽
+            fn.emit("store", blk, ("imm", 1), av)            # 线程实参
+            fn.emit("store", blk, ("imm", 2), fv)            # 目标代码地址
+            wname = f"__thread_{self.spawn_id}"
+            self.spawn_id += 1
+            w = Fn(wname)
+            w.no_inline = True                # 跑在另一个栈上
+            wp = w.new_v()
+            w.emit("args", [wp])
+            fp = w.new_v()
+            w.emit("load", fp, wp, ("imm", 2))
+            ap = w.new_v()
+            w.emit("load", ap, wp, ("imm", 1))
+            rv = w.new_v()
+            w.emit("callr", rv, fp, [ap])
+            w.emit("store", wp, ("imm", 0), rv)
+            w.emit("ret", ("imm", 0))
+            self.out.append(w)
+            if self.platform == "windows":
+                wrap = Fn(wname + "__entry")
+                wrap.win_thread = True        # 序言/尾声保存 RDI/RSI（Win64）
+                xp = wrap.new_v()
+                wrap.emit("winargs", [xp])
+                wrap.emit("call", None, wname, [xp])
+                wrap.emit("ret", ("imm", 0))
+                self.out.append(wrap)
+                tid = fn.new_v()
+                fn.emit("winapi", tid, "CreateThread",
+                        [("imm", 0), ("imm", 0), ("fnaddr", wrap.name),
+                         blk, ("imm", 0), ("imm", 0)])
+            else:
+                st = fn.new_v()
+                fn.emit("syscall", st, self.sc["mmap"],
+                        [("imm", 0), ("imm", STACK_SZ), ("imm", PROT_RW),
+                         ("imm", MAP_PRIVATE_ANON), ("imm", -1), ("imm", 0)])
+                top = fn.new_v()
+                fn.emit("bin", "add", top, st, ("imm", STACK_SZ - 256))
+                fn.emit("store", st, ("imm", (STACK_SZ - 264) // 8), blk)
+                pid = fn.new_v()
+                fn.emit("syscall", pid, self.sc["clone"],
+                        [("imm", CLONE_FLAGS), top, ("imm", 0),
+                         ("imm", 0), ("imm", 0), ("imm", 0)])
+                l_child, l_after = fn.label("thchild"), fn.label("thafter")
+                fn.emit("jz", pid, l_child)
+                fn.emit("jmp", l_after)
+                fn.emit("label", l_child)
+                fn.emit("spawn_child", wname)
+                fn.emit("label", l_after)
+                tid = pid
+            return tid
+        if name == "net_config" and name not in self.fns_ast:
+            # net_config(key) -> int：编译期读 Quelmara.toml 的有效值（v2.12）。
+            # reactor 搬进 std 之后仍要以根配置为唯一开关，所以把这些上限
+            # 做成编译期常量内建，而不是让库层自己写死数字。
+            #   0 = max_conns   1 = recv_buffer   2 = io_threads（已解析）
+            #   3 = tcp_nodelay（0/1）
+            if len(e[2]) != 1:
+                raise SyntaxError("net_config(key) 需要一个实参")
+            k = self.eval(e[2][0], fn, env)
+            if not (isinstance(k, tuple) and k[0] == "imm"):
+                raise SyntaxError("net_config 的 key 必须是编译期常量（0-3）")
+            ncfg = self.cfg.get("net", {}) or {}
+            key = int(k[1])
+            if key == 0:
+                return ("imm", int(ncfg.get("max_conns", 1000000) or 1000000))
+            if key == 1:
+                return ("imm", int(ncfg.get("recv_buffer", 4096) or 4096))
+            if key == 2:
+                t = int(ncfg.get("io_threads", 0) or 0)
+                if t <= 0:
+                    t = int(self.cfg["core"].get("threads", 0) or 0)
+                if t <= 0:
+                    t = os.cpu_count() or 1
+                return ("imm", t)
+            if key == 3:
+                return ("imm", 1 if ncfg.get("tcp_nodelay", True) else 0)
+            raise SyntaxError("net_config(key) 的 key 只有 0-3")
+
         if name == "substr" and name not in self.fns_ast:
             # substr(s, lo, n) -> str：越界 fail-fast（与下标同策略）
             if len(e[2]) != 3:
@@ -6031,7 +6177,7 @@ class Lower:
         # io 线程与 acceptor 并发分配时，非原子的 load->add->store 会
         # 返回重叠内存 / 回退 bump（曾因此 reactor 静默不回声）。
         # 无线程程序不发射锁——单线程路径零变化（hello/loop_sum 不受影响）。
-        alloc_locked = self.uses_join or self.uses_net_serve
+        alloc_locked = self.uses_join or self.uses_threads
         if alloc_locked:
             gid_alloc_lock = self.intern_array(1)
             l_spin = f.label("aspin")
@@ -7636,7 +7782,13 @@ class Lower:
             net_fail(f, l_fl, "listen")
             self.out.append(f)
 
-            # __tcp_connect(host, port) -> fd（v1.25，Windows getaddrinfo）
+            # __tcp_connect(host, port) -> fd
+            #   v1.25：getaddrinfo（系统 DNS + hosts）
+            #   v2.07：hints.family 从 AF_INET 放宽到 AF_UNSPEC —— IPv6 字面量
+            #   与 AAAA 记录直接可用；socket 家族/类型/协议全部取 ai_*，
+            #   sockaddr 按 ai_addrlen 整段拷（v4 16B / v6 28B）。
+            #   失败时沿 ai_next 逐个尝试：Windows 对 "localhost" 常先给 ::1，
+            #   若服务端只监听 v4，不回溯就等于把原来的可用路径弄丢。
             f = Fn("__tcp_connect")
             host = f.new_v()
             port = f.new_v()
@@ -7649,13 +7801,13 @@ class Lower:
             sw2 = f.new_v()
             f.emit("winapi", sw2, "WSAStartup", [("imm", 0x202), wsa2])
             f.emit("jnz", sw2, l_fail)
-            # hints（48B）：family=AF_INET(2)@4、socktype=SOCK_STREAM(1)@8、
+            # hints（48B）：family=AF_UNSPEC(0)@4、socktype=SOCK_STREAM(1)@8、
             # protocol=IPPROTO_TCP(6)@12，其余 0
             hints = f.new_v()
             f.emit("call", hints, "__alloc", [("imm", 48)])
             for slot in range(6):
                 f.emit("store", hints, ("imm", slot), ("imm", 0))
-            f.emit("store8", hints, ("imm", 4), ("imm", 2))
+            f.emit("store8", hints, ("imm", 4), ("imm", 0))
             f.emit("store8", hints, ("imm", 8), ("imm", 1))
             f.emit("store8", hints, ("imm", 12), ("imm", 6))
             # PADDRINFOA *res = NULL
@@ -7665,47 +7817,205 @@ class Lower:
             gr = f.new_v()
             f.emit("winapi", gr, "getaddrinfo", [host, ("imm", 0), hints, res])
             f.emit("jnz", gr, l_fail)
+            # head 留给 freeaddrinfo（链表中间节点不能直接 free）
+            head = f.new_v()
+            f.emit("load", head, res, ("imm", 0))
+            f.emit("jz", head, l_fail)
             ai = f.new_v()
-            f.emit("load", ai, res, ("imm", 0))
-            f.emit("jz", ai, l_fail)
+            f.emit("mov", ai, head)
             s = f.new_v()
-            f.emit("winapi", s, "socket", [("imm", 2), ("imm", 1), ("imm", 0)])
-            s32 = f.new_v()
-            f.emit("bin", "shl", s32, s, ("imm", 32))
-            s322 = f.new_v()
-            f.emit("bin", "sar", s322, s32, ("imm", 32))
-            f.emit("cmpset", "e", b, s322, ("imm", -1))
-            f.emit("jnz", b, l_fail)
-            # sockaddr_in：先整段拷 ai_addr（16B），再把端口写进字节 2/3
-            addr = f.new_v()
-            f.emit("load", addr, ai, ("imm", 4))       # ai_addr 在字节 32
-            sin = f.new_v()
-            f.emit("call", sin, "__alloc", [("imm", 16)])
-            for off in range(16):
-                bb = f.new_v()
-                f.emit("load8", bb, addr, ("imm", off))
-                f.emit("store8", sin, ("imm", off), bb)
+            f.emit("mov", s, ("imm", 0))
+            # 端口高/低字节（网络序）：sockaddr_in 与 sockaddr_in6 的端口
+            # 都在字节 2/3，算一次两个家族共用
             hi = f.new_v()
             f.emit("bin", "shr", hi, port, ("imm", 8))
             f.emit("bin", "and", hi, hi, ("imm", 0xFF))
             lo = f.new_v()
             f.emit("bin", "and", lo, port, ("imm", 0xFF))
+            l_try = f.label("netct")
+            l_retry = f.label("netcr")
+            l_ok = f.label("netco")
+            f.emit("label", l_try)
+            f.emit("jz", ai, l_fail)                   # 链表走完仍失败
+            fam = f.new_v()
+            f.emit("load8", fam, ai, ("imm", 4))       # ai_family（低字节即可）
+            sty = f.new_v()
+            f.emit("load8", sty, ai, ("imm", 8))       # ai_socktype
+            pro = f.new_v()
+            f.emit("load8", pro, ai, ("imm", 12))      # ai_protocol
+            alen = f.new_v()
+            f.emit("load", alen, ai, ("imm", 2))       # ai_addrlen（字节 16）
+            # sockaddr 缓冲 32B（v6 28B 够用；多给 4B 留 scope_id 余量）
+            sin = f.new_v()
+            f.emit("call", sin, "__alloc", [("imm", 32)])
+            addr = f.new_v()
+            f.emit("load", addr, ai, ("imm", 4))       # ai_addr 在字节 32
+            f.emit("call", None, "__memcpy", [sin, addr, alen])
             f.emit("store8", sin, ("imm", 2), hi)
             f.emit("store8", sin, ("imm", 3), lo)
+            cs = f.new_v()
+            f.emit("winapi", cs, "socket", [fam, sty, pro])
+            cs32 = f.new_v()
+            f.emit("bin", "shl", cs32, cs, ("imm", 32))
+            cs322 = f.new_v()
+            f.emit("bin", "sar", cs322, cs32, ("imm", 32))
+            f.emit("cmpset", "e", b, cs322, ("imm", -1))
+            f.emit("jnz", b, l_retry)
             cr = f.new_v()
-            f.emit("winapi", cr, "connect", [s, sin, ("imm", 16)])
+            f.emit("winapi", cr, "connect", [cs, sin, alen])
             cr32 = f.new_v()
             f.emit("bin", "shl", cr32, cr, ("imm", 32))
             cr322 = f.new_v()
             f.emit("bin", "sar", cr322, cr32, ("imm", 32))
             f.emit("cmpset", "e", b, cr322, ("imm", -1))
-            f.emit("jnz", b, l_fail)
-            f.emit("winapi", None, "freeaddrinfo", [ai])
+            f.emit("jnz", b, l_retry)
+            f.emit("mov", s, cs)
+            f.emit("jmp", l_ok)
+            f.emit("label", l_retry)
+            f.emit("winapi", None, "closesocket", [cs])   # socket 失败时 -1 无害
+            nxt = f.new_v()
+            f.emit("load", nxt, ai, ("imm", 5))        # ai_next 在字节 40
+            f.emit("mov", ai, nxt)
+            f.emit("jmp", l_try)
+            f.emit("label", l_ok)
+            f.emit("winapi", None, "freeaddrinfo", [head])
             f.emit("ret", s)
             f.emit("label", l_fail)
             f.emit("call", None, "__net_fail_connect", [])
             f.emit("ret", ("imm", 0))
             self.out.append(f)
+
+            # __tcp_listen6(port) -> fd（v2.07，AF_INET6 + 双栈）
+            # sockaddr_in6（28B）：family(u16) port(u16) flowinfo(u32)
+            #                     addr(16B, :: = 全 0) scope_id(u32)
+            # 只写 w0（family | htons(port)<<16）与 w1..w3 = 0，即绑 ::。
+            f = Fn("__tcp_listen6")
+            p6 = f.new_v()
+            f.emit("args", [p6])
+            b6 = f.new_v()
+            l6_fs = f.label("net6fs")
+            l6_fb = f.label("net6fb")
+            l6_fl = f.label("net6fl")
+            gid_wsa6 = self.intern_array(8)
+            wsa6 = f.new_v()
+            f.emit("movaddr", wsa6, gid_wsa6)
+            sw6 = f.new_v()
+            f.emit("winapi", sw6, "WSAStartup", [("imm", 0x202), wsa6])
+            f.emit("jnz", sw6, l6_fs)
+            s6 = f.new_v()
+            f.emit("winapi", s6, "socket",
+                   [("imm", 23), ("imm", 1), ("imm", 0)])   # AF_INET6, SOCK_STREAM
+            s632 = f.new_v()
+            f.emit("bin", "shl", s632, s6, ("imm", 32))
+            s6322 = f.new_v()
+            f.emit("bin", "sar", s6322, s632, ("imm", 32))
+            f.emit("cmpset", "e", b6, s6322, ("imm", -1))
+            f.emit("jnz", b6, l6_fs)
+            # IPV6_V6ONLY=0：Windows 默认 1，不开就等于"只接 v6"，
+            # 双栈部署要的是同一个端口同时接 v4（映射地址）。
+            f.emit("store", ("ga", gid_wsa6), ("imm", 0), ("imm", 0))
+            f.emit("winapi", None, "setsockopt",
+                   [s6, ("imm", 41), ("imm", 27), ("ga", gid_wsa6), ("imm", 4)])
+            sin6 = f.new_v()
+            f.emit("call", sin6, "__alloc", [("imm", 32)])
+            for slot in range(4):
+                f.emit("store", sin6, ("imm", slot), ("imm", 0))
+            if isinstance(p6, tuple) and p6[0] == "imm":
+                port_v = p6[1]
+                port_be = ((port_v & 0xFF) << 8) | ((port_v >> 8) & 0xFF)
+                f.emit("store", sin6, ("imm", 0), ("imm", 23 | (port_be << 16)))
+            else:
+                hp6 = f.new_v()
+                f.emit("bin", "and", hp6, p6, ("imm", 0xFF))
+                hp62 = f.new_v()
+                f.emit("bin", "shl", hp62, hp6, ("imm", 8))
+                hb6 = f.new_v()
+                f.emit("bin", "shr", hb6, p6, ("imm", 8))
+                hb62 = f.new_v()
+                f.emit("bin", "and", hb62, hb6, ("imm", 0xFF))
+                hp63 = f.new_v()
+                f.emit("bin", "or", hp63, hp62, hb62)
+                sh6 = f.new_v()
+                f.emit("bin", "shl", sh6, hp63, ("imm", 16))
+                w60 = f.new_v()
+                f.emit("bin", "or", w60, sh6, ("imm", 23))
+                f.emit("store", sin6, ("imm", 0), w60)
+            br6 = f.new_v()
+            f.emit("winapi", br6, "bind", [s6, sin6, ("imm", 28)])
+            br632 = f.new_v()
+            f.emit("bin", "shl", br632, br6, ("imm", 32))
+            br6322 = f.new_v()
+            f.emit("bin", "sar", br6322, br632, ("imm", 32))
+            f.emit("cmpset", "e", b6, br6322, ("imm", -1))
+            f.emit("jnz", b6, l6_fb)
+            lr6 = f.new_v()
+            f.emit("winapi", lr6, "listen", [s6, ("imm", 16)])
+            lr632 = f.new_v()
+            f.emit("bin", "shl", lr632, lr6, ("imm", 32))
+            lr6322 = f.new_v()
+            f.emit("bin", "sar", lr6322, lr632, ("imm", 32))
+            f.emit("cmpset", "e", b6, lr6322, ("imm", -1))
+            f.emit("jnz", b6, l6_fl)
+            f.emit("ret", s6)
+            net_fail(f, l6_fs, "socket")
+            net_fail(f, l6_fb, "bind")
+            net_fail(f, l6_fl, "listen")
+            self.out.append(f)
+
+            if self.uses_peer:
+                # __tcp_peer_raw(fd) -> str（v2.07，getpeername 的字节视图）
+                # 20 字节：[0..1] 端口网络序 | [2] family | [3] 0 | [4..19] 地址
+                # getpeername 失败（fd 已关）时 name 保持全 0 -> family=0、地址全 0，
+                # 库层按"未知"处理，不在这里开失败分支。
+                f = Fn("__tcp_peer_raw")
+                pfd = f.new_v()
+                f.emit("args", [pfd])
+                name = f.new_v()
+                f.emit("call", name, "__alloc", [("imm", 32)])
+                for slot in range(4):               # 全 0：失败时 family 读出来就是 0
+                    f.emit("store", name, ("imm", slot), ("imm", 0))
+                lp = f.new_v()
+                f.emit("call", lp, "__alloc", [("imm", 8)])
+                f.emit("store", lp, ("imm", 0), ("imm", 28))
+                f.emit("winapi", None, "getpeername", [pfd, name, lp])
+                raw = f.new_v()
+                f.emit("call", raw, "__alloc", [("imm", 24)])
+                for slot in range(3):               # 24B 全 0（v4 时地址后半段就是 0）
+                    f.emit("store", raw, ("imm", slot), ("imm", 0))
+                ph = f.new_v()
+                f.emit("load8", ph, name, ("imm", 2))
+                f.emit("store8", raw, ("imm", 0), ph)
+                pl = f.new_v()
+                f.emit("load8", pl, name, ("imm", 3))
+                f.emit("store8", raw, ("imm", 1), pl)
+                pfam = f.new_v()
+                f.emit("load8", pfam, name, ("imm", 0))
+                f.emit("store8", raw, ("imm", 2), pfam)
+                bpf = f.new_v()
+                l_pv6 = f.label("peer6")
+                l_pdone = f.label("peerd")
+                f.emit("cmpset", "e", bpf, pfam, ("imm", 23))
+                f.emit("jnz", bpf, l_pv6)
+                # v4（或未知）：sockaddr_in 的地址在字节 4，拷 4B 到 raw+4
+                rd4 = f.new_v()
+                f.emit("bin", "add", rd4, raw, ("imm", 4))
+                nd4 = f.new_v()
+                f.emit("bin", "add", nd4, name, ("imm", 4))
+                f.emit("call", None, "__memcpy", [rd4, nd4, ("imm", 4)])
+                f.emit("jmp", l_pdone)
+                f.emit("label", l_pv6)
+                # v6：sockaddr_in6 的地址在字节 8，拷 16B 到 raw+4
+                rd6 = f.new_v()
+                f.emit("bin", "add", rd6, raw, ("imm", 4))
+                nd6 = f.new_v()
+                f.emit("bin", "add", nd6, name, ("imm", 8))
+                f.emit("call", None, "__memcpy", [rd6, nd6, ("imm", 16)])
+                f.emit("label", l_pdone)
+                ps = f.new_v()
+                f.emit("call", ps, "__str_from_mem", [raw, ("imm", 20)])
+                f.emit("ret", ps)
+                self.out.append(f)
+
 
             # __tcp_accept(fd) -> conn（阻塞）
             f = Fn("__tcp_accept")
@@ -7881,406 +8191,6 @@ class Lower:
             else:
                 f.emit("syscall", None, self.sc["close"], [fd])
             f.emit("ret", ("imm", 0))
-            self.out.append(f)
-
-        if self.uses_net_serve and self.platform == "windows":
-            # ---- 高并发 reactor：IOCP（v1.4，Windows PE）----
-            # 模型（SPEC §5 net.TcpServer 的第一格，先落 Windows；PLATFORM.md 候选 B）：
-            #   主线程 = acceptor：阻塞 accept -> 关联完成端口 -> 投递 WSARecv
-            #   N 个 io 线程 = GetQueuedCompletionStatus 循环 -> callr 派发用户回调
-            # 连接记录 rec（编译期定尺，recv_buffer 内联）：
-            #   +0 fd | +8 OVERLAPPED(32B) | +40 WSABUF.len | +48 WSABUF.buf
-            #   +56 nrecv | +64 flags | +80 recvbuf（recv_buffer 字节）
-            # freelist：xchg 自旋锁（acceptor 分配、io 线程回收——堆是 bump
-            # 分配器，不回收会被连接 churn 耗尽触发堆上限 fail-fast）。
-            # 全局：cbconn/cbdata/cbclose/iocp/active/freehead/lock/wsa
-            ncfg = self.cfg.get("net", {})
-            max_conns = int(ncfg.get("max_conns", 1000000) or 1000000)
-            recv_cap = int(ncfg.get("recv_buffer", 4096) or 4096)
-            io_threads = int(ncfg.get("io_threads", 0) or 0)
-            if io_threads <= 0:
-                io_threads = int(self.cfg["core"].get("threads", 0) or 0)
-            if io_threads <= 0:
-                io_threads = os.cpu_count() or 1
-            nodelay = bool(ncfg.get("tcp_nodelay", True))
-            rec_bytes = (80 + recv_cap + 8 + 7) & ~7      # +8 给 NUL 留位
-            OFF_FD, OFF_OV, OFF_WLEN, OFF_WBUF = 0, 1, 5, 6
-            OFF_NRECV, OFF_FLAGS, OFF_DATA = 7, 8, 10
-
-            # ---- fail-fast：WSAGetLastError + stderr + exit(1) ----
-            msg_ns = "quelmara: net_serve() reactor failed (fail-fast)\n"
-            gid_ns = self.intern_str(msg_ns)
-            f = Fn("__net_serve_fail")
-            f.emit("args", [])
-            err = f.new_v()
-            f.emit("winapi", err, "WSAGetLastError", [])
-            f.emit("call", None, "__print_i64", [err])
-            bp = f.new_v()
-            f.emit("movaddr", bp, gid_ns)
-            self.emit_write(f, 2, bp, ("imm", len(msg_ns.encode("utf-8"))))
-            self.emit_exit(f, 1)
-            f.emit("ret", ("imm", 0))
-            self.out.append(f)
-
-            g_cbconn = self.intern_array(1)
-            g_cbdata = self.intern_array(1)
-            g_cbclose = self.intern_array(1)
-            g_iocp = self.intern_array(1)
-            g_active = self.intern_array(1)
-            g_freehead = self.intern_array(1)
-            g_lock = self.intern_array(1)
-            g_wsa = self.intern_array(8)      # WSADATA 64B；setsockopt 复用低 8B
-
-            # ---- io 线程入口（Win64 ThreadProc：winargs 取 lpParameter）----
-            wrap = Fn("__net_worker_entry")
-            wrap.win_thread = True            # 序言/尾声保存 RDI/RSI（Win64 callee-saved）
-            wp = wrap.new_v()
-            wrap.emit("winargs", [wp])
-            wv = wrap.new_v()
-            wrap.emit("load", wv, wp, ("imm", 0))   # 参数块首字 = IOCP 句柄
-            wrap.emit("call", None, "__net_worker", [wv])
-            wrap.emit("ret", ("imm", 0))
-            self.out.append(wrap)
-
-            # ---- rec 槽分配 / 回收（xchg 自旋锁 freelist）----
-            def emit_spin_lock(f, gid, spin_lbl, locked_lbl):
-                f.emit("label", spin_lbl)
-                old = f.new_v()
-                f.emit("xchg", old, ("ga", gid), ("imm", 1))
-                f.emit("jz", old, locked_lbl)
-                self.emit_yield(f)
-                f.emit("jmp", spin_lbl)
-                f.emit("label", locked_lbl)
-
-            f = Fn("__net_rec_alloc")
-            emit_spin_lock(f, g_lock, f.label("nraspin"), f.label("nralock"))
-            h = f.new_v()
-            f.emit("load", h, ("ga", g_freehead), ("imm", 0))
-            b = f.new_v()
-            f.emit("cmpset", "e", b, h, ("imm", 0))
-            l_heap = f.label("nraheap")
-            f.emit("jnz", b, l_heap)
-            n = f.new_v()
-            f.emit("load", n, h, ("imm", 0))          # next 借用 +0 槽
-            f.emit("store", ("ga", g_freehead), ("imm", 0), n)
-            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
-            f.emit("ret", h)
-            f.emit("label", l_heap)
-            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
-            p = f.new_v()
-            f.emit("call", p, "__alloc", [("imm", rec_bytes)])
-            f.emit("ret", p)
-            self.out.append(f)
-
-            f = Fn("__net_rec_free")
-            rec = f.new_v()
-            f.emit("args", [rec])
-            emit_spin_lock(f, g_lock, f.label("nrfspin"), f.label("nrflock"))
-            h = f.new_v()
-            f.emit("load", h, ("ga", g_freehead), ("imm", 0))
-            f.emit("store", rec, ("imm", 0), h)       # next 借用 +0 槽
-            f.emit("store", ("ga", g_freehead), ("imm", 0), rec)
-            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
-            f.emit("ret", ("imm", 0))
-            self.out.append(f)
-
-            # ---- 连接计数：try_inc 上限内接纳 / dec 关闭归还（g_lock 复用）----
-            f = Fn("__net_active_try_inc")
-            maxc = f.new_v()
-            f.emit("args", [maxc])
-            emit_spin_lock(f, g_lock, f.label("naispin"), f.label("nailock"))
-            a = f.new_v()
-            f.emit("load", a, ("ga", g_active), ("imm", 0))
-            b = f.new_v()
-            f.emit("cmpset", "ge", b, a, maxc)
-            l_full = f.label("naifull")
-            f.emit("jnz", b, l_full)               # a >= max：拒绝
-            a1 = f.new_v()
-            f.emit("bin", "add", a1, a, ("imm", 1))
-            f.emit("store", ("ga", g_active), ("imm", 0), a1)
-            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
-            f.emit("ret", ("imm", 1))              # 接纳
-            f.emit("label", l_full)
-            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
-            f.emit("ret", ("imm", 0))              # 达到上限
-            self.out.append(f)
-
-            f = Fn("__net_active_dec")
-            f.emit("args", [])
-            emit_spin_lock(f, g_lock, f.label("nadspin"), f.label("nadlock"))
-            a = f.new_v()
-            f.emit("load", a, ("ga", g_active), ("imm", 0))
-            a1 = f.new_v()
-            f.emit("bin", "sub", a1, a, ("imm", 1))
-            f.emit("store", ("ga", g_active), ("imm", 0), a1)
-            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
-            f.emit("ret", ("imm", 0))
-            self.out.append(f)
-
-            # ---- 投递一条 WSARecv（rec 布局见上）----
-            f = Fn("__net_recv_post")
-            rec = f.new_v()
-            f.emit("args", [rec])
-            fd = f.new_v()
-            f.emit("load", fd, rec, ("imm", OFF_FD))
-            f.emit("store", rec, ("imm", OFF_WLEN), ("imm", recv_cap))
-            dp = f.new_v()
-            f.emit("bin", "add", dp, rec, ("imm", OFF_DATA * 8))
-            f.emit("store", rec, ("imm", OFF_WBUF), dp)
-            f.emit("store", rec, ("imm", OFF_NRECV), ("imm", 0))
-            f.emit("store", rec, ("imm", OFF_FLAGS), ("imm", 0))
-            pw = f.new_v()
-            f.emit("bin", "add", pw, rec, ("imm", OFF_WLEN * 8))
-            pn = f.new_v()
-            f.emit("bin", "add", pn, rec, ("imm", OFF_NRECV * 8))
-            pf = f.new_v()
-            f.emit("bin", "add", pf, rec, ("imm", OFF_FLAGS * 8))
-            po = f.new_v()
-            f.emit("bin", "add", po, rec, ("imm", OFF_OV * 8))
-            r = f.new_v()
-            f.emit("winapi", r, "WSARecv",
-                   [fd, pw, ("imm", 1), pn, pf, po, ("imm", 0)])
-            # WSARecv 返回值语义（Winsock 约定）：
-            #   0            = 立即完成（完成包仍会入队，GQCS 照样收到）
-            #   SOCKET_ERROR = 失败 **或** WSA_IO_PENDING(997) 成功入队——必须
-            #   查 WSAGetLastError 区分，否则 997 被误判为失败（曾在这里炸过：
-            #   第一条 WSARecv 就 fail-fast，表现是 accept 成功后即死）。
-            r32 = f.new_v()
-            f.emit("bin", "shl", r32, r, ("imm", 32))
-            r322 = f.new_v()
-            f.emit("bin", "sar", r322, r32, ("imm", 32))
-            b2 = f.new_v()
-            f.emit("cmpset", "e", b2, r322, ("imm", -1))
-            l_ok = f.label("nrpok")
-            f.emit("jz", b2, l_ok)               # 非 SOCKET_ERROR：立即完成
-            e2 = f.new_v()
-            f.emit("winapi", e2, "WSAGetLastError", [])
-            # 极性备忘：cmpset e 后 b=相等为 1；「命中即跳」用 jnz，「不中即跳」用 jz
-            f.emit("cmpset", "e", b2, e2, ("imm", 997))   # WSA_IO_PENDING
-            f.emit("jnz", b2, l_ok)               # 997 = 成功入队 -> OK
-            f.emit("call", None, "__net_serve_fail", [])
-            f.emit("label", l_ok)
-            f.emit("ret", ("imm", 0))
-            self.out.append(f)
-
-            # ---- __net_serve(port, backlog, cbconn, cbdata, cbclose) ----
-            f = Fn("__net_serve")
-            p_port, p_bl = f.new_v(), f.new_v()
-            p_c1, p_c2, p_c3 = f.new_v(), f.new_v(), f.new_v()
-            f.emit("args", [p_port, p_bl, p_c1, p_c2, p_c3])
-            b = f.new_v()
-            l_fail = f.label("nsfail")
-            f.emit("store", ("ga", g_cbconn), ("imm", 0), p_c1)
-            f.emit("store", ("ga", g_cbdata), ("imm", 0), p_c2)
-            f.emit("store", ("ga", g_cbclose), ("imm", 0), p_c3)
-            f.emit("store", ("ga", g_active), ("imm", 0), ("imm", 0))
-            f.emit("store", ("ga", g_freehead), ("imm", 0), ("imm", 0))
-            f.emit("store", ("ga", g_lock), ("imm", 0), ("imm", 0))
-            # WSAStartup
-            wsa = f.new_v()
-            f.emit("movaddr", wsa, g_wsa)
-            sw = f.new_v()
-            f.emit("winapi", sw, "WSAStartup", [("imm", 0x202), wsa])
-            # WSAStartup：0 = 成功，非 0 = 错误码。极性：相等跳失败
-            f.emit("cmpset", "e", b, sw, ("imm", 0))
-            f.emit("jz", b, l_fail)
-            # 完成端口（创建态）
-            iocp = f.new_v()
-            f.emit("winapi", iocp, "CreateIoCompletionPort",
-                   [("imm", -1), ("imm", 0), ("imm", 0), ("imm", 0)])
-            f.emit("cmpset", "e", b, iocp, ("imm", 0))
-            f.emit("jnz", b, l_fail)
-            f.emit("store", ("ga", g_iocp), ("imm", 0), iocp)
-            # 监听 socket：显式 WSA_FLAG_OVERLAPPED（Accepted socket 继承可重叠性）
-            s = f.new_v()
-            f.emit("winapi", s, "WSASocketW",
-                   [("imm", 2), ("imm", 1), ("imm", 0), ("imm", 0),
-                    ("imm", 0), ("imm", 1)])
-            s32 = f.new_v()
-            f.emit("bin", "shl", s32, s, ("imm", 32))
-            s322 = f.new_v()
-            f.emit("bin", "sar", s322, s32, ("imm", 32))
-            f.emit("cmpset", "e", b, s322, ("imm", -1))
-            f.emit("jnz", b, l_fail)
-            # sockaddr_in：w0 = family(2) | htons(port)<<16（与 __tcp_listen 同构）
-            sinb = f.new_v()
-            f.emit("call", sinb, "__alloc", [("imm", 16)])
-            hp = f.new_v()
-            f.emit("bin", "and", hp, p_port, ("imm", 0xFF))
-            hp2 = f.new_v()
-            f.emit("bin", "shl", hp2, hp, ("imm", 8))
-            hb = f.new_v()
-            f.emit("bin", "shr", hb, p_port, ("imm", 8))
-            hb2 = f.new_v()
-            f.emit("bin", "and", hb2, hb, ("imm", 0xFF))
-            hp3 = f.new_v()
-            f.emit("bin", "or", hp3, hp2, hb2)
-            sh16 = f.new_v()
-            f.emit("bin", "shl", sh16, hp3, ("imm", 16))
-            w0 = f.new_v()
-            f.emit("bin", "or", w0, sh16, ("imm", 2))
-            f.emit("store", sinb, ("imm", 0), w0)
-            f.emit("store", sinb, ("imm", 1), ("imm", 0))
-            br = f.new_v()
-            f.emit("winapi", br, "bind", [s, sinb, ("imm", 16)])
-            br32 = f.new_v()
-            f.emit("bin", "shl", br32, br, ("imm", 32))
-            br322 = f.new_v()
-            f.emit("bin", "sar", br322, br32, ("imm", 32))
-            f.emit("cmpset", "e", b, br322, ("imm", -1))
-            f.emit("jnz", b, l_fail)
-            lr = f.new_v()
-            f.emit("winapi", lr, "listen", [s, p_bl])
-            lr32 = f.new_v()
-            f.emit("bin", "shl", lr32, lr, ("imm", 32))
-            lr322 = f.new_v()
-            f.emit("bin", "sar", lr322, lr32, ("imm", 32))
-            f.emit("cmpset", "e", b, lr322, ("imm", -1))
-            f.emit("jnz", b, l_fail)
-            # io 线程（N 个 GQCS worker）
-            i = f.new_v()
-            f.emit("mov", i, ("imm", 0))            # 计数必须显式初始化
-            l_sp, l_spd = f.label("nssp"), f.label("nsspd")
-            f.emit("label", l_sp)
-            # 退出条件：i >= io_threads（极性备忘：jcc 是「真则退出」形态）
-            f.emit("jcc", "ge", i, ("imm", io_threads), l_spd)
-            ap = f.new_v()
-            f.emit("movaddr", ap, g_iocp)             # 参数块 = &g_iocp
-            h = f.new_v()
-            f.emit("winapi", h, "CreateThread",
-                   [("imm", 0), ("imm", 0), ("fnaddr", wrap.name), ap,
-                    ("imm", 0), ("imm", 0)])
-            f.emit("bin", "add", i, i, ("imm", 1))
-            f.emit("jmp", l_sp)
-            f.emit("label", l_spd)
-            # acceptor 循环（主线程）
-            l_acc = f.label("nsacc")
-            c = f.new_v()
-            f.emit("label", l_acc)
-            f.emit("winapi", c, "accept", [s, ("imm", 0), ("imm", 0)])
-            c32 = f.new_v()
-            f.emit("bin", "shl", c32, c, ("imm", 32))
-            c322 = f.new_v()
-            f.emit("bin", "sar", c322, c32, ("imm", 32))
-            f.emit("cmpset", "e", b, c322, ("imm", -1))
-            f.emit("jnz", b, l_fail)
-            # max_conns 上限（原子判定）：try_inc 返回 0 = 拒绝新连接
-            ad = f.new_v()
-            f.emit("call", ad, "__net_active_try_inc", [("imm", max_conns)])
-            f.emit("cmpset", "e", b, ad, ("imm", 0))
-            l_over = f.label("nsover")
-            l_aok = f.label("nsaok")
-            f.emit("jnz", b, l_over)               # ad == 0：达到上限
-            f.emit("jmp", l_aok)
-            f.emit("label", l_over)
-            f.emit("winapi", None, "closesocket", [c])
-            f.emit("jmp", l_acc)
-            f.emit("label", l_aok)
-            if nodelay:
-                # TCP_NODELY：level=IPPROTO_TCP(6), optname=TCP_NODELAY(1)
-                f.emit("store", ("ga", g_wsa), ("imm", 0), ("imm", 1))
-                f.emit("winapi", None, "setsockopt",
-                       [c, ("imm", 6), ("imm", 1), ("ga", g_wsa), ("imm", 4)])
-            # rec 槽 + 关联完成端口
-            rec = f.new_v()
-            f.emit("call", rec, "__net_rec_alloc", [])
-            f.emit("store", rec, ("imm", OFF_FD), c)
-            cap = f.new_v()
-            f.emit("winapi", cap, "CreateIoCompletionPort",
-                   [c, iocp, rec, ("imm", 0)])
-            f.emit("cmpset", "e", b, cap, ("imm", 0))
-            f.emit("jnz", b, l_fail)
-            # on_connect(c)（0 = 不回调）
-            fc = f.new_v()
-            f.emit("load", fc, ("ga", g_cbconn), ("imm", 0))
-            f.emit("cmpset", "e", b, fc, ("imm", 0))
-            l_cbc = f.label("nscbc")
-            f.emit("jnz", b, l_cbc)
-            f.emit("callr", None, fc, [c])
-            f.emit("label", l_cbc)
-            # 投递首个 recv 后继续 accept
-            f.emit("call", None, "__net_recv_post", [rec])
-            f.emit("jmp", l_acc)
-            f.emit("label", l_fail)
-            f.emit("call", None, "__net_serve_fail", [])
-            f.emit("ret", ("imm", 0))
-            self.out.append(f)
-
-            # ---- __net_worker(iocp)：GQCS 循环 + 回调派发 ----
-            f = Fn("__net_worker")
-            iocp = f.new_v()
-            f.emit("args", [iocp])
-            sc = f.new_v()
-            f.emit("call", sc, "__alloc", [("imm", 24)])   # [bytes, key, ov]
-            a_key = f.new_v()
-            f.emit("bin", "add", a_key, sc, ("imm", 8))
-            a_ov = f.new_v()
-            f.emit("bin", "add", a_ov, sc, ("imm", 16))
-            l_loop = f.label("nwl")
-            f.emit("label", l_loop)
-            r = f.new_v()
-            f.emit("winapi", r, "GetQueuedCompletionStatus",
-                   [iocp, sc, a_key, a_ov, ("imm", -1)])
-            kv = f.new_v()
-            f.emit("load", kv, sc, ("imm", 1))
-            b = f.new_v()
-            f.emit("cmpset", "e", b, kv, ("imm", 0))
-            f.emit("jnz", b, l_loop)                  # key==0：无意义完成，继续
-            # dequeue 失败（r==0）且 ov==0 -> 致命；ov!=0 -> 该连接 IO 错误走关闭
-            ov = f.new_v()
-            f.emit("load", ov, sc, ("imm", 2))
-            f.emit("cmpset", "e", b, r, ("imm", 0))
-            l_okq = f.label("nwokq")
-            l_errq = f.label("nwerrq")
-            l_data = f.label("nwdata")
-            l_close = f.label("nwclose")
-            l_keep = f.label("nwkeep")
-            l_nocb = f.label("nwnocb")
-            f.emit("jnz", b, l_okq)          # r != 0：正常出队
-            f.emit("cmpset", "e", b, ov, ("imm", 0))
-            f.emit("jnz", b, l_errq)          # r==0 且 ov==0：端口级致命错误
-            f.emit("label", l_okq)           # r==0 且 ov!=0：该连接 IO 错误，走 bytes 判定
-            byv = f.new_v()
-            f.emit("load", byv, sc, ("imm", 0))
-            # 注意极性：cmpset e + jnz = 「相等时跳走」
-            f.emit("cmpset", "ne", b, byv, ("imm", 0))
-            f.emit("jnz", b, l_data)            # 有数据 -> 数据路径
-            f.emit("jmp", l_close)              # bytes==0：对端关闭
-            f.emit("label", l_errq)             # dequeue 失败且 ov==0：致命
-            f.emit("call", None, "__net_serve_fail", [])
-            f.emit("label", l_data)
-            fd = f.new_v()
-            f.emit("load", fd, kv, ("imm", OFF_FD))
-            dp = f.new_v()
-            f.emit("bin", "add", dp, kv, ("imm", OFF_DATA * 8))
-            # v1.5.1 长度前缀：OFF_DATA 前一个字（布局空洞，见文件头注释）
-            # 写入本次收到的字节数，on_data 拿到的 data 就是合规 str
-            f.emit("store", kv, ("imm", OFF_DATA - 1), byv)
-            f.emit("store8", dp, byv, ("imm", 0))      # NUL 结尾 -> str
-            fc = f.new_v()
-            f.emit("load", fc, ("ga", g_cbdata), ("imm", 0))
-            dr = f.new_v()
-            f.emit("callr", dr, fc, [fd, dp])    # on_data(fd, data) -> int
-            f.emit("cmpset", "e", b, dr, ("imm", 0))
-            f.emit("jnz", b, l_close)           # 返回 0 -> 关闭连接
-            # ---- 保持路径：重新投递 recv ----
-            f.emit("label", l_keep)
-            f.emit("call", None, "__net_recv_post", [kv])
-            f.emit("jmp", l_loop)
-            # ---- 关闭路径：closesocket + on_close + 还槽 ----
-            f.emit("label", l_close)
-            fcw = f.new_v()
-            f.emit("load", fcw, kv, ("imm", OFF_FD))
-            f.emit("winapi", None, "closesocket", [fcw])
-            fx = f.new_v()
-            f.emit("load", fx, ("ga", g_cbclose), ("imm", 0))
-            f.emit("cmpset", "e", b, fx, ("imm", 0))
-            f.emit("jnz", b, l_nocb)            # 0 = 不回调 on_close
-            f.emit("callr", None, fx, [fcw])
-            f.emit("label", l_nocb)
-            f.emit("call", None, "__net_active_dec", [])
-            f.emit("call", None, "__net_rec_free", [kv])
-            f.emit("jmp", l_loop)
             self.out.append(f)
 
         if self.uses_substr:
@@ -9768,7 +9678,13 @@ class Lower:
     def _map_of(fn, v):
         return getattr(fn, "mapv", {}).get(v) if isinstance(v, int) else None
 
-    def run(self, fns_ast):
+    def run(self, fns_ast, reuse=None, reuse_order=None):
+        """降级整个程序。
+
+        reuse: {函数名: fn_record}（来自 `.qla` 的已降级+已优化函数）；
+        reuse_order: 档案里的函数顺序——**复用的函数按这个顺序接管**，
+        这样"什么都没改"的增量构建产物与全量构建逐字节相同。
+        """
         # @extern("C") 声明只有函数原型、没有函数体：自研后端产出裸 ELF/PE，
         # 没有动态链接器可用，外部符号无处解析。这里必须给出明确诊断，
         # 而不是让 body=None 一路漏到 lowering 里炸成 Python traceback。
@@ -9795,20 +9711,101 @@ class Lower:
                     spec["dll"], spec["sym"],
                     [pt[1] for _pn, pt in f["params"]], f["ret"][1])
             elif f.get("body") is None:
+                if f.get("qla"):
+                    # v2.03：`.qla` 二进制库的声明——实现不在本单元，
+                    # 由链接期按名字解析（`qlm_qla.merge` 补上）。
+                    self.qla_stubs[f["name"]] = (f["params"], f["ret"])
+                    continue
                 raise SyntaxError(
                     f"函数 {f['name']} 没有函数体：无函数体的声明必须带 "
                     f'@extern("C") 或 @ffi("dll") 注解')
         self.build_iface_meta(fns_ast)
-        # 先降级用户函数，再按需发射运行库：只把真正用到的
-        # arena/join/chan 运行时塞进产物（省体积、省导入）。
+        reuse = reuse or {}
+        adopted = set()
+        if reuse:
+            # 1) 按档案顺序原样接管（含 lambda 体 / parfor worker / 运行库
+            #    helper——它们不在 fns_ast 里，只存在于档案中）
+            for name in (reuse_order or list(reuse)):
+                rec = reuse.get(name)
+                if rec is None:
+                    continue
+                self._adopt(rec)
+                adopted.add(name)
+        # 2) 只降级"没被复用"的函数
+        newly = 0
+        fresh = []
         for f in fns_ast:
             if f.get("body") is None:
-                continue          # @ffi 声明：符号在 DLL 里，无本地产物
+                continue          # @ffi 声明 / .qla 存根：无本地产物
+            if f["name"] in adopted:
+                continue
+            before = self._flag_snapshot()
+            start = len(self.out)
+            self._cur_owner = f["name"]
             self.lower_fn(f)
+            self._cur_owner = None
+            after = self._flag_snapshot()
+            self.fn_needs[f["name"]] = [k for k, v in after.items()
+                                        if v and not before.get(k)]
+            for fn in self.out[start:]:
+                if fn.name != f["name"]:
+                    self.fn_owner.setdefault(fn.name, f["name"])
+                else:
+                    fresh.append(fn)
+            newly += 1
         # v1.95 闭包：lambda 体在外层函数之后降级（顺序无关，按名字引用）
         self.lower_pending_lambdas()
-        self.lower_runtime()
+        # 3) 运行库：三种情况
+        #    a) 全部函数复用 -> 不重发（否则新 intern 一批全局字，产物就
+        #       不再与全量构建逐字节相同）；
+        #    b) 部分复用，但新降级的函数要用到的 helper 全在档案里 -> 也不重发
+        #       （省掉整个运行库的 IR 生成，是"改一个函数"的主要成本之一）；
+        #    c) 其余 -> 照常发射，同名 helper 在下面按名字去重，留档案里那份。
+        need_rt = None
+        if reuse:
+            need_rt = set()
+            for fn in fresh:
+                for ins in fn.instrs:
+                    if ins and ins[0] == "call" and isinstance(ins[2], str) \
+                            and ins[2].startswith("__"):
+                        need_rt.add(ins[2])
+                    elif ins and ins[0] == "fnaddr" and isinstance(ins[1], str) \
+                            and ins[1].startswith("__"):
+                        need_rt.add(ins[1])
+            if getattr(self, "uses_args", False):
+                need_rt.add("__qlm_args_boot")
+        if not (reuse and newly == 0) and not (need_rt is not None
+                                               and need_rt <= set(reuse)):
+            self.lower_runtime()
+        seen, out = set(), []
+        for fn in self.out:
+            if fn.name in seen:
+                continue
+            seen.add(fn.name)
+            out.append(fn)
+        self.out = out
         return self.out
+
+    _FLAG_CACHE = None
+
+    def _flag_snapshot(self):
+        """`uses_*` 标志快照——一个函数"需要哪些运行库"就是它们的增量。"""
+        names = Lower._FLAG_CACHE
+        if names is None:
+            names = sorted(n for n in dir(self) if n.startswith("uses_"))
+            Lower._FLAG_CACHE = names
+        return {n: getattr(self, n) for n in names}
+
+    def _adopt(self, rec):
+        """接管一条档案记录：置位它需要的运行库标志，并把 Fn 放进 out。"""
+        import qlm_qla
+        for n in rec.get("needs") or ():
+            if hasattr(self, n):
+                setattr(self, n, True)
+        fn = qlm_qla.record_to_fn(rec)
+        self.reuse_fns[fn.name] = fn
+        self.out.append(fn)
+        return fn
 
 
 # ===========================================================================
@@ -9962,12 +9959,14 @@ def _reachable(g, start):
     return seen
 
 
-def opt_inline(fns, max_instrs=28, rounds=3, hot=None):
+def opt_inline(fns, max_instrs=28, rounds=3, hot=None, only=None):
     """内联：小函数一律内联，大函数仅单调用点；递归/调用环禁止
 
     hot: {函数名: 放宽阈值} —— 运行时热函数（__map_hash/__map_find 等）跨
     多个调用点也必须内联。全局放宽阈值到 64 会让 hello 从 8 KB 涨到 14.8 KB
     （内联副本 + 重定位），所以只对白名单里的少数函数开口子。
+    only: 只改写这些调用者（v2.03 增量复用：档案里接管过来的函数已经是
+    优化后的 IR，再跑一遍内联会让"什么都没改"的产物与全量构建不一致）。
     """
     hot = hot or {"__map_hash": 160, "__map_find": 160, "__map_len": 160}
     fmap = {f.name: f for f in fns}
@@ -9976,6 +9975,8 @@ def opt_inline(fns, max_instrs=28, rounds=3, hot=None):
         counts = _call_sites(fns)
         changed = False
         for fn in fns:
+            if only is not None and fn.name not in only:
+                continue
             out = []
             for ins in fn.instrs:
                 if ins[0] == "call" and ins[2] in fmap:
@@ -9987,6 +9988,7 @@ def opt_inline(fns, max_instrs=28, rounds=3, hot=None):
                         out.append(ins)
                         continue
                     out.extend(_inline_one(fn, callee, ins))
+                    fn.inlined_from.add(callee.name)
                     changed = True
                 else:
                     out.append(ins)
@@ -11470,14 +11472,109 @@ def drop_table(fns_ast):
     return out
 
 
+def _ast_refs(node, refs, methods, bound):
+    """AST 里引用到的顶层名字（增量哈希用：被调方签名变了必须重编调用方）。"""
+    if isinstance(node, tuple):
+        k = node[0] if node else None
+        if k == "call" and len(node) > 1 and isinstance(node[1], list) and node[1]:
+            refs.add(node[1][-1])
+        elif k == "gcall" and len(node) > 1 and isinstance(node[1], str):
+            refs.add(node[1])
+        elif k == "name" and len(node) > 1 and isinstance(node[1], str):
+            refs.add(node[1])
+        elif k == "method" and len(node) > 2 and isinstance(node[2], str):
+            methods.add(node[2])
+        elif k in ("enumlit", "structlit", "pat") and len(node) > 1 \
+                and isinstance(node[1], list) and node[1]:
+            refs.add(node[1][0])
+        elif k == "named" and len(node) > 1 and isinstance(node[1], str):
+            refs.add(node[1])
+        elif k == "let" and len(node) > 2 and isinstance(node[2], str):
+            bound.add(node[2])
+        elif k in ("for", "parfor", "foreach") and len(node) > 1 \
+                and isinstance(node[1], str):
+            bound.add(node[1])
+        for v in node:
+            _ast_refs(v, refs, methods, bound)
+    elif isinstance(node, list):
+        for v in node:
+            _ast_refs(v, refs, methods, bound)
+    elif isinstance(node, dict):
+        for v in node.values():
+            _ast_refs(v, refs, methods, bound)
+
+
+def _sig_of(f):
+    """函数签名（影响调用方降级的最小集合）。"""
+    return [f.get("params"), f.get("ret"), f.get("impl_iface"),
+            f.get("self_type"), f.get("impl_method")]
+
+
+def fn_hashes(fns_ast, env_digest):
+    """每个函数的增量哈希：自身 AST + 环境摘要 + 它引用到的函数签名。
+
+    为什么不是"整个签名表"：加一个函数就会让全表变，等于没有增量。
+    为什么不能只看自身 AST：改被调方的形参/返回类型会改调用方的降级
+    （聚合返回开出参槽、实参转换），调用方必须跟着重编。
+    """
+    import qlm_qla
+    sigs = {f["name"]: _sig_of(f) for f in fns_ast}
+    out = {}
+    for f in fns_ast:
+        refs, methods, bound = set(), set(), set()
+        _ast_refs(f.get("body"), refs, methods, bound)
+        used = []
+        for n in sorted(refs - bound):
+            if n in sigs:
+                used.append([n, sigs[n]])
+        for m in sorted(methods):
+            for k in sorted(sigs):
+                if k.endswith("__" + m):
+                    used.append([k, sigs[k]])
+        body = {k: v for k, v in f.items() if k not in ("doc", "line")}
+        blob = qlm_qla._canon_json({"env": env_digest, "deps": used,
+                                    "fn": body})
+        out[f["name"]] = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+    return out
+
+
+def _env_digest(arch, platform, optimize, structs, enums, drops, ifaces, cfg=""):
+    """类型环境摘要：类型布局/接口/析构表变了，所有函数都得重编。"""
+    import qlm_qla
+    blob = qlm_qla._canon_json({
+        "compiler": qlm_qla.compiler_fingerprint(),
+        "arch": arch, "platform": platform, "opt": bool(optimize),
+        "cfg": cfg,
+        "structs": structs, "enums": enums,
+        "drops": drops, "ifaces": ifaces,
+    })
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
+def cfg_digest(cfg):
+    """构建配置摘要（Quelmara.toml 变了，产物就可能变——不能复用档案）。"""
+    import qlm_qla
+    blob = qlm_qla._canon_json(
+        {k: v for k, v in (cfg or {}).items() if not k.startswith("_")})
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
 def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
                   asset_root=None,
-                       platform="linux", prog=None):
+                       platform="linux", prog=None,
+                       reuse=None, keep_all=False, libs=None, meta=None):
     """前端共享层：解析 + 降级 + 优化（x86_64 / aarch64 发射层共用）
 
     prog: v1.62 调试信息预加载程序（qlm_dbinfo.load_program_dbg 的产物：
     带行号标记的 fns_ast + 主文件函数名集）。非 None 时跳过内部
-    load_program，并打开 Lower 的调试标记发射。"""
+    load_program，并打开 Lower 的调试标记发射。
+
+    v2.03 `.qla` 相关参数：
+    reuse:   `qlm_qla.Archive`——按函数哈希复用它的 IR（函数级增量）。
+    keep_all: 不做全局 DCE（`--lib`：库没有入口，全部函数都要留下）。
+    libs:    其他 `.qla`（二进制库）：注入它们的类型表与函数签名存根。
+    meta:    非 None 时填入档案元数据（函数记录/全局区/符号表/未定义符号）。
+    """
     require_source(src_path)
     cfg = load_config(src_path)
     if prog is None:
@@ -11485,6 +11582,10 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
     else:
         fns_ast, tests = prog["fns_ast"], prog["tests"]
         structs, enums = prog["structs"], prog["enums"]
+    # v2.03：二进制库（.qla）注入——类型表按布局一致性合并，函数只拿签名
+    # 存根（body=None + qla=True），实现留给链接期。
+    if libs:
+        fns_ast = _inject_libs(fns_ast, structs, enums, libs)
     fns_ast = with_test_runner(fns_ast, tests)   # test "name" { } -> 测试入口
     # v1.93：析构表必须在 DCE 之前算（隐式调用，DCE 看不到），并把析构
     # 函数钉成 DCE 根——否则"定义了 drop 但只在作用域退出时被调用"的函数
@@ -11492,19 +11593,83 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
     drops = drop_table(fns_ast)
     # 全局 DCE（v1.17d）：main 调用图可达性——import 大库只链接用到的。
     # 在测试合成之后（根含测试入口）、Lower 之前（AST 级，一次到位）
-    fns_ast = global_dce(fns_ast, keep=set(drops.values()))
+    if not keep_all:
+        fns_ast = global_dce(fns_ast, keep=set(drops.values()))
+    ifaces = {}
+    for f in fns_ast:
+        if f.get("impl_iface") and f.get("iface_sig"):
+            ifaces.setdefault(f["impl_iface"], {}).update(f["iface_sig"])
+    cdg = cfg_digest(cfg)
+    hashes = fn_hashes(fns_ast, _env_digest(arch, platform, optimize, structs,
+                                            enums, drops, ifaces, cdg))
+    # 复用：只有哈希一致、且来源档案与当前环境同源的函数才接管
+    reuse_map, reuse_order, seed = None, None, None
+    if reuse is not None:
+        import qlm_qla
+        if reuse.compiler != qlm_qla.compiler_fingerprint():
+            raise SyntaxError(
+                f"增量档案 {reuse.unit} 是另一版编译器产出的"
+                f"（指纹 {reuse.compiler}），不能复用——请全量重编")
+        if reuse.cfg and reuse.cfg != cdg:
+            raise SyntaxError(
+                f"增量档案 {reuse.unit} 的构建配置与本工程不同"
+                f"（{reuse.cfg} vs {cdg}）——配置变了必须全量重编")
+        if bool(reuse.opt) != bool(optimize):
+            raise SyntaxError(
+                f"增量档案 {reuse.unit} 是 {'--no-opt' if not reuse.opt else '优化'} "
+                f"构建产出的，与本次开关不一致——请全量重编")
+        reuse_map = {r["name"]: r for r in reuse.funcs}
+        reuse_order = [r["name"] for r in reuse.funcs]
+        seed = {"globals": reuse.globals, "special": reuse.special,
+                "counters": reuse.counters, "strmap": reuse.strmap}
+        keep = {n: r for n, r in reuse_map.items()
+                if n in hashes and hashes[n] == r.get("hash")}
+        # 不在 fns_ast 里的记录（lambda 体 / parfor worker / 运行库 helper）
+        # 跟着它们的父函数走：父函数复用时一并复用，父函数重编时全部作废
+        # （否则新旧两份 `__lam_N` 同名，链接期会撞）。
+        alive = set(keep)
+        for n, r in reuse_map.items():
+            if n in hashes:
+                continue
+            owner = r.get("owner")
+            if owner is not None:
+                if owner in alive:            # 父函数复用 -> 合成函数跟着复用
+                    keep[n] = r
+            else:
+                # 运行库 helper（无 owner）：它的 IR 只由编译器指纹 + 平台 +
+                # 配置决定，与用户源码无关——**永远复用**。重新发射一份会
+                # 把全局字重开（数据区变大）且 IR 与旧版不一致。
+                keep[n] = r
+        # 内联传播：内联把 callee 的函数体搬进了 caller，所以 callee 一变，
+        # caller 的 IR 也"应该"跟着变——不失效就会留着**旧函数体的副本**
+        # （实测：改 helper 的 `* 2` 为 `* 3`，被内联的 use 仍算出旧值）。
+        # 沿着 `inl` 图做不动点，直到没有新的失效。
+        dirty = {n for n in hashes if n not in keep}
+        changed = True
+        while changed:
+            changed = False
+            for n, r in list(keep.items()):
+                if any(c in dirty for c in (r.get("inl") or ())):
+                    keep.pop(n)
+                    dirty.add(n)
+                    changed = True
+        reuse_map = keep
+        reuse_order = [n for n in reuse_order if n in keep]
+        seed["special"] = {k: v for k, v in (reuse.special or {}).items()}
     low = Lower(fns_ast, cfg, arch=arch, structs=structs, enums=enums,
                 asset_root=asset_root,
                 platform=platform,
                 dbg=prog is not None,
                 dbg_main=(prog.get("main_fns") if prog else None),
                 dbg_src=(src_path if prog else None),
-                drop_fns=drops)
-    fns = low.run(fns_ast)
+                drop_fns=drops, seed=seed)
+    fns = low.run(fns_ast, reuse=reuse_map, reuse_order=reuse_order)
+    reused = set(low.reuse_fns)
+    fresh = [fn for fn in fns if fn.name not in reused]
     if optimize:
         # v0.2 管线：字符串求长外提 -> 内联 -> 逐函数收敛
         # （求长外提必须在内联之前：内联会把 __str_len 的扫描循环搬进循环体）
-        for fn in fns:
+        for fn in fresh:
             opt_strlen_hoist(fn)
         # v1.71：调试构建（prog 非 None，即 --dbg-info）默认**不内联**。
         # 内联后被调函数的语句行落在调用者函数体里，独立函数体成为死代码，
@@ -11513,8 +11678,10 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
         # 调试构建以断点语义优先；QLM_NO_INLINE=1 仍可显式关。
         if prog is None and "1" not in os.environ.get(
                 "QLM_NO_INLINE", "").split(","):
-            opt_inline(fns)
-        for fn in fns:
+            # 复用的函数已经是优化后的 IR：只让新降级的函数再走一遍内联
+            opt_inline(fns, only=None if not reused else
+                       {fn.name for fn in fresh})
+        for fn in fresh:
             opt_all(fn, unroll=True)
     # 编译期死循环体检（v1.16）：guard 变量不更新 → 警告 + 位置
     import qlm_opt as _qopt
@@ -11524,7 +11691,113 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
             print(f"== {fn.name} (vregs={fn.nv}) ==")
             for ins in fn.instrs:
                 print("   ", ins)
+    if meta is not None:
+        _fill_meta(meta, fns, low, fns_ast, hashes, reuse_map, structs, enums,
+                   ifaces, keep_all, cdg)
     return fns, low, cfg
+
+
+def _inject_libs(fns_ast, structs, enums, libs):
+    """把 `.qla` 的类型表与函数签名存根注入本次编译。"""
+    import qlm_qla
+    T = qlm_qla.deep_tuple
+    have = {f["name"] for f in fns_ast}
+    for arc in libs:
+        for kind, table in (("structs", structs), ("enums", enums)):
+            norm = qlm_qla.norm_decl(kind, arc.decls.get(kind) or {})
+            for k, v in norm.items():
+                if k in table and qlm_qla.norm_decl(kind, {k: table[k]})[k] != v:
+                    raise SyntaxError(
+                        f"二进制库 {arc.unit} 的 {kind[:-1]} {k} 与本地定义"
+                        f"布局不一致——同名类型不能有两套布局")
+                table.setdefault(k, v)
+        for e in arc.exports:
+            if e["name"] in have:
+                continue          # 本地有同名定义：本地优先（不静默替换）
+            stub = {"name": e["name"],
+                    "params": qlm_qla.norm_params(e["params"]),
+                    "ret": T(e["ret"]), "body": None, "qla": True, "pub": True}
+            for k in ("impl_iface", "self_type", "impl_method"):
+                if e.get(k):
+                    stub[k] = e[k]
+            if e.get("iface_sig"):
+                stub["iface_sig"] = {m: [qlm_qla.norm_params(ps), T(rt)]
+                                     for m, (ps, rt) in e["iface_sig"].items()}
+            fns_ast.append(stub)
+            have.add(e["name"])
+    return fns_ast
+
+
+def _fill_meta(meta, fns, low, fns_ast, hashes, reuse_map, structs, enums,
+               ifaces, keep_all, cfg_dg=""):
+    """把降级结果整理成 `.qla` 需要的元数据（qlm_qla.Archive 直接吃）。"""
+    import qlm_qla
+    by_name = {f["name"]: f for f in fns_ast}
+    records = []
+    for fn in fns:
+        if reuse_map and fn.name in reuse_map:
+            # 复用的函数：记录**原样搬过来**（IR 已经是 JSON 形态）。
+            # 重新序列化 1.4 万条指令要多花上百毫秒，而且结果一字不差。
+            records.append(dict(reuse_map[fn.name]))
+            continue
+        h = hashes.get(fn.name)
+        needs = low.fn_needs.get(fn.name)
+        owner = low.fn_owner.get(fn.name)
+        records.append(qlm_qla.fn_record(fn, h or "", needs or (), owner))
+    exports = []
+    for f in fns_ast:
+        if not f.get("pub") or f.get("qla"):
+            continue
+        e = {"name": f["name"], "params": [list(p) for p in f["params"]],
+             "ret": list(f["ret"]), "pub": True}
+        for k in ("impl_iface", "self_type", "impl_method", "iface_sig"):
+            if f.get(k):
+                e[k] = f[k]
+        exports.append(e)
+    defined = {r["name"] for r in records}
+    vt_labels = {f"__vt_{i}__{t}"
+                 for (i, t) in (getattr(low, "vtables", None) or {})}
+    undefined = []
+    for r in records:
+        for ref in qlm_qla.symbol_refs(qlm_qla.json_to_ir(r["ir"])):
+            if ref in defined or ref in vt_labels or ref in undefined:
+                continue
+            undefined.append(ref)
+    for _k, fnames in (getattr(low, "vtables", None) or {}).items():
+        for ref in fnames:
+            if ref not in defined and ref not in undefined:
+                undefined.append(ref)
+    special = {}
+    for name, attr in (("argc", "argc_gid"), ("argv", "argv_gid"),
+                       ("written", "written_gid"),
+                       ("committed", "committed_gid"),
+                       ("static", "_static_gid"), ("free", "free_gid"),
+                       ("args_copied", "_args_copied_gid")):
+        gid = getattr(low, attr, None)
+        if isinstance(gid, int):
+            special[name] = gid
+    meta.update({
+        "funcs": records,
+        "globals": list(low.globals),
+        "vtables": [[i, t, list(fs)]
+                    for (i, t), fs in sorted(
+                        (getattr(low, "vtables", None) or {}).items())],
+        "special": special,
+        "counters": {"lam_seq": low.lam_seq, "spawn_id": low.spawn_id},
+        "exports": exports,
+        "decls": {"structs": structs, "enums": enums, "ifaces": ifaces},
+        "undefined": sorted(undefined),
+        "uses_args": bool(getattr(low, "uses_args", False)),
+        "nreused": sum(1 for n in (reuse_map or ()) if n in hashes),
+        "ntotal": len(by_name),
+        "irreused": sum(len(r["ir"]) for r in records
+                        if reuse_map and r["name"] in reuse_map),
+        "irtotal": sum(len(r["ir"]) for r in records),
+        "nreused_all": len(reuse_map or ()),
+        "strmap": dict(getattr(low, "gid_of_str", {}) or {}),
+        "cfg": cfg_dg,
+    })
+    return meta
 
 
 def transpile_native(src_path, dump_ir=False, optimize=True, arch="x86_64", asset_root=None):

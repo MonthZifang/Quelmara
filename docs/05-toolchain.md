@@ -14,7 +14,7 @@ python tools/stage0/qlm_cli.py <cmd> [参数]            :: 任意平台
 
 | 命令 | 作用 | 主要参数 |
 |---|---|---|
-| `build` | 编译（可一次给多个源） | `src...`、`--target`、`-o/--out`（单源）、`--no-opt`、`--dump-ir`、`-j`（多源并发）、`--no-cache` |
+| `build` | 编译（可一次给多个源） | `src...`、`--target`、`-o/--out`（单源）、`--no-opt`、`--dump-ir`、`-j`（多源并发）、`--no-cache`；**v2.11**：`--emit-qla`（编译到 `.qla`）、`--lib`（二进制库）、`--incr`（函数级增量）、`--lib-input Q.LA`（链接二进制库） |
 | `run` | 编译并运行 | `src`、`--target`、`--` 之后的参数传给程序 |
 | `test` | 跑 `test "名字" { }` 块 | `paths`、`--target`、`--targets`（逗号分隔或 `all`）、`--no-opt`、`-j`（并发）、`--no-cache` |
 | `fmt` | 格式化 | `paths`、`--check`（只检查）、`-q/--quiet` |
@@ -26,6 +26,8 @@ python tools/stage0/qlm_cli.py <cmd> [参数]            :: 任意平台
 | `fuzz` | 编译器前端模糊测试（v1.83） | `src`（种子）、`--cases`（默认 64）、`--seed`（默认 1）、`--out`、`--timeout-ms`、`--max-seconds`、`--emit`（连后端一起跑） |
 | `lsp` | 语言服务器（v1.91） | `--stdio`、`--root`、`--index FILE`、`--symbols FILE`、`--at FILE:L:C`、`--completions FILE:L:C`、`--check FILE` |
 | `cache` | 增量编译缓存（v1.100） | `--stat`（默认）、`--clear`、`--prune DAYS` |
+| `link` | 链接多份 `.qla`（v2.11） | `inputs...`、`-o/--out` |
+| `qla` | 查看 / 校验 `.qla`（v2.11） | `--stat FILE`、`--symbols FILE`、`--verify FILE` |
 | `version` | 版本与能力 | — |
 
 `--target` 取值：`native`（ELF64）/ `win`（PE32+）/ `arm64`（AArch64 ELF）/ `c`（C99，仅交叉验证）。
@@ -406,8 +408,8 @@ python tools/stage0/qlm_cli.py lsp --completions src/main.qma:63:16  # 该位置
 ### 1.7 增量与并行编译（v1.100）
 
 编译器是**整程序编译**：主文件 + import 闭包一次解析、单态化、降级、优化、编码。
-没有目标文件格式（`.qla` 仍是 🚧），所以"改一行只重编一个函数"做不到；
-但"什么都没改还全量重编"是纯浪费。两个开关分别对付这两件事：
+目标文件格式 `.qla` 由 §1.8（v2.11）提供——它管"只重编变了的函数"和"分发二进制库"；
+这一节管"什么都没改还全量重编"这件纯浪费的事。两个开关分别对付两件事：
 
 | 开关 | 默认 | 作用 |
 |---|---|---|
@@ -472,8 +474,8 @@ VBS 开启时一个空 Python 进程要 1.3 s，8 个 worker 的启动成本就�
 
 #### 边界（做不到的写在这里）
 
-- **不是目标文件格式**：没有 `.qla`，所以没有函数级增量、没有"只重编变了的
-  模块再链接"。这里省掉的是**整个单元**的编译，跨单元复用不做。
+- **单元级，不是函数级**：这一层省掉的是**整个单元**的编译，跨单元复用不做；
+  函数级增量在 §1.8（`.qla`）。两者叠加：缓存未命中时，`.qla` 仍能复用没变的函数。
 - **单文件内部不并行**：并行粒度是单元。一个 30 万行的文件仍然单进程串行。
 - **不跨机器共享**：缓存里是产物二进制，绑 target + 编译器指纹；
   换机器/换 Python 版本后条目仍可能命中（产物是原生码，与 Python 无关），
@@ -485,6 +487,150 @@ VBS 开启时一个空 Python 进程要 1.3 s，8 个 worker 的启动成本就�
 回归：`tests/cache_test.py`（24 条：冷/热、改主文件、改依赖、改回原样命中旧条目、
 开关隔离、`--no-cache`、产物截断、`--stat/--clear`、串行=并行）。
 性能：`tools/dev/incr_bench.py`，数字见 `06-status.md` §3.14。
+
+### 1.8 目标文件 `.qla` 与函数级增量（v2.11）
+
+v1.100 的缓存省掉的是**整个单元**的重编；`.qla` 省掉的是**没变的函数**的降级与
+优化，并让"分发二进制库"成为可能。两者叠加：缓存未命中时，`.qla` 仍能复用没变
+的函数。
+
+| 命令 | 作用 |
+|---|---|
+| `build src --emit-qla` | 编译到 `build/<名字>.qla`（QuIR + 全局区 + 符号表，**不发射机器码**） |
+| `build src --lib` | 库档案：**不做 DCE**，全部函数 + 类型表进档案，可脱离源码分发 |
+| `build src --incr` | 函数级增量：复用 `build/<名字>.qla` 里未变的函数 IR，产出 `.qex` 并把新档案写回 |
+| `build src --lib-input lib.qla` | 把库档案的**签名与类型布局**注入编译期（不拿实现） |
+| `link a.qla [b.qla…] -o out.qex` | 多份档案 → 一个可执行文件 |
+| `qla --stat / --symbols / --verify` | 统计与元数据 / 导出符号表 / 校验和 |
+
+```bash
+python tools/stage0/qlm_cli.py build src/mylib.qma --lib -o build/mylib.qla
+python tools/stage0/qlm_cli.py qla --symbols build/mylib.qla
+python tools/stage0/qlm_cli.py build src/app.qma --lib-input build/mylib.qla -o build/app.qex
+python tools/stage0/qlm_cli.py build src/app.qma --incr      # 改一行 -> 只重编那个函数
+python tools/stage0/qlm_cli.py link build/app.qla build/mylib.qla -o build/app.qex
+```
+
+#### 容器格式（`tools/stage0/qlm_qla.py`）
+
+```
+QLA1\n
+<header json>\n      format / unit / kind(program|lib) / arch / platform / opt /
+                     compiler（编译器指纹）/ cfg（配置摘要）/
+                     payload_sha256 / sections[{name,off,len,sha256}]
+<payload>            meta 段（JSON）+ 全局数据段（裸字节）
+```
+
+`meta` 段：函数记录（`name/hash/needs/ir/nv/frame_words/structv/no_inline/
+iface_fresh/iface_own/closig/win_thread/owner/inl`）、全局块长度表、vtable、
+进程级单例全局字的 gid、计数器、导出符号表、类型表、未定义符号、字符串池映射。
+IR 是 QuIR 的 JSON 形态（元组 ↔ 数组严格互逆）。
+
+- **确定性**：`sort_keys` + 无时间戳 + 无绝对路径 ⇒ 同源码同编译器**同字节**，
+  sha256 即身份（可当内容寻址的键）。
+- **自校验**：段级 sha256 + payload sha256 + 长度表。截断/拼接/损坏一律在
+  `Archive.load` 报错，不会把半截 IR 交给发射层。
+- **不含机器码**：档案到 `.qex` 之间还有一次 Codegen，所以同一份档案可以按
+  不同入口/不同档案组合反复链接。
+
+#### 函数级增量：怎么判定"这个函数不用重编"
+
+一个函数的哈希 = H(自身 AST + 类型环境摘要 + 它引用到的函数签名) 再叠加内联传播：
+
+| 组成 | 为什么在里面 |
+|---|---|
+| 自身 AST（去 `doc`/`line`） | 函数体、形参、返回类型、impl 信息。注释与行号不影响代码，改了不必重编 |
+| **类型环境摘要** | 编译器指纹 + 架构/平台/优化档 + 配置摘要 + **类型表**（struct/enum 布局）+ 接口表 + 析构表。字段一加，布局全变 → 全部失效（保守但正确） |
+| **被引函数的签名** | 只收它**真正引用到的**函数，不是整张签名表——否则"加一个函数"会让全库失效 |
+| **内联传播**（`inl` 表） | 内联把 callee 的函数体搬进了 caller，callee 一变 caller 的 IR 也必须变。档案里每个函数记下"内联进来的 callee 名单"，复用时沿这张表做不动点 |
+
+内联传播是**正确性要求**，不是优化：实测反例——把 helper 的 `a * 2` 改成
+`a * 3`，不做传播时被内联的 `use` 仍然算旧值（产物能跑、结果是错的）。
+所以"改小函数"会连带重编调用链；改**大函数**（>28 条 IR 且多个调用点，不会被
+内联）才是"只重编它自己"。
+
+复用时要接管三样状态，少一样产物就与全量构建不一致：
+
+1. **全局数据区 + 字符串池映射**（`gid_of_str`）：否则重降级的函数会把同一份
+   字面量再 intern 一遍，数据区里出现重复块。
+2. **进程级单例全局字**（`argc`/`argv`/`static_word`/空闲链/`args` 拷贝标志）：
+   `args()` 必须读到入口写的那一份。
+3. **计数器**（`lam_seq`/`spawn_id`）：否则新旧两份 `__lam_N` 撞名。
+
+运行库 helper（`__alloc`/`__vec_*`…）**永远复用**——它们的 IR 只由编译器指纹 +
+平台 + 配置决定，与用户源码无关。全部函数都复用时连运行库都不重发（不新开全局
+字），产物才与全量构建**逐字节相同**。
+
+#### 二进制库：链接是名字解析
+
+- `build --lib`：不做全局 DCE（库没有入口），全部函数 + 类型表进档案；
+  `exports` 只收 `pub` 声明（`qla --symbols` 看到的就是它，非 pub 的内部
+  函数在档案里但不在符号表里）。
+- `--lib-input lib.qla`：注入**类型表**（同名类型布局必须一致，否则报冲突）与
+  **函数签名存根**（`body=None`，实现留给链接期）。本文件有同名定义时本地优先。
+- `link`：
+  1. 按单元基址重编 gid——`("ga", gid)` **元组**与 `movaddr` 的**裸 gid** 都要改
+     （漏后者会让跨库字符串指到别人的数据区，实测打成 `qlaqla`）；
+  2. 进程级单例全局字统一指向第一个档案；
+  3. 同名函数按"忽略 gid 的结构签名"去重（于是运行库 helper 全进程只有一份：
+     一个堆、一份空闲链），签名不一致则报**符号冲突**而不是随便挑一个；
+  4. vtable 合并；`__vt_接口__类型` 是 Codegen 现发的表，不算未定义符号；
+  5. 收尾检查：`main` 唯一、无未定义符号。
+
+#### 边界（做不到的写在这里）
+
+- **仅 `--target win`**：IR 与 ABI 都按 PE/x86-64 固化；`--dbg-info` 不走档案。
+- **档案不跨编译器/跨配置复用**：指纹或配置摘要不符直接报错，不猜。
+- **增量下限是解析**：哈希按 AST 算，仍要读全部源码。解析器目前一个文件读三遍
+  （宽松扫描 / 严格重解析 / `_consts_of`），这是下一步（解析缓存）的空间。
+- **无跨档案内联**：内联只在各自编译单元内做；链接期不重跑内联。
+- **泛型模板与 `const` 不从档案导出**：`const` 在解析期内联（已经在 IR 里），
+  泛型模板要实例化，跨档案传递需要新的档案段，未做。
+- **无档案级调试信息**：链接产物不带 `.qlmdbg`（断点调试仍走源码构建）。
+
+回归：`tests/qla_test.py`（32 条：往返逐字节、函数级增量四种形态、二进制库
+无源码链接、7 条失败路径、CLI）。性能：`tools/dev/qla_bench.py`，数字见
+`06-status.md` §3.22。
+
+### 1.9 服务端运行时（reactor）在标准库里（v2.12）
+
+**改哪里**：`std/net/reactor.qma`。IOCP 事件循环、连接记录池、accept 循环、完成包
+派发、关闭路径全在这个文件里，用 Quelmara 写。stage-0 只剩三个原语：
+
+| 原语 | 作用 |
+|---|---|
+| `@ffi`（v1.87） | `CreateIoCompletionPort` / `GetQueuedCompletionStatus` / `WSARecv` / `WSASocketW` / `bind` / `listen` / `accept` / `closesocket` / `setsockopt` / `WSAStartup` / `WSAGetLastError` |
+| `thread_start(fn, arg)`（v2.12） | 起 N 个 worker。**不受 `multicore=false` 降级**——`spawn` 在单核配置下会内联执行，主线程就再也回不到 accept |
+| `net_config(key)`（v2.12） | 编译期读 `[net]`：`0` max_conns / `1` recv_buffer / `2` io_threads（已解析）/ `3` tcp_nodelay |
+
+**分层（别合并）**：
+
+| 模块 | 内容 | 可移植性 |
+|---|---|---|
+| `std/net.qma` | 阻塞式 `listen` / `accept` / `send` / `recv` / `connect` | 不含 `@ffi`；`tcp_*` 内建目前仍只有 Windows 实现 |
+| `std/net/reactor.qma` | IOCP reactor：`net_serve` / `serve` | **仅 Windows PE**（`@ffi`） |
+| `std/net/core.qma` | 协议库共用的槽位层（640 B/连接） | 纯内建，可移植 |
+
+`std/http` / `std/ws` / `std/sse` 都 `import std.net.reactor`；`std/net.qma` **不** import
+它。理由不是"现在就能编 Linux"（`tcp_listen` 内建在 native 上仍会报
+`无法发射指令 ('winapi', … 'WSAStartup')`），而是**别让 IOCP 绑定钉死 net 模块**：
+`@ffi` 在非 Windows 目标是声明期硬失败，并进来之后 Linux 侧接 epoll 也永远编不过。
+与 `std/log` / `std/logfile` 的拆法同源。
+
+**多核默认**：worker 数 = `[net] io_threads`（`0` → `core.threads` → 物理核数）。
+完成端口**共用一个**：per-reactor（每线程一个端口）实测更差，见 `06-status.md` §3.23。
+
+**测**：先起服务端再压客户端——
+
+```bash
+python tools/stage0/qlm_cli.py build bench/echo_bench.qma --target win -o build/echo_bench.exe
+build/echo_bench.exe &
+python tools/dev/net_bench.py echo --conns 4 --reqs 300        # 往返
+python tools/dev/net_bench.py echo --conns 32 --reqs 200 --threads 4   # 吞吐
+```
+
+多核标定用 `bench/net_cpu_bench.qma`（handler 里烧固定 CPU，吞吐随 `io_threads` 走）；
+改 `[net] io_threads` 后重编才能生效——它是**编译期常量**。
 
 ## 2. 配置文件 `Quelmara.toml`
 
@@ -711,10 +857,10 @@ alpha = "registry|path:../qreg|1.2.0|<sha256>|<1.2.0>|<tree>|beta@^1.0;gamma@~2.
 
 | 目录 | 内容 |
 |---|---|
-| `tests/*.qma` | 144 个正向夹具，多数用 `assert` 自校验 |
-| `tests/bad/*.qma` | 67 个负向夹具，**必须编译失败**（工作区口径；HEAD 为 70，差 3 个 v1.96 能力翻转后失效、待决定去留的旧夹具） |
-| `examples/*.qma` | 18 个可运行示例 |
-| `bench/*.qma` | 24 个基准 |
+| `tests/*.qma` | 148 个正向夹具，多数用 `assert` 自校验（v2.10 实测口径；含 `t130_router_dispatch` / `t131_timer` / `t140_net6`） |
+| `tests/bad/*.qma` | 68 个负向夹具，**必须编译失败**（v2.12 新增 `net_serve_builtin`：reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断） |
+| `examples/*.qma` | 19 个可运行示例 |
+| `bench/*.qma` | 32 个基准（v2.10 `http_router_bench`；v2.12 新增 `echo_bench`（无日志的 reactor echo 服务端）与 `net_cpu_bench`（handler 烧固定 CPU，用于多核标定）） |
 | `fixtures/` | 端到端工程夹具（srcproj / qpm-demo / lspdemo / dbgdemo …） |
 | `fixtures/lspdemo/` | 语言服务器夹具：`main.qma` + 被导入的 `util.qma`（跨文件跳转/重命名），**同时能编译运行** |
 
@@ -754,7 +900,11 @@ alpha = "registry|path:../qreg|1.2.0|<sha256>|<1.2.0>|<tree>|beta@^1.0;gamma@~2.
 | `tests/lsp_test.py` | 语言服务器：全仓库词法对拍 / 容错索引 / 索引语义 / 真 JSON-RPC 协议 / 性能阈值 | 全平台 |
 | `tests/cache_test.py` | 增量缓存：冷/热、改主文件、改依赖、改回原样命中旧条目、开关隔离、产物截断、`--stat/--clear`、串行=并行 | Windows |
 | `tests/kv_test.py` | **KV 进程级恢复**：跨进程重开、撕裂尾（砍半条记录）、垃圾尾（追加 200 B）、Python 独立解析器逐条对拍磁盘格式 + FNV-1a 64 标准向量 | Windows |
+| `tests/qla_test.py` | **`.qla` 目标文件**（v2.11）：往返逐字节（直编 vs 档案→链接）、函数级增量四种形态（无改动/改小函数/改大函数/加函数/改布局）、二进制库无源码链接、7 条失败路径、CLI | Windows |
+| `tests/http_router_test.py` | **HTTP 服务端路由 / 中间件端到端**：编译并启动 `examples/http_router.qma`，真实 socket 断言 20 项（命中 / 归一化 / 404 / 405 / 鉴权中间件 / 请求体 / gzip 协商 / keep-alive / 流水线）；`--bench` 追加吞吐与服务端 CPU | Windows |
+| `tools/dev/net_bench.py` | **服务端网络探针**（v2.12）：echo / http / cpu 三种模式，`--conns`/`--reqs`/`--threads`，报告 req/s 与 RTT p50/p99（min-of-reps）；服务端由调用方先起（手动） | 全平台 |
 | `tools/dev/incr_bench.py` | 增量/并行编译性能探针（单单元冷/热、多源 `-j`、`test -j`、进程创建基线，手动） | 全平台 |
+| `tools/dev/qla_bench.py` | `.qla` 性能探针（冷编译 / 无改动增量 / 改一个函数 / link，附"解析占增量下限"的分离测量，手动） | 全平台 |
 | `tools/dev/link_bench.py` | 链接期性能探针（import 合并 + 限定引用 + per-module mangling 三档同规模对照，手动） | 全平台 |
 | `tools/dev/selfhost_status.py` | 自举进度：组件数与行数占比（`06-status.md` §4 的口径来源） | 全平台 |
 | `tools/dev/doc_bench.py` | doc 扫描吞吐与编译期占比探针（手动） | 全平台 |

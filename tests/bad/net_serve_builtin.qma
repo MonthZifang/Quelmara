@@ -1,0 +1,12 @@
+// tests/bad/net_serve_builtin.qma —— v2.12：net_serve 不再是内建
+//
+// reactor 整体搬进 std/net/reactor.qma 之后，直接调 net_serve（没有
+// import std.net.reactor）必须**编译期**报错，并指向迁移方式——否则
+// 老代码只会看到一句"未定义函数 net_serve"，不知道该 import 什么。
+fn on_data(fd: int, data: str) -> int {
+    return 1
+}
+
+fn main() {
+    net_serve(19999, 128, 0, on_data, 0)
+}

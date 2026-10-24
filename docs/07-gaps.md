@@ -38,18 +38,19 @@
 | 压缩 | ✅ v1.32：多 member gzip 拼接流 + **zlib 容器**（RFC 1950，含 adler32 校验）；`adler32` 也可单独用 | 仍无 zlib 预置字典（FDICT）与 raw inflate 的窗口复用 |
 | TLS | **根证书库**（信任锚管理）、**P-384 / SHA-384**；RSA（PKCS#1 + PSS）与链校验 v1.27 已实现 | 无法自动信任公网证书；部分站点链验不过 |
 | HTTP 客户端 | ✅ v1.50：`std/httpc`（URL 拆分 / 请求构造 / 响应解析 content-length+chunked / 重定向判定，纯函数）+ `std/httpc_net`（get / get_tls / get_follow，Windows，loopback E2E 实测） | 仍缺：连接池 / 流水线、自动解压 Content-Encoding、HTTP/2、Linux DNS |
-| 路由 / 中间件 | 🟡 v1.67：`std/router`（`/users/:id` 参数段、尾部 `*` 通配、query/尾斜杠归一化、参数捕获、方法白名单）**可用**；`std/http` 仍是单回调、无中间件链，**且当前不可导入**（0 个 pub 导出 + 局部变量撞关键字 `rc`，见 §7.13） | 路径分发不用再手写 if 链；HTTP 服务端与中间件（日志/鉴权/压缩）暂时用不了 |
+| 路由 / 中间件 | ✅ v2.10：`std/router`（`/users/:id` 参数段、尾部 `*` 通配、query/尾斜杠归一化、参数捕获、方法白名单）+ **`std/http` 已可导入**（原有 40 个顶层函数里 29 个补成 `pub` + `///`，本版新增的 10 个路由/中间件 API 也全部公开——现在 54 个顶层函数 / 39 个公开）并带**路由表 + 中间件链**：`http_route`（64 条）/ `http_use`（16 个；1 = 继续，0 = 终止）/ `http_dispatch` / `http_param` / `http_query`；匹配零拷贝（路径字节直接喂 `route_match_bytes`，注册期归一化 + 字面前缀过滤）。边界：先注册先匹配（不按具体度排序）、无正则路由、405 不带 `Allow`、handler 必须裸函数名（闭包是两字聚合，`callr` 进不了 reactor）；`std/sse` / `std/ws` 仍不可导入（§7.13） | 路径分发不用再手写 if 链；日志 / 鉴权 / gzip 协商按中间件链挂上去（`examples/http_router.qma` 是完整样板） |
 | 静态文件 / MIME / cookie / session / multipart | **MIME ✅ v1.67**（`std/mime`）；**静态文件 ✅ v1.69**（`std/staticfile`：URL 解码 / 穿越防护 / index / Cache-Control / ETag / Range + `static_serve` 直接产出 200/206/403/404 完整响应）；剩 If-None-Match / Last-Modified / 分块发送 / gzip 协商；**Cookie ✅ v1.70**（`std/cookie`）；**Session ✅ v1.71**（`std/session`：TTL 惰性过期 / 滑动续期 / 墓碑销毁；sid 可预测、无后台 GC、无并发保护）；**multipart ✅ v1.72**（`std/multipart`：boundary / 字段与文件 / CRLF 正文） | 这条 §2 行已全绿 |
 | `chunked` 请求体 | 回 501 | 部分客户端上传 |
-| DNS | Windows 走系统 `getaddrinfo`（v1.25）；Linux 无解析器 | Linux 只能写 IPv4 字面量 |
-| IPv6 | socket 家族改造（AF_INET6 + sockaddr_in6 + 字面量解析） | 现代部署基本要求 |
+| DNS | Windows 走系统 `getaddrinfo`（v1.25；v2.07 起 `AF_UNSPEC`，v4/v6 两个家族都返）；Linux 无解析器 | Linux 只能写 IPv4 字面量 |
+| IPv6 | ✅ v2.07：**TCP 全链路**——`tcp_listen6`（AF_INET6 + `sockaddr_in6` 28B + `IPV6_V6ONLY=0` 双栈，同一端口同时接 v4 映射连接）；`tcp_connect` 的 family 从 `AF_INET` 放宽到 `AF_UNSPEC`（IPv6 字面量与 AAAA 记录直接可用，失败沿 `ai_next` 回退——`localhost` 先给 `::1` 时 v4-only 服务端仍能连上）；`tcp_peer_raw`（`getpeername` 的 20 字节视图）+ `std/net/addr`（`ip_family` / `ip6_parse` / `ip6_format`（RFC 5952）/ `ip4_format` / `peer_ip` / `peer_port`，双栈上的 `::ffff:a.b.c.d` 还原成点分） | 仍缺：**UDP 没有 v6**（`udp_sendto` 的地址参数是 u32 网络序，要改成 16 字节 API 才带得动 v6）；`net_serve`（IOCP reactor）仍只绑 v4；Linux 侧 `tcp_connect`/`tcp_listen6` 编译期报错；无 zone id（`%eth0`）、不做 `::a.b.c.d` 兼容地址归一 |
 | TCP 批量收发 | 只有单次 `tcp_send/recv` | 高吞吐场景 syscall 太多 |
 | 可靠 UDP | UDP 四件之上未做 | 游戏/实时传输 |
 | 日志 | ✅ v2.03：**`std/log`**（级别过滤 / **绝对时间戳**（RFC 3339 毫秒 + 时区偏移，同一毫秒内复用缓存）/ **stdout·stderr 双通道** / 结构化 `k=v` 字段 / 每行持锁不交错）+ **`std/logfile`**（追加写 + **按大小轮转** `.1`…`.keep` + 64 KB 攒批 + `logf_tee` 同时打控制台 + 共享打开可边写边 tail）。边界：文件通道走 `std/fs`，**仅 Windows PE**；攒批的崩溃窗口最多 64 KB（要即时落盘调 `logf_flush`，掉电仍要 `fs_sync`）；不做 syslog/网络输出、不做压缩归档、级别不能热加载 | 生产可观测性：日志能对上外部系统的时钟，stdout 留业务、stderr 留诊断，文件自己滚动；写路径 434 ns/行（173 MB/s），被过滤的行 2 ns |
 | 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠；**f64 打印已修（v1.51）**：定点/科学计数按 C 后端口径逐位一致（`__f64_to_str` 有限值路径漏长度前缀已补），仍缺最短往返表示（grisu/ryu） |
 | 数学 | ✅ v1.47：`exp`/`log`/`log2`/`log10`/`pow`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`hypot` + 常数助手（Cody–Waite 双字归约；sin/cos 误差随 |x|·1.1e-16 增长，多字 π 归约未做） | 图形、统计、复利 |
 | 哈希 | ✅ v1.35：SHA-1 / SHA-256 / FNV-1a 32/64 / MD5（仅兼容用途）；✅ v1.53：**SHA-512 / SHA-384 + HMAC-SHA512** + **CRC-64/XZ**（FIPS 180-4 / RFC 4231 / ECMA-182 向量全过） | ✅ v1.55：**BLAKE2b**（RFC 7693，含 keyed 与变长输出）；仍无 SHA-512/224、SHA-3 |
-| 数据结构 | 🟡 v1.29/30：**set[int]·set[str]** / **deque** / **LRU**（自建开放寻址表 + 双向链表，单句柄）可用；**RingBuf / MinHeap 在 `std/ds`，该模块 0 个 pub 导出，用户代码引用会编译失败**（§7.13） | LRU 的 key 只有 int（字符串先 `fnv1a64`）；无 TTL / 无容量自适应；环形缓冲/最小堆要等 `std/ds` 补 pub |
+| 数据结构 | ✅ v2.05：**set[int]·set[str]** / **deque** / **LRU**（自建开放寻址表 + 双向链表，单句柄）/ **RingBuf·MinHeap**（`std/ds` 补成公开模块：13 个 `pub` + 全量 `///` + `tests/t129_ds.qma` + `bench/ds_bench.qma`） | 边界：`std/ds` 只存 int（`MinHeap` 是 key-only，句柄打包进 key 低位）；空/满哨兵 -1 与元素值同域；LRU 的 key 只有 int（字符串先 `fnv1a64`）、无 TTL、无容量自适应；全部非线程安全 |
+| 定时器 | ✅ v2.08：**`std/timer`** 从"不可导入"到可用——轮询式定时器（无后台线程/无回调），二叉最小堆落在 **mem 块**（`static_word(13)/(14)`）而非 `vec`（`vec` 句柄存进静态字会丢类型标签）；`timer_after`/`cancel`/`poll`/`pending`/`clear` 五个 API，push/poll 均 O(log n)，取消 O(1)；`tests/t131_timer.qma` + `bench/timer_bench.qma` | 边界：**轮询式**——没人 poll 就不会触发（没有后台线程）；`timer_pending` 是 O(n) 扫描；同一时刻到期按 id 出堆（不做优先级）；非线程安全；进程退出不清理（`timer_clear` 要自己调） |
 | 持久化 | ✅ v1.102：**`std/fs`**（open / read / write / seek / size / sync / close / rename，`@ffi` 直调 kernel32）+ **`std/kv`**（追加日志 + 内存索引：put / get / del / has / len / compact / sync，重开重放，**撕裂尾与垃圾尾都能恢复**，压缩把覆盖写后的日志压回一半）。边界：**Windows PE**（ELF 后端无动态链接器，`@ffi` 编译期 fail-fast）；值全量驻留内存（内存 ≈ 数据集大小）；无 SQL / 事务 / 并发写保护；**写路径已批量提交**（v2.01：每 64 条合并一次 `WriteFile`，`kv_sync`/`kv_close`/`kv_compact` 前冲刷；代价是进程被强杀最多丢最后不足 64 条，掉电仍要 `kv_sync`）；**语言内建仍只有元数据操作**（`file_exists`/`file_size`/`fs_mkdir`/`fs_remove`），读写走 `@ffi` 是当前方案，内建 `file_*` 要同时改 x86 与 A64 两个发射层，未做 | 配置 / 会话 / 计数 / 缓存元数据都能落盘；SQL 与大于内存的数据集还要 mmap 视图 + 页缓存 |
 | 正则 | ✅ v1.57 | `std/regex`：回溯 VM（字节码 + 显式栈，无 AST），字面字节 / `.` / 字符类（含 `\d \w \s` 及否定式）/ 转义 / 贪婪量词 `* + ? {n} {n,} {n,m}` / 交替 / 分组 `( )`·`(?: )` / 锚点 `^ $`；`regex_compile` / `match` / `match_full` / `exec` / `find` / `replace` / `replace_all`。**不做**：捕获组、反向引用、环视、懒惰量词、多行模式、Unicode 属性；病态模式由 400 万步上限兜底。期望值全部由 Python `re` 现算的差分对拍见 `tests/t99_regex.qma` | 文本清洗 / 表单校验 / 路由匹配不必再手写逐字节扫描 |
 | CLI | ✅ v1.29：`std/cli`（`--k=v` / `--k v` / `-k v` / 布尔 / 位置参数）；无子命令与自动 usage | 子命令要自己 switch |
@@ -62,11 +63,12 @@
 | 调试器 | ✅ v1.75 / v1.80 | **两种调试信息一份数据源**：`.qlmdbg`（自研 JSON，带 `bind`/`last` 活跃区间，调试器读它）+ **标准 DWARF v4**（`.debug_abbrev`/`info`/`line`/`loc`，外部工具读它，地址用 RVA）。`quelmara debug` 源码断点（`break 文件:行` / `break 函数`）/ `step` / `next` / `finish` / `print a.b.c` / `locals` / `bt` / `list`（Windows 调试 API，int3 软断点 + RBP 帧链，零外部依赖）。边界：仅 Windows PE（ELF 后端未接节写出）；**不发 PDB**（无 MSVC 工具链可验证）；库函数帧无行号（`<library>`）；调试构建默认不内联（否则源码断点静默不命中）；变量只在"最后一次使用之前"可见；`print` 限变量与字段路径。测试 `tests/debugger_test.py` + `tests/dbg_test.py` + `tests/dwarf_test.py` |
 | LSP / 补全 | ✅ v1.91 | **语义索引 + 补全/跳转/引用/重命名/悬停/大纲/全局符号**（`quelmara lsp`，stdio LSP 3.17 子集，零依赖）。索引是**容错**的（不经过编译器前端，一个语法错误不会让整篇符号消失），词法另有位置信息并与 `qlm.tokenize` 全仓库对拍。边界见 `05-toolchain.md` §1.4：**诊断只到词法/结构层**（不做类型检查）、`didChange` 整篇重建（无增量索引）、成员解析靠语法推断（推不出就退化为本文件成员）、重命名只改解析得到的引用。编辑器里从此能补全、能跳转、能改名 |
 | 文档生成 | ✅ v1.92 | **`///` 是语言层语法**（`02-language.md` §2.4）：紧贴顶层声明、`//!` 模块文档、空行即脱离、`////` 不算、缩进不收；前端按行挂到声明上（`f["doc"]` / `type_docs` / `module_doc`），**不进记号流**（lexdiff/parsediff 契约不变）。工具链 `quelmara doc`：Markdown/JSON、`--check` 漂移、`--missing` 覆盖门禁；std 全库 387 个公开声明 100% 覆盖，`03-stdlib.md` 与源码同源。边界：只收顶层声明（`impl` 内方法文档未做）、不做交叉引用/链接校验、不渲染 Markdown、全量不增量 | API 文档从源码长出来；门禁拦『写了文档却挂不上』与『声明没文档』 |
-| 库归档 `.qla` | 🚧 | 无目标文件格式 → 无法**函数级**增量编译（单元级增量已由 v1.100 的缓存提供，见上一行）、无法分发二进制库 |
+| 库归档 `.qla` | ✅ v2.11 | **目标文件格式**：`QLA1` 容器（header JSON + `meta` 段 + 全局数据段，段级 + 整体 sha256，**确定性字节**——同源码同编译器同字节，sha256 即身份），内容是**已降级+已优化**的 QuIR + 全局区 + 符号表 + 类型布局，不含源码也不含机器码。**函数级增量**：每个函数按「自身 AST + 类型环境摘要（类型表/接口/析构表/配置）+ 被引函数的签名 + **内联传播**」算哈希，未变就复用档案里的 IR（无改动时产物与全量构建**逐字节相同**）；`build --incr` 实测 2.4×（下限是解析）。**二进制库**：`build --lib` 不做 DCE、带符号表与类型布局，`--lib-input` 只取签名与布局、`link` 按名字解析合并 IR（`call`/`fnaddr`/vtable 槽），**源码可以不分发**。边界：仅 PE/x86-64；档案跨编译器/跨配置不复用（指纹 + 配置摘要不符直接报错）；改被内联的小函数会连带重编调用链（正确性要求，见 `05-toolchain.md` §1.8）；泛型模板与 `const` 不从档案导出；无跨档案内联；`--dbg-info` 不走档案。见 `05-toolchain.md` §1.8、实测 `06-status.md` §3.22、回归 `tests/qla_test.py`（32 条） |
 | 包管理 | ✅ v1.99 | **qpm 全链路**：三种来源（path / git / **registry**）+ **sparse 索引**（每包一个 JSON，解析不下载包体）+ **确定性 `.qpk`**（同源码同字节，sha256 即身份）+ `publish` / `yank`（同版本不可覆盖，撤回不删历史）+ **传递依赖**（读每个包自己的 `[deps]`，同名区间取交集选最大版本，git 归一化 rev，跨来源直接报冲突，环可安装并提示）+ 锁 v2（`--locked` 可复现、`verify` 锁/清单/磁盘三方校验、`tree`）。边界：**一个项目只从一个 registry 解析**、无签名/公信链、无多租户权限（只有 Bearer token）、无构建钩子、无增量（每次重解析重落地）。细节见 `05-toolchain.md` §4 |
-| 增量 / 并行编译 | ✅ v1.100 | **单元级增量**（内容寻址缓存：编译器指纹 + 主文件 + **精确 import 闭包** + 源根目录清单 + `QLM_*` 环境快照，任一不符即重编；产物 sha256 校验，半截/损坏的条目不会交出去）+ **单元级并行**（`build -j` 多源、`test -j` 多文件，进程池，输出顺序与串行一致）。边界：**不是目标文件格式**——没有 `.qla` 就没有函数级增量，也做不到「只重编变了的模块再链接」；单文件内部不并行；并行收益受进程创建成本限制。见 `05-toolchain.md` §1.7、实测 `06-status.md` §3.14、回归 `tests/cache_test.py` |
+| 增量 / 并行编译 | ✅ v1.100 | **单元级增量**（内容寻址缓存：编译器指纹 + 主文件 + **精确 import 闭包** + 源根目录清单 + `QLM_*` 环境快照，任一不符即重编；产物 sha256 校验，半截/损坏的条目不会交出去）+ **单元级并行**（`build -j` 多源、`test -j` 多文件，进程池，输出顺序与串行一致）。边界：这一层省的是**整个单元**的重编；函数级增量由上一行的 `.qla` 提供（v2.11），两者叠加：缓存未命中时，`.qla` 仍能复用没变的函数；单文件内部不并行；并行收益受进程创建成本限制。见 `05-toolchain.md` §1.7 / §1.8、实测 `06-status.md` §3.14 / §3.18、回归 `tests/cache_test.py`、`tests/qla_test.py` |
 | 性能回归门禁 | ✅ v1.88 | **`tools/dev/bench_gate.py`**：`bench/gate_bench.qma`（**Quelmara 写**，输出 `QLMBENCH`/`QLMCAL`/`QLMDIGEST`）+ 校准归一化（换机器仍可比）+ 噪声闸 + 双模式（本机基线 `--check` / CI 同机交错 A/B `--ab REV`）+ 校验和与体积硬判；CI 独立 `perf` job。边界：基线按 CPU 型号分 key（换机器 SKIP，不误判）；不做统计显著性检验（min-of-N + 离散度）；不是微架构计数器（无 cycles / 分支失败率）；`quelmara bench` 的进程墙钟口径保留，两者分工见 `05-toolchain.md` §1.3 |
 | 覆盖率 / fuzz | ✅ v1.83 | **行 + 分支覆盖**：`quelmara cov` = 调试器逐行/逐 `jcc` 断点采集 + `tools/qlm_cov.qma`（**用 Quelmara 写**，自己读 PE 节表 + `.qlmdbg` JSON）汇总；行/分支/函数/文件四级，`--min`/`--min-branch` 双门禁，`--append` 多次运行累加。分支判定用 EFLAGS 不单步；只收"目标为语句入口"的源码级分支（`assert` 失败块/越界 panic 块/`args()` 展开不计入）。**fuzz ✅**：`quelmara fuzz` = `tools/qlm_fuzz.qma`（Quelmara 写的变异器，确定性 LCG）+ `qlm_fuzz.py` 判定（built/rejected/deep/bug/slow 五分类，`bug` 退出码 1）。边界：不采条件级 MC/DC（`&&` 子条件按各自 `jcc` 自然计数）；采集靠断点，大文件线性慢；fuzz 默认只跑前端；非 UTF-8 源文件抛 `UnicodeDecodeError`（§7.11） |
+| 服务端运行时自举 | ✅ v2.12 | **IOCP reactor 从 stage-0 搬到 `std/net/reactor.qma`**（Quelmara 源码）：v1.4 起手搓的 400 行 IR（`__net_serve` / `__net_worker` / rec 池 / accept 循环）全部删除，stage-0 只留 `thread_start`（Win64 线程入口 ABI）与 `net_config`（编译期读 `[net]`）。worker 数 = `[net] io_threads`（默认物理核数），完成端口共用一个（per-reactor 实测更差，见 `06-status.md` §3.23）。分层：`std/net/reactor.qma` 仅 Windows PE（`@ffi`）/ `std/net.qma` 不含 `@ffi`（但 `tcp_*` 内建目前也只在 Windows 实现）/ `std/net/core.qma` 槽位层。边界：**仍只有 Windows**（Linux epoll/io_uring reactor 未做）；accept 在**主线程单点**（未做多 acceptor + `SO_REUSEPORT`，`[net] reuse_port` 目前是声明未用）；`max_conns` 用 `atomic_add` 计数、拒绝发生在 accept 之后（连接已被内核接受一次）。回归：主回归 + `tests/http_router_test.py`（20 项 E2E） | 服务端链路（http/ws/sse/router/reactor）100% 本语言实现；改事件循环不用再碰编译器 |
 | 对拍脚本耗时 | ✅ | `irdiff` 并行后 60 s（原 5 min 41 s）；`emitdiff` 10 s 内 |
 | `version` 口径 | ✅ | `tools/stage0/qlm_cli.py` 的 `VERSION` 与最新 `docs/versions/vX.Y/` 一致（v1.24 起 1.24.0，由 `check_docs.py` 校验） |
 
@@ -75,7 +77,7 @@
 | 平台 | 状态 | 前置 |
 |---|---|---|
 | Windows PE32+ | ✅ 主平台 | — |
-| Linux ELF64 | ✅ 构建级（CI 执行） | 本机无 gcc/WSL |
+| Linux ELF64 | ✅ 构建级（CI 执行） | 本机无 gcc/WSL；**`tcp_*` 内建没有 Linux 实现**（`import std.net` 编 native 会在 `tcp_listen` 处报 `无法发射指令 ('winapi', … 'WSAStartup')`，v2.12 复核），Linux 侧的网络走 `qlm_uring` 那条 C 链 |
 | Linux io_uring | ✅ | 5.1+ 内核 |
 | AArch64 | 🟡 模拟器执行级 | 需补 chan/map/spawn/SHA（**atomic/acquire-release 已接**，v1.98）；~~vtable~~ ✅ v1.97（`tests/a64_iface_test.py` 执行级 7 用例） |
 | macOS Mach-O + kqueue | ❌ | 新后端 + 新事件层 |
@@ -96,6 +98,8 @@
 | ~~URL 解析 / mem_chr 回归~~ | ✅ v1.35 已查证：没有回归（v1.28 逐字节 85 ms → v1.34 mem_chr 81 ms） | 文档里的 69 ms 是环境漂移（VBS 噪声 ±50%），不要再怀疑一遍 |
 | ~~URL / JSON / KV 读取路径~~ | ✅ v2.02 已做：`url_port` **1.55×**、`url_query_get` 1.18×、`json_parse` 41→**49 MB/s**（1.19×）、`kv_get` 190→**160 ns**（1.19×） | 全是「去掉多余分配 / 多余扫描」，不是算法改造；JSON 容器共用暂存、SHA-256 展开两个实验测不出收益已回退。数字见 `06-status.md` §3.17 |
 | ~~KV 批量提交~~ | ✅ v2.01 已做：put **16.5 → 2.7 µs/条（6.1×）**、覆盖写 **16.2 → 2.1 µs（7.7×）**；磁盘格式与恢复语义不变 | 每 64 条合并一次 `WriteFile`，`kv_sync`/`kv_close`/`kv_compact` 前冲刷。代价是崩溃窗口 ≤64 条；`kv_sync` 384 µs/条 不变（每条都等落盘）。数字见 `06-status.md` §3.16 |
+| ~~`std/ds` 堆下沉"挖洞"~~ | ✅ v2.05 已做：`heap_pop` 同进程 A/B **670–730 → 450–465 ns/次**（20 万元素，**1.5×**） | 每层从"读 4 写 4"降到"读 2 写 1"（末元素取出 → 逐层上提 → 最后落位）。剩余成本是**树高 × 缓存行**（17.6 层随机访存），不是方法调用——换 mem 块也救不了，只有 4 叉堆 / B 树布局才有用。数字见 `06-status.md` §3.19 |
+| ~~`std/timer` 的 poll 扫描~~ | ✅ v2.08 已做：`timer_poll` 从"每次弹堆后线性扫平行数组找 id"（O(n)）改成**堆里同时存 id、弹到即返回**（O(log n)）；2 万个取消项 drain **256 ns/项** | 取消改成存活位（O(1)，不搬堆），到期时静默丢弃。10 万个定时器：push **136 ns**、poll **433 ns**、cancel **12 ns**。数字见 `06-status.md` §3.20 |
 | ~~SHA-256 轮展开~~ | ❌ **已验证无收益**（v2.02）：8 轮展开 + 状态变量环移位命名，每轮 8 条搬移全部消失，1 MiB 仍是 41–42 ms | 瓶颈不是搬移而是**指令数**：每块约 3000 条，8450 cycles/块 ≈ 2.8 cycles/条；x86 的 `mov` 在重命名阶段就消掉了，省它不省时间。要更快只有两条路：SHA-NI（本机无该扩展）或 `int` 走 32 位指令（现为恒 64 位，`& 0xFFFFFFFF` 掩码消不掉）。数字见 `06-status.md` §3.17 |
 | **GHASH 4 路并行** | 现在是串行依赖（每块依赖上一块结果）；4 路聚合可再快 2–3× | 需要重排 CTR/GHASH 交织，收益已不大 |
 | **LICM 根修** | 普适（所有循环） | 根因是 x64 分配器布局敏感段错误；修好前 LICM 只能关 |
@@ -133,7 +137,7 @@
 3. `map[str]Struct`（~~`vec[map]`~~ ✅ v1.37）
 4. 函数值放宽：8 参、允许 struct 实参
 5. ~~`defer` / `Drop`~~（✅ v1.48 / v1.93：资源生命周期进语法）
-6. IPv6、TCP 批量收发
+6. UDP v6 / reactor 双栈、TCP 批量收发
 7. ~~包管理 registry + 发布~~ ✅ v1.99（~~semver 区间~~ v1.45 → registry/发布/传递依赖）
 8. 自举主线：函数体 parser 收敛（当前分叉数见 `06-status.md`）
 
@@ -384,7 +388,7 @@ fn main() {
 - 回归：`tests/t128_mainret.qma`（if / while / 被调 void 函数三条早退路径），
   由 `run_win_tests.py` 的 `case_output` 检查**退出码 0**——只测输出测不出来。
 
-### 7.13 待修：10 个标准库模块没有 `pub` 导出，其中 4 个连解析都过不去（v2.01 审计发现）
+### 7.13 待修：6 个标准库模块没有 `pub` 导出，其中 2 个连解析都过不去（v2.01 审计 / v2.08 重测）
 
 写文档时为了核对"哪些模块真能用"，逐个 `import` 了一遍（命令见下），结果和
 `03-stdlib.md` 的 ✅ 标记对不上：
@@ -406,35 +410,62 @@ for dp, _, fns in os.walk('std'):
 EOF
 ```
 
-**A. 四个模块解析失败**（`import` 就报错，连符号表都建不起来）
+**已修的部分**（v2.08 重测：`std/` 下每个模块逐个 `import` 复核）
+
+| 模块 | 修法 | 证据 |
+|---|---|---|
+| `std/ds` | 10 → **13 个 `pub`**，补全 `///`，新增 `rb_clear` / `rb_free` / `heap_len`；堆上浮/下沉改"挖洞" | `tests/t129_ds.qma`（15 组断言）+ `bench/ds_bench.qma` |
+| `std/timer` | **重写**：四个顶层 `let` → mem 块 + `static_word(13)/(14)`；`now_ms()`（不存在）→ `now_ns()`；4 → **5 个 `pub`**；`timer_poll` 从"每次 O(n) 扫平行数组"改成 O(log n) 弹堆 | `tests/t131_timer.qma`（7 组）+ `bench/timer_bench.qma` |
+| `std/http`、`std/net/core` | v2.10（并行轨）：`http` 的 `let rc` 改名 + 29 个 API 补 `pub`/`///` + 路由表与中间件链；`net/core` 18 → **22 个 `pub`**（跨模块读不了的 `ST_*` / `SLOT_RECVLEN` 常量改成访问器——`const` 不能 `pub`，语法只允许 `fn/struct/enum/interface`） | `tests/t130_router_dispatch.qma` + `tests/http_router_test.py`（20 项 E2E）+ `bench/http_router_bench.qma` |
+
+**A. 两个模块解析失败**（`import` 就报错，连符号表都建不起来）
 
 | 文件:行 | 症状 | 原因 |
 |---|---|---|
-| `std/http.qma:180` | `期望 NAME，得到 'rc'` | `let rc = h(fd)`——`rc` 是**关键字**（`rc[T]` 类型构造） |
-| `std/sse.qma:132` | 同上 | 同上 |
+| `std/sse.qma:132` | `期望 NAME，得到 'rc'` | `let rc = h(fd)`——`rc` 是**关键字**（`rc[T]` 类型构造） |
 | `std/ws.qma:179`（另 372/400 同） | 同上 | 同上 |
-| `std/timer.qma:21–24` | `顶层期望 fn/struct/test/module/import，得到 'let'` | 四个顶层 `let` 做模块状态；parser 只认顶层 fn/struct/test/module/import |
 
-**B. 十个模块 0 个 `pub` 导出**（能 import，但用户代码一引用就编译失败）
+**B. 六个模块 0 个 `pub` 导出**（能 import，但用户代码一引用就编译失败）
 
-`std/core`（4 个函数）/ `std/ds`（10）/ `std/gen`（9）/ `std/http`（40）/ `std/net/core`（18）/
-`std/serialize`（10）/ `std/sse`（20）/ `std/time`（2）/ `std/timer`（4）/ `std/ws`（24）——
-合计 **141 个顶层函数**。`03-stdlib.md` §1 总览的"公开 / 全部"列里显示 `0 / N` 的就是这批。
+`std/core`（4 个函数）/ `std/gen`（9）/ `std/serialize`（10）/ `std/sse`（20）/ `std/time`（2）/
+`std/ws`（24）——合计 **69 个顶层函数**。`03-stdlib.md` §1 总览的"公开 / 全部"列里显示
+`0 / N` 的就是这批。
 
 - 复现：`import std.core` 后调 `abs(-3)` → `SyntaxError: 引用了非 pub 声明（1 处）：'abs' <- core.qma`。
-- 根因：v1.43 把 std 全库改成 `pub fn` 的那一轮**漏了这 10 个文件**（`gen_stdlib_doc.py` 里
+- 根因：v1.43 把 std 全库改成 `pub fn` 的那一轮**漏了这批文件**（`gen_stdlib_doc.py` 里
   v1.47 的注释记的是"把 271 个 pub API 全部漏出"，说明当时只核对了"有 pub 的那部分"）。
   之后再没人 import 过它们，所以一直没暴露——`run_win_tests.py` 不构建 `examples/`。
-- 连带：`examples/http_demo.qma` / `ws_demo.qma` / `sse_demo.qma` 三个示例当前**都构建不过**
-  （先撞 A 的解析错，修掉再撞 B 的可见性错）；`std/timer` 依赖 `std/ds`+`std/core`，也是 B 的受害者。
+- 连带：`examples/ws_demo.qma` / `sse_demo.qma` 仍构建不过（先撞 A 的解析错，修掉再撞 B 的
+  可见性错）；`std/core` 是 `std/log` / `std/rand` / `std/sse` / `std/ws` 的共同依赖，补它的
+  `pub` 能一次解开四个模块的引用问题（**下一版就做它**）。
 
-**为什么这一版没修**：A 是 5 处变量改名 + 一处状态初始化改造，B 要给 141 个声明补 `pub`
-**并且**补 `///`（doc 门禁要求公开声明必须有文档），是独立一版的工作量；混在"性能 + 文档口径"
-里会把 diff 撑到无法评审。**先如实登记，避免下一个人再按 ✅ 去用。**
+**下一版顺序**：① `sse`/`ws` 的 `rc` → `rcv`（3 处）；② `std/core` 的 4 个声明补 `pub` + `///`
+（解开 log/rand/sse/ws 的引用）；③ 余下 5 个模块 65 个声明补 `pub` + `///`；④ 把
+`examples/{ws_demo,sse_demo}.qma` 与 `std/timer` 的冒烟构建纳入 `run_win_tests.py`——
+**坏了这么久没人发现，就是因为没人编它**。
 
-**下一版顺序**：① 三个文件的 `rc` → `rcv`（5 处）；② `timer` 的四个顶层 `let` 收进惰性初始化；
-③ 10 个模块 141 个声明补 `pub` + `///`；④ 把 `examples/{http_demo,ws_demo,sse_demo}.qma`
-和 `std/timer` 的冒烟构建纳入 `run_win_tests.py`——**坏了这么久没人发现，就是因为没人编它**。
+### 7.14 待查：调用实参类型不匹配不报错，静默按位重解释（v2.07 发现）
+
+写 `std/net/addr` 时把 `str_find_from(s, from, needle)` 的实参写反了
+（`str_find_from(s, ".", start)`——第 2 个位置给了 `str`、第 3 个给了 `int`），
+编译器**一句都不说**，生成出来的程序当场 SIGSEGV。最小复现：
+
+```quelmara
+fn g(a: str, b: int, c: str) -> int { return b }
+fn main() { print(g("abc", "not-int", "x").to_str()) }   // 编译通过
+```
+
+```
+r=140697867661375      ← 把 str 数据指针当 int 原样返回
+```
+
+- 期望：编译期报「第 2 个实参期望 `int`，得到 `str`」（`map.get` 缺键都能 fail-fast，
+  这里连类型都不看）。
+- 现状：调用点只做**个数**校验（`需要 N 个实参`），没有形参类型比对；`str`/`int`/
+  指针在 IR 里都是 1 个 8 字节槽，于是"能编过、跑起来读野指针"。
+- 影响：写错一个实参顺序 = 段错误（v2.07 踩到一次），而不是编译错误。
+- 复核：把上面 4 行存成 `build/tc.qma`，`python tools/stage0/qlm_cli.py run build/tc.qma
+  --target win`——能跑出数字就说明这个缺口还在。
 
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
@@ -453,13 +484,15 @@ EOF
    ~~泛型 enum~~ ✅ v1.63；~~FFI~~ ✅ v1.87）
 3. **标准库（§2）**：~~MD5~~（v1.35）→ ~~HTTP 客户端封装~~（v1.50）→ ~~路由 / 静态文件 / MIME /
    cookie / session / multipart~~（v1.67–v1.72）→ ~~多 member gzip + zlib 容器~~（v1.32）→
-   ~~正则~~（v1.57）→ ~~持久化（KV）~~ ✅ v1.102（批量提交列入 2.x 后续版本）→ ~~`exp/log/sin/cos`~~（v1.47）。
-   **当前红标只剩**：TLS 根证书库 / P-384 / SHA-384、连接池与 HTTP/2、中间件链
-   （日志/鉴权/压缩）、IPv6、TCP 批量收发、Linux DNS、国际化（locale / Unicode 分类 /
+   ~~正则~~（v1.57）→ ~~持久化（KV）~~ ✅ v1.102（批量提交列入 2.x 后续版本）→ ~~`exp/log/sin/cos`~~（v1.47）→
+   ~~`std/ds` 补 pub（RingBuf / MinHeap 变成真 API）~~ ✅ v2.05 → ~~`std/timer` 重写（轮询式定时器可用）~~ ✅ v2.08 → ~~IPv6（TCP 全链路 + 双栈 listen）~~ ✅ v2.07 → ~~HTTP 服务端路由表 + 中间件链（`std/http` 可导入）~~ ✅ v2.10。
+   **当前红标只剩**：TLS 根证书库 / P-384 / SHA-384、连接池与 HTTP/2、UDP v6 与 reactor 双栈、TCP 批量收发、Linux DNS、国际化（locale / Unicode 分类 /
    大小写折叠）、SQL 与大于内存的数据集（要 mmap 视图 + 页缓存）
 4. **工具链（§3）**：~~调试器~~ ✅ v1.75/v1.80 → ~~覆盖率（行/分支/函数/文件/合并）~~ ✅ v1.83 → ~~fuzz~~ ✅ v1.83 → ~~性能回归门禁~~ ✅ v1.88
    → ~~LSP / 补全~~ ✅ v1.91 → ~~包管理（registry / 发布 / 传递依赖）~~ ✅ v1.99
-   → ~~增量 / 并行编译~~ ✅ v1.100（单元级；函数级要等 `.qla`）→ `.qla`
+   → ~~增量 / 并行编译~~ ✅ v1.100（单元级）→ ~~`.qla` 目标文件 / 函数级增量 / 二进制库~~ ✅ v2.11
+   （工具链 §3 的缺口表到此全绿；剩下的都是"更强"而不是"没有"：跨档案内联、
+   档案级调试信息、A64/ELF 档案）
 
 > 2026-10-23 起语言层与工具链**双轨并行**：语言层由另一会话负责（v1.44 命名空间
 > 限定语法即其成果），工具链从 v1.45（qpm semver）起推进。两轨共享连续版本号，

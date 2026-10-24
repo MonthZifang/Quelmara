@@ -5,6 +5,7 @@
 module echo_reactor
 
 import std.net
+import std.net.reactor
 
 fn on_connect(fd: int) {
     print("peer connected")
