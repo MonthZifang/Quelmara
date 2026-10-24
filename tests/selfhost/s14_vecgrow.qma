@@ -1,0 +1,60 @@
+// s14_vecgrow.qma —— stage-1 编译器（qlmc）vec 扩容的差分夹具（v2.27）
+//
+// 覆盖：
+//   1) 从 2 格起步连 push 40 次，跨多次翻倍
+//   2) 别名（let w = v）在扩容后依然指向同一份数据
+//   3) 0 容量起步（new(0) 之后 push 不能写穿堆）
+//   4) vec[str] 扩容（元素是句柄，拷的是指针而不是内容）
+//   5) 扩容之后按下标遍历累加
+// 与 stage-0 做逐字节差分（tests/qlmc_test.py）。
+fn main() {
+    let v = vec[int].new(2)
+    let mut i = 0
+    while i < 40 {
+        v.push(i * 3)
+        i = i + 1
+    }
+    print(len(v))
+    print(v[0])
+    print(v[39])
+    print(v.get(20))
+
+    // 别名：扩容只换数据块，句柄不变，所以 w 和 v 始终是同一个 vec
+    let w = v
+    let mut j = 0
+    while j < 25 {
+        w.push(1000 + j)
+        j = j + 1
+    }
+    print(len(w))
+    print(len(v))
+    print(v[64])
+    print(w[64])
+
+    // 0 容量起步
+    let z = vec[int].new(0)
+    print(len(z))
+    z.push(7)
+    z.push(8)
+    z.push(9)
+    print(len(z))
+    print(z[0])
+    print(z[2])
+
+    // vec[str] 扩容
+    let t = vec[str].new(1)
+    t.push("a")
+    t.push("bb")
+    t.push("ccc")
+    t.push("dddd")
+    print(len(t))
+    print(t[3])
+    print(t[0])
+
+    // 扩容后按下标累加
+    let mut s = 0
+    for k in 0..len(v) {
+        s = s + v[k]
+    }
+    print(s)
+}

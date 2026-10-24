@@ -956,30 +956,43 @@ p50 从 1,904 → 473 µs 是 **4.0×**，与 worker 数同阶——多核确实
 降到 4–13 ms；冷路径不变（委托 stage-0，2136 ms）。失效正确性实测：`exit(7)` 改成
 `exit(8)` 后 `qlm run` 的退出码从 7 变 8，产物被重新生成。
 
-### 3.25 stage-1 编译器 `qlmc`（v2.26：子集 S12）
+### 3.25 stage-1 编译器 `qlmc`（v2.27：子集 S13）
 
 口径：本机 20 逻辑核（VBS 开着，噪声见 §3.26，只做纵向比较）；`qlmc` 的耗时是
 **它自己报的**（`now_ns()` 差，排除进程创建税），每个数字取 5 次的最小值。
+噪声 ±30% 是常态，**只有跨版本同量级才可比**。
 
 | 用例 | 源码 | 产物 | 编译（进程内，min of 5） |
 |---|---|---|---|
-| `examples/fib.qma` | 0.2 KB | 2560 B | 4.3 ms |
+| `examples/fib.qma` | 0.2 KB | 2560 B | 4.1–5.1 ms |
 | `examples/loop_sum.qma` | 0.3 KB | 2560 B | 4.8 ms |
 | `tests/selfhost/s4_agg.qma`（struct+数组+for） | 1.3 KB | 4096 B | **5.6 ms** |
 | `tests/selfhost/s5_enum.qma`（enum+match） | 1.5 KB | 3584 B | **8.9 ms** |
-| `tests/selfhost/s6_vec.qma`（vec） | 0.9 KB | 4096 B | **5.4 ms** |
+| `tests/selfhost/s6_vec.qma`（vec） | 0.9 KB | 4096 B | **5.8–6.0 ms** |
 | `tests/selfhost/s7_aggfn.qma`（聚合形参/返回） | 1.2 KB | 4096 B | **4.9 ms** |
 | `tests/selfhost/s8_map.qma`（map + 4 实参） | 0.8 KB | 7168 B | **4.9 ms** |
 | `tests/selfhost/s9_slice.qma`（切片） | 0.9 KB | 4096 B | **4.7 ms** |
 | `tests/selfhost/s10_defer.qma`（defer） | 1.0 KB | 2560 B | **4.6 ms** |
 | `tests/selfhost/s11_import.qma`（import，2 个文件） | 1.1 KB | 2560 B | **6.3 ms** |
 | `tests/selfhost/s12_ffi.qma`（@ffi 三个 API） | 0.7 KB | 2560 B | **5.7 ms** |
-| `tests/selfhost/s13_closure.qma`（闭包） | 1.1 KB | 3584 B | **4.6 ms** |
-| `tests/selfhost/s3_manyfns.qma`（200 函数） | 96 KB | 44 544 B | 16.5–19.2 ms |
+| `tests/selfhost/s13_closure.qma`（闭包） | 1.1 KB | 3584 B | **5.1 ms** |
+| `tests/selfhost/s14_vecgrow.qma`（扩容 + 别名） | 1.5 KB | 9216 B | **6.1–6.3 ms** |
+| `tests/selfhost/s3_manyfns.qma`（200 函数） | 96 KB | 44 544 B | 15.9–16.6 ms |
 | └ 其中后端阶段 | — | — | **2.5–3.4 ms（-j1）/ 1.6–2.5 ms（-j4）** |
 
-`build/qlmc.exe` 自身 824 KB（v2.17 787 KB；多出来的是 enum/match 与绑定栈），
+`build/qlmc.exe` 自身 **1268 KB**（v2.26 1180 KB，+7.4%：扩容冷路径 + 两处条件码守卫），
 由 stage-0 编出来。
+
+**`push` 的机器码代价**（v2.27 实测，用 `tools/dev/dumpasm.py` 数指令，不受噪声影响）：
+
+| 版本 | push 常见路径 | 说明 |
+|---|---|---|
+| v2.26 | ~26 条 | `[len][cap][data...]` 单块，数据基址是 `h+16` 立即数 |
+| v2.27 第一版 | ~40 条 | 为了跨扩容调用，把 len/cap/data 提前钉进帧槽（**回退掉了**） |
+| v2.27 定稿 | ~34 条 | 冷路径自包含；多出的几条是"句柄→数据指针"多一次 load（新布局固有） |
+
+编译耗时看不出差异（`fib` 4.3→4.1–5.1 ms、`s3_manyfns` 16.5–19.2→15.9–16.6 ms，
+都在噪声内），所以**不宣称加速或回退**。
 
 **生成代码质量**（v2.16 引入寄存器分配时测的，v2.17 未变）
 

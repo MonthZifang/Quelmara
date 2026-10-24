@@ -69,7 +69,7 @@
 | 性能回归门禁 | ✅ v1.88 | **`tools/dev/bench_gate.py`**：`bench/gate_bench.qma`（**Quelmara 写**，输出 `QLMBENCH`/`QLMCAL`/`QLMDIGEST`）+ 校准归一化（换机器仍可比）+ 噪声闸 + 双模式（本机基线 `--check` / CI 同机交错 A/B `--ab REV`）+ 校验和与体积硬判；CI 独立 `perf` job。边界：基线按 CPU 型号分 key（换机器 SKIP，不误判）；不做统计显著性检验（min-of-N + 离散度）；不是微架构计数器（无 cycles / 分支失败率）；`quelmara bench` 的进程墙钟口径保留，两者分工见 `05-toolchain.md` §1.3 |
 | 覆盖率 / fuzz | ✅ v1.83 | **行 + 分支覆盖**：`quelmara cov` = 调试器逐行/逐 `jcc` 断点采集 + `tools/qlm_cov.qma`（**用 Quelmara 写**，自己读 PE 节表 + `.qlmdbg` JSON）汇总；行/分支/函数/文件四级，`--min`/`--min-branch` 双门禁，`--append` 多次运行累加。分支判定用 EFLAGS 不单步；只收"目标为语句入口"的源码级分支（`assert` 失败块/越界 panic 块/`args()` 展开不计入）。**fuzz ✅**：`quelmara fuzz` = `tools/qlm_fuzz.qma`（Quelmara 写的变异器，确定性 LCG）+ `qlm_fuzz.py` 判定（built/rejected/deep/bug/slow 五分类，`bug` 退出码 1）。边界：不采条件级 MC/DC（`&&` 子条件按各自 `jcc` 自然计数）；采集靠断点，大文件线性慢；fuzz 默认只跑前端；非 UTF-8 源文件抛 `UnicodeDecodeError`（§7.11） |
 | 服务端运行时自举 | ✅ v2.12 | **IOCP reactor 从 stage-0 搬到 `std/net/reactor.qma`**（Quelmara 源码）：v1.4 起手搓的 400 行 IR（`__net_serve` / `__net_worker` / rec 池 / accept 循环）全部删除，stage-0 只留 `thread_start`（Win64 线程入口 ABI）与 `net_config`（编译期读 `[net]`）。worker 数 = `[net] io_threads`（默认物理核数），完成端口共用一个（per-reactor 实测更差，见 `06-status.md` §3.23）。分层：`std/net/reactor.qma` 仅 Windows PE（`@ffi`）/ `std/net.qma` 不含 `@ffi`（但 `tcp_*` 内建目前也只在 Windows 实现）/ `std/net/core.qma` 槽位层。边界：**仍只有 Windows**（Linux epoll/io_uring reactor 未做）；accept 在**主线程单点**（未做多 acceptor + `SO_REUSEPORT`，`[net] reuse_port` 目前是声明未用）；`max_conns` 用 `atomic_add` 计数、拒绝发生在 accept 之后（连接已被内核接受一次）。回归：主回归 + `tests/http_router_test.py`（20 项 E2E） | 服务端链路（http/ws/sse/router/reactor）100% 本语言实现；改事件循环不用再碰编译器 |
-| stage-1 编译器 | 🚧 v2.26 | **`bootstrap/qlmc/qlmc.qma`**（约 5.6 千行 Quelmara）：`.qma` -> PE32+ **全链路**，后端为三地址 IR + 两段式寄存器分配 + `cmp/jcc` 融合 + **按函数多核并行**（`-j N`，产物与线程数无关）。**子集 S12**：int/bool/str、struct、定长数组 `[N]T`、enum/match、vec[T]、map[K]V、切片 []T、defer、import、@ffi、**闭包（无捕获）**、聚合作形参/返回值、≤4 实参、`for`/`break`/`continue`、`while`、`let`/`mut`、`const`、`print`、`len`、`assert`、递归、算术/比较/短路逻辑、str 拼接与内容比较。与 stage-0 **逐字节差分**通过（`tests/qlmc_test.py`：17 组用例 + 并行确定性 2 条）。**缺**：f64、泛型、宏/反射、接口、`rc`/`Drop`、闭包的**捕获**与作形参类型、`pub` 可见性与限定调用、ffi 的 f64/结构体/变参实参、嵌套聚合字段、vec/map 扩容、聚合作容器元素、match 穷尽性检查、常量折叠 / 强度削减 / CSE、前端并行。实测数字见 `06-status.md` §3.25 |
+| stage-1 编译器 | 🚧 v2.27 | **`bootstrap/qlmc/qlmc.qma`**（约 5.7 千行 Quelmara）：`.qma` -> PE32+ **全链路**，后端为三地址 IR + 两段式寄存器分配 + `cmp/jcc` 融合 + **按函数多核并行**（`-j N`，产物与线程数无关）。**子集 S13**：int/bool/str、struct、定长数组 `[N]T`、enum/match、vec[T]（**容量可变，满了翻倍**）、map[K]V、切片 []T、defer、import、@ffi、**闭包（无捕获）**、聚合作形参/返回值、≤4 实参、`for`/`break`/`continue`、`while`、`let`/`mut`、`const`、`print`、`len`、`assert`、递归、算术/比较/短路逻辑、str 拼接与内容比较。与 stage-0 **逐字节差分**通过（`tests/qlmc_test.py`：18 组用例 + 并行确定性 2 条）。**缺**：f64、泛型、宏/反射、接口、`rc`/`Drop`、**位运算与移位（`& | ^ << >>`，自举的第一个硬阻塞：`qlmc` 编译自己的源码时第一个报错就是 `qlmc: 不认识的字符 '&' @ line 1613`，全文件二十余处）**、闭包的**捕获**与作形参类型、`pub` 可见性与限定调用、ffi 的 f64/结构体/变参实参、嵌套聚合类型与字段（`vec[vec[T]]` 见 §7.18）、聚合作容器元素、map 扩容、match 穷尽性检查、常量折叠 / 强度削减 / CSE、前端并行。实测数字见 `06-status.md` §3.25 |
 | 对拍脚本耗时 | ✅ | `irdiff` 并行后 60 s（原 5 min 41 s）；`emitdiff` 10 s 内 |
 | `version` 口径 | ✅ | `tools/stage0/qlm_cli.py` 的 `VERSION` 与最新 `docs/versions/vX.Y/` 一致（v1.24 起 1.24.0，由 `check_docs.py` 校验） |
 
@@ -536,6 +536,36 @@ r=140697867661375      ← 把 str 数据指针当 int 原样返回
 函数体第一次写帧就 AV。修法：帧 > 4 KB 时**自高向低**逐页 touch（等价 `__chkstk`；
 从低往高写会直接落在未提交页上，照样崩——顺序是关键）。修完 `r1.qma` 连跑 6 次全过，
 主回归 290 不变。
+
+### 7.18 待修：`vec[vec[T]]` 撞类型码区间（v2.27 发现，qlmc 侧）
+
+qlmc 的类型编码是"标签 + 载荷"塞进一个 int：
+
+```
+TY_VEC = 0x8000 + elem      // elem 是**完整**的 TY_* 码
+TY_MAP = 0x10000 + (K<<8) + V
+```
+
+于是 `vec[vec[int]]` 的码是 `0x8000 + 0x8000 = 0x10000`，**正好落进 `TY_MAP` 的区间**。
+症状不是崩溃，而是走错分支：
+
+```
+qlmc: map 只支持 .set(k,v) / .get(k) / .has(k) / .len()
+```
+
+`_lower_method` 里第一段判定是 `if hty >= TY_MAP && hty < TY_ARRAY`，`0x10000` 满足，
+于是 `vec[vec[int]].new(1)` 被当成 map 处理。同类风险：`vec[map[K]V]`、`vec[切片]`、
+`vec[闭包]`、`vec[enum]`、`vec[struct]` 全部会落进别的区间（后三个是"看似能用但
+`_ty_elem` 取出的 elem 值错"）。
+
+**为什么当初没暴露**：S5 起所有夹具的 vec 元素都是 `int`/`str`（码 0/2），
+`0x8000+0/2` 落在自己区间内，一路绿灯。
+
+**修法**（不要只给 `TY_VEC` 打补丁）：元素类型不能存"完整 TY 码"，要存
+**类型表下标**（`TY_VEC = 0x8000 + ti`，`ti` 是 `fc` 里的类型表项），
+让嵌套退化成一次查表。这样 `TY_MAP` 的 K/V 也该一起改成下标。
+动之前先看 `_ty_is_agg`、`_ty_elem`、`_ty_size`、`_addr_index`、`_lower_method`
+五处按区间判定的地方（教训同 `05-toolchain.md` §1.11 坑表 #19）。
 
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。

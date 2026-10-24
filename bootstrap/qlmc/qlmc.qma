@@ -1924,10 +1924,13 @@ const OP_COPY = 31     // memcpy(a, b, imm)
 const OP_ZERO = 32     // zero(a, imm)
 const OP_RETAGG = 33   // 聚合返回：memcpy([sret], a, imm)；rax = sret
 const OP_RETSRET = 34  // 兜底返回：只把 rax = sret
-const OP_ZERON = 35
+const OP_ZERON = 35    // zero(a, b)：按 b 给的**字节数**清零（动态长度）
 const OP_CALLIAT = 36  // dst = call [rip+iat[imm]]（@ffi）
 const OP_LEAFN = 37    // dst = &函数 imm（取函数地址，给闭包用）
-const OP_CALLR = 38    // dst = call [a]（a = 闭包值地址，间接调用）    // zero(a, b)：按 b 给的**字节数**清零（动态长度）
+const OP_CALLR = 38    // dst = call [a]（a = 闭包值地址，间接调用）
+// memcpy(a, b, dst)：**运行时**字节数版本。Ir 只有 4 个操作数槽，只好把
+// 字节数塞进 dst（dst 这个字段对 memcpy 没有别的含义）。vec 扩容要用。
+const OP_MEMCPYN = 39
 
 struct Ir {
     op: int
@@ -2268,6 +2271,11 @@ fn _ir_emit(fc: FnCtx, op: int, dst: int, a: int, b: int, imm: int) -> int {
     if b > 0 {
         fc.vend.set(b, i)
     }
+    // OP_MEMCPYN 把字节数放在 dst 槽里——它是**被读**的，必须算一次使用，
+    // 否则分配器会认为它的活跃区间在这条指令之前就结束，把寄存器复用掉。
+    if op == OP_MEMCPYN && dst > 0 {
+        fc.vend.set(dst, i)
+    }
     return i
 }
 
@@ -2590,14 +2598,15 @@ fn _addr_field(fc: FnCtx, base_nid: int, fname: int) -> int {
 }
 
 fn _addr_index(fc: FnCtx, base_nid: int, ix_nid: int) -> int {
-    // vec：句柄本身就是基址，数据从 +16 开始；数组：区域地址直接当下标基址
+    // vec：句柄是头块，数据指针在 [h+0]；数组：区域地址直接当下标基址
     let bty0 = _ty_of_expr(fc, base_nid)
     if bty0 >= TY_VEC && bty0 < TY_MAP {
         let h = _lower_expr(fc, base_nid)
         let i = _lower_expr(fc, ix_nid)
         _vec_check(fc, h, i)
         fc.cells.set(C_ADDRTY, bty0 - TY_VEC)
-        return _vec_elem_addr(fc, h, i)
+        let data = _vec_field(fc, h, 0)
+        return _vec_elem_addr(fc, data, i)
     }
     if bty0 >= TY_SLICE && bty0 < TY_ARRAY {
         // 切片：(ptr, len)，先查边界再用 ptr 当下标基址
@@ -2721,7 +2730,7 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
                 let h = _lower_expr(fc, nd.b)
                 let d = _vnew(fc)
                 fc.vty.set(d, TY_INT)
-                _ir_emit(fc, OP_MOV, d, _vec_field(fc, h, 0), 0, 0)
+                _ir_emit(fc, OP_MOV, d, _vec_field(fc, h, 8), 0, 0)
                 return d
             }
             let a = _lower_expr(fc, nd.b)
@@ -3733,6 +3742,13 @@ fn _emit_ir(fc: FnCtx, i: int) {
         return
     }
     if op == OP_CMP {
+        // imm 必须是 setcc 码（0x90..0x9F）。写成 jcc 码（0x8x）会发成
+        // `0F 1C` 这种**非法字节**，CPU 当多字节 NOP 执行——不报错，只是
+        // 比较结果变成"上一次的 AL"。v2.27 踩过一次，这里必须拦下。
+        if ins.imm < 0x90 || ins.imm > 0x9F {
+            eprint("qlmc: 内部错误：OP_CMP 的条件码必须是 setcc（0x90..0x9F），拿到 " + ins.imm.to_str())
+            exit(2)
+        }
         let aloc = fc.vloc.get(ins.a)
         let mut ar = RAX
         if aloc > 0 {
@@ -3761,6 +3777,11 @@ fn _emit_ir(fc: FnCtx, i: int) {
         return
     }
     if op == OP_JCMP {
+        // 同理：dst 必须是 jcc 码（0x80..0x8F）
+        if ins.dst < 0x80 || ins.dst > 0x8F {
+            eprint("qlmc: 内部错误：OP_JCMP 的条件码必须是 jcc（0x80..0x8F），拿到 " + ins.dst.to_str())
+            exit(2)
+        }
         let aloc = fc.vloc.get(ins.a)
         let mut ar = RAX
         if aloc > 0 {
@@ -3979,6 +4000,14 @@ fn _emit_ir(fc: FnCtx, i: int) {
         _to_reg(fc, RDI, ins.a)
         _to_reg(fc, RSI, ins.b)
         _mov_imm(code, RCX, ins.imm)
+        let p = _call_rel(code)
+        _addfix(fc.fixes, p, RT_MEMCPY, FK_RT)
+        return
+    }
+    if op == OP_MEMCPYN {
+        _to_reg(fc, RDI, ins.a)
+        _to_reg(fc, RSI, ins.b)
+        _to_reg(fc, RCX, ins.dst)          // 字节数（运行时）
         let p = _call_rel(code)
         _addfix(fc.fixes, p, RT_MEMCPY, FK_RT)
         return
@@ -4226,8 +4255,8 @@ fn _lower_slice(fc: FnCtx, nd: Node) -> int {
     } else if bty >= TY_VEC && bty < TY_MAP {
         let h = _lower_expr(fc, nd.a)
         elem = bty - TY_VEC
-        base = _pin(fc, _map_base(fc, h))
-        blen = _vec_field(fc, h, 0)
+        base = _pin(fc, _vec_field(fc, h, 0))     // 数据块基址
+        blen = _vec_field(fc, h, 8)
     } else if bty >= TY_ARRAY {
         elem = _ty_elem(bty)
         base = _addr_of(fc, nd.a)
@@ -4444,8 +4473,14 @@ fn _map_has(fc: FnCtx, nd: Node, h: int) -> int {
 }
 
 // ---- vec 运行时辅助（v2.19；放在文件末尾，避免扰动既有函数的代码布局）----
+//
+// v2.27：布局改成和 stage-0 一致的「头块 + 独立数据块」：
+//   [h+0]=data 指针  [h+8]=len  [h+16]=cap
+// 旧布局是 [len][cap][data...] 单块，数据紧跟在头后面，一旦扩容就必须换整块，
+// 句柄随之变化——任何别名变量（`let w = v`、vec[vec[T]] 的元素）立刻悬垂。
+// 头块独立后，扩容只改 [h+0]/[h+16]，句柄恒定，别名问题从根上消失。
 
-/// 读 vec 头字段：[h + off]（off = 0 长度 / 8 容量）
+/// 读头字段：[h + off]（off = 0 数据指针 / 8 长度 / 16 容量）
 fn _vec_field(fc: FnCtx, h: int, off: int) -> int {
     let a = _vnew(fc)
     fc.vty.set(a, TY_INT)
@@ -4458,7 +4493,7 @@ fn _vec_field(fc: FnCtx, h: int, off: int) -> int {
 
 /// 越界就 exit(1)：`jb` 是**无符号**比较，负数下标也会被拦下
 fn _vec_check(fc: FnCtx, h: int, i: int) {
-    let n = _vec_field(fc, h, 0)
+    let n = _vec_field(fc, h, 8)
     let lfail = _newlab(fc.labs)
     let lok = _newlab(fc.labs)
     _ir_emit(fc, OP_JCMP, 0x83, i, n, lfail)   // jae：i >= len 就越界
@@ -4471,47 +4506,114 @@ fn _vec_check(fc: FnCtx, h: int, i: int) {
     _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
 }
 
-/// 元素地址 = h + 16 + i*8（数据紧跟在 [len][cap] 之后）
-fn _vec_elem_addr(fc: FnCtx, h: int, i: int) -> int {
-    let base = _vnew(fc)
-    fc.vty.set(base, TY_INT)
-    _ir_emit(fc, OP_ADDRF, base, h, 0, 16)
+/// 元素地址 = data + i*8（data 是**数据块**基址，不是句柄）
+fn _vec_elem_addr(fc: FnCtx, data: int, i: int) -> int {
     let a = _vnew(fc)
     fc.vty.set(a, TY_INT)
-    _ir_emit(fc, OP_ADDRX, a, base, i, 8)
+    _ir_emit(fc, OP_ADDRX, a, data, i, 8)
     return a
 }
 
-/// vec[T].new(n)：句柄 = 堆块首地址，布局 [len][cap][data...]
+/// **冷路径**：容量翻倍、分配新数据块、搬旧数据、更新头。只改 [h+0] 与 [h+16]。
+///
+/// 这里刻意**不接收也不返回** len/cap/data——全部自己重新读一遍。原因：
+/// push 的常见路径是"还有空间"，那条路上不应该为扩容付出任何代价（v2.27 第一版
+/// 把 len/cap/data 提前钉进帧槽，push 的机器码从 26 条涨到 ~40 条）。把读+钉
+/// 全塞进冷路径后，常见路径只剩 `cmp+jl` 加一次重新读 len。
+///
+/// ncp = max(cap*2, 4)：new(0) 的容量是 0，翻倍还是 0，必须兜底成 4，
+/// 否则 push 会往 0 字节的块里写，踩下一块堆。
+fn _vec_grow_body(fc: FnCtx, h: int) {
+    let hp = _pin(fc, h)
+    let len = _pin(fc, _vec_field(fc, hp, 8))
+    let cap = _pin(fc, _vec_field(fc, hp, 16))
+    let old = _pin(fc, _vec_field(fc, hp, 0))
+    // ncp = cap*2，下限 4
+    let two = _vnew(fc)
+    fc.vty.set(two, TY_INT)
+    _ir_emit(fc, OP_CONST, two, 0, 0, 2)
+    let d2 = _vnew(fc)
+    fc.vty.set(d2, TY_INT)
+    _ir_emit(fc, OP_MUL, d2, cap, two, 0)
+    let ncp = _new_var(fc, -1, TY_INT)
+    _ir_emit(fc, OP_MOV, ncp, d2, 0, 0)
+    let four = _vnew(fc)
+    fc.vty.set(four, TY_INT)
+    _ir_emit(fc, OP_CONST, four, 0, 0, 4)
+    let lt = _vnew(fc)
+    fc.vty.set(lt, TY_INT)
+    _ir_emit(fc, OP_CMP, lt, d2, four, 0x9C)       // setl（imm 是 setcc 码，不是 jcc 码）
+    let lge = _newlab(fc.labs)
+    _ir_emit(fc, OP_JZ, 0, lt, 0, lge)
+    _ir_emit(fc, OP_MOV, ncp, four, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lge)
+    // 分配 ncp*8 字节
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    let nb = _vnew(fc)
+    fc.vty.set(nb, TY_INT)
+    _ir_emit(fc, OP_MUL, nb, ncp, eight, 0)
+    _ir_emit(fc, OP_ARG, 0, nb, 0, 0)
+    let nd = _vnew(fc)
+    fc.vty.set(nd, TY_INT)
+    _ir_emit(fc, OP_CALLRT, nd, 0, 0, RT_ALLOC)
+    let dp = _pin(fc, nd)
+    // 搬 len*8 字节（运行时长度 → OP_MEMCPYN）
+    let eight2 = _vnew(fc)
+    fc.vty.set(eight2, TY_INT)
+    _ir_emit(fc, OP_CONST, eight2, 0, 0, 8)
+    let cb = _vnew(fc)
+    fc.vty.set(cb, TY_INT)
+    _ir_emit(fc, OP_MUL, cb, len, eight2, 0)
+    _ir_emit(fc, OP_MEMCPYN, cb, dp, old, 0)
+    // 更新头
+    let a0 = _vnew(fc)
+    fc.vty.set(a0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a0, hp, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, a0, dp, 8)
+    let a2 = _vnew(fc)
+    fc.vty.set(a2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a2, hp, 0, 16)
+    _ir_emit(fc, OP_STORE, 0, a2, ncp, 8)
+}
+
+/// vec[T].new(n)：头块 24 字节 [data][len][cap] + 独立数据块 n*8
 fn _lower_vecnew(fc: FnCtx, nd: Node) -> int {
     let n = _pin(fc, _lower_expr(fc, nd.b))
+    let h = _vnew(fc)
+    fc.vty.set(h, TY_VEC + nd.a)
+    let hdr = _vnew(fc)
+    fc.vty.set(hdr, TY_INT)
+    _ir_emit(fc, OP_CONST, hdr, 0, 0, 24)
+    _ir_emit(fc, OP_ARG, 0, hdr, 0, 0)
+    _ir_emit(fc, OP_CALLRT, h, 0, 0, RT_ALLOC)
     let eight = _vnew(fc)
     fc.vty.set(eight, TY_INT)
     _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
     let bytes = _vnew(fc)
     fc.vty.set(bytes, TY_INT)
     _ir_emit(fc, OP_MUL, bytes, n, eight, 0)
-    let sixteen = _vnew(fc)
-    fc.vty.set(sixteen, TY_INT)
-    _ir_emit(fc, OP_CONST, sixteen, 0, 0, 16)
-    let total = _vnew(fc)
-    fc.vty.set(total, TY_INT)
-    _ir_emit(fc, OP_ADD, total, bytes, sixteen, 0)
-    _ir_emit(fc, OP_ARG, 0, total, 0, 0)
-    let h = _vnew(fc)
-    fc.vty.set(h, TY_VEC + nd.a)
-    _ir_emit(fc, OP_CALLRT, h, 0, 0, RT_ALLOC)
-    let z = _vnew(fc)
-    fc.vty.set(z, TY_INT)
-    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, bytes, 0, 0)
+    let data = _vnew(fc)
+    fc.vty.set(data, TY_INT)
+    _ir_emit(fc, OP_CALLRT, data, 0, 0, RT_ALLOC)
+    // 这里之后没有调用了，h / data 不用 pin（跨调用的活跃由分配器的 cp[] 兜住）
     let a0 = _vnew(fc)
     fc.vty.set(a0, TY_INT)
     _ir_emit(fc, OP_ADDRF, a0, h, 0, 0)
-    _ir_emit(fc, OP_STORE, 0, a0, z, 8)
+    _ir_emit(fc, OP_STORE, 0, a0, data, 8)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
     let a1 = _vnew(fc)
     fc.vty.set(a1, TY_INT)
     _ir_emit(fc, OP_ADDRF, a1, h, 0, 8)
-    _ir_emit(fc, OP_STORE, 0, a1, n, 8)
+    _ir_emit(fc, OP_STORE, 0, a1, z, 8)
+    let a2 = _vnew(fc)
+    fc.vty.set(a2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a2, h, 0, 16)
+    _ir_emit(fc, OP_STORE, 0, a2, n, 8)
     return h
 }
 
@@ -4550,7 +4652,7 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
     if m == "len" {
         let d = _vnew(fc)
         fc.vty.set(d, TY_INT)
-        _ir_emit(fc, OP_MOV, d, _vec_field(fc, h, 0), 0, 0)
+        _ir_emit(fc, OP_MOV, d, _vec_field(fc, h, 8), 0, 0)
         return d
     }
     if m == "push" {
@@ -4558,27 +4660,29 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
             eprint("qlmc: push 需要一个实参")
             exit(2)
         }
-        let x = _lower_expr(fc, nd.c)
-        let len = _vec_field(fc, h, 0)
-        let cap = _vec_field(fc, h, 8)
-        let lok = _newlab(fc.labs)
-        _ir_emit(fc, OP_JCMP, 0x8C, len, cap, lok)     // jl：还有空间
+        let x = _pin(fc, _lower_expr(fc, nd.c))
+        let hp = _pin(fc, h)
+        // 常见路径只要"比较一次"：满了才进冷路径（_vec_grow_body 自己重读头字段）
+        let len0 = _vec_field(fc, hp, 8)
+        let cap0 = _vec_field(fc, hp, 16)
+        let lpush = _newlab(fc.labs)
+        _ir_emit(fc, OP_JCMP, 0x8C, len0, cap0, lpush)   // jl：还有空间
+        _vec_grow_body(fc, hp)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, lpush)
+        // 扩容会换数据块，所以 len/data 在汇合点之后重新读（顺带保证不跨调用）
+        let len = _vec_field(fc, hp, 8)
+        let data = _vec_field(fc, hp, 0)
+        let addr = _vec_elem_addr(fc, data, len)
+        _ir_emit(fc, OP_STORE, 0, addr, x, 8)
         let one = _vnew(fc)
         fc.vty.set(one, TY_INT)
         _ir_emit(fc, OP_CONST, one, 0, 0, 1)
-        _ir_emit(fc, OP_EXIT, 0, one, 0, 0)
-        _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
-        let addr = _vec_elem_addr(fc, h, len)
-        _ir_emit(fc, OP_STORE, 0, addr, x, 8)
-        let one2 = _vnew(fc)
-        fc.vty.set(one2, TY_INT)
-        _ir_emit(fc, OP_CONST, one2, 0, 0, 1)
         let nl = _vnew(fc)
         fc.vty.set(nl, TY_INT)
-        _ir_emit(fc, OP_ADD, nl, len, one2, 0)
+        _ir_emit(fc, OP_ADD, nl, len, one, 0)
         let ah = _vnew(fc)
         fc.vty.set(ah, TY_INT)
-        _ir_emit(fc, OP_ADDRF, ah, h, 0, 0)
+        _ir_emit(fc, OP_ADDRF, ah, hp, 0, 8)
         _ir_emit(fc, OP_STORE, 0, ah, nl, 8)
         let d = _vnew(fc)
         fc.vty.set(d, TY_INT)
@@ -4592,7 +4696,8 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
         }
         let i = _lower_expr(fc, nd.c)
         _vec_check(fc, h, i)
-        let addr = _vec_elem_addr(fc, h, i)
+        let data = _vec_field(fc, h, 0)
+        let addr = _vec_elem_addr(fc, data, i)
         let d = _vnew(fc)
         fc.vty.set(d, et)
         _ir_emit(fc, OP_LOAD, d, addr, 0, 8)
@@ -5393,7 +5498,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S12：int/bool/str + struct/数组/enum/vec/map/切片 + defer + import + @ffi + 闭包 + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S13：int/bool/str + struct/数组/enum/vec（可扩容）/map/切片 + defer + import + @ffi + 闭包 + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
