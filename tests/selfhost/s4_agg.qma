@@ -1,0 +1,87 @@
+// s4_agg.qma —— stage-1 编译器（qlmc）子集 S3 的差分夹具（v2.17）
+//
+// 覆盖：struct（声明 / 字面量 / 字段读写 / 值语义拷贝）、定长数组
+// （字面量 / 下标读写）、for 区间循环、break / continue（含嵌套）。
+// 与 stage-0 做**逐字节差分**（stdout + 退出码），见 tests/qlmc_test.py。
+struct Point {
+    x: int
+    y: int
+}
+
+struct Acc {
+    sum: int
+    cnt: int
+}
+
+fn sum_arr(n: int) -> int {
+    let a = [10, 20, 30, 40, 50]
+    let mut s = 0
+    for i in 0..n {
+        s = s + a[i]
+    }
+    return s
+}
+
+fn main() {
+    // struct 字面量 + 字段读
+    let p = Point { x: 3, y: 4 }
+    print(p.x + p.y)
+
+    // 字段写
+    p.x = 10
+    print(p.x)
+
+    // 值语义：拷贝之后互不影响
+    let q = p
+    q.y = 99
+    print(p.y)
+    print(q.y)
+
+    // 数组：字面量 + 下标读 + 下标写
+    let a = [1, 2, 3, 4, 5]
+    print(a[0] + a[4])
+    a[2] = 30
+    print(a[2])
+    print(sum_arr(3))
+
+    // for + 累加器 struct
+    let acc = Acc { sum: 0, cnt: 0 }
+    for i in 0..10 {
+        if i % 3 == 0 {
+            continue
+        }
+        if i > 7 {
+            break
+        }
+        acc.sum = acc.sum + i
+        acc.cnt = acc.cnt + 1
+    }
+    print(acc.sum)
+    print(acc.cnt)
+
+    // 嵌套 for：内层 continue / break 只影响内层
+    let mut n = 0
+    for i in 0..4 {
+        for j in 0..4 {
+            if j == 2 {
+                continue
+            }
+            if j == 3 {
+                break
+            }
+            n = n + 1
+        }
+    }
+    print(n)
+
+    // 数组求和（for 区间由变量决定）
+    let mut total = 0
+    for i in 0..len_arr() {
+        total = total + a[i]
+    }
+    print(total)
+}
+
+fn len_arr() -> int {
+    return 5
+}

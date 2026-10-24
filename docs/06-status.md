@@ -9,7 +9,7 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=290 FAIL=0 SKIP=1**（v2.16 在当前树实测：新增 `t143_parshard`（分片并行写 / 工作线程读共享 vec / 8 参 spawn）；v2.14 口径：新增 `[9b]` stage-1 编译器差分（`tests/qlmc_test.py`，7 条）；v2.13 口径：新增 `t141_vecindex`（vec 下标六形态）+ `test_exitcode()` 三条（`exit(运行期值)` 的退出码）；v2.12 口径：新增负向夹具 `net_serve_builtin`——reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断；v2.11 那条 `.qla` 沙箱删除 FAIL 已随夹具改「就地覆盖」收口。以下为 v2.10 口径的历史记录：本版新增项 `[3j2]`：`t130_router_dispatch`（路由表 / 参数 / 404·405 / 表满）+ `http_router_test.py`（20 项真实 socket E2E）。**唯一 FAIL 是 `.qla` 目标文件用例撞沙箱的批量删除策略**（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`：一次删 `build/_qlatest` 里 62 个文件，超过 50 个的阈值），与被测逻辑无关；`cache_test` 的 `build/` 争用失败本次未复现。v2.07 记录的那条 LSP FAIL 已收口（`tests/lsp_test.py` 的容错索引段改成 `std/sse` / `std/ws`（仍解析失败）负向 + `std/http` / `std/timer`（已修好）正向，内部断言 38 → 42）。SKIP 为 WSL 交叉验证，本机被沙箱拦。此前新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
+| PE 回归（主回归） | **PASS=290 FAIL=0 SKIP=1**（v2.17 口径：qlmc 差分从 17 条扩到 19 条（新增 `s4_agg`），主回归总数不变；v2.16 口径：新增 `t143_parshard`（分片并行写 / 工作线程读共享 vec / 8 参 spawn）；v2.14 口径：新增 `[9b]` stage-1 编译器差分（`tests/qlmc_test.py`，7 条）；v2.13 口径：新增 `t141_vecindex`（vec 下标六形态）+ `test_exitcode()` 三条（`exit(运行期值)` 的退出码）；v2.12 口径：新增负向夹具 `net_serve_builtin`——reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断；v2.11 那条 `.qla` 沙箱删除 FAIL 已随夹具改「就地覆盖」收口。以下为 v2.10 口径的历史记录：本版新增项 `[3j2]`：`t130_router_dispatch`（路由表 / 参数 / 404·405 / 表满）+ `http_router_test.py`（20 项真实 socket E2E）。**唯一 FAIL 是 `.qla` 目标文件用例撞沙箱的批量删除策略**（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`：一次删 `build/_qlatest` 里 62 个文件，超过 50 个的阈值），与被测逻辑无关；`cache_test` 的 `build/` 争用失败本次未复现。v2.07 记录的那条 LSP FAIL 已收口（`tests/lsp_test.py` 的容错索引段改成 `std/sse` / `std/ws`（仍解析失败）负向 + `std/http` / `std/timer`（已修好）正向，内部断言 38 → 42）。SKIP 为 WSL 交叉验证，本机被沙箱拦。此前新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
 | 词法器对拍 | **PASS=238 FAIL=0**（241 个源文件；SKIP 3 个含 `f"..."` 插值的文件——stage-1 词法器不认 `FSTR`，v1.61 插值未移植。**闭包不再进 SKIP 名单**：`fn(x: int) -> int { ... }` 用的全是既有记号，`t126_closure` 逐记号一致（v1.95）） | `python tests/lexdiff.py` |
 | 声明级 AST 对拍 | **PASS=149 FAIL=1**（150 个源文件；唯一 FAIL 是 `tests/t115_derive.qma`——并行轨的 enum 派生让声明顺序变了、自举 parser 还没跟上，**与并发改动无关**。跳过 17 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer` / `t99_generic_struct` / `t101_bounds` / `t102_generic_impl` / `t103_generic_enum` / `t104_generic_enum_impl` / `t116_iface_multi` / `iface_rc` / `iface_rc_a64` / `t118_iface_own` / `t119_drop` / `t123_derive_enum` / `t124_macro` / `t125_refl_dyn`——自举 parser 未做 interface/impl/泛型单态化、类型约束、泛型 impl 与泛型 enum，v1.96 的 enum 派生 / token 宏 / 运行时下标反射也未移植；v1.97 把 `iface_rc_a64` 与 `t118_iface_own` 按同一口径记账，`t120_ffi` / `t115_derive` / `dpub_*` 两侧逐行一致） | `python tests/parsediff.py` |
 | 函数体 dump 对拍 | **一致 1719 / 分叉 1608 / SKIP 同步 26 / SKIP 不同步 44**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |
@@ -956,47 +956,50 @@ p50 从 1,904 → 473 µs 是 **4.0×**，与 worker 数同阶——多核确实
 降到 4–13 ms；冷路径不变（委托 stage-0，2136 ms）。失效正确性实测：`exit(7)` 改成
 `exit(8)` 后 `qlm run` 的退出码从 7 变 8，产物被重新生成。
 
-### 3.25 stage-1 编译器 `qlmc`（v2.16：IR + 线性扫描 + 按函数并行）
+### 3.25 stage-1 编译器 `qlmc`（v2.17：子集 S3）
 
-口径：本机 20 逻辑核（VBS 开着，噪声 ±50%，只做纵向比较）；`qlmc` 的耗时是
-**它自己报的**（`now_ns()` 差，排除进程创建税），每个数字取 5–7 次的最小值。
+口径：本机 20 逻辑核（VBS 开着，噪声见 §3.26，只做纵向比较）；`qlmc` 的耗时是
+**它自己报的**（`now_ns()` 差，排除进程创建税），每个数字取 5 次的最小值。
 
-**编译耗时与产物**
-
-| 用例 | 源码 | 产物（v2.15 → v2.16） | 编译（进程内，min of 5） |
+| 用例 | 源码 | 产物 | 编译（进程内，min of 5） |
 |---|---|---|---|
-| `examples/fib.qma` | 0.2 KB | 2560 B → 2560 B | 4.3 ms → **4.3 ms** |
-| `examples/loop_sum.qma` | 0.3 KB | 2560 B → 2560 B | 4.2 ms → **4.8 ms** |
-| `tests/selfhost/s3_manyfns.qma` | 96 KB / 200 函数 | 87 552 B → **44 544 B** | 15.8 ms → **16.0 ms** |
-| └ 其中后端阶段 | — | — | — → **2.86 ms（-j1）/ 1.6–2.4 ms（-j4）** |
+| `examples/fib.qma` | 0.2 KB | 2560 B | 4.3 ms |
+| `examples/loop_sum.qma` | 0.3 KB | 2560 B | 4.8 ms |
+| `tests/selfhost/s4_agg.qma`（struct+数组+for） | 1.3 KB | 4096 B | **5.6 ms** |
+| `tests/selfhost/s3_manyfns.qma`（200 函数） | 96 KB | 44 544 B | 16.5–19.2 ms |
+| └ 其中后端阶段 | — | — | **2.5–3.4 ms（-j1）/ 1.6–2.5 ms（-j4）** |
 
-`build/qlmc.exe` 自身 552 KB（比 v2.15 的 330 KB 大，多出来的是 IR / 分配器 /
-并行层），由 stage-0 编出来。
+`build/qlmc.exe` 自身 787 KB（v2.16 552 KB；多出来的是聚合、控制流与 `__zero` 例程），
+由 stage-0 编出来。
 
-**并行的扩展性**（同一份源码，只改 `-j`；产物逐字节相同）
+**生成代码质量**（v2.16 引入寄存器分配时测的，v2.17 未变）
 
-| 输入 | `-j1` | `-j2` | `-j4` | `-j8` |
-|---|---|---|---|---|
-| 200 函数（后端阶段） | 2.86 ms | 2.08 ms | **1.63 ms** | 1.97 ms |
-| 800 函数（后端阶段） | 8.95 ms | 6.63 ms | **5.94 ms** | 5.94 ms |
-
-只有 1.5–1.8×，两个原因都是结构性的：① 线程创建 ~200 µs/个是固定成本；
-② **前端（词法+语法）仍是单线程**，200 函数时占总编译时间的 80%（13 ms / 16 ms）。
-并行目前只覆盖后 20% 的流水线——这是下一版的位置。
-
-**生成代码质量**（同一份源码，两个编译器各编一份，比运行时间；min of 7，
-已扣掉 332.6 ms 的进程创建税）
-
-| 形状 | v2.15 产物 | v2.16 产物 | 净加速 |
+| 形状 | v2.15 产物 | v2.16+ 产物 | 净加速 |
 |---|---|---|---|
 | 5 个局部变量互累加 1 亿次（无除法） | 919.8 ms | **543.4 ms** | **3.2×** |
 | `loop_sum`（`% 13` 主导）2 亿次 | 2671.7 ms | 2324.1 ms | 1.17× |
 
-`loop_sum` 只涨 17% 是预期的：热点是 `idiv`（~26 周期），寄存器分配省的是访存，
-不是除法。要再快得把「除以常数」换成乘逆元（强度削减），本版没有。
+### 3.26 测量噪声到底从哪来（v2.17 实测）
 
-**"比 C 快 5 倍"**：本机没有 gcc/clang（`07-gaps.md` §4），且任何进程创建要
-~370 ms（§3.24），这条**仍未在本机测**，不下结论。
+每组 15 次，同一台机器、同一时刻：
+
+| 测量对象 | min | 中位 | max | 波动 |
+|---|---|---|---|---|
+| `python -c pass` | 949.7 ms | 1125.5 ms | 1307.9 ms | **37.7%** |
+| 裸 Quelmara exe（无 Python） | 373.7 ms | 442.9 ms | 492.9 ms | **31.9%** |
+| qlmc 进程内计时（-j1，200 函数） | 14 170 µs | 16 697 µs | 33 712 µs | **137.9%** |
+| qlmc 进程内计时（后端段 -j1） | 2415 µs | 2760 µs | 6699 µs | **177.4%** |
+
+结论：**噪声与 Python 无关**。裸 exe 的进程创建本身就波动 32%；qlmc 的进程内计时
+（不含进程创建、不含 Python）波动更大，说明是宿主（VBS/Hyper-V）在抽走 vCPU。
+唯一可靠口径是 `min of N`。
+
+**`cpu_ns()` 不可用于微秒级测量**：Windows PE 上实测两次读数差恒为 156 250 000 ns
+（≈156 ms 粒度），1M 与 200M 次循环的读数差都落在同一档。
+
+**编译期优化的一次失败尝试（已回退）**：把 `_name_id` 的 O(n²) 线性查表换成
+FNV-1a 哈希，800 函数前端 32.7 ms → 34.4 ms（无收益）。瓶颈不在查表，在词法/语法的
+分配与结构体拷贝。
 
 ## 4. 自举
 

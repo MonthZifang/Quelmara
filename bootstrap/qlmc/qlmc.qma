@@ -7,14 +7,16 @@
 //
 // ## 它不是什么（重要，别当成"自举完成"）
 //
-// 只覆盖**子集 S2**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
+// 只覆盖**子集 S3**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
 // "链路通 + 后端真"排在"语法全覆盖"前面：后端是自举的承重墙，语法是加法。
 //
-//   支持：fn（int/bool/str 形参与返回，≤4 参）、let/mut、赋值、if/else、while、
-//         return、exit、print、assert、len(str)、const（解析期内联）、
-//         算术 + - * / %、比较、&& || !（短路）、str 拼接与内容比较、递归
-//   不支持：struct/enum/match、数组、vec/map、f64、泛型、闭包、切片、defer、
-//         for、break/continue、import（多文件）、宏/反射、@ffi、接口、rc
+//   支持：fn（int/bool/str 形参与返回，≤4 参）、let/mut（可带类型标注）、赋值、
+//         if/else、while、**for 区间**、**break/continue**、return、exit、print、
+//         assert、len(str)、const（解析期内联）、算术 + - * / %、比较、
+//         && || !（短路）、str 拼接与内容比较、递归、**struct（声明/字面量/
+//         字段读写/值语义拷贝）**、**定长数组 [N]T（字面量/下标读写）**
+//   不支持：enum/match、vec/map、f64、泛型、闭包、切片、defer、import（多文件）、
+//         宏/反射、@ffi、接口、rc、struct 形参/返回值、嵌套聚合字段、聚合 print
 //
 // ## 分层（v2.16 重写了后端，前端沿用）
 //
@@ -87,6 +89,11 @@ const K_EXIT = 11
 const K_MODULE = 12
 const K_IMPORT = 13
 const K_CONST = 14
+const K_FOR = 15
+const K_IN = 16
+const K_BREAK = 17
+const K_CONTINUE = 18
+const K_STRUCT = 19
 
 // 标点 id（多字符的按"最长匹配"先行）
 const P_LPAREN = 1
@@ -113,6 +120,9 @@ const P_OR = 21
 const P_NOT = 22
 const P_ARROW = 23
 const P_DOT = 24
+const P_DOTDOT = 25
+const P_LBRACK = 26
+const P_RBRACK = 27
 
 struct Tok {
     k: int          // T_*
@@ -134,7 +144,13 @@ const E_VAR = 2
 const E_BIN = 3      // a = 运算符(P_*)，b/c = 子节点
 const E_UN = 4       // a = P_MINUS / P_NOT，b = 子节点
 const E_CALL = 5     // a = 名字 id，b/c = 实参节点（-1 = 无）
-const E_STR = 6      // a = 字符串表 id
+const E_STR = 6
+const E_FIELD = 7      // a = 基址表达式，b = 字段名 id
+const E_INDEX = 8      // a = 基址表达式，b = 下标表达式
+const E_STRUCTLIT = 9  // a = struct 序号，b = 首个 E_FINIT（nx 链）
+const E_ARRLIT = 10    // a = 首个 E_AINIT（nx 链），b = 元素个数
+const E_FINIT = 11     // a = 字段序号，b = 值
+const E_AINIT = 12     // a = 值      // a = 字符串表 id
 
 // 语句
 const S_LET = 10     // a = 名字 id，b = 初值，n = mut(0/1)，slot = 帧槽号
@@ -144,7 +160,12 @@ const S_WHILE = 13   // a = 条件，b = start，c = count
 const S_RETURN = 14  // a = 值（-1 = 无）
 const S_PRINT = 15   // a = 值
 const S_EXIT = 16    // a = 值
-const S_EXPR = 17    // a = 值
+const S_EXPR = 17
+const S_FOR = 18       // a = 循环变量名，b = lo，c = hi，n = 体
+const S_BREAK = 19
+const S_CONTINUE = 20
+const S_ASG_FIELD = 21   // a = 基址，b = 字段名 id，c = 值
+const S_ASG_INDEX = 22   // a = 基址，b = 下标，c = 值    // a = 值
 
 struct Node {
     op: int
@@ -164,6 +185,11 @@ const TY_INT = 0
 const TY_BOOL = 1
 const TY_STR = 2
 const TY_VOID = 3
+// 聚合类型编码（v2.17）：0x1000+si = struct；0x100000+(count<<8)+elem = 数组
+const TY_STRUCT = 0x1000
+const TY_ARRAY = 0x100000
+const ST_STRIDE = 18        // 每个 struct 在 stt 里占 18 字：name, nf, 8*(fname, fty)
+const MAX_FIELD = 8
 
 struct Fn {
     name: int       // 名字 id
@@ -222,6 +248,11 @@ fn _kw_id(w: str) -> int {
     if w == "module" { return K_MODULE }
     if w == "import" { return K_IMPORT }
     if w == "const" { return K_CONST }
+    if w == "for" { return K_FOR }
+    if w == "in" { return K_IN }
+    if w == "break" { return K_BREAK }
+    if w == "continue" { return K_CONTINUE }
+    if w == "struct" { return K_STRUCT }
     return 0
 }
 
@@ -331,6 +362,7 @@ fn lex(src: str, toks: vec[Tok]) -> int {
             else if two == "&&" { pid = P_AND }
             else if two == "||" { pid = P_OR }
             else if two == "->" { pid = P_ARROW }
+            else if two == ".." { pid = P_DOTDOT }
             if pid != 0 {
                 _tok(toks, T_PUNCT, pid, "", line)
                 i = i + 2
@@ -355,6 +387,8 @@ fn lex(src: str, toks: vec[Tok]) -> int {
         else if c == 62 { p1 = P_GT }
         else if c == 33 { p1 = P_NOT }
         else if c == 46 { p1 = P_DOT }
+        else if c == 91 { p1 = P_LBRACK }
+        else if c == 93 { p1 = P_RBRACK }
         if p1 == 0 {
             eprint("qlmc: 不认识的字符 '" + chr(c) + "' @ line " + line.to_str())
             exit(2)
@@ -382,6 +416,71 @@ struct P {
     fns: vec[Fn]
     cname: vec[int]     // const 名字 id
     cval: vec[int]      // const 值（本版只支持整型字面量）
+    stt: vec[int]       // struct 表：stt[0]=个数，每个 struct 占 ST_STRIDE 字
+}
+
+fn _st_base(si: int) -> int {
+    return 1 + si * ST_STRIDE
+}
+
+fn _struct_index(p: P, nid: int) -> int {
+    let n = p.stt.get(0)
+    let mut i = 0
+    while i < n {
+        if p.stt.get(_st_base(i)) == nid {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn _pnf(p: P, si: int) -> int {
+    return p.stt.get(_st_base(si) + 1)
+}
+
+fn _st_field(p: P, si: int, nid: int) -> int {
+    let nf = _pnf(p, si)
+    let mut i = 0
+    while i < nf {
+        if p.stt.get(_st_base(si) + 2 + i * 2) == nid {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/// 类型：`int|bool|str|StructName|[N]T`
+fn _type(p: P, pos: vec[int]) -> int {
+    let t = _cur(p, pos)
+    if t.k == T_PUNCT && t.n == P_LBRACK {
+        _adv(pos)
+        let n = _cur(p, pos)
+        if n.k != T_NUM {
+            _fail(p, pos, "数组长度期望整数常量")
+        }
+        _adv(pos)
+        _eat_p(p, pos, P_RBRACK)
+        let e = _type(p, pos)
+        if e >= TY_STRUCT {
+            _fail(p, pos, "本版数组元素只支持 int/bool/str")
+        }
+        return TY_ARRAY + (n.n << 8) + e
+    }
+    if t.k == T_NAME {
+        _adv(pos)
+        if t.s == "int" { return TY_INT }
+        if t.s == "bool" { return TY_BOOL }
+        if t.s == "str" { return TY_STR }
+        let si = _struct_index(p, _name_id(p, t.s))
+        if si < 0 {
+            _fail(p, pos, "未知类型 " + t.s)
+        }
+        return TY_STRUCT + si
+    }
+    _fail(p, pos, "期望类型")
+    return TY_INT
 }
 
 fn _adv(pos: vec[int]) {
@@ -460,6 +559,70 @@ fn _node(p: P, op: int, a: int, b: int, c: int) -> int {
 }
 
 // 表达式：优先级爬升。|| -> && -> 相等 -> 关系 -> 加减 -> 乘除模 -> 一元 -> 基本
+fn _set_nx(p: P, id: int, nx: int) {
+    let nd = p.nodes.get(id)
+    p.nodes.set(id, Node { op: nd.op, a: nd.a, b: nd.b, c: nd.c, n: nd.n,
+                           slot: nd.slot, ty: nd.ty, nx: nx })
+}
+
+/// 后缀：`.字段` 与 `[下标]`，可链式
+fn _postfix(p: P, pos: vec[int], base: int) -> int {
+    let mut e = base
+    while true {
+        if _is_p(p, pos, P_DOT) {
+            _adv(pos)
+            let nm = _cur(p, pos)
+            if nm.k != T_NAME {
+                _fail(p, pos, ". 后期望字段名")
+            }
+            _adv(pos)
+            e = _node(p, E_FIELD, e, _name_id(p, nm.s), -1)
+            continue
+        }
+        if _is_p(p, pos, P_LBRACK) {
+            _adv(pos)
+            let ix = _expr(p, pos)
+            _eat_p(p, pos, P_RBRACK)
+            e = _node(p, E_INDEX, e, ix, -1)
+            continue
+        }
+        break
+    }
+    return e
+}
+
+/// struct 字面量：`Name { f: e, g: e2 }`（字段名必须存在）
+fn _struct_lit(p: P, pos: vec[int], si: int) -> int {
+    _eat_p(p, pos, P_LBRACE)
+    let mut first = -1
+    let mut last = -1
+    while !_is_p(p, pos, P_RBRACE) {
+        let nm = _cur(p, pos)
+        if nm.k != T_NAME {
+            _fail(p, pos, "struct 字面量期望字段名")
+        }
+        _adv(pos)
+        _eat_p(p, pos, P_COLON)
+        let v = _expr(p, pos)
+        let fi = _st_field(p, si, _name_id(p, nm.s))
+        if fi < 0 {
+            _fail(p, pos, "struct 没有字段 " + nm.s)
+        }
+        let id = _node(p, E_FINIT, fi, v, -1)
+        if first < 0 {
+            first = id
+        } else {
+            _set_nx(p, last, id)
+        }
+        last = id
+        if _is_p(p, pos, P_COMMA) {
+            _adv(pos)
+        }
+    }
+    _eat_p(p, pos, P_RBRACE)
+    return _node(p, E_STRUCTLIT, si, first, -1)
+}
+
 fn _expr(p: P, pos: vec[int]) -> int {
     return _or_e(p, pos)
 }
@@ -548,11 +711,11 @@ fn _primary(p: P, pos: vec[int]) -> int {
     let t = _cur(p, pos)
     if t.k == T_NUM {
         _adv(pos)
-        return _node(p, E_NUM, t.n, -1, -1)
+        return _postfix(p, pos, _node(p, E_NUM, t.n, -1, -1))
     }
     if t.k == T_STR {
         _adv(pos)
-        return _node(p, E_STR, _str_id(p, t.s), -1, -1)
+        return _postfix(p, pos, _node(p, E_STR, _str_id(p, t.s), -1, -1))
     }
     if t.k == T_KW && (t.n == K_TRUE || t.n == K_FALSE) {
         _adv(pos)
@@ -560,21 +723,50 @@ fn _primary(p: P, pos: vec[int]) -> int {
         if t.n == K_TRUE {
             v = 1
         }
-        return _node(p, E_NUM, v, -1, -1)
+        return _postfix(p, pos, _node(p, E_NUM, v, -1, -1))
+    }
+    if t.k == T_PUNCT && t.n == P_LBRACK {
+        // 数组字面量 [e1, e2, ...]
+        _adv(pos)
+        let mut first = -1
+        let mut last = -1
+        let mut cnt = 0
+        while !_is_p(p, pos, P_RBRACK) {
+            let v = _expr(p, pos)
+            let id = _node(p, E_AINIT, v, -1, -1)
+            if first < 0 {
+                first = id
+            } else {
+                _set_nx(p, last, id)
+            }
+            last = id
+            cnt = cnt + 1
+            if _is_p(p, pos, P_COMMA) {
+                _adv(pos)
+            }
+        }
+        _eat_p(p, pos, P_RBRACK)
+        return _postfix(p, pos, _node(p, E_ARRLIT, first, cnt, -1))
     }
     if t.k == T_PUNCT && t.n == P_LPAREN {
         _adv(pos)
         let v = _expr(p, pos)
         _eat_p(p, pos, P_RPAREN)
-        return v
+        return _postfix(p, pos, v)
     }
     if t.k == T_NAME {
         _adv(pos)
         let nid = _name_id(p, t.s)
+        if _is_p(p, pos, P_LBRACE) {
+            let si = _struct_index(p, nid)
+            if si >= 0 {
+                return _postfix(p, pos, _struct_lit(p, pos, si))
+            }
+        }
         if !_is_p(p, pos, P_LPAREN) {
             let cv = _const_of(p, nid)
             if cv >= 0 {
-                return _node(p, E_NUM, cv, -1, -1)
+                return _postfix(p, pos, _node(p, E_NUM, cv, -1, -1))
             }
         }
         if _is_p(p, pos, P_LPAREN) {
@@ -589,9 +781,9 @@ fn _primary(p: P, pos: vec[int]) -> int {
                 }
             }
             _eat_p(p, pos, P_RPAREN)
-            return _node(p, E_CALL, nid, a0, a1)
+            return _postfix(p, pos, _node(p, E_CALL, nid, a0, a1))
         }
-        return _node(p, E_VAR, nid, -1, -1)
+        return _postfix(p, pos, _node(p, E_VAR, nid, -1, -1))
     }
     _fail(p, pos, "期望表达式")
     return -1
@@ -612,18 +804,21 @@ fn _stmt(p: P, pos: vec[int]) -> int {
         }
         _adv(pos)
         let nid = _name_id(p, nm.s)
-        if _is_p(p, pos, P_COLON) {          // 类型标注：S1 只有 64 位整数，跳过
+        let mut ty = TY_INT
+        let mut has = 0
+        if _is_p(p, pos, P_COLON) {
             _adv(pos)
-            if _cur(p, pos).k != T_NAME {
-                _fail(p, pos, "类型标注期望类型名")
-            }
-            _adv(pos)
+            ty = _type(p, pos)
+            has = 1
         }
-        _eat_p(p, pos, P_ASSIGN)
-        let v = _expr(p, pos)
-        let id = _node(p, S_LET, nid, v, -1)
-        p.nodes.set(id, Node { op: S_LET, a: nid, b: v, c: -1, n: m,
-                               slot: 0, ty: TY_INT, nx: -1 })
+        let mut init = -1
+        if _is_p(p, pos, P_ASSIGN) {
+            _adv(pos)
+            init = _expr(p, pos)
+        }
+        let id = _node(p, S_LET, nid, init, -1)
+        p.nodes.set(id, Node { op: S_LET, a: nid, b: init, c: -1, n: m,
+                               slot: has, ty: ty, nx: -1 })
         return id
     }
     if t.k == T_KW && t.n == K_IF {
@@ -638,6 +833,34 @@ fn _stmt(p: P, pos: vec[int]) -> int {
                                    n: eh, slot: 0, ty: TY_INT, nx: -1 })
         }
         return id
+    }
+    if t.k == T_KW && t.n == K_FOR {
+        _adv(pos)
+        let nm = _cur(p, pos)
+        if nm.k != T_NAME {
+            _fail(p, pos, "for 后期望循环变量名")
+        }
+        _adv(pos)
+        if !(_cur(p, pos).k == T_KW && _cur(p, pos).n == K_IN) {
+            _fail(p, pos, "for 变量后期望 in")
+        }
+        _adv(pos)
+        let lo = _expr(p, pos)
+        _eat_p(p, pos, P_DOTDOT)
+        let hi = _expr(p, pos)
+        let body = _block(p, pos)
+        let id = _node(p, S_FOR, _name_id(p, nm.s), lo, hi)
+        p.nodes.set(id, Node { op: S_FOR, a: _name_id(p, nm.s), b: lo, c: hi,
+                               n: body, slot: 0, ty: TY_INT, nx: -1 })
+        return id
+    }
+    if t.k == T_KW && t.n == K_BREAK {
+        _adv(pos)
+        return _node(p, S_BREAK, -1, -1, -1)
+    }
+    if t.k == T_KW && t.n == K_CONTINUE {
+        _adv(pos)
+        return _node(p, S_CONTINUE, -1, -1, -1)
     }
     if t.k == T_KW && t.n == K_WHILE {
         _adv(pos)
@@ -667,15 +890,23 @@ fn _stmt(p: P, pos: vec[int]) -> int {
         _eat_p(p, pos, P_RPAREN)
         return _node(p, S_EXIT, v, -1, -1)
     }
-    // 赋值（NAME = expr）或表达式语句
-    if t.k == T_NAME && _t(p, pos[0] + 1).k == T_PUNCT &&
-       _t(p, pos[0] + 1).n == P_ASSIGN {
-        let nid = _name_id(p, t.s)
-        pos.set(0, pos[0] + 2)
-        let v = _expr(p, pos)
-        return _node(p, S_ASSIGN, nid, v, -1)
-    }
+    // 表达式语句，或 `左值 = 表达式`（左值可以是 变量 / 字段 / 下标）
     let v = _expr(p, pos)
+    if _is_p(p, pos, P_ASSIGN) {
+        _adv(pos)
+        let rhs = _expr(p, pos)
+        let lv = p.nodes.get(v)
+        if lv.op == E_VAR {
+            return _node(p, S_ASSIGN, lv.a, rhs, -1)
+        }
+        if lv.op == E_FIELD {
+            return _node(p, S_ASG_FIELD, lv.a, lv.b, rhs)
+        }
+        if lv.op == E_INDEX {
+            return _node(p, S_ASG_INDEX, lv.a, lv.b, rhs)
+        }
+        _fail(p, pos, "赋值左边不是变量 / 字段 / 下标")
+    }
     return _node(p, S_EXPR, v, -1, -1)
 }
 
@@ -768,9 +999,9 @@ fn _fn(p: P, pos: vec[int]) {
 
 /// 顶层：`module x` 忽略；`import` 本版不支持；`fn` 逐个解析。
 fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
-         fns: vec[Fn], cname: vec[int], cval: vec[int]) -> int {
+         fns: vec[Fn], cname: vec[int], cval: vec[int], stt: vec[int]) -> int {
     let p = P { toks: toks, nodes: nodes, names: names, strs: strs, fns: fns,
-                cname: cname, cval: cval }
+                cname: cname, cval: cval, stt: stt }
     let pos = vec[int].new(1)
     pos.push(0)
     while _cur(p, pos).k != T_EOF {
@@ -783,6 +1014,53 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
         }
         if t.k == T_KW && t.n == K_IMPORT {
             _fail(p, pos, "import 本版不支持（单文件编译）")
+        }
+        if t.k == T_KW && t.n == K_STRUCT {
+            _adv(pos)
+            let nm = _cur(p, pos)
+            if nm.k != T_NAME {
+                _fail(p, pos, "struct 后期望名字")
+            }
+            _adv(pos)
+            let nid = _name_id(p, nm.s)
+            if _struct_index(p, nid) >= 0 {
+                _fail(p, pos, "struct 重复声明 " + nm.s)
+            }
+            let nst = p.stt.get(0)
+            // 先把表扩到 nst+1 个槽位
+            let mut k = 0
+            while k < ST_STRIDE {
+                p.stt.push(0)
+                k = k + 1
+            }
+            p.stt.set(0, nst + 1)
+            p.stt.set(_st_base(nst), nid)
+            _eat_p(p, pos, P_LBRACE)
+            let mut nf = 0
+            while !_is_p(p, pos, P_RBRACE) {
+                let fnm = _cur(p, pos)
+                if fnm.k != T_NAME {
+                    _fail(p, pos, "struct 字段名期望标识符")
+                }
+                _adv(pos)
+                _eat_p(p, pos, P_COLON)
+                let fty = _type(p, pos)
+                if fty >= TY_STRUCT {
+                    _fail(p, pos, "本版 struct 字段只支持 int/bool/str")
+                }
+                if nf >= MAX_FIELD {
+                    _fail(p, pos, "struct 字段超过 8 个")
+                }
+                p.stt.set(_st_base(nst) + 2 + nf * 2, _name_id(p, fnm.s))
+                p.stt.set(_st_base(nst) + 2 + nf * 2 + 1, fty)
+                nf = nf + 1
+                if _is_p(p, pos, P_COMMA) {
+                    _adv(pos)
+                }
+            }
+            _eat_p(p, pos, P_RBRACE)
+            p.stt.set(_st_base(nst) + 1, nf)
+            continue
         }
         if t.k == T_KW && t.n == K_FN {
             _fn(p, pos)
@@ -809,7 +1087,7 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
             p.cval.push(v.n)
             continue
         }
-        _fail(p, pos, "顶层期望 fn / const")
+        _fail(p, pos, "顶层期望 fn / const / struct")
     }
     return len(p.fns)
 }
@@ -1164,6 +1442,13 @@ const OP_LEA = 22      // dst = 字符串 imm 的地址（rip 相对）
 const OP_LEN = 23      // dst = [a - 8]（str 长度前缀）
 const OP_PARAM = 24    // dst = 第 imm 个入参寄存器（0=RCX 1=RDX 2=R8 3=R9）
 const OP_JCMP = 25     // cmp a, b；按 dst(=cc) 跳到 imm
+const OP_ADDRV = 26    // dst = &帧槽 imm（聚合变量的区域基址）
+const OP_ADDRF = 27    // dst = a + imm（字段地址）
+const OP_ADDRX = 28    // dst = a + b*8（数组元素地址）
+const OP_LOAD = 29     // dst = [a]
+const OP_STORE = 30    // [a] = b
+const OP_COPY = 31     // memcpy(a, b, imm)
+const OP_ZERO = 32     // zero(a, imm)
 
 struct Ir {
     op: int
@@ -1226,15 +1511,19 @@ struct FnCtx {
     nv: vec[int]        // [0] = 已固定到寄存器的变量数
     ep: vec[int]        // [0] = 尾声标签 id
     rt: vec[int]        // 运行库例程位置（顺序段填好后共享）
+    stt: vec[int]       // struct 表（只读，跨线程共享）
+    addrty: vec[int]    // [0] = `_addr_of` 返回地址所指向的类型
+    loops: vec[int]     // 循环栈：(continue 标签, break 标签) 成对
+    ldepth: vec[int]    // [0] = 当前循环深度
     cp: vec[int]        // 复用缓冲：调用前缀和
     rend: vec[int]      // 复用缓冲：寄存器占用到的指令
     send: vec[int]      // 复用缓冲：临时槽占用到的指令
 }
 
-const FRAME = 1024          // 帧大小（128 个 8 字节槽，变量 0..63 / 临时 64..127）
-const MAX_VAR = 64
-const SLOT_TEMP = 64
-const MAX_SLOT = 128
+const FRAME = 4096          // 帧大小（512 个 8 字节槽）
+const MAX_VAR = 64          // 变量最多占 64 个寄存器位（其余落槽）
+const SLOT_TEMP = 256       // 0..255 给变量与聚合区域；256..511 给临时值溢出
+const MAX_SLOT = 512
 
 // 运行库例程在 rt 里的槽号
 const RT_PINT = 0
@@ -1245,6 +1534,7 @@ const RT_CAT = 4
 const RT_EQ = 5
 const RT_DIE = 6
 const RT_PBOOL = 7
+const RT_ZERO = 8
 
 fn _slot_disp(slot: int) -> int {
     return -8 * (slot + 1)
@@ -1379,6 +1669,22 @@ fn _len_of(code: vec[int], dst: int, base: int) {
     _b(code, 0xF8)
 }
 
+/// lea dst, [rbp + disp32]
+fn _lea_rbp(code: vec[int], dst: int, disp: int) {
+    _rex2(code, 1, dst, RBP)
+    _b(code, 0x8D)
+    _modrm(code, 2, dst, RBP)
+    _w32(code, disp)
+}
+
+/// lea dst, [base + disp32]
+fn _lea_rm(code: vec[int], dst: int, base: int, disp: int) {
+    _rex2(code, 1, dst, base)
+    _b(code, 0x8D)
+    _modrm(code, 2, dst, base)
+    _w32(code, disp)
+}
+
 fn _push_r(code: vec[int], r: int) {
     if r >= 8 {
         _b(code, 0x41)
@@ -1409,6 +1715,7 @@ fn _fc_reset(fc: FnCtx) {
     fc.vpin.clear()
     fc.vmap.clear()
     fc.vval.clear()
+    fc.loops.clear()
     fc.cp.clear()
     fc.rend.clear()
     fc.send.clear()
@@ -1421,23 +1728,31 @@ fn _fc_reset(fc: FnCtx) {
     fc.st.set(0, 0)
     fc.nv.set(0, 0)
     fc.ep.set(0, 0)
+    fc.ldepth.set(0, 0)
 }
 
 /// 一个线程建一次，之后每个函数 `_fc_reset` 复用——并行时堆分配是争用点
-fn _new_fc(nodes: vec[Node], names: vec[str], fns: vec[Fn], rt: vec[int]) -> FnCtx {
+fn _new_fc(nodes: vec[Node], names: vec[str], fns: vec[Fn], rt: vec[int],
+           stt: vec[int]) -> FnCtx {
     let st = vec[int].new(1)
     let nv = vec[int].new(1)
     let ep = vec[int].new(1)
+    let ldepth = vec[int].new(1)
+    let addrty = vec[int].new(1)
+    addrty.push(0)
     st.push(0)
     nv.push(0)
     ep.push(0)
+    ldepth.push(0)
     let fc = FnCtx { code: vec[int].new(256), labs: vec[int].new(16),
                      fixes: vec[Fix].new(16), ir: vec[Ir].new(64),
                      nodes: nodes, names: names, fns: fns,
                      vloc: vec[int].new(32), vty: vec[int].new(32),
                      vstart: vec[int].new(32), vend: vec[int].new(32),
                      vpin: vec[int].new(32), vmap: vec[int].new(16),
-                     vval: vec[int].new(16), st: st, nv: nv, ep: ep, rt: rt,
+                     vval: vec[int].new(16), st: st, nv: nv, ep: ep,
+                     ldepth: ldepth, rt: rt, stt: stt, addrty: addrty,
+                     loops: vec[int].new(16),
                      cp: vec[int].new(64), rend: vec[int].new(4),
                      send: vec[int].new(64) }
     _fc_reset(fc)
@@ -1465,20 +1780,70 @@ fn _ir_emit(fc: FnCtx, op: int, dst: int, a: int, b: int, imm: int) -> int {
     return i
 }
 
-fn _st_slot(fc: FnCtx) -> int {
+fn _ty_is_agg(ty: int) -> bool {
+    return ty >= TY_STRUCT
+}
+
+fn _st_nf(fc: FnCtx, si: int) -> int {
+    return fc.stt.get(1 + si * ST_STRIDE + 1)
+}
+
+fn _st_field_type(fc: FnCtx, si: int, fi: int) -> int {
+    return fc.stt.get(1 + si * ST_STRIDE + 2 + fi * 2 + 1)
+}
+
+fn _st_field_idx(fc: FnCtx, si: int, nid: int) -> int {
+    let nf = _st_nf(fc, si)
+    let mut i = 0
+    while i < nf {
+        if fc.stt.get(1 + si * ST_STRIDE + 2 + i * 2) == nid {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn _ty_size(fc: FnCtx, ty: int) -> int {
+    if ty >= TY_ARRAY {
+        return ((ty - TY_ARRAY) >> 8) * 8
+    }
+    if ty >= TY_STRUCT {
+        return _st_nf(fc, ty - TY_STRUCT) * 8
+    }
+    return 8
+}
+
+fn _ty_elem(ty: int) -> int {
+    return (ty - TY_ARRAY) & 0xFF
+}
+
+fn _st_units(fc: FnCtx, n: int) -> int {
     let s = fc.st.get(0)
-    if s >= MAX_VAR {
-        eprint("qlmc: 局部变量超过 " + (MAX_VAR).to_str() + " 个")
+    if s + n > SLOT_TEMP {
+        eprint("qlmc: 局部变量/聚合超出帧（" + (SLOT_TEMP).to_str() + " 个 8 字节槽）")
         exit(2)
     }
-    fc.st.set(0, s + 1)
+    fc.st.set(0, s + n)
     return s
+}
+
+fn _st_slot(fc: FnCtx) -> int {
+    return _st_units(fc, 1)
 }
 
 fn _new_var(fc: FnCtx, nid: int, ty: int) -> int {
     let v = _vnew(fc)
     fc.vpin.set(v, 1)
     fc.vty.set(v, ty)
+    if _ty_is_agg(ty) {
+        let units = _ty_size(fc, ty) / 8
+        let u = _st_units(fc, units)
+        fc.vloc.set(v, -(u + units))
+        fc.vmap.push(nid)
+        fc.vval.push(v)
+        return v
+    }
     let n = fc.nv.get(0)
     if n < 5 {
         fc.vloc.set(v, _cs_reg(n) + 1)
@@ -1599,6 +1964,68 @@ fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
     return TY_INT
 }
 
+/// 左值取地址：变量（聚合）/ 字段 / 下标。结果 vreg 存地址，类型放 fc.addrty
+fn _addr_of(fc: FnCtx, nid: int) -> int {
+    let nd = fc.nodes.get(nid)
+    if nd.op == E_VAR {
+        let v = _var_id(fc, nd.a)
+        let loc = fc.vloc.get(v)
+        if loc >= 0 {
+            eprint("qlmc: 只有聚合变量能取地址：" + fc.names.get(nd.a))
+            exit(2)
+        }
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_ADDRV, d, 0, 0, -loc - 1)
+        fc.addrty.set(0, fc.vty.get(v))
+        return d
+    }
+    if nd.op == E_FIELD {
+        return _addr_field(fc, nd.a, nd.b)
+    }
+    if nd.op == E_INDEX {
+        return _addr_index(fc, nd.a, nd.b)
+    }
+    eprint("qlmc: 这个表达式不能取地址")
+    exit(2)
+    return 0
+}
+
+fn _addr_field(fc: FnCtx, base_nid: int, fname: int) -> int {
+    let base = _addr_of(fc, base_nid)
+    let bty = fc.addrty.get(0)
+    if bty < TY_STRUCT || bty >= TY_ARRAY {
+        eprint("qlmc: 只有 struct 有字段：" + fc.names.get(fname))
+        exit(2)
+    }
+    let si = bty - TY_STRUCT
+    let fi = _st_field_idx(fc, si, fname)
+    if fi < 0 {
+        eprint("qlmc: struct 没有字段 " + fc.names.get(fname))
+        exit(2)
+    }
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_ADDRF, d, base, 0, fi * 8)
+    fc.addrty.set(0, _st_field_type(fc, si, fi))
+    return d
+}
+
+fn _addr_index(fc: FnCtx, base_nid: int, ix_nid: int) -> int {
+    let base = _addr_of(fc, base_nid)
+    let bty = fc.addrty.get(0)
+    if bty < TY_ARRAY {
+        eprint("qlmc: 只有定长数组能下标")
+        exit(2)
+    }
+    let ix = _lower_expr(fc, ix_nid)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_ADDRX, d, base, ix, 8)
+    fc.addrty.set(0, _ty_elem(bty))
+    return d
+}
+
 fn _lower_expr(fc: FnCtx, nid: int) -> int {
     let nd = fc.nodes.get(nid)
     if nd.op == E_NUM {
@@ -1608,7 +2035,16 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         return d
     }
     if nd.op == E_VAR {
-        return _var_id(fc, nd.a)
+        let v = _var_id(fc, nd.a)
+        let ty = fc.vty.get(v)
+        if _ty_is_agg(ty) {
+            // 聚合变量的"值"是它区域的地址
+            let d = _vnew(fc)
+            fc.vty.set(d, ty)
+            _ir_emit(fc, OP_ADDRV, d, 0, 0, -fc.vloc.get(v) - 1)
+            return d
+        }
+        return v
     }
     if nd.op == E_STR {
         let d = _vnew(fc)
@@ -1727,13 +2163,130 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         fc.vty.set(d, t)
         return d
     }
+    if nd.op == E_FIELD || nd.op == E_INDEX {
+        let a = _addr_of(fc, nid)
+        let ty = fc.addrty.get(0)
+        if _ty_is_agg(ty) {
+            // 聚合值 = 它的地址（只用于赋值/初始化拷贝）
+            fc.vty.set(a, ty)
+            return a
+        }
+        let d = _vnew(fc)
+        fc.vty.set(d, ty)
+        _ir_emit(fc, OP_LOAD, d, a, 0, 8)
+        return d
+    }
+    if nd.op == E_STRUCTLIT || nd.op == E_ARRLIT {
+        eprint("qlmc: 聚合字面量只能出现在 let / 赋值 / 字段初始化里")
+        exit(2)
+    }
     eprint("qlmc: 不支持的表达式节点 " + nd.op.to_str())
     exit(2)
     return 0
 }
 
+/// 聚合目标：字面量逐字段写，其余按地址整块拷贝
+fn _lower_into_agg(fc: FnCtx, nid: int, dst: int, dty: int) {
+    let nd = fc.nodes.get(nid)
+    let loc = fc.vloc.get(dst)
+    let base_imm = -loc - 1
+    if nd.op == E_STRUCTLIT {
+        let si = dty - TY_STRUCT
+        let mut f = nd.b
+        while f >= 0 {
+            let fd = fc.nodes.get(f)
+            let fi = fd.a
+            let fty = _st_field_type(fc, si, fi)
+            if _ty_is_agg(fty) {
+                eprint("qlmc: 嵌套聚合字段本版不支持")
+                exit(2)
+            }
+            let v = _lower_expr(fc, fd.b)
+            let a0 = _vnew(fc)
+            fc.vty.set(a0, TY_INT)
+            _ir_emit(fc, OP_ADDRV, a0, 0, 0, base_imm)
+            let a1 = _vnew(fc)
+            fc.vty.set(a1, TY_INT)
+            _ir_emit(fc, OP_ADDRF, a1, a0, 0, fi * 8)
+            _ir_emit(fc, OP_STORE, 0, a1, v, 8)
+            f = fd.nx
+        }
+        return
+    }
+    if nd.op == E_ARRLIT {
+        let mut e = nd.a
+        let mut i = 0
+        while e >= 0 {
+            let en = fc.nodes.get(e)
+            let v = _lower_expr(fc, en.a)
+            let a0 = _vnew(fc)
+            fc.vty.set(a0, TY_INT)
+            _ir_emit(fc, OP_ADDRV, a0, 0, 0, base_imm)
+            let a1 = _vnew(fc)
+            fc.vty.set(a1, TY_INT)
+            _ir_emit(fc, OP_ADDRF, a1, a0, 0, i * 8)
+            _ir_emit(fc, OP_STORE, 0, a1, v, 8)
+            i = i + 1
+            e = en.nx
+        }
+        return
+    }
+    // 其余（变量 / 字段 / 下标）：整块拷贝
+    let src = _lower_expr(fc, nid)
+    let sty = fc.vty.get(src)
+    if sty != dty {
+        eprint("qlmc: 聚合赋值两侧类型不一致")
+        exit(2)
+    }
+    let a0 = _vnew(fc)
+    fc.vty.set(a0, TY_INT)
+    _ir_emit(fc, OP_ADDRV, a0, 0, 0, base_imm)
+    _ir_emit(fc, OP_COPY, 0, a0, src, _ty_size(fc, dty))
+}
+
 /// 把表达式算进一个已存在的位置（变量）。顶层是二元/一元运算时直接发射到位。
+/// 只做类型推导（不发指令）：`let q = p` 要按 p 的类型决定 q 是标量还是聚合
+fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
+    let nd = fc.nodes.get(nid)
+    if nd.op == E_VAR {
+        return fc.vty.get(_var_id(fc, nd.a))
+    }
+    if nd.op == E_FIELD {
+        let bty = _ty_of_expr(fc, nd.a)
+        if bty >= TY_STRUCT && bty < TY_ARRAY {
+            let si = bty - TY_STRUCT
+            let fi = _st_field_idx(fc, si, nd.b)
+            if fi >= 0 {
+                return _st_field_type(fc, si, fi)
+            }
+        }
+        return TY_INT
+    }
+    if nd.op == E_INDEX {
+        let bty = _ty_of_expr(fc, nd.a)
+        if bty >= TY_ARRAY {
+            return _ty_elem(bty)
+        }
+        return TY_INT
+    }
+    if nd.op == E_STRUCTLIT {
+        return TY_STRUCT + nd.a
+    }
+    if nd.op == E_ARRLIT {
+        return TY_ARRAY + (nd.b << 8) + TY_INT
+    }
+    if nd.op == E_STR {
+        return TY_STR
+    }
+    return TY_INT
+}
+
 fn _lower_into(fc: FnCtx, nid: int, dst: int) {
+    let dty = fc.vty.get(dst)
+    if _ty_is_agg(dty) {
+        _lower_into_agg(fc, nid, dst, dty)
+        return
+    }
     let nd = fc.nodes.get(nid)
     if nd.op == E_BIN && nd.a != P_AND && nd.a != P_OR {
         let r = _lower_expr(fc, nd.c)
@@ -1793,6 +2346,22 @@ fn _lower_cond(fc: FnCtx, nid: int, lab: int, if_false: int) {
     }
 }
 
+fn _loop_push(fc: FnCtx, cont: int, brk: int) {
+    let d = fc.ldepth.get(0)
+    if len(fc.loops) > d * 2 {
+        fc.loops.set(d * 2, cont)
+        fc.loops.set(d * 2 + 1, brk)
+    } else {
+        fc.loops.push(cont)
+        fc.loops.push(brk)
+    }
+    fc.ldepth.set(0, d + 1)
+}
+
+fn _loop_pop(fc: FnCtx) {
+    fc.ldepth.set(0, fc.ldepth.get(0) - 1)
+}
+
 fn _lower_block(fc: FnCtx, head: int, ep: int) {
     let mut cur = head
     while cur >= 0 {
@@ -1804,8 +2373,43 @@ fn _lower_block(fc: FnCtx, head: int, ep: int) {
 fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
     let nd = fc.nodes.get(id)
     if nd.op == S_LET {
-        let d = _new_var(fc, nd.a, TY_INT)
-        _lower_into(fc, nd.b, d)
+        let mut ty = nd.ty
+        if nd.b >= 0 && nd.slot == 0 {
+            // 无类型标注：按初值推类型（聚合要据此决定"区域"还是"寄存器"）
+            ty = _ty_of_expr(fc, nd.b)
+        }
+        let d = _new_var(fc, nd.a, ty)
+        if nd.b >= 0 {
+            _lower_into(fc, nd.b, d)
+        } else if _ty_is_agg(ty) {
+            // 无初始化：整块清零
+            let a0 = _vnew(fc)
+            fc.vty.set(a0, TY_INT)
+            _ir_emit(fc, OP_ADDRV, a0, 0, 0, -fc.vloc.get(d) - 1)
+            _ir_emit(fc, OP_ZERO, 0, a0, 0, _ty_size(fc, ty))
+        } else {
+            let z = _vnew(fc)
+            fc.vty.set(z, TY_INT)
+            _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+            _ir_emit(fc, OP_MOV, d, z, 0, 0)
+        }
+        return
+    }
+    if nd.op == S_ASG_FIELD {
+        let a = _addr_field(fc, nd.a, nd.b)
+        let fty = fc.addrty.get(0)
+        let v = _lower_expr(fc, nd.c)
+        if _ty_is_agg(fty) {
+            _ir_emit(fc, OP_COPY, 0, a, v, _ty_size(fc, fty))
+        } else {
+            _ir_emit(fc, OP_STORE, 0, a, v, 8)
+        }
+        return
+    }
+    if nd.op == S_ASG_INDEX {
+        let a = _addr_index(fc, nd.a, nd.b)
+        let v = _lower_expr(fc, nd.c)
+        _ir_emit(fc, OP_STORE, 0, a, v, 8)
         return
     }
     if nd.op == S_ASSIGN {
@@ -1829,9 +2433,51 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
         let lend = _newlab(fc.labs)
         _ir_emit(fc, OP_LAB, 0, 0, 0, ltop)
         _lower_cond(fc, nd.a, lend, 1)
+        _loop_push(fc, ltop, lend)
         _lower_block(fc, nd.b, ep)
+        _loop_pop(fc)
         _ir_emit(fc, OP_JMP, 0, 0, 0, ltop)
         _ir_emit(fc, OP_LAB, 0, 0, 0, lend)
+        return
+    }
+    if nd.op == S_FOR {
+        // 与 stage-0 同口径：上下界各求值**一次**，循环变量是隐藏的 int 变量
+        let lo = _lower_expr(fc, nd.b)
+        let hi = _lower_expr(fc, nd.c)
+        // **上界必须钉进变量**：临时值的活跃区间不跨循环回边，下一轮比较会读到
+        // 被别的临时值覆盖的寄存器（v2.17 实测：`for k in 0..3` 死循环）。
+        let hiv = _new_var(fc, -1, TY_INT)
+        _ir_emit(fc, OP_MOV, hiv, hi, 0, 0)
+        let iv = _new_var(fc, nd.a, TY_INT)
+        _ir_emit(fc, OP_MOV, iv, lo, 0, 0)
+        let ltop = _newlab(fc.labs)
+        let lcont = _newlab(fc.labs)
+        let lend = _newlab(fc.labs)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, ltop)
+        _ir_emit(fc, OP_JCMP, 0x8D, iv, hiv, lend)    // jge：i >= hi 就退出
+        _loop_push(fc, lcont, lend)
+        _lower_block(fc, nd.n, ep)
+        _loop_pop(fc)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, lcont)
+        let one = _vnew(fc)
+        fc.vty.set(one, TY_INT)
+        _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+        _ir_emit(fc, OP_ADD, iv, iv, one, 0)
+        _ir_emit(fc, OP_JMP, 0, 0, 0, ltop)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, lend)
+        return
+    }
+    if nd.op == S_BREAK || nd.op == S_CONTINUE {
+        let d = fc.ldepth.get(0)
+        if d < 1 {
+            eprint("qlmc: break / continue 不在循环里")
+            exit(2)
+        }
+        let mut l = fc.loops.get((d - 1) * 2 + 1)
+        if nd.op == S_CONTINUE {
+            l = fc.loops.get((d - 1) * 2)
+        }
+        _ir_emit(fc, OP_JMP, 0, 0, 0, l)
         return
     }
     if nd.op == S_RETURN {
@@ -1844,6 +2490,10 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
     }
     if nd.op == S_PRINT {
         let v = _lower_expr(fc, nd.a)
+        if _ty_is_agg(fc.vty.get(v)) {
+            eprint("qlmc: print 只支持 int / bool / str")
+            exit(2)
+        }
         _ir_emit(fc, OP_PRINT, 0, v, 0, fc.vty.get(v))
         return
     }
@@ -2257,6 +2907,76 @@ fn _emit_ir(fc: FnCtx, i: int) {
         _from_reg(fc, fc.vloc.get(ins.dst), _arg_reg_of(ins.imm))
         return
     }
+    if op == OP_ADDRV {
+        let dloc = fc.vloc.get(ins.dst)
+        if dloc > 0 {
+            _lea_rbp(code, dloc - 1, _slot_disp(ins.imm))
+        } else {
+            _lea_rbp(code, RAX, _slot_disp(ins.imm))
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+        }
+        return
+    }
+    if op == OP_ADDRF {
+        let aloc = fc.vloc.get(ins.a)
+        let mut ar = RAX
+        if aloc > 0 {
+            ar = aloc - 1
+        } else {
+            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
+        }
+        let dloc = fc.vloc.get(ins.dst)
+        if dloc > 0 {
+            _lea_rm(code, dloc - 1, ar, ins.imm)
+        } else {
+            _lea_rm(code, RAX, ar, ins.imm)
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+        }
+        return
+    }
+    if op == OP_ADDRX {
+        _to_reg(fc, RCX, ins.b)
+        _b(code, 0x48)                      // shl rcx, 3
+        _b(code, 0xC1)
+        _modrm(code, 3, 4, RCX)
+        _b(code, 3)
+        _to_reg(fc, RAX, ins.a)
+        _alu_rr(code, 0x01, RAX, RCX)
+        _store_rax(fc, fc.vloc.get(ins.dst))
+        return
+    }
+    if op == OP_LOAD {
+        _to_reg(fc, RAX, ins.a)
+        let dloc = fc.vloc.get(ins.dst)
+        if dloc > 0 {
+            _mov_load(code, dloc - 1, RAX, 0)
+        } else {
+            _mov_load(code, RAX, RAX, 0)
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+        }
+        return
+    }
+    if op == OP_STORE {
+        _to_reg(fc, RAX, ins.a)
+        _to_reg(fc, RCX, ins.b)
+        _mov_store(code, RAX, 0, RCX)
+        return
+    }
+    if op == OP_COPY {
+        _to_reg(fc, RDI, ins.a)
+        _to_reg(fc, RSI, ins.b)
+        _mov_imm(code, RCX, ins.imm)
+        let p = _call_rel(code)
+        _addfix(fc.fixes, p, RT_MEMCPY, FK_RT)
+        return
+    }
+    if op == OP_ZERO {
+        _to_reg(fc, RDI, ins.a)
+        _mov_imm(code, RCX, ins.imm)
+        let p = _call_rel(code)
+        _addfix(fc.fixes, p, RT_ZERO, FK_RT)
+        return
+    }
     eprint("qlmc: 内部错误：未知 IR 操作 " + op.to_str())
     exit(2)
 }
@@ -2316,6 +3036,34 @@ fn _emit_fn(fc: FnCtx) {
     _ret(code)
 }
 
+/// __zero(rdi = 地址, rcx = 字节数)：逐字节清零
+fn _gen_zero(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_ZERO, len(code))
+    let ltop = _newlab(labs)
+    let ldone = _newlab(labs)
+    _b(code, 0x48)                         // test rcx, rcx
+    _b(code, 0x85)
+    _b(code, 0xC9)
+    let p0 = _jcc(code, 0x84)
+    _addfix(ctx.fixes, p0, ldone, FK_LAB)
+    _setlab(labs, code, ltop)
+    _b(code, 0xC6)                         // mov byte [rdi], 0
+    _b(code, 0x07)
+    _b(code, 0)
+    _b(code, 0x48)                         // inc rdi
+    _b(code, 0xFF)
+    _b(code, 0xC7)
+    _b(code, 0x48)                         // dec rcx
+    _b(code, 0xFF)
+    _b(code, 0xC9)
+    let p1 = _jcc(code, 0x85)
+    _addfix(ctx.fixes, p1, ltop, FK_LAB)
+    _setlab(labs, code, ldone)
+    _ret(code)
+}
+
 // ---------------------------------------------------------------------------
 // 并行：一个工作线程编译 [lo, hi) 区间的函数
 //
@@ -2333,12 +3081,12 @@ const MAX_THREADS = 8
 const ARENA_CAP = 16 * 1024 * 1024
 
 fn _compile_range(hdr: int, wid: int, nodes: vec[Node], names: vec[str],
-                  strs: vec[str], fns: vec[Fn], rt: vec[int]) -> int {
+                  strs: vec[str], fns: vec[Fn], rt: vec[int], stt: vec[int]) -> int {
     let lo = mem_load64(hdr, wid * 8)
     let hi = mem_load64(hdr, wid * 8 + 1)
     let base = mem_load64(hdr, wid * 8 + 2)
     let cap = mem_load64(hdr, wid * 8 + 3)
-    let fc = _new_fc(nodes, names, fns, rt)
+    let fc = _new_fc(nodes, names, fns, rt, stt)
     let mut off = 0
     let mut fi = lo
     while fi < hi {
@@ -3131,7 +3879,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.3（Quelmara 写的 stage-1 编译器，子集 S2：int/bool/str；IR + 线性扫描 + 并行）")
+        print("qlmc 0.4（Quelmara 写的 stage-1 编译器，子集 S3：int/bool/str + struct/数组 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
@@ -3166,7 +3914,9 @@ fn main() {
     let fns = vec[Fn].new(8)
     let cname = vec[int].new(8)
     let cval = vec[int].new(8)
-    parse(toks, nodes, names, strs, fns, cname, cval)
+    let stt = vec[int].new(1)
+    stt.push(0)
+    parse(toks, nodes, names, strs, fns, cname, cval, stt)
 
     if cmd == "dump" {
         print("tokens   : " + len(toks).to_str())
@@ -3174,6 +3924,7 @@ fn main() {
         print("fns      : " + len(fns).to_str())
         print("names    : " + len(names).to_str())
         print("strs     : " + len(strs).to_str())
+        print("structs  : " + stt.get(0).to_str())
         return
     }
     if len(fns) < 1 {
@@ -3205,9 +3956,9 @@ fn main() {
     }
     let nl = vec[int].new(1)
     nl.push(0)
-    let rt_pos = vec[int].new(8)
+    let rt_pos = vec[int].new(9)
     si = 0
-    while si < 8 {
+    while si < 9 {
         rt_pos.push(0)
         si = si + 1
     }
@@ -3234,6 +3985,7 @@ fn main() {
     _gen_str_cat(ctx)
     _gen_str_eq(ctx)
     _gen_die(ctx)
+    _gen_zero(ctx)
     let rt_end = now_ns()
 
     // ---- 并行编译函数体 -------------------------------------------------
@@ -3252,12 +4004,12 @@ fn main() {
         w = w + 1
     }
     if nt == 1 {
-        _compile_range(arb, 0, nodes, names, strs, fns, rt_pos)
+        _compile_range(arb, 0, nodes, names, strs, fns, rt_pos, stt)
     } else {
         let hs = vec[int].new(nt)
         w = 0
         while w < nt {
-            hs.push(spawn _compile_range(arb, w, nodes, names, strs, fns, rt_pos))
+            hs.push(spawn _compile_range(arb, w, nodes, names, strs, fns, rt_pos, stt))
             w = w + 1
         }
         w = 0
@@ -3306,7 +4058,7 @@ fn main() {
     }
     write_file(out, blob)
     let t_all = (now_ns() - t0) / 1000
-    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S2)" +
+    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S3)" +
           "  编译 " + t_all.to_str() + " us（进程内）  后端 " +
           ((fn_end - rt_end) / 1000).to_str() + " us  -j" + nt.to_str())
 }

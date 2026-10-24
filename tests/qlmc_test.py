@@ -38,6 +38,7 @@ CASES = [
     ("s2_const", "tests/selfhost/s2_const.qma"),
     ("s2_assert", "tests/selfhost/s2_assert.qma"),
     ("s3_manyfns", "tests/selfhost/s3_manyfns.qma"),
+    ("s4_agg", "tests/selfhost/s4_agg.qma"),
 ]
 
 npass = 0
