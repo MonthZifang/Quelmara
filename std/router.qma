@@ -47,44 +47,181 @@ pub fn route_segs(target: str) -> vec[str] {
 /// 路径模板匹配：`/users/:id` 的 `:段` 匹配任意一段，尾部 `*` 匹配剩余（含零段）。
 /// 比较前两边都归一化（去 query、去尾斜杠）；段数不等且没有 `*` 则不匹配。
 pub fn route_match(pattern: str, path: str) -> bool {
-    let ps = route_segs(pattern)
-    let xs = route_segs(path)
-    let mut i = 0
-    while i < len(ps) {
-        let p = ps.get(i)
-        if p == "*" {
-            return true                    // 通配剩余（含零段）
-        }
-        if i >= len(xs) {
-            return false
-        }
-        if len(p) == 0 || p[0] != 58 {     // 不是 ':参数' 段 -> 逐字相等
-            if p != xs.get(i) {
-                return false
-            }
-        }
-        i = i + 1
-    }
-    return i == len(xs)
+    return route_match_bytes(mem_ptr(pattern, 0), len(pattern),
+                             mem_ptr(path, 0), len(path))
 }
 
 /// 捕获的参数（按出现顺序）；不匹配返回空 vec
 pub fn route_params(pattern: str, path: str) -> vec[str] {
     let out = vec[str].new(4)
-    if !route_match(pattern, path) {
-        return out
-    }
-    let ps = route_segs(pattern)
-    let xs = route_segs(path)
+    let pp = mem_ptr(pattern, 0)
+    let pn = len(pattern)
+    let xp = mem_ptr(path, 0)
+    let xn = len(path)
+    let n = route_param_count(pp, pn, xp, xn)
     let mut i = 0
-    while i < len(ps) {
-        let p = ps.get(i)
-        if len(p) > 0 && p[0] == 58 {
-            out.push(xs.get(i))
-        }
+    while i < n {
+        out.push(route_param_at(pp, pn, xp, xn, i))
         i = i + 1
     }
     return out
+}
+
+// ---------------------------------------------------------------------------
+// 字节级变体（v2.04）：路径字节还在连接缓冲里，不必先构造 str
+//
+// std/http 的路由派发每条请求都要匹配一次，用 str 版会把 path 拆成 vec[str]
+// （每段一次分配）。下面三个函数直接吃 (指针, 长度)，零分配；语义与 str 版
+// **逐字节等价**（`route_match` / `route_params` 已改为转调它们，只有一份实现）。
+// ---------------------------------------------------------------------------
+
+// 有效长度：截掉 `?query` / `#frag`，再去掉尾部 '/'（至少保留 1 字节）。
+// 顺序与 route_norm 一致：先截 query、再去尾 '/'；去首 '/' 由调用方做。
+fn _norm_len(buf: int, n: int) -> int {
+    let mut e = n
+    let mut i = 0
+    while i < e {
+        let c = mem_load8(buf, i)
+        if c == 63 || c == 35 {            // '?' '#'
+            e = i
+            break
+        }
+        i = i + 1
+    }
+    while e > 1 && mem_load8(buf, e - 1) == 47 {   // '/'
+        e = e - 1
+    }
+    return e
+}
+
+// 段尾：从 from 起找到下一个 '/' 或到 to 为止
+fn _seg_end(buf: int, from: int, to: int) -> int {
+    let mut i = from
+    while i < to && mem_load8(buf, i) != 47 {
+        i = i + 1
+    }
+    return i
+}
+
+// 首段起点：有前导 '/' 就跳过一个
+fn _seg_start(buf: int, n: int) -> int {
+    if n > 0 && mem_load8(buf, 0) == 47 {
+        return 1
+    }
+    return 0
+}
+
+/// 归一化后的有效长度（截掉 `?query` / `#frag`、去掉尾部 '/'）。
+/// 路由表在注册期用它把模板存成**归一化形态**，派发期用它把路径算一次。
+pub fn route_eff_len(buf: int, n: int) -> int {
+    return _norm_len(buf, n)
+}
+
+/// 归一化缓冲的段数（'/' 分隔；空缓冲 0 段；连续 '/' 会产生空段，与 str_split 一致）
+pub fn route_seg_count(buf: int, n: int) -> int {
+    if n <= 0 {
+        return 0
+    }
+    let mut c = 1
+    let mut i = 0
+    while i < n {
+        if mem_load8(buf, i) == 47 {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+/// 模板匹配的字节级版：`pat`/`path` 是 (数据指针, 字节长度)。
+/// 归一化（query / fragment / 首尾斜杠）与 `route_match` 完全一致。
+pub fn route_match_bytes(pat: int, pat_len: int, path: int, path_len: int) -> bool {
+    let pl = _norm_len(pat, pat_len)
+    let xl = _norm_len(path, path_len)
+    let ps = _seg_start(pat, pl)
+    let xs = _seg_start(path, xl)
+    return route_match_norm(pat + ps, pl - ps, path + xs, xl - xs)
+}
+
+/// 已归一化输入的匹配（两边都去过 query / 首尾斜杠）：纯逐段走，不再扫归一化。
+/// 路由表在注册期就把模板存成归一化形态、派发期把路径归一化一次，热路径走这里。
+pub fn route_match_norm(pat: int, pat_len: int, path: int, path_len: int) -> bool {
+    let mut pi = 0
+    let mut xi = 0
+    while pi < pat_len {
+        let pe = _seg_end(pat, pi, pat_len)
+        if pe - pi == 1 && mem_load8(pat, pi) == 42 {    // '*'
+            return true                                  // 通配剩余（含零段）
+        }
+        if xi >= path_len {
+            return false                                 // 路径段数不够
+        }
+        let xe = _seg_end(path, xi, path_len)
+        if mem_load8(pat, pi) != 58 {                    // 不是 ':' 段 -> 逐字节相等
+            if pe - pi != xe - xi {
+                return false
+            }
+            if mem_diff(pat + pi, path + xi, pe - pi) != pe - pi {
+                return false
+            }
+        }
+        pi = pe + 1
+        xi = xe + 1
+    }
+    return xi >= path_len
+}
+
+/// 第 idx 个 `:参数` 捕获（不匹配或越界返回 ""）。零分配匹配、只拷贝那一段。
+pub fn route_param_at(pat: int, pat_len: int, path: int, path_len: int,
+                      idx: int) -> str {
+    if idx < 0 || !route_match_bytes(pat, pat_len, path, path_len) {
+        return ""
+    }
+    let pl = _norm_len(pat, pat_len)
+    let xl = _norm_len(path, path_len)
+    let mut pi = _seg_start(pat, pl)
+    let mut xi = _seg_start(path, xl)
+    let mut seen = 0
+    while pi < pl {
+        let pe = _seg_end(pat, pi, pl)
+        if pe - pi == 1 && mem_load8(pat, pi) == 42 {    // '*'
+            break
+        }
+        if xi >= xl {
+            break
+        }
+        let xe = _seg_end(path, xi, xl)
+        if mem_load8(pat, pi) == 58 {                    // ':' 段
+            if seen == idx {
+                return mem_str(path + xi, xe - xi)
+            }
+            seen = seen + 1
+        }
+        pi = pe + 1
+        xi = xe + 1
+    }
+    return ""
+}
+
+/// `:参数` 段个数（不匹配返回 0）
+pub fn route_param_count(pat: int, pat_len: int, path: int, path_len: int) -> int {
+    if !route_match_bytes(pat, pat_len, path, path_len) {
+        return 0
+    }
+    let pl = _norm_len(pat, pat_len)
+    let mut pi = _seg_start(pat, pl)
+    let mut n = 0
+    while pi < pl {
+        let pe = _seg_end(pat, pi, pl)
+        if pe - pi == 1 && mem_load8(pat, pi) == 42 {    // '*'
+            break
+        }
+        if mem_load8(pat, pi) == 58 {
+            n = n + 1
+        }
+        pi = pe + 1
+    }
+    return n
 }
 
 /// "GET,POST" 里是否允许 method（HTTP 方法区分大小写，按原样比）

@@ -5,7 +5,9 @@
 // 解析是单遍字节扫描（mem_load8 内联，无 strlen、无 str 拼接热路径）。
 // 响应一次性组包，单个 conn_send 发出。
 //
-// 用法（handler 传函数名，经 callr 间接调用）：
+// ## 两种用法
+//
+// 1) 单回调（v1.6 起）：handler 自己比路径
 //
 //   import std.http
 //
@@ -23,6 +25,18 @@
 //       http_serve(8080, 512, route)       // 阻塞运行
 //   }
 //
+// 2) 路由表 + 中间件（v2.04）：把 http_dispatch 当 handler 传进去
+//
+//   fn main() {
+//       http_use(log_mw)                   // 注册顺序 = 执行顺序
+//       http_use(auth_mw)
+//       http_route("GET", "/users/:id", user_get)
+//       http_route("GET", "/files/*", files)
+//       http_serve(8080, 512, http_dispatch)
+//   }
+//
+//   handler 里用 http_param(fd, 0) 取 `:id`、http_query(fd) 取 query 串。
+//
 // 支持：keep-alive、流水线（一个缓冲里多个请求依次派发）、
 // Content-Length 请求体、Connection: close、头部增量解析。
 // 明确 fail-fast：Transfer-Encoding: chunked -> 501；头部超限 -> 431；
@@ -33,9 +47,14 @@
 //   w7/w8   方法偏移/长度       w9/w10 路径偏移/长度
 //   w11/w12 头块偏移/长度       w13/w14 体偏移/长度（=Content-Length）
 //   w15 头部扫描位置（\r\n\r\n 增量搜索）
+//
+// 进程级静态字：static_word(0) = 连接状态块，static_word(1) = 解析失败码，
+// static_word(2) = 路由/中间件表（见文件末「路由 + 中间件」一节）。
 
 import std.mem
 import std.net.core
+import std.net.reactor
+import std.router
 import std.str
 import std.gzip
 
@@ -67,39 +86,47 @@ const HTTP_DEFAULT_CONNS = 100000 // 十万连接档（可由 http_serve_max 覆
 // 服务入口
 // ---------------------------------------------------------------------------
 
-fn http_serve(port: int, backlog: int, on_request: int) -> int {
+/// 阻塞运行 HTTP 服务：`backlog` 是监听队列长度，`on_request` 是
+/// `fn(fd: int) -> int` 的裸函数名（返回 0 = 响应后关连接，1 = 按 keep-alive 继续）。
+/// 十万连接档的槽位在启动时一次预分配（640 B/连接）。
+pub fn http_serve(port: int, backlog: int, on_request: int) -> int {
     return http_serve_max(port, backlog, on_request, HTTP_DEFAULT_CONNS)
 }
 
-// max_conns 可调版：槽位层按 max_conns 预分配定长槽位
-// （640 B/连接 × max_conns，十万连接 = 64 MB 常驻，无 GC、无停顿）。
-fn http_serve_max(port: int, backlog: int, on_request: int,
-                  max_conns: int) -> int {
+/// 可调连接上限版：槽位层按 `max_conns` 预分配定长槽位
+/// （640 B/连接 × max_conns，十万连接 = 64 MB 常驻，无 GC、无停顿）。
+/// 超过上限的新连接被直接拒绝（fail-fast，不静默膨胀）。
+pub fn http_serve_max(port: int, backlog: int, on_request: int,
+                      max_conns: int) -> int {
     let st = conn_state_new(max_conns, 80)
-    mem_store64(st, ST_H0, on_request)          // 用户 handler
+    conn_set_h0(st, on_request)                 // 用户 handler
     mem_store64(static_word(0), 0, st)          // 回调通道：进程级状态指针
     return net_serve(port, backlog, http_on_connect, http_on_data,
                      http_on_close)
 }
 
-// 统计直通（core.qma 的计数器，监控用）
-fn http_accepted() -> int {
+/// 累计 accept 的连接数
+pub fn http_accepted() -> int {
     return conn_accepted(_st())
 }
 
-fn http_closed() -> int {
+/// 累计关闭的连接数
+pub fn http_closed() -> int {
     return conn_closed(_st())
 }
 
-fn http_reqs() -> int {
+/// 累计派发给 handler 的请求数
+pub fn http_reqs() -> int {
     return conn_msgs(_st())
 }
 
-fn http_bytes_in() -> int {
+/// 累计收到的字节数
+pub fn http_bytes_in() -> int {
     return conn_bytes_in(_st())
 }
 
-fn http_bytes_out() -> int {
+/// 累计发出的字节数
+pub fn http_bytes_out() -> int {
     return conn_bytes_out(_st())
 }
 
@@ -142,7 +169,7 @@ fn http_on_data(fd: int, data: str) -> int {
     // 解析-派发循环：一次 on_data 可能带 0 个、1 个或多个完整请求（流水线）
     while true {
         let buf = conn_buf_ptr(p)
-        let n = mem_load64(p, SLOT_RECVLEN)
+        let n = conn_recvlen(p)
         let state = mem_load64(p, HP_STATE) & 255
         if state == HP_ST_HDR {
             // 增量搜索 \r\n\r\n（扫描位置跨 on_data 持久，整请求只扫一遍）
@@ -175,11 +202,11 @@ fn http_on_data(fd: int, data: str) -> int {
             return 1
         }
         // 派发：callr 间接调用用户 handler
-        mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
-        let h = mem_load64(st, ST_H0)
-        let rc = h(fd)
+        conn_msg_inc(st)
+        let h = conn_h0(st)
+        let code = h(fd)                        // 注意：rc 是关键字（rc[T]），别用作变量名
         let flags = mem_load64(p, HP_STATE)
-        if rc == 0 || (flags & HP_F_CLOSE) != 0 {
+        if code == 0 || (flags & HP_F_CLOSE) != 0 {
             return 0                            // handler 要求关 / Connection: close
         }
         // keep-alive：把剩余半包搬到缓冲头，继续解析下一个请求
@@ -380,6 +407,29 @@ fn _hdr_num(buf: int, from: int, to: int) -> int {
     return v
 }
 
+// 头块值区取原样字符串（只去首尾空格；http_header 用这个，值的大小写有意义：
+// Authorization / Cookie / ETag 都不能被折叠）
+fn _hdr_val_raw(buf: int, from: int, to: int) -> str {
+    let mut a = from
+    while a < to && (mem_load8(buf, a) == 32 || mem_load8(buf, a) == 9) {
+        a += 1
+    }
+    let mut b = to
+    while b > a && (mem_load8(buf, b - 1) == 32 || mem_load8(buf, b - 1) == 9) {
+        b -= 1
+    }
+    if a == b {
+        return ""
+    }
+    let tmp = mem_alloc(b - a + 1)
+    let mut i = a
+    while i < b {
+        mem_store8(tmp, i - a, mem_load8(buf, i))
+        i += 1
+    }
+    return mem_str(tmp, b - a)
+}
+
 // 头块值区取小写字符串（connection 值比较用）
 fn _hdr_val_str(buf: int, from: int, to: int) -> str {
     let mut a = from
@@ -407,7 +457,8 @@ fn _hdr_val_str(buf: int, from: int, to: int) -> str {
 // 请求访问器（handler 内用；数据就在连接槽位里，mem_str 只拷一次）
 // ---------------------------------------------------------------------------
 
-fn http_method(fd: int) -> str {
+/// 请求方法（"GET" / "POST" …）
+pub fn http_method(fd: int) -> str {
     let p = conn_slot(_st(), fd)
     if p == 0 {
         return ""
@@ -416,7 +467,8 @@ fn http_method(fd: int) -> str {
     return mem_str(buf + mem_load64(p, HP_MOFF), mem_load64(p, HP_MLEN))
 }
 
-fn http_path(fd: int) -> str {
+/// 请求目标原样（含 query 串；归一化请用 std.router 的 route_norm）
+pub fn http_path(fd: int) -> str {
     let p = conn_slot(_st(), fd)
     if p == 0 {
         return ""
@@ -425,8 +477,35 @@ fn http_path(fd: int) -> str {
     return mem_str(buf + mem_load64(p, HP_POFF), mem_load64(p, HP_PLEN))
 }
 
-// 零拷贝体访问（大请求体：拿到指针直接读，不构造 str）
-fn http_body_ptr(fd: int) -> int {
+/// `?` 之后的 query 串（到 `#` 或行尾为止；没有 query 返回 ""）
+pub fn http_query(fd: int) -> str {
+    let p = conn_slot(_st(), fd)
+    if p == 0 {
+        return ""
+    }
+    let buf = conn_buf_ptr(p)
+    let xp = buf + mem_load64(p, HP_POFF)
+    let xl = mem_load64(p, HP_PLEN)
+    let mut i = 0
+    while i < xl {
+        let c = mem_load8(xp, i)
+        if c == 63 {                            // '?'
+            let mut e = i + 1
+            while e < xl && mem_load8(xp, e) != 35 {    // '#'
+                e += 1
+            }
+            return mem_str(xp + i + 1, e - i - 1)
+        }
+        if c == 35 {
+            return ""
+        }
+        i += 1
+    }
+    return ""
+}
+
+/// 零拷贝体访问（大请求体：拿到指针直接读，不构造 str）
+pub fn http_body_ptr(fd: int) -> int {
     let p = conn_slot(_st(), fd)
     if p == 0 {
         return 0
@@ -434,7 +513,8 @@ fn http_body_ptr(fd: int) -> int {
     return conn_buf_ptr(p) + mem_load64(p, HP_BOFF)
 }
 
-fn http_body_len(fd: int) -> int {
+/// 请求体长度（= Content-Length；无体为 0）
+pub fn http_body_len(fd: int) -> int {
     let p = conn_slot(_st(), fd)
     if p == 0 {
         return 0
@@ -442,7 +522,8 @@ fn http_body_len(fd: int) -> int {
     return mem_load64(p, HP_BLEN)
 }
 
-fn http_body(fd: int) -> str {
+/// 请求体（拷成一个 str；大请求体用 http_body_ptr + http_body_len）
+pub fn http_body(fd: int) -> str {
     let n = http_body_len(fd)
     if n == 0 {
         return ""
@@ -450,8 +531,8 @@ fn http_body(fd: int) -> str {
     return mem_str(http_body_ptr(fd), n)
 }
 
-// 按名找请求头（name 传小写；比较大小写无关）。没有返回 ""。
-fn http_header(fd: int, name: str) -> str {
+/// 按名找请求头（name 传小写；比较大小写无关）。没有返回 ""。
+pub fn http_header(fd: int, name: str) -> str {
     let p = conn_slot(_st(), fd)
     if p == 0 {
         return ""
@@ -470,15 +551,15 @@ fn http_header(fd: int, name: str) -> str {
             c += 1
         }
         if c < e && _ci_bytes(buf, i, c - i, name) == 1 {
-            return _hdr_val_str(buf, c + 1, e)
+            return _hdr_val_raw(buf, c + 1, e)
         }
         i = e + 2
     }
     return ""
 }
 
-// handler 强制本连接响应后关闭（不等对端 Connection 头）
-fn http_set_close(fd: int) -> int {
+/// 强制本连接在本次响应后关闭（不等对端 Connection 头）
+pub fn http_set_close(fd: int) -> int {
     let p = conn_slot(_st(), fd)
     if p == 0 {
         return 0
@@ -492,7 +573,8 @@ fn http_set_close(fd: int) -> int {
 // 响应构造
 // ---------------------------------------------------------------------------
 
-fn http_reason(status: int) -> str {
+/// 状态码 → 原因短语（未收录的返回 "Unknown"）
+pub fn http_reason(status: int) -> str {
     if status == 200 {
         return "OK"
     }
@@ -514,6 +596,9 @@ fn http_reason(status: int) -> str {
     if status == 400 {
         return "Bad Request"
     }
+    if status == 401 {
+        return "Unauthorized"
+    }
     if status == 403 {
         return "Forbidden"
     }
@@ -528,6 +613,9 @@ fn http_reason(status: int) -> str {
     }
     if status == 426 {
         return "Upgrade Required"
+    }
+    if status == 429 {
+        return "Too Many Requests"
     }
     if status == 431 {
         return "Request Header Fields Too Large"
@@ -544,10 +632,10 @@ fn http_reason(status: int) -> str {
     return "Unknown"
 }
 
-// 标准响应：状态行 + Content-Type/Length + Connection + 体，一次组包一次 send。
-// extra_headers 传 "" 表示没有；要附加自定义头时每行自带 \r\n。
-fn http_respond_ext(fd: int, status: int, ctype: str, extra: str,
-                    body: str) -> int {
+/// 标准响应：状态行 + Content-Type/Length + Connection + 体，一次组包一次 send。
+/// `extra` 传 "" 表示没有附加头；要附加时每行自带 \r\n。
+pub fn http_respond_ext(fd: int, status: int, ctype: str, extra: str,
+                        body: str) -> int {
     let st = _st()
     let mut conn = "keep-alive"
     let p = conn_slot(st, fd)
@@ -563,30 +651,34 @@ fn http_respond_ext(fd: int, status: int, ctype: str, extra: str,
     return 0
 }
 
-fn http_respond(fd: int, status: int, ctype: str, body: str) -> int {
+/// 标准响应（无附加头）
+pub fn http_respond(fd: int, status: int, ctype: str, body: str) -> int {
     return http_respond_ext(fd, status, ctype, "", body)
 }
 
-// 响应后立即关闭（SSE 场景之外少用；force close 不看对端头）
-fn http_respond_close(fd: int, status: int, ctype: str, body: str) -> int {
+/// 响应后立即关闭（force close 不看对端头）
+pub fn http_respond_close(fd: int, status: int, ctype: str, body: str) -> int {
     http_set_close(fd)
     return http_respond(fd, status, ctype, body)
 }
 
-fn http_text(fd: int, status: int, body: str) -> int {
+/// text/plain; charset=utf-8 响应
+pub fn http_text(fd: int, status: int, body: str) -> int {
     return http_respond(fd, status, "text/plain; charset=utf-8", body)
 }
 
-fn http_html(fd: int, status: int, body: str) -> int {
+/// text/html; charset=utf-8 响应
+pub fn http_html(fd: int, status: int, body: str) -> int {
     return http_respond(fd, status, "text/html; charset=utf-8", body)
 }
 
-fn http_json(fd: int, status: int, body: str) -> int {
+/// application/json 响应
+pub fn http_json(fd: int, status: int, body: str) -> int {
     return http_respond(fd, status, "application/json", body)
 }
 
-// 供库内解析失败路径用（此时槽位协议字未就绪，直接组包发送）
-fn http_respond_raw(fd: int, status: int, extra: str, body: str) -> int {
+/// 供库内解析失败路径用（此时槽位协议字未就绪，直接组包发送并关连接）
+pub fn http_respond_raw(fd: int, status: int, extra: str, body: str) -> int {
     let head = "HTTP/1.1 " + (status).to_str() + " " + http_reason(status)
                + "\r\nContent-Type: text/plain; charset=utf-8"
                + "\r\nContent-Length: " + len(body).to_str()
@@ -602,7 +694,8 @@ fn http_respond_raw(fd: int, status: int, extra: str, body: str) -> int {
 //   * Vary: Accept-Encoding 必须带，缓存/CDN 才不会串味。
 // ---------------------------------------------------------------------------
 
-fn http_accepts_gzip(fd: int) -> bool {
+/// 客户端是否接受 gzip（看 Accept-Encoding）
+pub fn http_accepts_gzip(fd: int) -> bool {
     let v = http_header(fd, "accept-encoding")
     if len(v) == 0 {
         return false
@@ -610,33 +703,383 @@ fn http_accepts_gzip(fd: int) -> bool {
     return str_contains(str_lower(v), "gzip")
 }
 
-fn http_respond_gzip(fd: int, status: int, ctype: str, body: str) -> int {
+/// 强制 gzip 响应（带 Content-Encoding 与 Vary）
+pub fn http_respond_gzip(fd: int, status: int, ctype: str, body: str) -> int {
     let gz = gzip_encode(body)
     return http_respond_ext(fd, status, ctype,
                             "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n",
                             gz)
 }
 
-// 自动协商版：客户端支持且体足够大才压，否则原样发。
-fn http_respond_auto(fd: int, status: int, ctype: str, body: str) -> int {
+/// 自动协商：客户端支持且体 ≥256 字节才压，否则原样发
+pub fn http_respond_auto(fd: int, status: int, ctype: str, body: str) -> int {
     if len(body) >= 256 && http_accepts_gzip(fd) {
         return http_respond_gzip(fd, status, ctype, body)
     }
     return http_respond(fd, status, ctype, body)
 }
 
-fn http_json_auto(fd: int, status: int, body: str) -> int {
+/// JSON + 自动 gzip 协商
+pub fn http_json_auto(fd: int, status: int, body: str) -> int {
     return http_respond_auto(fd, status, "application/json", body)
 }
 
-fn http_html_auto(fd: int, status: int, body: str) -> int {
+/// HTML + 自动 gzip 协商
+pub fn http_html_auto(fd: int, status: int, body: str) -> int {
     return http_respond_auto(fd, status, "text/html; charset=utf-8", body)
 }
 
-fn http_not_found(fd: int) -> int {
+/// 404 响应（text/plain）
+pub fn http_not_found(fd: int) -> int {
     return http_text(fd, 404, "not found\n")
 }
 
-fn http_method_not_allowed(fd: int) -> int {
+/// 405 响应（text/plain）
+pub fn http_method_not_allowed(fd: int) -> int {
     return http_text(fd, 405, "method not allowed\n")
+}
+
+// ---------------------------------------------------------------------------
+// 路由 + 中间件（v2.04）
+//
+// 约束：reactor 的回调只传 (fd, data)，没有 user-data 通道；handler 必须是
+// **裸函数名**（`callr` 间接调用），闭包（两字聚合）传不进去。所以路由表与
+// 中间件链放在进程级静态字 static_word(2) 指向的预分配表里，注册在
+// `http_serve` **之前**完成（单线程，不加锁）。
+//
+// 表布局（字）：
+//   w0 路由条数 n        w1 条目容量（RT_MAX = 64，固定）
+//   w2 中间件条数 m      w3 中间件容量（RT_MW_MAX = 16，固定）
+//   w4 条目区指针        w5 字节区指针
+//   w6..w21 中间件槽（每槽 1 字 = 函数地址）
+// 条目（8 字 = 64 B）：[方法指针][方法长度][模板指针][模板长度][handler][0][0][0]
+// 字节区（每条目 144 B）：方法 ≤15 字节 + 模板 ≤127 字节。注册时把字节**拷进
+//   表里**（调用方的 str 随作用域释放，只存指针会读到野内存）。
+//
+// 匹配零拷贝：路径字节还在连接缓冲里，直接喂 std.router 的 route_match_bytes；
+// `:id` 的值由 http_param(fd, i) 现取（重匹配一次，不占槽位、不存每连接状态）。
+//
+// 返回约定：
+//   * 中间件 `fn(fd) -> int`：1 = 继续下一个，0 = 终止链路（视为已响应）。
+//   * handler `fn(fd) -> int`：返回值**忽略**；要关连接就调 http_set_close。
+//     （单回调模式 http_serve 的 1/0 语义不变，那是另一条路径。）
+// ---------------------------------------------------------------------------
+
+const RT_W = 2                  // static_word(2) = 路由/中间件表
+const RT_N = 0
+const RT_CAP = 1
+const RT_MWN = 2
+const RT_MWMAX = 3
+const RT_ENT = 4
+const RT_BYT = 5
+const RT_MW = 6
+const RT_HDR_B = 176            // 表头 22 字
+const RT_ENTRY_B = 64           // 每条目 8 字
+const RT_BYTES_PER = 144        // 方法 16 B + 模板 128 B
+const RT_MAX = 64
+const RT_MW_MAX = 16
+const RT_METHOD_MAX = 15
+const RT_PATTERN_MAX = 127
+
+// 取（必要时建）路由表块；create=0 时不建，返回 0 表示还没注册过
+fn _rt(create: int) -> int {
+    let w = static_word(RT_W)
+    let t = mem_load64(w, 0)
+    if t != 0 || create == 0 {
+        return t
+    }
+    let t2 = mem_alloc(RT_HDR_B)
+    mem_zero(t2, RT_HDR_B)
+    let ent = mem_alloc(RT_MAX * RT_ENTRY_B)
+    mem_zero(ent, RT_MAX * RT_ENTRY_B)
+    let byt = mem_alloc(RT_MAX * RT_BYTES_PER)
+    mem_zero(byt, RT_MAX * RT_BYTES_PER)
+    mem_store64(t2, RT_CAP, RT_MAX)
+    mem_store64(t2, RT_MWMAX, RT_MW_MAX)
+    mem_store64(t2, RT_ENT, ent)
+    mem_store64(t2, RT_BYT, byt)
+    mem_store64(w, 0, t2)
+    return t2
+}
+
+/// 清空路由表与中间件链（只清计数，不释放内存；测试与「重载配置」用）
+pub fn http_routes_reset() -> int {
+    let t = _rt(1)
+    mem_store64(t, RT_N, 0)
+    mem_store64(t, RT_MWN, 0)
+    return 0
+}
+
+/// 注册一条路由：`method` 传 "GET"/"POST"…，`"*"` 或 "" 表示任意方法；
+/// `pattern` 见 std.router（`/users/:id`、尾部 `*`）；`handler` 是裸函数名。
+/// 返回条目下标；表满返回 -1，方法/模板超长返回 -2（模板 ≤127 字节）。
+pub fn http_route(method: str, pattern: str, handler: int) -> int {
+    let t = _rt(1)
+    let n = mem_load64(t, RT_N)
+    if n >= mem_load64(t, RT_CAP) {
+        return -1
+    }
+    let ml = len(method)
+    let pl = len(pattern)
+    if ml > RT_METHOD_MAX || pl > RT_PATTERN_MAX {
+        return -2
+    }
+    let ent = mem_load64(t, RT_ENT) + n * RT_ENTRY_B
+    let byt = mem_load64(t, RT_BYT) + n * RT_BYTES_PER
+    if ml > 0 {
+        mem_copy(byt, mem_ptr(method, 0), ml)
+    }
+    mem_store8(byt, ml, 0)
+    if pl > 0 {
+        mem_copy(byt + 16, mem_ptr(pattern, 0), pl)
+    }
+    mem_store8(byt, 16 + pl, 0)
+    // 模板按**归一化形态**入库（去 query/尾斜杠/首个 '/'）：字面段路由在派发期
+    // 只需一次长度比较 + mem_diff，不必走逐段扫描。
+    let pn = route_eff_len(mem_ptr(pattern, 0), pl)
+    let mut ps = 0
+    if pn > 0 && mem_load8(mem_ptr(pattern, 0), 0) == 47 {
+        ps = 1
+    }
+    let norm_len = pn - ps
+    let pptr = byt + 16 + ps
+    // 特征位：bit0 = 含 ':' 段，bit1 = 含 '*'；顺带数出段数（段数不符可提前排除）
+    let mut flags = 0
+    let mut segs = 1
+    let mut i = 0
+    while i < norm_len {
+        let c = mem_load8(pptr, i)
+        if c == 58 {
+            flags |= 1
+        }
+        if c == 42 {
+            flags |= 2
+        }
+        if c == 47 {
+            segs += 1
+        }
+        i += 1
+    }
+    if norm_len == 0 {
+        segs = 0
+    }
+    // 字面前缀长度（到第一个 ':' 或 '*' 为止）：派发期先用 mem_diff 过滤，
+    // 大多数不匹配的路由一次比较就被排除。含 '*' 时不用它（'*' 能吃零段）。
+    let mut prefix = norm_len
+    let mut j = 0
+    while j < norm_len {
+        let c = mem_load8(pptr, j)
+        if c == 58 || c == 42 {
+            prefix = j
+            break
+        }
+        j += 1
+    }
+    mem_store64(ent, 0, byt)
+    mem_store64(ent, 1, ml)
+    mem_store64(ent, 2, pptr)
+    mem_store64(ent, 3, norm_len)
+    mem_store64(ent, 4, handler)
+    mem_store64(ent, 5, flags)
+    mem_store64(ent, 6, segs)
+    mem_store64(ent, 7, prefix)
+    mem_store64(t, RT_N, n + 1)
+    return n
+}
+
+/// 注册一个中间件（`fn(fd: int) -> int`：1 = 继续，0 = 终止链路）。
+/// 执行顺序 = 注册顺序；返回槽位下标，满返回 -1。
+pub fn http_use(mw: int) -> int {
+    let t = _rt(1)
+    let m = mem_load64(t, RT_MWN)
+    if m >= mem_load64(t, RT_MWMAX) {
+        return -1
+    }
+    mem_store64(t, RT_MW + m, mw)
+    mem_store64(t, RT_MWN, m + 1)
+    return m
+}
+
+/// 已注册路由条数
+pub fn http_route_count() -> int {
+    let t = _rt(0)
+    if t == 0 {
+        return 0
+    }
+    return mem_load64(t, RT_N)
+}
+
+/// 已注册中间件条数
+pub fn http_mw_count() -> int {
+    let t = _rt(0)
+    if t == 0 {
+        return 0
+    }
+    return mem_load64(t, RT_MWN)
+}
+
+// 方法字节相等（通配 "*" 或空方法 = 任意）；1 = 相等
+fn _m_eq(a: int, an: int, b: int, bn: int) -> int {
+    if an == 0 {
+        return 1
+    }
+    if an == 1 && mem_load8(a, 0) == 42 {       // '*'
+        return 1
+    }
+    if an != bn {
+        return 0
+    }
+    if mem_diff(a, b, an) == an {               // 全等返回 n（8 字节字比较）
+        return 1
+    }
+    return 0
+}
+
+// 查表：返回条目下标；-1 = 没有路径匹配（404）；-2 = 路径匹配但方法不符（405）
+fn _route_find(mp: int, ml: int, xp: int, xl: int) -> int {
+    let t = _rt(0)
+    if t == 0 {
+        return -1
+    }
+    let n = mem_load64(t, RT_N)
+    // 路径归一化整条请求只算一次（去 query/fragment、去首尾 '/'）
+    let xl2 = route_eff_len(xp, xl)
+    let mut xs = 0
+    if xl2 > 0 && mem_load8(xp, 0) == 47 {
+        xs = 1
+    }
+    let xn = xl2 - xs
+    let xsegs = route_seg_count(xp + xs, xn)
+    let mut i = 0
+    let mut path_hit = 0
+    while i < n {
+        let ent = mem_load64(t, RT_ENT) + i * RT_ENTRY_B
+        let pptr = mem_load64(ent, 2)
+        let plen = mem_load64(ent, 3)
+        let flags = mem_load64(ent, 5)
+        let mut pm = false
+        if (flags & 3) == 0 {
+            // 纯字面段：长度相等 + 一次 mem_diff（8 字节字比较）
+            if plen == xn && mem_diff(pptr, xp + xs, xn) == xn {
+                pm = true
+            }
+        } else {
+            let mut cand = true
+            if (flags & 2) == 0 {                  // 没有 '*' 才能用段数/前缀过滤
+                if mem_load64(ent, 6) != xsegs {
+                    cand = false                   // 段数不符：直接排除
+                } else {
+                    let pf = mem_load64(ent, 7)
+                    if pf > 0 && (xn < pf || mem_diff(pptr, xp + xs, pf) != pf) {
+                        cand = false               // 字面前缀不符：一次比较排除
+                    }
+                }
+            }
+            if cand {
+                pm = route_match_norm(pptr, plen, xp + xs, xn)
+            }
+        }
+        if pm {
+            if _m_eq(mem_load64(ent, 0), mem_load64(ent, 1), mp, ml) == 1 {
+                return i
+            }
+            path_hit = 1
+        }
+        i += 1
+    }
+    if path_hit == 1 {
+        return -2
+    }
+    return -1
+}
+
+/// 纯查询版路由匹配（不碰连接、不发送）：返回条目下标 / -1 未匹配 / -2 方法不符。
+/// 用于单测与「先查再处理」的自定义派发。
+pub fn http_route_index(method: str, path: str) -> int {
+    return _route_find(mem_ptr(method, 0), len(method),
+                       mem_ptr(path, 0), len(path))
+}
+
+/// 当前请求命中的第 `i` 个 `:参数`（从 0 起；不匹配/越界返回 ""）
+pub fn http_param(fd: int, i: int) -> str {
+    let t = _rt(0)
+    if t == 0 {
+        return ""
+    }
+    let sp = conn_slot(_st(), fd)
+    if sp == 0 {
+        return ""
+    }
+    let buf = conn_buf_ptr(sp)
+    let xp = buf + mem_load64(sp, HP_POFF)
+    let xl = mem_load64(sp, HP_PLEN)
+    let idx = _route_find(buf + mem_load64(sp, HP_MOFF), mem_load64(sp, HP_MLEN),
+                          xp, xl)
+    if idx < 0 {
+        return ""
+    }
+    let ent = mem_load64(t, RT_ENT) + idx * RT_ENTRY_B
+    return route_param_at(mem_load64(ent, 2), mem_load64(ent, 3), xp, xl, i)
+}
+
+/// 当前请求命中的 `:参数` 个数（没命中返回 0）
+pub fn http_param_count(fd: int) -> int {
+    let t = _rt(0)
+    if t == 0 {
+        return 0
+    }
+    let sp = conn_slot(_st(), fd)
+    if sp == 0 {
+        return 0
+    }
+    let buf = conn_buf_ptr(sp)
+    let xp = buf + mem_load64(sp, HP_POFF)
+    let xl = mem_load64(sp, HP_PLEN)
+    let idx = _route_find(buf + mem_load64(sp, HP_MOFF), mem_load64(sp, HP_MLEN),
+                          xp, xl)
+    if idx < 0 {
+        return 0
+    }
+    let ent = mem_load64(t, RT_ENT) + idx * RT_ENTRY_B
+    return route_param_count(mem_load64(ent, 2), mem_load64(ent, 3), xp, xl)
+}
+
+/// 内置派发器：中间件链 → 路由表 → handler；未命中回 404、方法不符回 405。
+/// 当 `http_serve(port, backlog, http_dispatch)` 的 handler 用。
+/// 永远返回 1（连接按 keep-alive 走），要关连接在 handler/中间件里调
+/// http_set_close。
+pub fn http_dispatch(fd: int) -> int {
+    let t = _rt(0)
+    if t != 0 {
+        let m = mem_load64(t, RT_MWN)
+        let mut i = 0
+        while i < m {
+            let h = mem_load64(t, RT_MW + i)
+            if h != 0 {
+                if h(fd) == 0 {
+                    return 1                    // 中间件已响应，终止链路
+                }
+            }
+            i += 1
+        }
+    }
+    let sp = conn_slot(_st(), fd)
+    if sp == 0 {
+        return 0
+    }
+    let buf = conn_buf_ptr(sp)
+    let idx = _route_find(buf + mem_load64(sp, HP_MOFF), mem_load64(sp, HP_MLEN),
+                          buf + mem_load64(sp, HP_POFF), mem_load64(sp, HP_PLEN))
+    if idx == -2 {
+        http_method_not_allowed(fd)
+        return 1
+    }
+    if idx < 0 {
+        http_not_found(fd)
+        return 1
+    }
+    let ent = mem_load64(t, RT_ENT) + idx * RT_ENTRY_B
+    let h = mem_load64(ent, 4)
+    h(fd)
+    return 1
 }

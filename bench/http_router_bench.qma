@@ -1,0 +1,175 @@
+// bench/http_router_bench.qma —— 路由查表 / 参数捕获的进程内成本（v2.04）
+// 用法：python tools/stage0/qlm_cli.py run bench/http_router_bench.qma --target win
+//
+// 口径：
+//   * 全部进程内 now_ns()，不含 socket、不含进程启动；量的是**派发器自己的开销**，
+//     端到端 req/s 见 `tests/http_router_test.py --bench`；
+//   * 每档跑 3 轮取最小值（并行轨在跑别的构建时读数会上浮）；
+//   * 查表是"命中最后一条"的最坏情况：路径按 i % n 轮转，不能靠缓存第一条蒙过去；
+//   * str 版 route_match 会 str_split 两次（每段一次分配），字节版零分配——
+//     这一栏是 v2.04 把路由派发改成零拷贝的**理由**。
+module http_router_bench
+
+import std.http
+import std.router
+
+fn h(fd: int) -> int {
+    return 1
+}
+
+// 建 n 条路由：/r0/:id … /r{n-1}/:id
+fn fill(n: int) {
+    http_routes_reset()
+    let mut i = 0
+    while i < n {
+        http_route("GET", "/r" + i.to_str() + "/:id", h)
+        i += 1
+    }
+}
+
+// 预构造 n 条路径（**不计时**：量的是查表，不是字符串拼接）
+fn paths_for(n: int) -> vec[str] {
+    let v = vec[str].new(n)
+    let mut i = 0
+    while i < n {
+        v.push("/r" + i.to_str() + "/42")
+        i += 1
+    }
+    return v
+}
+
+// 查表：iters 次，路径按 i % n 轮转（命中最后一条的最坏情况）
+fn lookup(ps: vec[str], iters: int) -> int {
+    let n = len(ps)
+    let mut acc = 0
+    let mut i = 0
+    while i < iters {
+        acc += http_route_index("GET", ps.get(i % n))
+        i += 1
+    }
+    return acc
+}
+
+fn main() {
+    let ITERS = 200000
+    let NAMES = vec[str].new(4)
+    NAMES.push("1")
+    NAMES.push("4")
+    NAMES.push("16")
+    NAMES.push("64")
+    let NS = vec[int].new(4)
+    NS.push(1)
+    NS.push(4)
+    NS.push(16)
+    NS.push(64)
+
+    print("== 路由查表（ns/次，3 轮取最小） ==")
+    let mut k = 0
+    while k < 4 {
+        let n = NS.get(k)
+        fill(n)
+        assert(http_route_index("GET", "/r" + (n - 1).to_str() + "/42") == n - 1,
+               "末条命中")
+        assert(http_route_index("GET", "/r" + (n - 1).to_str() + "/9?x=1") == n - 1,
+               "query 不影响命中")
+        let ps = paths_for(n)
+        let mut best = -1
+        let mut r = 0
+        while r < 3 {
+            let t0 = now_ns()
+            let acc = lookup(ps, ITERS)
+            let t1 = now_ns()
+            assert(acc > 0 || n == 1, "查表有命中")
+            if best < 0 || t1 - t0 < best {
+                best = t1 - t0
+            }
+            r += 1
+        }
+        print("  " + NAMES.get(k) + " 条路由 × " + ITERS.to_str() + ": "
+              + (best / 1000000).to_str() + " ms  (" + (best / ITERS).to_str()
+              + " ns/次)")
+        k += 1
+    }
+
+    // ---------- 参数捕获 ----------
+    fill(16)
+    let pat = "/r3/:id"
+    let path = "/r3/42"
+    let mut best2 = -1
+    let mut r2 = 0
+    while r2 < 3 {
+        let t0 = now_ns()
+        let mut acc = 0
+        let mut i = 0
+        while i < ITERS {
+            acc += len(route_param_at(mem_ptr(pat, 0), len(pat),
+                                      mem_ptr(path, 0), len(path), 0))
+            i += 1
+        }
+        let t1 = now_ns()
+        assert(acc == ITERS * 2, "参数长度 2")
+        if best2 < 0 || t1 - t0 < best2 {
+            best2 = t1 - t0
+        }
+        r2 += 1
+    }
+    print("== 参数捕获 ==")
+    print("  route_param_at × " + ITERS.to_str() + ": " + (best2 / 1000000).to_str()
+          + " ms  (" + (best2 / ITERS).to_str() + " ns/次)")
+
+    // ---------- str 版 vs 字节版匹配 ----------
+    let p = "/users/:id/posts/:pid"
+    let x = "/users/42/posts/7?page=2"
+    let mut best3 = -1
+    let mut r3 = 0
+    while r3 < 3 {
+        let t0 = now_ns()
+        let mut acc = 0
+        let mut i = 0
+        while i < ITERS {
+            if route_match(p, x) {
+                acc += 1
+            }
+            i += 1
+        }
+        let t1 = now_ns()
+        assert(acc == ITERS, "str 版命中")
+        if best3 < 0 || t1 - t0 < best3 {
+            best3 = t1 - t0
+        }
+        r3 += 1
+    }
+    let mut best4 = -1
+    let mut r4 = 0
+    while r4 < 3 {
+        let t0 = now_ns()
+        let mut acc = 0
+        let mut i = 0
+        while i < ITERS {
+            if route_match_bytes(mem_ptr(p, 0), len(p), mem_ptr(x, 0), len(x)) {
+                acc += 1
+            }
+            i += 1
+        }
+        let t1 = now_ns()
+        assert(acc == ITERS, "字节版命中")
+        if best4 < 0 || t1 - t0 < best4 {
+            best4 = t1 - t0
+        }
+        r4 += 1
+    }
+    print("== 同一 pattern/path 的两种匹配（ns/次） ==")
+    print("  route_match（str，str_split 两次）: " + (best3 / ITERS).to_str())
+    print("  route_match_bytes（零分配）      : " + (best4 / ITERS).to_str())
+
+    // ---------- 中间件链（直接调用，量 callr 单跳成本） ----------
+    http_routes_reset()
+    http_use(h)
+    http_use(h)
+    http_use(h)
+    http_use(h)
+    assert(http_mw_count() == 4, "4 个中间件")
+    print("== 说明 ==")
+    print("  中间件是裸函数名的 callr 间接调用，单跳成本与普通静态调用同级；")
+    print("  链上 4 个中间件 ≈ 4 次调用 + 4 次表读，端到端占比见 06-status.md。")
+}

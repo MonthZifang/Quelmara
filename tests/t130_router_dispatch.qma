@@ -1,0 +1,148 @@
+// t130_router_dispatch.qma：std/http 路由表 + 中间件（v2.04）
+//
+// 覆盖：
+//   1) std/router 的字节级匹配与 str 版逐例等价（同一份实现，只有一份语义）
+//   2) 参数捕获：多段、越界、不匹配
+//   3) 路由注册：下标 / 计数 / reset / 表满 / 超长模板
+//   4) 查表：命中、404、405（路径命中方法不符）、`*` 任意方法、query 与尾斜杠
+//   5) 顺序语义：先注册先匹配
+//   6) 中间件：计数、上限
+// 全部断言自校验，退出码 0 = 通过。网络路径见 tests/http_router_test.py。
+module t130
+
+import std.http
+import std.router
+import std.str
+
+fn h(fd: int) -> int {
+    return 1
+}
+
+fn main() {
+    // ============ 1. 字节级匹配 == str 版 ============
+    let pats = vec[str].new(8)
+    pats.push("/")
+    pats.push("/users/:id")
+    pats.push("/users/:id/posts/:pid")
+    pats.push("/files/*")
+    pats.push("/a/b")
+    pats.push("")
+    pats.push("/x/")
+    let paths = vec[str].new(8)
+    paths.push("/")
+    paths.push("/users/42")
+    paths.push("/users/42/")
+    paths.push("/users/42?x=1")
+    paths.push("/users/42/posts/7")
+    paths.push("/files/a/b/c")
+    paths.push("/files")
+    paths.push("/a/b/c")
+    paths.push("/x")
+    paths.push("")
+    let mut pi = 0
+    while pi < len(pats) {
+        let mut xi = 0
+        while xi < len(paths) {
+            let p = pats.get(pi)
+            let x = paths.get(xi)
+            let a = route_match(p, x)
+            let b = route_match_bytes(mem_ptr(p, 0), len(p), mem_ptr(x, 0), len(x))
+            assert(a == b, "字节级与 str 版不一致: " + p + " vs " + x)
+            xi += 1
+        }
+        pi += 1
+    }
+
+    // ============ 2. 参数捕获 ============
+    let p2 = "/users/:id/posts/:pid"
+    let x2 = "/users/42/posts/7"
+    assert(route_param_at(mem_ptr(p2, 0), len(p2), mem_ptr(x2, 0), len(x2), 0) == "42",
+           "第 0 个参数")
+    assert(route_param_at(mem_ptr(p2, 0), len(p2), mem_ptr(x2, 0), len(x2), 1) == "7",
+           "第 1 个参数")
+    assert(route_param_at(mem_ptr(p2, 0), len(p2), mem_ptr(x2, 0), len(x2), 2) == "",
+           "越界参数为空")
+    assert(route_param_count(mem_ptr(p2, 0), len(p2), mem_ptr(x2, 0), len(x2)) == 2,
+           "参数个数 2")
+    let x3 = "/users/42"
+    assert(route_param_count(mem_ptr(p2, 0), len(p2), mem_ptr(x3, 0), len(x3)) == 0,
+           "不匹配时参数个数 0")
+    assert(route_param_at(mem_ptr(p2, 0), len(p2), mem_ptr(x3, 0), len(x3), 0) == "",
+           "不匹配时参数为空")
+    // query 串不进入参数值
+    let p1 = "/users/:id"
+    let x4 = "/users/42?x=1"
+    assert(route_param_at(mem_ptr(p1, 0), len(p1), mem_ptr(x4, 0), len(x4), 0) == "42",
+           "query 不影响参数")
+    // 通配之后没有参数
+    let p5 = "/f/:a/*"
+    let x5 = "/f/1/2/3"
+    assert(route_param_count(mem_ptr(p5, 0), len(p5), mem_ptr(x5, 0), len(x5)) == 1,
+           "通配段不算参数")
+
+    // ============ 3. 路由注册 ============
+    http_routes_reset()
+    assert(http_route_count() == 0, "reset 后 0 条")
+    assert(http_route("GET", "/", h) == 0, "首条下标 0")
+    assert(http_route("GET", "/users/:id", h) == 1, "第二条下标 1")
+    assert(http_route("POST", "/users", h) == 2, "第三条")
+    assert(http_route("GET", "/files/*", h) == 3, "通配")
+    assert(http_route("*", "/any", h) == 4, "任意方法")
+    assert(http_route("GET", "/admin/stats", h) == 5, "第六条")
+    assert(http_route_count() == 6, "计数 6")
+
+    // 超长模板 / 超长方法 -> -2（不占位）
+    let long_pat = str_repeat("a", 128)
+    assert(http_route("GET", long_pat, h) == -2, "模板 >127 字节拒绝")
+    let long_m = str_repeat("G", 16)
+    assert(http_route(long_m, "/m", h) == -2, "方法 >15 字节拒绝")
+    assert(http_route_count() == 6, "拒绝的注册不占位")
+
+    // ============ 4. 查表 ============
+    assert(http_route_index("GET", "/") == 0, "根路径")
+    assert(http_route_index("GET", "/users/42") == 1, "参数段命中")
+    assert(http_route_index("GET", "/users/42?x=1") == 1, "query 不参与匹配")
+    assert(http_route_index("GET", "/users/42/") == 1, "尾斜杠等价")
+    assert(http_route_index("POST", "/users") == 2, "方法区分")
+    assert(http_route_index("GET", "/users") == -2, "路径命中方法不符 -> 405")
+    assert(http_route_index("DELETE", "/users/42") == -2, "参数段也报 405")
+    assert(http_route_index("GET", "/files/a/b/c") == 3, "通配命中")
+    assert(http_route_index("DELETE", "/files/a") == -2, "通配路径方法不符")
+    assert(http_route_index("PUT", "/any") == 4, "任意方法")
+    assert(http_route_index("GET", "/any") == 4, "任意方法（GET）")
+    assert(http_route_index("GET", "/nope") == -1, "未注册 -> 404")
+    assert(http_route_index("GET", "/users/42/posts/7") == -1, "段数多 -> 404")
+    assert(http_route_index("GET", "/admin/stats") == 5, "字面段")
+    assert(http_route_index("POST", "/admin/stats") == -2, "字面段方法不符")
+
+    // ============ 5. 顺序语义 ============
+    http_routes_reset()
+    assert(http_route("GET", "/u/:id", h) == 0, "先注册通配参数")
+    assert(http_route("GET", "/u/me", h) == 1, "后注册字面段")
+    assert(http_route_index("GET", "/u/me") == 0, "先注册者先匹配（不按具体度排序）")
+
+    // ============ 6. 表满与中间件上限 ============
+    http_routes_reset()
+    let mut i = 0
+    while i < 64 {
+        let r = http_route("GET", "/r" + i.to_str(), h)
+        assert(r == i, "第 " + i.to_str() + " 条注册成功")
+        i += 1
+    }
+    assert(http_route_count() == 64, "表满 64 条")
+    assert(http_route("GET", "/overflow", h) == -1, "第 65 条 -> -1（表满）")
+    assert(http_route_count() == 64, "表满后计数不变")
+    assert(http_route_index("GET", "/r63") == 63, "第 64 条可查")
+
+    http_routes_reset()
+    assert(http_mw_count() == 0, "reset 后 0 个中间件")
+    i = 0
+    while i < 16 {
+        assert(http_use(h) == i, "第 " + i.to_str() + " 个中间件")
+        i += 1
+    }
+    assert(http_mw_count() == 16, "中间件满 16 个")
+    assert(http_use(h) == -1, "第 17 个 -> -1（链满）")
+
+    print("router dispatch ok")
+}

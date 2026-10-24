@@ -54,7 +54,9 @@ const ST_H1 = 10       // 协议回调 1（on_message / on_close）
 const ST_H2 = 11
 const ST_AUX = 12      // 协议私有（如 ws 最大消息长度、sse 订阅表）
 
-fn conn_state_new(max_conns: int, slot_words: int) -> int {
+/// 新建协议状态块：`max_conns` 个定长槽位（每槽 `slot_words` 字）。
+/// 返回状态指针，交给 `conn_open` / `conn_*` 统计函数使用。
+pub fn conn_state_new(max_conns: int, slot_words: int) -> int {
     let st = mem_alloc(128)
     mem_zero(st, 128)
     // fd 表容量取 2 倍连接数（负载因子 50%），向上取 2 的幂
@@ -69,27 +71,33 @@ fn conn_state_new(max_conns: int, slot_words: int) -> int {
     return st
 }
 
-fn conn_max_conns(st: int) -> int {
+/// 槽位上限（超过后 `conn_open` 返回 -1，由协议层拒绝连接）。
+pub fn conn_max_conns(st: int) -> int {
     return mem_load64(st, ST_MAXCONN)
 }
 
-fn conn_accepted(st: int) -> int {
+/// 累计 accept 的连接数（含已关闭）。
+pub fn conn_accepted(st: int) -> int {
     return mem_load64(st, ST_ACCEPTED)
 }
 
-fn conn_closed(st: int) -> int {
+/// 累计关闭的连接数。
+pub fn conn_closed(st: int) -> int {
     return mem_load64(st, ST_CLOSED)
 }
 
-fn conn_msgs(st: int) -> int {
+/// 累计派发给协议层的消息/请求数（`conn_msg_inc` 加）。
+pub fn conn_msgs(st: int) -> int {
     return mem_load64(st, ST_MSGS)
 }
 
-fn conn_bytes_in(st: int) -> int {
+/// 累计收到的字节数。
+pub fn conn_bytes_in(st: int) -> int {
     return mem_load64(st, ST_BYTES_IN)
 }
 
-fn conn_bytes_out(st: int) -> int {
+/// 累计发出的字节数。
+pub fn conn_bytes_out(st: int) -> int {
     return mem_load64(st, ST_BYTES_OUT)
 }
 
@@ -101,7 +109,9 @@ fn conn_bytes_out(st: int) -> int {
 // 持锁时间是微秒级（O(1) 空闲链操作），无系统调用、无让渡。
 // ---------------------------------------------------------------------------
 
-fn conn_lock() -> int {
+/// 取全局自旋锁（`static_word(11)`）。共享结构（槽位空闲链 / fd 表）改前必取。
+/// 持锁时间必须是 O(1)（几个指令），否则 io 线程会互相拖死。
+pub fn conn_lock() -> int {
     let lp = static_word(CONN_LOCK_W)
     while mem_xchg(lp, 1) != 0 {
         // 自旋等锁（持锁方几个指令内就释放）
@@ -109,7 +119,8 @@ fn conn_lock() -> int {
     return 0
 }
 
-fn conn_unlock() -> int {
+/// 放全局自旋锁（与 `conn_lock` 成对）。
+pub fn conn_unlock() -> int {
     let lp = static_word(CONN_LOCK_W)
     mem_store64(lp, 0, 0)
     return 0
@@ -117,7 +128,8 @@ fn conn_unlock() -> int {
 
 // 新连接：分配槽位并登记 fd -> 槽位。超上限返回 -1（fail-fast 语义：
 // 调用方应直接关闭连接，不静默膨胀）。
-fn conn_open(st: int, fd: int) -> int {
+/// 新连接：分配槽位、整槽清零、登记 fd→槽位。返回槽位下标；超上限返回 -1。
+pub fn conn_open(st: int, fd: int) -> int {
     conn_lock()
     let slab = mem_load64(st, ST_SLAB)
     let idx = slab_alloc(slab)
@@ -142,7 +154,8 @@ fn conn_open(st: int, fd: int) -> int {
     return idx
 }
 
-fn conn_slot(st: int, fd: int) -> int {
+/// fd → 槽位指针（未登记返回 0）。协议私有字从 `SLOT_PROTO` 起，见 `std/net/core.qma` 头部布局。
+pub fn conn_slot(st: int, fd: int) -> int {
     let idx = fdtab_get(mem_load64(st, ST_FDTAB), fd)
     if idx < 0 {
         return 0
@@ -150,7 +163,8 @@ fn conn_slot(st: int, fd: int) -> int {
     return slab_ptr(mem_load64(st, ST_SLAB), idx)
 }
 
-fn conn_close(st: int, fd: int) -> int {
+/// 关连接：归还溢出缓冲与槽位（O(1)，空闲链复用）。
+pub fn conn_close(st: int, fd: int) -> int {
     conn_lock()
     let fdt = mem_load64(st, ST_FDTAB)
     let idx = fdtab_get(fdt, fd)
@@ -169,7 +183,8 @@ fn conn_close(st: int, fd: int) -> int {
 }
 
 // 数据区指针：溢出时用堆缓冲，否则用槽位内联区
-fn conn_buf_ptr(p: int) -> int {
+/// 连接数据区指针：有溢出缓冲用堆，否则用槽位内联区。
+pub fn conn_buf_ptr(p: int) -> int {
     let sp = mem_load64(p, SLOT_SPILL)
     if sp != 0 {
         return sp
@@ -177,7 +192,8 @@ fn conn_buf_ptr(p: int) -> int {
     return p + SLOT_BUF * 8
 }
 
-fn conn_buf_cap(st: int, p: int) -> int {
+/// 数据区当前容量（字节）。
+pub fn conn_buf_cap(st: int, p: int) -> int {
     let sp = mem_load64(p, SLOT_SPILL)
     if sp != 0 {
         return mem_load64(p, SLOT_SPILL_CAP)
@@ -188,7 +204,9 @@ fn conn_buf_cap(st: int, p: int) -> int {
 // 把 reactor 投递的一段数据追加到连接缓冲；返回新的总长度。
 // 内联区满时自动溢出到堆缓冲（倍增扩容，上限 CONN_MAX_BUF）。
 // 缓冲满返回 -1（调用方按协议返回 413/关闭，绝不静默截断）。
-fn conn_append(st: int, p: int, data: str) -> int {
+/// 把一段数据追加到连接缓冲，返回新的总长度；超 `CONN_MAX_BUF` 返回 -1。
+/// 内联区满时自动溢出到堆（倍增扩容），任意分片都不会丢数据。
+pub fn conn_append(st: int, p: int, data: str) -> int {
     let have = mem_load64(p, SLOT_RECVLEN)
     let n = len(data)
     let cap = conn_buf_cap(st, p)
@@ -223,8 +241,31 @@ fn conn_append(st: int, p: int, data: str) -> int {
     return total
 }
 
+/// 已收到的字节数（协议层的解析游标读它，不必知道槽位布局）
+pub fn conn_recvlen(p: int) -> int {
+    return mem_load64(p, SLOT_RECVLEN)
+}
+
+/// 派发计数 +1（协议层每处理一条完整消息调用一次）
+pub fn conn_msg_inc(st: int) -> int {
+    mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
+    return 0
+}
+
+/// 协议回调槽 0（`ST_H0`）：协议库把用户 handler 存这里，reactor 回调时取用
+pub fn conn_h0(st: int) -> int {
+    return mem_load64(st, ST_H0)
+}
+
+/// 写协议回调槽 0
+pub fn conn_set_h0(st: int, h: int) -> int {
+    mem_store64(st, ST_H0, h)
+    return 0
+}
+
 // 把 [from, len) 搬到缓冲头部（处理完一个请求后剩下的半包）
-fn conn_shift(p: int, from: int) -> int {
+/// 把 `[from, len)` 搬到缓冲头部（处理完一个请求后剩下的半包），返回剩余长度。
+pub fn conn_shift(p: int, from: int) -> int {
     let len = mem_load64(p, SLOT_RECVLEN)
     if from <= 0 {
         return len
@@ -241,7 +282,8 @@ fn conn_shift(p: int, from: int) -> int {
 }
 
 // 发送一段缓冲区（零拷贝：指针 + 长度直接进 send）
-fn conn_send(st: int, fd: int, ptr: int, n: int) -> int {
+/// 发送一段缓冲区（指针 + 长度直接进 send，零拷贝）。返回实际写入字节数。
+pub fn conn_send(st: int, fd: int, ptr: int, n: int) -> int {
     if n <= 0 {
         return 0
     }
@@ -252,6 +294,7 @@ fn conn_send(st: int, fd: int, ptr: int, n: int) -> int {
     return w
 }
 
-fn conn_send_str(st: int, fd: int, s: str) -> int {
+/// 发送一个 str（`len(s)` 字节）。返回实际写入字节数。
+pub fn conn_send_str(st: int, fd: int, s: str) -> int {
     return conn_send(st, fd, s, len(s))
 }

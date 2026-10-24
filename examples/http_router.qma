@@ -1,0 +1,116 @@
+// http_router.qma —— 路由表 + 中间件示例（std.http v2.04）
+//
+// 运行：python tools/stage0/qlm_cli.py run examples/http_router.qma --target win
+// 然后用 curl 验证：
+//
+//   curl -i http://127.0.0.1:8092/                       -> 200 index
+//   curl -i http://127.0.0.1:8092/users/42?x=1           -> {"id":"42","q":"x=1"}
+//   curl -i http://127.0.0.1:8092/users/42/posts/7       -> 两个参数
+//   curl -i -X POST -d 'hello' http://127.0.0.1:8092/users  -> 201 + 体长度
+//   curl -i http://127.0.0.1:8092/files/a/b.txt          -> 通配段
+//   curl -i http://127.0.0.1:8092/admin/stats            -> 401（中间件拦下）
+//   curl -i -H 'Authorization: Bearer s3cret' \
+//        http://127.0.0.1:8092/admin/stats               -> 200
+//   curl -i http://127.0.0.1:8092/nope                   -> 404
+//   curl -i -X DELETE http://127.0.0.1:8092/users/42     -> 405
+//
+// 要点：
+//   * 中间件与 handler 都是**裸函数名**（reactor 用 callr 间接调用，闭包传不进去）；
+//   * 注册必须在 http_serve 之前（单线程，无锁）；
+//   * handler 返回值被忽略——要关连接就调 http_set_close(fd)。
+import std.http
+import std.str
+
+// 用户自定义静态字（12–31 归用户代码；0–10 是协议库的）
+const QUIET_W = 12
+
+// ---- 中间件：访问日志（1 = 继续链路） ----
+// `--quiet` 关掉：控制台一次 WriteFile 就是几十微秒，压测时必须静音，
+// 否则量到的是终端而不是 HTTP 栈。
+fn log_mw(fd: int) -> int {
+    if mem_load64(static_word(QUIET_W), 0) == 0 {
+        print("  <- " + http_method(fd) + " " + http_path(fd))
+    }
+    return 1
+}
+
+// ---- 中间件：/admin 前缀要 Bearer 令牌（0 = 终止链路，已响应 401） ----
+fn auth_mw(fd: int) -> int {
+    if !str_starts_with(http_path(fd), "/admin") {
+        return 1
+    }
+    if http_header(fd, "authorization") == "Bearer s3cret" {
+        return 1
+    }
+    http_json(fd, 401, "{\"error\":\"unauthorized\"}")
+    return 0
+}
+
+// ---- handler ----
+fn index(fd: int) -> int {
+    http_html(fd, 200, "<h1>Quelmara router</h1><p>routes + middleware</p>")
+    return 1
+}
+
+fn user_get(fd: int) -> int {
+    http_json(fd, 200, "{\"id\":\"" + http_param(fd, 0)
+                        + "\",\"q\":\"" + http_query(fd) + "\"}")
+    return 1
+}
+
+fn post_get(fd: int) -> int {
+    http_json(fd, 200, "{\"user\":\"" + http_param(fd, 0)
+                        + "\",\"post\":\"" + http_param(fd, 1) + "\"}")
+    return 1
+}
+
+fn user_create(fd: int) -> int {
+    http_json(fd, 201, "{\"created\":true,\"len\":" + http_body_len(fd).to_str() + "}")
+    return 1
+}
+
+fn files(fd: int) -> int {
+    http_text(fd, 200, http_path(fd))
+    return 1
+}
+
+// 统计端点：cpu_ns 是本进程 CPU 时间（纳秒），用来算「服务端每请求烧多少核」
+// ——它不受客户端快慢影响，比 req/s 更能说明服务端成本。
+fn admin_stats(fd: int) -> int {
+    http_json(fd, 200, "{\"accepted\":" + http_accepted().to_str()
+                        + ",\"reqs\":" + http_reqs().to_str()
+                        + ",\"cpu_ns\":" + cpu_ns().to_str() + "}")
+    return 1
+}
+
+// 大响应：走自动 gzip 协商（体 ≥256 字节且客户端接受才压）
+fn big(fd: int) -> int {
+    let mut body = "<h1>big</h1>"
+    let mut i = 0
+    while i < 40 {
+        body = body + "<p>line " + i.to_str() + " of a compressible body</p>"
+        i += 1
+    }
+    http_html_auto(fd, 200, body)
+    return 1
+}
+
+fn main() {
+    let argv = args()
+    if len(argv) > 1 && argv[1] == "--quiet" {
+        mem_store64(static_word(QUIET_W), 0, 1)
+    }
+    http_routes_reset()
+    http_use(log_mw)
+    http_use(auth_mw)
+    http_route("GET", "/", index)
+    http_route("GET", "/users/:id", user_get)
+    http_route("POST", "/users", user_create)
+    http_route("GET", "/users/:id/posts/:pid", post_get)
+    http_route("GET", "/files/*", files)
+    http_route("GET", "/admin/stats", admin_stats)
+    http_route("GET", "/big", big)
+    print("http_router listening on 8092 (routes=" + http_route_count().to_str()
+          + ", middlewares=" + http_mw_count().to_str() + ")")
+    http_serve(8092, 512, http_dispatch)
+}
