@@ -1,7 +1,7 @@
 # 当前状态（实测）
 
 > **本文是全部实测数字的唯一出处。** 其它文档引用数字时写"见 `06-status.md`"。
-> 口径日期：2026-10-23。环境：Windows 10/11 x86-64，Xeon E5-2666 v3（Haswell 代，
+> 口径日期：2026-10-24。环境：Windows 10/11 x86-64，Xeon E5-2666 v3（Haswell 代，
 > **无 SHA-NI、无 AVX2**），VBS/Hyper-V 开启（进程冷启动 ~426 ms，跑分噪声 ±50%）。
 > 解释器：Python 3.13.14。
 
@@ -24,18 +24,18 @@
 | RSA 验签（PKCS#1 v1.5 / PSS） | **t71 / t72 全绿**（1024 位正负向量 + PSS + 2048 位） | `python tests/run_win_tests.py` |
 | X.509 证书链 / 有效期 / 域名 | **PASS=13 FAIL=0**（EC 三级链 + RSA 根混合链 + 通配符/过期/篡改/缺中间证书） | `python tests/x509_chain_test.py` |
 | X.509 解析 + 自签验签互操作 | **PASS=7 FAIL=0**（4 正向：v3/v1/长 CN/大序列号；3 负向：篡改 TBS/篡改签名/截断） | `python tests/x509_test.py` |
-| 调试器脚本化会话（v1.79） | **PASS**（18 项：断点行号/源码文本、int·bool·f64·str·struct 求值、`a.b` 字段、step/next 行推进、bt 帧链、退出码；外加调试构建与非调试构建输出逐字节相同） | `python tests/debugger_test.py` |
+| 调试器脚本化会话（v1.75） | **PASS**（18 项：断点行号/源码文本、int·bool·f64·str·struct 求值、`a.b` 字段、step/next 行推进、bt 帧链、退出码；外加调试构建与非调试构建输出逐字节相同） | `python tests/debugger_test.py` |
 | DWARF v4 互操作（v1.80） | **PASS=20 FAIL=0**（CU 头 / 行表 40 条逐项 / subprogram 的 low_pc·high_pc / 变量位置多重集 / `Point` 布局 / DataDirectory[6] 为空） | `python tests/dwarf_test.py` |
 | 调试器端到端命令链（v1.80） | **PASS=40 FAIL=0**（断点编号与命中计数、三种不可读语义、next/finish、bt、删除断点、程序输出与退出码） | `python tests/dbg_test.py` |
 | 覆盖率链路（行 + 分支，v1.83） | **PASS=23 FAIL=0**（`cov.qma` 行 4/5、分支 1/2 且列出未覆盖分支 `8->9`；`main.qma` 行/分支双 100%；行与分支两种阈值各退出码 1；`cov2.qma` 两次运行合并后行 8/8、分支 4/4；`--lines-only` 分支显示 `0/0`） | `python tests/cov_test.py` |
 | 模糊测试链路（v1.83） | **PASS=12 FAIL=0**（同 seed 逐字节一致 / 不同 seed 不同 / 变异生效且仍是合法 UTF-8 / built·rejected·bug 三分类口径 / 端到端 8 例 0 崩溃） | `python tests/fuzz_test.py` |
 | doc comment 链路（v1.92） | **PASS=31 FAIL=0**（语法规则 10 / 前端挂载 6 / 工具链 14 / 产物逐字节相同 1） | `python tests/doc_test.py` |
-| 文档生成门禁（v1.92） | **PASS**：58 个模块 / **387 个公开声明全部有 `///`**，0 个脱离块；`03-stdlib.md` 与源码一致 | `python tools/stage0/qlm_cli.py doc std --missing` + `python tools/dev/gen_stdlib_doc.py --check --require-doc` |
+| 文档生成门禁（v1.92） | **PASS**：60 个模块 / **409 个公开声明全部有 `///`**，0 个脱离块；`03-stdlib.md` 与源码一致 | `python tools/stage0/qlm_cli.py doc std --missing` + `python tools/dev/gen_stdlib_doc.py --check --require-doc` |
 | 语言服务器（v1.91） | **PASS=38 FAIL=0**（五段：词法对拍 321 文件 / 213208 记号分叉 0；容错索引 2 个前端解析不了的文件；索引语义；真 JSON-RPC 协议；性能阈值） | `python tests/lsp_test.py` |
 | 性能门禁自测（v1.88） | **PASS=12 FAIL=0**（建基线 / 同产物判 PASS / 伪造 2× 回归必须 FAIL / 校验和与体积必须拦住） | `python tests/bench_gate_test.py` |
 | 闭包 / 捕获（v1.95） | **t126 的 11 组断言全过**（无捕获 / 单捕获 / str+f64 / 逃逸 / 快照 / 嵌套 / 捕获 vec 句柄 / 循环建多个 / 聚合返回 + 聚合形参 / 6·8 参走栈）；负向 3 个编译期拦下（捕获 struct、体内写捕获变量、裸函数名当闭包传）；`--no-opt` 与 `--dbg-info` 构建输出一致；AArch64 构建通过（同一条 `callr`）；C 后端 fail-fast | `python tools/stage0/qlm_cli.py run tests/t126_closure.qma --target win` （主回归总数见 §1 主行；本版新增 1 正 + 3 负用例） |
 | 包管理 qpm（v1.99） | **PASS=61 FAIL=0**（确定性打包逐字节一致 / 打包跳过产物 / 恶意 tar 拒绝 / spec 十一种形态 / registry 索引与包体落盘 / 同版本不可覆盖 / 传递依赖选版本 / 区间交集合并 / 无交集与跨来源冲突的诊断文案 / yank 后回退 / `--locked` 不升级且检出清单漂移 / `verify` 检出磁盘被改 / 依赖环可安装 / HTTP PUT 发布与 GET 安装 / 401 拒发 / 装完能被编译器 import 并跑出依赖里的字符串） | `python tests/qpm_test.py` |
-| 五道门禁 | check_names / check_origin / check_docs 全 PASS；`gen_stdlib_doc.py --check --require-doc` PASS（58 个模块 / 385 个公开函数） | `python tools/dev/check_*.py` + `python tools/dev/gen_stdlib_doc.py --check` |
+| 五道门禁 | check_names / check_origin / check_docs 全 PASS；`gen_stdlib_doc.py --check --require-doc` PASS（60 个模块 / 406 个公开函数） | `python tools/dev/check_*.py` + `python tools/dev/gen_stdlib_doc.py --check` |
 
 `run_win_tests.py` 的 10 组覆盖：PE 结构（MZ/PE32+/AMD64/无 CRT 符号）、基础语义、
 语言特性（struct/enum/match/宽度/@simd/rc/所有权/vec/map/切片/函数值/**@ffi**）、多核
@@ -353,15 +353,17 @@ python tools/stage0/qlm_cli.py run bench/drop_bench.qma  --target win
 
 | 项 | 数值 |
 |---|---|
-| 全库扫描（58 文件 / 535 KB / 518 行 `///`） | **12–15 ms**（**35–42 MB/s**；单文件均摊 ~230 µs） |
-| 同批文件全库词法 | 595 ms → doc 扫描是它的 **2.5%** |
-| 最大文件 `std/aes.qma`（1087 行） | 词法 37 ms / doc 扫描 0.6–0.9 ms（**2%**） |
-| 一次真实构建（`examples/hello.qma`） | doc 扫描占 **0.5%**（构建要加载 std 全库，按文件数线性摊开） |
+| 全库扫描（60 文件 / 552 KB / 554 行 `///`） | **5.6 ms**（**97 MB/s**；单文件均摊 ~93 µs） |
+| 同批文件全库词法 | 236 ms → doc 扫描是它的 **2.4%** |
+| 最大文件 `std/aes.qma`（1087 行） | 词法 15.3 ms / doc 扫描 0.31 ms（**2%**） |
+| 一次真实构建（`examples/hello.qma`） | doc 扫描占 **0.35%**（构建要加载 std 全库，按文件数线性摊开） |
 | 产物体积 | **+0 B**——带与不带 doc comment 的同一程序 PE 逐字节相同 |
 
 口径：只有源码里出现 `///` 或 `//!` 才启动扫描（`"///" in src` 的 C 级子串判断，
 未写文档的项目一行都不扫）；本机 VBS 噪声 ±50%，**只做纵向比较**。
 复现：`python tools/dev/doc_bench.py`。
+> 2026-10-24 复测（v1.103）：上一轮记录是 12–15 ms / 595 ms 词法，同一台机器这次整体
+> 快 2.5 倍——机器负载不同批次，**不要把两批的绝对值混着比**，比值（2.4%）才是口径。
 
 ### 3.8 调试链路（`tools/dev/dbg_bench.py`，min of 3）
 
@@ -627,26 +629,33 @@ p95 1.6–1.9 ms**（多次运行的区间，单次请求到出结果）。词�
 （21 个文件、1600 个函数）。口径：`python tools/dev/link_bench.py`，
 本机 VBS 噪声 ±50%，只做纵向比较。
 
-### 3.16 持久化 KV（`bench/kv_bench.qma`，v1.102）
+### 3.16 持久化 KV（`bench/kv_bench.qma`，v1.102；批量提交列入 2.x 后续版本）
 
 `std/kv` = 追加日志 + 内存索引；`std/fs` 走 `@ffi` 直调 kernel32。
 数据集 2 万条（8 B 键 + 32 B 值），键值**预先构造好、不计时**；进程内 `now_ns()`。
+两列是**同一台机器、同一天、同一条命令**的 A/B（各 3 次取中位）：左列是 v1.102 的
+"每条一次 `WriteFile`"，右列是 v1.103 的"攒 64 条合并成一次 `WriteFile`"。
 
-| 项 | 数值 | 口径 |
-|---|---|---|
-| put 2 万条 | **520 ms**（26.0 µs/条，≈ 38k 写/秒） | 每条一次 `WriteFile`，**不刷盘** |
-| get 2 万条 | **4 ms**（219 ns/条） | 纯内存 `map` 查找，不打盘 |
-| 覆盖写 2 万次（2000 键 × 10 轮） | 448 ms（22.4 µs/次） | 同上，日志随之膨胀 |
-| put + `kv_sync` ×200 | 80 ms（**404 µs/条**） | 每条一次 `FlushFileBuffers`（掉电安全） |
-| 重开 + 重放 20 200 条 | **38 ms**（1.89 µs/条） | 读全文 + 逐条校验 + 重建索引 |
-| 压缩 | 531 ms，**2 660 010 B → 1 343 695 B** | 覆盖写后的日志压回一半 |
-| 单条记录 | 66 B | 头 28 B（`KV1 klen vlen hash` + 换行）+ 键 8 + 值 32 |
+| 项 | 改造前（每条一次写） | 改造后（批量提交） | 变化 |
+|---|---|---|---|
+| put 2 万条 | 331 ms（16.5 µs/条，≈ 60k 写/秒） | **54 ms（2.7 µs/条，≈ 370k 写/秒）** | **6.1×** |
+| get 2 万条 | 3 ms（190 ns/条） | 3 ms（190 ns/条） | 不变（纯内存 `map`） |
+| 覆盖写 2 万次（2000 键 × 10 轮） | 324 ms（16.2 µs/次） | **42 ms（2.1 µs/次）** | **7.6×** |
+| put + `kv_sync` ×200 | 79 ms（**397 µs/条**） | 76 ms（**384 µs/条**） | 不变（每条都等落盘） |
+| 重开 + 重放 20 200 条 | 38 ms（1.85 µs/条） | 38 ms（1.9 µs/条） | 不变 |
+| 压缩 | 342 ms，**2 660 010 B → 1 343 695 B** | 351 ms，同体积 | 不变（纯重写活记录） |
+| 单条记录 | 66 B | 66 B | **磁盘格式未变** |
 
-> 写路径被**文件 I/O 支配**：一条 66 字节记录，语言侧只做一次 `map` 插入与一次
-> `WriteFile`，26 µs 里绝大部分是内核与文件过滤驱动（本机开着 Defender）。读路径是纯内存
-> 的 219 ns——差 120 倍，所以要提高吞吐该做**批量提交**（攒 N 条一次写，顺带把 `kv_sync`
-> 摊薄），而不是优化 map。`kv_sync` 404 µs/条 是「每条都等落盘」的代价，真实用法是
-> 写一批、sync 一次。
+> 写路径原先被**文件 I/O 支配**：一条 66 字节记录，语言侧只做一次 `map` 插入与一次
+> `WriteFile`，16 µs 里绝大部分是内核与文件过滤驱动（本机开着 Defender）。批量提交把
+> 这 16 µs 摊到 64 条上，剩下 **2.7 µs/条** 全是语言侧成本：`_rec` 拼记录（两次分配 +
+> 三次 `int.to_str`）+ `map` 插入 + `vec.push`。读路径仍是纯内存的 190 ns——两者差
+> **14 倍**（改造前是 87 倍），所以下一步要再快就轮到 `_rec` 的分配次数，不再是 I/O。
+>
+> `kv_sync` 384 µs/条 是「每条都等落盘」的代价，批量提交对它**没有帮助**（每次 sync 都要
+> 先把缓冲冲刷干净）：真实用法是写一批、sync 一次。代价是**崩溃窗口**——进程被强杀时
+> 最多丢最后不足 64 条（掉电仍要 `kv_sync`），已写进 `std/kv.qma` 头注释与
+> `07-gaps.md` §2 的边界栏。
 
 > 恢复路径的正确性在 `tests/kv_test.py` 里用**独立 Python 解析器**对拍磁盘格式：
 > 撕裂尾（砍掉半条记录）只丢那一条，垃圾尾（追加 200 字节）不影响重放，两种情况之后

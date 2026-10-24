@@ -50,8 +50,8 @@
 | 数学 | ✅ v1.47：`exp`/`log`/`log2`/`log10`/`pow`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`hypot` + 常数助手（Cody–Waite 双字归约；sin/cos 误差随 |x|·1.1e-16 增长，多字 π 归约未做） | 图形、统计、复利 |
 | 哈希 | ✅ v1.35：SHA-1 / SHA-256 / FNV-1a 32/64 / MD5（仅兼容用途）；✅ v1.53：**SHA-512 / SHA-384 + HMAC-SHA512** + **CRC-64/XZ**（FIPS 180-4 / RFC 4231 / ECMA-182 向量全过） | ✅ v1.55：**BLAKE2b**（RFC 7693，含 keyed 与变长输出）；仍无 SHA-512/224、SHA-3 |
 | 数据结构 | ✅ v1.29/30：RingBuf / MinHeap / **set[int]·set[str]** / **deque** / **LRU**（自建开放寻址表 + 双向链表，单句柄） | LRU 的 key 只有 int（字符串先 `fnv1a64`）；无 TTL / 无容量自适应 |
-| 持久化 | ✅ v1.102：**`std/fs`**（open / read / write / seek / size / sync / close / rename，`@ffi` 直调 kernel32）+ **`std/kv`**（追加日志 + 内存索引：put / get / del / has / len / compact / sync，重开重放，**撕裂尾与垃圾尾都能恢复**，压缩把覆盖写后的日志压回一半）。边界：**Windows PE**（ELF 后端无动态链接器，`@ffi` 编译期 fail-fast）；值全量驻留内存（内存 ≈ 数据集大小）；无 SQL / 事务 / 并发写保护；写路径被文件 I/O 支配（约 26 µs/条）；**语言内建仍只有元数据操作**（`file_exists`/`file_size`/`fs_mkdir`/`fs_remove`），读写走 `@ffi` 是当前方案，内建 `file_*` 要同时改 x86 与 A64 两个发射层，未做 | 配置 / 会话 / 计数 / 缓存元数据都能落盘；SQL 与大于内存的数据集还要 mmap 视图 + 页缓存 |
-| 正则 | 无 | 文本清洗、路由匹配 |
+| 持久化 | ✅ v1.102：**`std/fs`**（open / read / write / seek / size / sync / close / rename，`@ffi` 直调 kernel32）+ **`std/kv`**（追加日志 + 内存索引：put / get / del / has / len / compact / sync，重开重放，**撕裂尾与垃圾尾都能恢复**，压缩把覆盖写后的日志压回一半）。边界：**Windows PE**（ELF 后端无动态链接器，`@ffi` 编译期 fail-fast）；值全量驻留内存（内存 ≈ 数据集大小）；无 SQL / 事务 / 并发写保护；**写路径已批量提交**（v1.103：每 64 条合并一次 `WriteFile`，`kv_sync`/`kv_close`/`kv_compact` 前冲刷；代价是进程被强杀最多丢最后不足 64 条，掉电仍要 `kv_sync`）；**语言内建仍只有元数据操作**（`file_exists`/`file_size`/`fs_mkdir`/`fs_remove`），读写走 `@ffi` 是当前方案，内建 `file_*` 要同时改 x86 与 A64 两个发射层，未做 | 配置 / 会话 / 计数 / 缓存元数据都能落盘；SQL 与大于内存的数据集还要 mmap 视图 + 页缓存 |
+| 正则 | ✅ v1.57 | `std/regex`：回溯 VM（字节码 + 显式栈，无 AST），字面字节 / `.` / 字符类（含 `\d \w \s` 及否定式）/ 转义 / 贪婪量词 `* + ? {n} {n,} {n,m}` / 交替 / 分组 `( )`·`(?: )` / 锚点 `^ $`；`regex_compile` / `match` / `match_full` / `exec` / `find` / `replace` / `replace_all`。**不做**：捕获组、反向引用、环视、懒惰量词、多行模式、Unicode 属性；病态模式由 400 万步上限兜底。期望值全部由 Python `re` 现算的差分对拍见 `tests/t99_regex.qma` | 文本清洗 / 表单校验 / 路由匹配不必再手写逐字节扫描 |
 | CLI | ✅ v1.29：`std/cli`（`--k=v` / `--k v` / `-k v` / 布尔 / 位置参数）；无子命令与自动 usage | 子命令要自己 switch |
 | 国际化 | 无 locale、无 Unicode 分类、无大小写折叠 | 多语言输出 |
 
@@ -59,7 +59,7 @@
 
 | 项 | 状态 | 缺什么 |
 |---|---|---|
-| 调试器 | ✅ v1.79 / v1.80 | **两种调试信息一份数据源**：`.qlmdbg`（自研 JSON，带 `bind`/`last` 活跃区间，调试器读它）+ **标准 DWARF v4**（`.debug_abbrev`/`info`/`line`/`loc`，外部工具读它，地址用 RVA）。`quelmara debug` 源码断点（`break 文件:行` / `break 函数`）/ `step` / `next` / `finish` / `print a.b.c` / `locals` / `bt` / `list`（Windows 调试 API，int3 软断点 + RBP 帧链，零外部依赖）。边界：仅 Windows PE（ELF 后端未接节写出）；**不发 PDB**（无 MSVC 工具链可验证）；库函数帧无行号（`<library>`）；调试构建默认不内联（否则源码断点静默不命中）；变量只在"最后一次使用之前"可见；`print` 限变量与字段路径。测试 `tests/debugger_test.py` + `tests/dbg_test.py` + `tests/dwarf_test.py` |
+| 调试器 | ✅ v1.75 / v1.80 | **两种调试信息一份数据源**：`.qlmdbg`（自研 JSON，带 `bind`/`last` 活跃区间，调试器读它）+ **标准 DWARF v4**（`.debug_abbrev`/`info`/`line`/`loc`，外部工具读它，地址用 RVA）。`quelmara debug` 源码断点（`break 文件:行` / `break 函数`）/ `step` / `next` / `finish` / `print a.b.c` / `locals` / `bt` / `list`（Windows 调试 API，int3 软断点 + RBP 帧链，零外部依赖）。边界：仅 Windows PE（ELF 后端未接节写出）；**不发 PDB**（无 MSVC 工具链可验证）；库函数帧无行号（`<library>`）；调试构建默认不内联（否则源码断点静默不命中）；变量只在"最后一次使用之前"可见；`print` 限变量与字段路径。测试 `tests/debugger_test.py` + `tests/dbg_test.py` + `tests/dwarf_test.py` |
 | LSP / 补全 | ✅ v1.91 | **语义索引 + 补全/跳转/引用/重命名/悬停/大纲/全局符号**（`quelmara lsp`，stdio LSP 3.17 子集，零依赖）。索引是**容错**的（不经过编译器前端，一个语法错误不会让整篇符号消失），词法另有位置信息并与 `qlm.tokenize` 全仓库对拍。边界见 `05-toolchain.md` §1.4：**诊断只到词法/结构层**（不做类型检查）、`didChange` 整篇重建（无增量索引）、成员解析靠语法推断（推不出就退化为本文件成员）、重命名只改解析得到的引用。编辑器里从此能补全、能跳转、能改名 |
 | 文档生成 | ✅ v1.92 | **`///` 是语言层语法**（`02-language.md` §2.4）：紧贴顶层声明、`//!` 模块文档、空行即脱离、`////` 不算、缩进不收；前端按行挂到声明上（`f["doc"]` / `type_docs` / `module_doc`），**不进记号流**（lexdiff/parsediff 契约不变）。工具链 `quelmara doc`：Markdown/JSON、`--check` 漂移、`--missing` 覆盖门禁；std 全库 387 个公开声明 100% 覆盖，`03-stdlib.md` 与源码同源。边界：只收顶层声明（`impl` 内方法文档未做）、不做交叉引用/链接校验、不渲染 Markdown、全量不增量 | API 文档从源码长出来；门禁拦『写了文档却挂不上』与『声明没文档』 |
 | 库归档 `.qla` | 🚧 | 无目标文件格式 → 无法**函数级**增量编译（单元级增量已由 v1.100 的缓存提供，见上一行）、无法分发二进制库 |
@@ -94,6 +94,7 @@
 | ~~GHASH 字级化~~ | ✅ v1.32 已做：4-bit 表乘法从逐字节改成 64 位字（一块 1024 次字节操作 → 64 次字操作），GHASH 123 → **34 ms**，GCM 端到端 125 → 36 ms | — |
 | ~~GHASH PCLMULQDQ~~ | ✅ v1.33 已做：4 次 `pclmulqdq` + 显式归约，GHASH 34 → **17 ms**，GCM 端到端 36 → 19 ms（相对 v1.28 的 1369 ms 是 **72×**） | 归约用移位折叠（不是 0xC2 常数版），比教科书实现多几条指令；AAD 与非整块尾仍走软件路径 |
 | ~~URL 解析 / mem_chr 回归~~ | ✅ v1.35 已查证：没有回归（v1.28 逐字节 85 ms → v1.34 mem_chr 81 ms） | 文档里的 69 ms 是环境漂移（VBS 噪声 ±50%），不要再怀疑一遍 |
+| ~~KV 批量提交~~ | ✅ v1.103 已做：put **16.5 → 2.7 µs/条（6.1×）**、覆盖写 **16.2 → 2.1 µs（7.6×）**；磁盘格式与恢复语义不变 | 每 64 条合并一次 `WriteFile`，`kv_sync`/`kv_close`/`kv_compact` 前冲刷。代价是崩溃窗口 ≤64 条；`kv_sync` 384 µs/条 不变（每条都等落盘）。数字见 `06-status.md` §3.16 |
 | **SHA-256 轮展开** | 现在 44 ms/MiB；8 轮展开（状态变量改名轮转，消掉 8 条搬移）预期再快 1.5–2× | 要把 64 轮按 8 组分身写，代码量 ×8；寄存器压力已经很高，展开可能反而溢出，需实测 |
 | **GHASH 4 路并行** | 现在是串行依赖（每块依赖上一块结果）；4 路聚合可再快 2–3× | 需要重排 CTR/GHASH 交织，收益已不大 |
 | **LICM 根修** | 普适（所有循环） | 根因是 x64 分配器布局敏感段错误；修好前 LICM 只能关 |
@@ -397,10 +398,13 @@ fn main() {
    黄标逐项（~~`@simd` 形状~~ ✅ v1.85、~~并发原语~~ ✅ v1.98、~~接口装箱~~ ✅ v1.97、~~所有权范围~~ ✅ v1.84 …）→
    红标逐项 红→黄→绿（~~泛型 struct~~ 黄 v1.59；~~类型约束~~ ✅ v1.61；~~泛型方法~~ ✅ v1.62；
    ~~泛型 enum~~ ✅ v1.63；~~FFI~~ ✅ v1.87）
-3. **标准库（§2）**：红标剩余项——**MD5**（只差旧协议兼容）、HTTP 客户端封装
-   （重定向/chunked/连接池）、路由/静态文件/MIME/cookie/session/multipart、
-   多 member gzip + zlib 容器、正则、~~持久化（KV）~~ ✅ v1.102（SQL 仍未做）、`exp/log/sin/cos`
-4. **工具链（§3）**：~~调试器~~ ✅ v1.79/v1.80 → ~~覆盖率（行/分支/函数/文件/合并）~~ ✅ v1.83 → ~~fuzz~~ ✅ v1.83 → ~~性能回归门禁~~ ✅ v1.88
+3. **标准库（§2）**：~~MD5~~（v1.35）→ ~~HTTP 客户端封装~~（v1.50）→ ~~路由 / 静态文件 / MIME /
+   cookie / session / multipart~~（v1.67–v1.72）→ ~~多 member gzip + zlib 容器~~（v1.32）→
+   ~~正则~~（v1.57）→ ~~持久化（KV）~~ ✅ v1.102（批量提交列入 2.x 后续版本）→ ~~`exp/log/sin/cos`~~（v1.47）。
+   **当前红标只剩**：TLS 根证书库 / P-384 / SHA-384、连接池与 HTTP/2、中间件链
+   （日志/鉴权/压缩）、IPv6、TCP 批量收发、Linux DNS、国际化（locale / Unicode 分类 /
+   大小写折叠）、SQL 与大于内存的数据集（要 mmap 视图 + 页缓存）
+4. **工具链（§3）**：~~调试器~~ ✅ v1.75/v1.80 → ~~覆盖率（行/分支/函数/文件/合并）~~ ✅ v1.83 → ~~fuzz~~ ✅ v1.83 → ~~性能回归门禁~~ ✅ v1.88
    → ~~LSP / 补全~~ ✅ v1.91 → ~~包管理（registry / 发布 / 传递依赖）~~ ✅ v1.99
    → ~~增量 / 并行编译~~ ✅ v1.100（单元级；函数级要等 `.qla`）→ `.qla`
 
