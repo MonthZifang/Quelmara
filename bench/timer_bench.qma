@@ -1,0 +1,95 @@
+// bench/timer_bench.qma —— std/timer（轮询式定时器）的单价（v2.07）
+// 用法：python tools/stage0/qlm_cli.py run bench/timer_bench.qma --target win
+//
+// 口径：
+//   * 全部用进程内 now_ns()，不含进程启动；
+//   * push：10 万个定时器，到期时刻打散在 0–4 ms（10 个档），量的是
+//     "分配 + 存活位 + 挖洞上浮 + 扩容"的合成成本；
+//   * pending：O(n) 扫描一遍 10 万个存活位；
+//   * drain：睡到全部到期后 poll 到 -1，量的是"弹堆 + 下沉"；
+//   * cancel：2 万个全部取消后再 drain——量的是"跳过取消项"这条路径（不返回 id）；
+//   * 机器噪声 ±50%（还有并行编译），看中位不看单次。
+module timer_bench
+
+import std.timer
+
+fn main() {
+    timer_clear()
+
+    // ---------- push：10 万个 ----------
+    let N = 100000
+    let t0 = now_ns()
+    let mut i = 0
+    while i < N {
+        timer_after(i % 5)
+        i = i + 1
+    }
+    let t1 = now_ns()
+    print("timer_after 10 万: " + ((t1 - t0) / 1000000).to_str() + " ms  ("
+        + ((t1 - t0) / N).to_str() + " ns/次)")
+
+    // ---------- pending：O(n) 扫描 ----------
+    let t2 = now_ns()
+    let p = timer_pending()
+    let t3 = now_ns()
+    print("timer_pending 扫 10 万: " + ((t3 - t2) / 1000).to_str() + " µs  (pending="
+        + p.to_str() + ")")
+    assert(p == N, "10 万个都挂着")
+
+    // ---------- drain：全部到期后弹空 ----------
+    sleep_ms(40)
+    let t4 = now_ns()
+    let mut got = 0
+    let mut go = 1
+    while go == 1 {
+        let id = timer_poll()
+        if id == -1 {
+            go = 0
+        } else {
+            got = got + 1
+        }
+    }
+    let t5 = now_ns()
+    assert(got == N, "10 万个全部弹出")
+    print("timer_poll 弹 10 万: " + ((t5 - t4) / 1000000).to_str() + " ms  ("
+        + ((t5 - t4) / N).to_str() + " ns/次)")
+
+    // ---------- cancel：2 万个全取消 ----------
+    timer_clear()
+    let M = 20000
+    i = 0
+    while i < M {
+        timer_after(0)
+        i = i + 1
+    }
+    let t6 = now_ns()
+    i = 1
+    while i <= M {
+        timer_cancel(i)
+        i = i + 1
+    }
+    let t7 = now_ns()
+    print("timer_cancel 2 万: " + ((t7 - t6) / 1000000).to_str() + " ms  ("
+        + ((t7 - t6) / M).to_str() + " ns/次)")
+
+    // ---------- 全取消后 drain：每个堆项都要被跳过 ----------
+    let t8 = now_ns()
+    let mut skipped = 0
+    let mut go2 = 1
+    while go2 == 1 {
+        let id = timer_poll()
+        if id == -1 {
+            go2 = 0
+        } else {
+            skipped = skipped + 1
+        }
+    }
+    let t9 = now_ns()
+    assert(skipped == 0, "取消后不应返回任何 id")
+    assert(timer_pending() == 0, "取消后 pending 0")
+    print("全取消后 drain 2 万: " + ((t9 - t8) / 1000000).to_str() + " ms  ("
+        + ((t9 - t8) / M).to_str() + " ns/项，全部跳过)")
+
+    timer_clear()
+    print("timer bench done")
+}

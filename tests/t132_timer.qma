@@ -1,0 +1,109 @@
+// t132_timer.qma：std/timer 轮询式定时器（v2.08 重写后首次回归）
+// 覆盖：id 序列 / 到期顺序 / 同一时刻的 id 兜底 / cancel 与幂等 / pending 计数 /
+//       2000 个定时器（触发多次 2 倍扩容）/ clear 复位 / 全弹空后的哨兵。
+// 时间断言只用"睡够了再 poll"，不测"还没到期"的精确边界（本机 VBS 噪声 ±50%）。
+module t132_timer
+
+import std.timer
+
+fn main() {
+    timer_clear()
+
+    // ---- 1. 空状态 ----
+    assert(timer_pending() == 0, "清空后 pending 0")
+    assert(timer_poll() == -1, "空 poll = -1")
+
+    // ---- 2. id 从 1 递增，clear 后重新从 1 起 ----
+    let a = timer_after(0)
+    let b = timer_after(0)
+    let c = timer_after(0)
+    assert(a == 1, "第一个 id = 1")
+    assert(b == 2, "第二个 id = 2")
+    assert(c == 3, "第三个 id = 3")
+    assert(timer_pending() == 3, "pending 3")
+    // 同一时刻到期 → 按 id 出（堆的兜底键）
+    assert(timer_poll() == 1, "同 due 先出 1")
+    assert(timer_poll() == 2, "同 due 再出 2")
+    assert(timer_poll() == 3, "同 due 最后 3")
+    assert(timer_poll() == -1, "全弹空")
+    assert(timer_pending() == 0, "弹空后 pending 0")
+
+    // ---- 3. 到期顺序按时间，不按创建顺序 ----
+    let t30 = timer_after(30)
+    let t0 = timer_after(0)
+    let t10 = timer_after(10)
+    assert(timer_poll() == t0, "0ms 先出")
+    // 睡够：10ms 与 30ms 都到期后，顺序仍按到期时刻
+    sleep_ms(60)
+    assert(timer_poll() == t10, "10ms 第二")
+    assert(timer_poll() == t30, "30ms 最后")
+    assert(timer_poll() == -1, "取空")
+
+    // ---- 4. cancel：到期时静默丢弃，pending 同步 ----
+    let k1 = timer_after(5)
+    let k2 = timer_after(5)
+    assert(timer_pending() == 2, "取消前 pending 2")
+    timer_cancel(k1)
+    assert(timer_pending() == 1, "取消后 pending 1")
+    timer_cancel(k1)                      // 幂等
+    timer_cancel(9999)                    // 越界忽略
+    timer_cancel(-1)                      // 负数忽略
+    assert(timer_pending() == 1, "重复/越界取消不改计数")
+    sleep_ms(40)
+    assert(timer_poll() == k2, "取消的那个不返回")
+    assert(timer_poll() == -1, "取消项被静默丢弃")
+    assert(timer_pending() == 0, "全部结束")
+
+    // ---- 5. 已到期的项再取消：不影响后续 ----
+    let d1 = timer_after(0)
+    sleep_ms(5)
+    timer_cancel(d1)                      // 已到期但还没 poll
+    assert(timer_poll() == -1, "到期后取消也算取消")
+
+    // ---- 6. 2000 个定时器：触发多次扩容 + 到期顺序正确 ----
+    timer_clear()
+    let N = 2000
+    let mut i = 0
+    while i < N {
+        // 10 个到期档（0,2,4,…,18 ms），每档 200 个
+        timer_after((i % 10) * 2)
+        i = i + 1
+    }
+    assert(timer_pending() == N, "2000 个都挂着")
+    sleep_ms(80)
+    let mut prev_id = 0
+    let mut prev_ms = -1
+    let mut got = 0
+    let mut go = 1
+    while go == 1 {
+        let id = timer_poll()
+        if id == -1 {
+            go = 0
+        } else {
+            // id 从 1 起，创建顺序 i = id-1 → 该定时器的 ms 档 = ((id-1) % 10) * 2
+            let ms = ((id - 1) % 10) * 2
+            assert(ms >= prev_ms, "到期档单调不减")
+            if ms == prev_ms {
+                assert(id > prev_id, "同档按 id 递增")
+            }
+            prev_ms = ms
+            prev_id = id
+            got = got + 1
+        }
+    }
+    assert(got == N, "2000 个全部弹出")
+    assert(timer_pending() == 0, "2000 个之后 pending 0")
+
+    // ---- 7. clear 复位：id 重新从 1 起，旧 id 失效 ----
+    let r = timer_after(0)
+    assert(r == 2001, "clear 前 id 连续")
+    timer_clear()
+    assert(timer_pending() == 0, "clear 后 pending 0")
+    assert(timer_poll() == -1, "clear 后 poll = -1")
+    let again = timer_after(0)
+    assert(again == 1, "clear 后 id 从 1 重来")
+    assert(timer_poll() == again, "clear 后新定时器可用")
+    timer_clear()
+
+    print("timer ok")
+}

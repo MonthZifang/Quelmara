@@ -8,9 +8,9 @@
   A. **词法对拍**：`qlm_index.scan` 与编译器词法 `qlm.tokenize` 在全仓库
      `.qma` 上逐记号相等（kind + val）。这是"索引不会与编译器漂移"的硬约束：
      词法一改，这里立刻红。
-  B. **容错索引**：`qlm.Parser` 解析不了的文件（`std/timer.qma` 的顶层 `let`、
-     `std/http.qma` 拿 `rc` 当变量名）照样要有完整符号表——编辑器里的文件
-     永远是半成品。
+  B. **容错索引**：`qlm.Parser` 解析不了的文件（`std/sse.qma` 拿 `rc` 当变量名）
+     照样要有完整符号表——编辑器里的文件永远是半成品。`std/http.qma`（v2.06）与
+     `std/timer.qma`（v2.08）修好之后改成正向钉住，防止退回。
   C. **索引语义**：跨文件定义、字段/变体补全、类型约束里的接口方法、
      重命名范围（本文件 / 跨文件）、诊断。
   D. **协议端到端**：起 `quelmara lsp` 子进程，走真的 JSON-RPC：
@@ -117,9 +117,10 @@ def test_lex_parity():
 
 def test_tolerant():
     ws = qlm_index.Workspace(ROOT)
-    cases = [("std/timer.qma", "顶层 let（编译器当前不支持）"),
-             ("std/http.qma", "`rc` 当变量名（关键字）")]
-    for rel, why in cases:
+    # 仍然过不了前端的两处（`rc` 是关键字）；容错索引必须照样给出完整符号表
+    neg = [("std/sse.qma", "`rc` 当变量名（关键字）"),
+           ("std/ws.qma", "`rc` 当变量名（关键字）")]
+    for rel, why in neg:
         path = os.path.join(ROOT, rel)
         if not os.path.isfile(path):
             ok(f"容错索引：{rel} 不存在，跳过（{why}）")
@@ -135,6 +136,28 @@ def test_tolerant():
         want(not parsed, f"容错索引：{rel} 确实过不了 qlm.Parser（{why}）")
         want(len(ix.syms) >= 5 and len(ix.occs) > 20,
              f"容错索引：{rel} 仍给出 {len(ix.syms)} 个符号 / {len(ix.occs)} 处引用")
+
+    # 反向钉住：修好之后必须**能过前端**（`std/http` 的 `rc` 是 v2.06 修的、
+    # `std/timer` 的顶层 let 是 v2.07 收进函数的）。这两条防"又退回只能靠
+    # 容错索引"的状态——容错能力本身由上面两条负向用例覆盖。
+    pos = [("std/http.qma", "v2.06 修掉 `rc` 撞关键字"),
+           ("std/timer.qma", "v2.08 把顶层 let 收进 mem 块")]
+    for rel, why in pos:
+        path = os.path.join(ROOT, rel)
+        if not os.path.isfile(path):
+            ok(f"容错索引：{rel} 不存在，跳过（{why}）")
+            continue
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        parsed = True
+        try:
+            qlm.Parser(qlm.tokenize(src)).parse_program()
+        except SyntaxError:
+            parsed = False
+        want(parsed, f"容错索引：{rel} 已能过 qlm.Parser（{why}）")
+        ix = ws.index(path, src)
+        want(len(ix.syms) >= 5 and len(ix.occs) > 20,
+             f"容错索引：{rel} 给出 {len(ix.syms)} 个符号 / {len(ix.occs)} 处引用")
 
 
 # ---------------------------------------------------------------------------

@@ -1,90 +1,264 @@
-// std/timer.qma —— 定时器（v1.17）
-// 基于最小堆（std/ds）+ 单调钟：帧循环驱动的**轮询式**定时器
-// （无后台线程、无回调——tick() 返回到期的 id，游戏/服务器主循环友好）。
+// std/timer.qma —— 轮询式定时器（v1.17 起；v2.08 重写：能 import、能编译、O(log n)）
 //
-// 用法：
-//   let id = timer_after(500)      // 500ms 后到期，返回句柄
+// 形态：没有后台线程、没有回调——主循环里自己 poll。游戏帧循环 / 服务器事件循环友好。
+//
+//   let id = timer_after(500)          // 500 ms 后到期，返回 id（>= 1）
 //   loop {
-//     timer_tick()                  // 每帧调用
-//     let due = timer_poll()        // 取一个到期句柄（无则 -1）
-//     if due >= 0 { ...处理... }
-//     sleep_ms(16)
+//       let due = timer_poll()         // 一次取一个到期且未取消的 id，没有则 -1
+//       if due >= 0 { ...处理... }
+//       sleep_ms(16)
 //   }
-// id 从 1 递增；时间戳打在两个平行 vec 上（到期时刻 + 存活标记）。
+//
+// 底座是二叉最小堆，但**不用 std/ds**：模块状态要跨调用存活，而 `vec` 句柄存进
+// `static_word` 再取回来会丢类型标签（`v.push` 报"不支持方法"）。所以堆与存活表
+// 直接落在 mem 块里（与 `std/http` 的连接状态同一套路），句柄就是一个 int。
+//
+// 布局（两个进程级块，指针分别在 static_word(13) / static_word(14)）：
+//   堆块  ：[cap, len] + keys[cap] + ids[cap]              16 字节头 + 16*cap
+//   存活块：[cap, len]       + alive[cap]                  16 字节头 + 8*cap
+//   alive 按 **id-1** 索引（id 从 1 递增、永不复用），1 = 未取消
+//   两个块都按 2 倍扩容，扩容时 mem_copy 旧内容再 mem_free
+//
+// 排序键 = (到期时刻, id)：同一时刻到期的按创建顺序出堆——测试与调试可复现。
+//
+// 语义纪律：
+//   * 到期时刻 = `now_ns() + ms*1e6`（单调钟，不受墙钟调整影响；int64 纳秒离
+//     溢出还有 292 年）；
+//   * `ms <= 0` 表示"下一次 poll 就到期"（到期时刻就是调用时刻）；
+//   * `timer_cancel(id)` 只清存活位，堆里的项留到到期时**静默丢弃**（不搬堆，O(1)）；
+//   * `timer_poll()` 一次只弹一个，调用方自己循环到 -1；
+//   * `timer_pending()` 是 O(n) 扫描（诊断用，不是热路径）；
+//   * 非线程安全：多线程同时 after/poll 要自己加锁（语言层不加内部锁）。
 // ---------------------------------------------------------------------------
 
-import std.ds
-import std.core
+const TIMER_W = 13        // static_word(13) = 堆块指针
+const TIMER_ALIVE_W = 14  // static_word(14) = 存活块指针
+const TIMER_CAP0 = 64     // 首次分配容量
+const TIMER_HDR = 16      // 堆块头：cap / len
+const ALIVE_HDR = 16      // 存活块头：cap / len
 
-const TIMER_KEY_W = 12    // static_word(12) = 下一个 id（1 起）
+// ---------------------------------------------------------------------------
+// 块管理
+// ---------------------------------------------------------------------------
 
-let _heap = heap_new(64)
-let _due = vec[int].new(64)      // 与堆平行的到期时刻（now_ms 基准）
-let _alive = vec[int].new(64)    // 1 = 未取消
-let _stamp0 = vec[int].new(4)    // 全局基准（首个 timer 创建时的 now_ms）
-
-// timer_after(ms) -> int：ms 毫秒后到期，返回句柄 id（> 0）
-fn timer_after(ms: int) -> int {
-    if len(_stamp0) == 0 {
-        _stamp0.push(now_ms())
+// _t_ctx() -> int：堆块指针（首次调用时惰性创建，进程级单例）
+fn _t_ctx() -> int {
+    let w = static_word(TIMER_W)
+    let c = mem_load64(w, 0)
+    if c != 0 {
+        return c
     }
-    let base = _stamp0.get(0)
-    let id = mem_load64(static_word(TIMER_KEY_W), 0) + 1
-    mem_store64(static_word(TIMER_KEY_W), 0, id)
-    let due_at = base + ms
-    // 堆键 = 到期时刻（最小堆：早到期先出）
-    heap_push(_heap, due_at)
-    _due.push(due_at)
-    _alive.push(1)
+    let cap = TIMER_CAP0
+    let nc = mem_alloc(TIMER_HDR + cap * 16)
+    mem_store64(nc, 0, cap)
+    mem_store64(nc, 1, 0)
+    mem_store64(w, 0, nc)
+    return nc
+}
+
+// _t_grow(c) -> int：容量翻倍（keys 与 ids 两段一起搬），返回新块指针
+fn _t_grow(c: int) -> int {
+    let cap = mem_load64(c, 0)
+    let len = mem_load64(c, 1)
+    let ncap = cap * 2
+    let nc = mem_alloc(TIMER_HDR + ncap * 16)
+    mem_store64(nc, 0, ncap)
+    mem_store64(nc, 1, len)
+    mem_copy(mem_ptr(nc, TIMER_HDR), mem_ptr(c, TIMER_HDR), len * 8)
+    mem_copy(mem_ptr(nc, TIMER_HDR + ncap * 8), mem_ptr(c, TIMER_HDR + cap * 8), len * 8)
+    mem_free(c, TIMER_HDR + cap * 16)
+    mem_store64(static_word(TIMER_W), 0, nc)
+    return nc
+}
+
+// _t_alive() -> int：存活块指针（惰性创建）
+fn _t_alive() -> int {
+    let w = static_word(TIMER_ALIVE_W)
+    let a = mem_load64(w, 0)
+    if a != 0 {
+        return a
+    }
+    let cap = TIMER_CAP0
+    let na = mem_alloc(ALIVE_HDR + cap * 8)
+    mem_store64(na, 0, cap)
+    mem_store64(na, 1, 0)
+    mem_store64(w, 0, na)
+    return na
+}
+
+// _t_alive_grow(a) -> int：存活表容量翻倍，返回新块指针
+fn _t_alive_grow(a: int) -> int {
+    let cap = mem_load64(a, 0)
+    let len = mem_load64(a, 1)
+    let ncap = cap * 2
+    let na = mem_alloc(ALIVE_HDR + ncap * 8)
+    mem_store64(na, 0, ncap)
+    mem_store64(na, 1, len)
+    mem_copy(mem_ptr(na, ALIVE_HDR), mem_ptr(a, ALIVE_HDR), len * 8)
+    mem_free(a, ALIVE_HDR + cap * 8)
+    mem_store64(static_word(TIMER_ALIVE_W), 0, na)
+    return na
+}
+
+// ---------------------------------------------------------------------------
+// 公开 API
+// ---------------------------------------------------------------------------
+
+/// timer_after(ms) -> int：ms 毫秒后到期，返回句柄 id（从 1 递增，永不复用）。
+/// `ms <= 0` 表示"下一次 timer_poll 就到期"（到期时刻不晚于调用时刻）。
+pub fn timer_after(ms: int) -> int {
+    let mut c = _t_ctx()
+    let mut a = _t_alive()
+    let len = mem_load64(a, 1)
+    let id = len + 1
+
+    // 存活位：id-1 位置置 1
+    if len >= mem_load64(a, 0) {
+        a = _t_alive_grow(a)
+    }
+    mem_store64(mem_ptr(a, ALIVE_HDR), len, 1)
+    mem_store64(a, 1, id)
+
+    // 堆容量
+    if mem_load64(c, 1) >= mem_load64(c, 0) {
+        c = _t_grow(c)
+    }
+    let due = now_ns() + ms * 1000000
+
+    // 挖洞上浮：父节点比 (due, id) 大就下移让位，最后一次性落位
+    let cap = mem_load64(c, 0)
+    let keys = mem_ptr(c, TIMER_HDR)
+    let ids = mem_ptr(c, TIMER_HDR + cap * 8)
+    let mut i = mem_load64(c, 1)
+    while i > 0 {
+        let p = (i - 1) / 2
+        let pd = mem_load64(keys, p)
+        let pid = mem_load64(ids, p)
+        if pd < due || (pd == due && pid < id) {
+            break
+        }
+        mem_store64(keys, i, pd)
+        mem_store64(ids, i, pid)
+        i = p
+    }
+    mem_store64(keys, i, due)
+    mem_store64(ids, i, id)
+    mem_store64(c, 1, mem_load64(c, 1) + 1)
     return id
 }
 
-// timer_cancel(id)：取消（到期时 timer_poll 跳过）
-fn timer_cancel(id: int) {
-    let i = id - 1
-    if i >= 0 && i < len(_alive) {
-        _alive.set(i, 0)
+/// timer_cancel(id)：取消（O(1)，只清存活位）。到期时 timer_poll 静默丢弃。
+/// 已取消 / 已到期的 id 再取消一次是幂等的；越界 id 直接忽略。
+pub fn timer_cancel(id: int) {
+    let a = _t_alive()
+    if id >= 1 && id <= mem_load64(a, 1) {
+        mem_store64(mem_ptr(a, ALIVE_HDR), id - 1, 0)
     }
 }
 
-// timer_poll() -> int：弹出一个**已到期且存活**的句柄（无则 -1）。
-// 已取消的到期项静默丢弃。
-fn timer_poll() -> int {
-    if len(_stamp0) == 0 {
-        return 0 - 1
-    }
-    let now = now_ms()
-    while len(_heap) > 0 {
-        let top = heap_peek(_heap)
-        if top > now {
-            return 0 - 1
-        }
-        heap_pop(_heap)
-        // 从平行数组找这个到期时刻对应的 id（最早的 alive 项）
-        let n = len(_due)
-        let mut i = 0
-        while i < n {
-            if _alive.get(i) == 1 && _due.get(i) == top {
-                _alive.set(i, 0)
-                return i + 1
+/// timer_poll() -> int：弹出一个**已到期且未取消**的 id（没有则 -1）。
+/// 已取消的到期项静默跳过——所以一次调用可能弹掉多个堆项才返回。
+pub fn timer_poll() -> int {
+    let c = _t_ctx()
+    let a = _t_alive()
+    // 一次调用只取一次钟（循环里跳过的取消项用同一个 now 判定）
+    let now = now_ns()
+    let mut res = 0 - 1
+    let mut go = 1
+    while go == 1 {
+        let len = mem_load64(c, 1)
+        if len == 0 {
+            go = 0
+        } else {
+            let cap = mem_load64(c, 0)
+            let keys = mem_ptr(c, TIMER_HDR)
+            let ids = mem_ptr(c, TIMER_HDR + cap * 8)
+            if mem_load64(keys, 0) > now {
+                go = 0
+            } else {
+                // 取根，末元素落到根后下沉（挖洞：逐层把孩子上提，最后落位）
+                let id = mem_load64(ids, 0)
+                let lastd = mem_load64(keys, len - 1)
+                let lastid = mem_load64(ids, len - 1)
+                mem_store64(c, 1, len - 1)
+                let m = len - 1
+                if m > 0 {
+                    let mut i = 0
+                    let mut go2 = 1
+                    while go2 == 1 {
+                        let l = i * 2 + 1
+                        if l >= m {
+                            go2 = 0
+                        } else {
+                            let ld = mem_load64(keys, l)
+                            let li = mem_load64(ids, l)
+                            let mut ck = l
+                            let mut cd = ld
+                            let mut ci = li
+                            let r = l + 1
+                            if r < m {
+                                let rd = mem_load64(keys, r)
+                                let ri = mem_load64(ids, r)
+                                if rd < ld || (rd == ld && ri < li) {
+                                    ck = r
+                                    cd = rd
+                                    ci = ri
+                                }
+                            }
+                            if cd > lastd || (cd == lastd && ci > lastid) {
+                                go2 = 0
+                            } else {
+                                mem_store64(keys, i, cd)
+                                mem_store64(ids, i, ci)
+                                i = ck
+                            }
+                        }
+                    }
+                    mem_store64(keys, i, lastd)
+                    mem_store64(ids, i, lastid)
+                }
+                // 存活判定：取消过的直接丢，继续看下一个
+                if id >= 1 && id <= mem_load64(a, 1) {
+                    let p = mem_ptr(a, ALIVE_HDR)
+                    if mem_load64(p, id - 1) == 1 {
+                        mem_store64(p, id - 1, 0)
+                        res = id
+                        go = 0
+                    }
+                }
             }
-            i = i + 1
         }
-        // 该到期时刻全部已取消——继续弹
     }
-    return 0 - 1
+    return res
 }
 
-// timer_pending() -> int：未决定时器数量（诊断用）
-fn timer_pending() -> int {
-    let n = len(_alive)
-    let mut c = 0
+/// timer_pending() -> int：还没到期/没取消的定时器个数（**O(n) 扫描**，诊断用）。
+pub fn timer_pending() -> int {
+    let a = _t_alive()
+    let n = mem_load64(a, 1)
+    let p = mem_ptr(a, ALIVE_HDR)
+    let mut cnt = 0
     let mut i = 0
     while i < n {
-        if _alive.get(i) == 1 {
-            c = c + 1
+        if mem_load64(p, i) == 1 {
+            cnt = cnt + 1
         }
         i = i + 1
     }
-    return c
+    return cnt
+}
+
+/// timer_clear()：释放两个块（下次 timer_after 重新建、id 从 1 起）。
+/// 主要给测试与"整轮重启"用；释放后旧 id 全部失效。
+pub fn timer_clear() {
+    let c = mem_load64(static_word(TIMER_W), 0)
+    if c != 0 {
+        mem_free(c, TIMER_HDR + mem_load64(c, 0) * 16)
+        mem_store64(static_word(TIMER_W), 0, 0)
+    }
+    let a = mem_load64(static_word(TIMER_ALIVE_W), 0)
+    if a != 0 {
+        mem_free(a, ALIVE_HDR + mem_load64(a, 0) * 8)
+        mem_store64(static_word(TIMER_ALIVE_W), 0, 0)
+    }
 }
