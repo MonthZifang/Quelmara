@@ -179,6 +179,9 @@ const E_VECNEW = 56    // a = 元素类型，b = 容量表达式
 const E_MAPNEW = 57    // a = 键类型，b = 容量表达式，c = 值类型
 const E_SLICE = 58     // a = 基址表达式，b = lo，c = hi（`a[lo..hi]`）
 const E_CLOSURE = 59   // a = 合成函数的序号
+// 形参记录（v2.29）：只出现在 nodes 的"形参表"区段里，不是真正的表达式。
+// a = 名字 id，b = 类型 TY_*。Fn.pbase 指向这一段的起点。
+const E_FPARAM = 60
 const E_ARM = 54       // a = 变体序号（-1 = 通配），b = 绑定名 id（-1 = 不绑定），c = 体      // a = 字符串表 id
 
 // 语句
@@ -234,15 +237,8 @@ const TBL_SIZE = EN_HDR + 1 + 64 * EN_STRIDE
 
 struct Fn {
     name: int       // 名字 id
-    np: int         // 形参数
-    p0: int
-    p1: int
-    p2: int
-    p3: int
-    p0t: int        // 形参类型（TY_*）
-    p1t: int
-    p2t: int
-    p3t: int
+    np: int         // 形参数（v2.29 起不限 4；第 5 个起走栈）
+    pbase: int      // 形参表基址：nodes 里连续 np 条 E_FPARAM（a=名字 id, b=类型）
     ret_t: int      // 返回类型
     body: int       // 语句块链头
     nbody: int
@@ -1055,10 +1051,7 @@ fn _primary(p: P, pos: vec[int]) -> int {
         // 闭包字面量：合成一个顶层函数，表达式值 = {code, 0}
         _adv(pos)
         _eat_p(p, pos, P_LPAREN)
-        let mut q0 = -1
-        let mut q1 = -1
-        let mut t0 = TY_INT
-        let mut t1 = TY_INT
+        let pbase = len(p.nodes)
         let mut np = 0
         while !_is_p(p, pos, P_RPAREN) {
             let pn = _cur(p, pos)
@@ -1074,15 +1067,7 @@ fn _primary(p: P, pos: vec[int]) -> int {
             if pt >= TY_STRUCT {
                 _fail(p, pos, "闭包形参只支持 int/bool/str")
             }
-            if np == 0 {
-                q0 = _name_id(p, pn.s)
-                t0 = pt
-            } else if np == 1 {
-                q1 = _name_id(p, pn.s)
-                t1 = pt
-            } else {
-                _fail(p, pos, "闭包最多 2 个形参")
-            }
+            _node(p, E_FPARAM, _name_id(p, pn.s), pt, -1)
             np = np + 1
             if _is_p(p, pos, P_COMMA) {
                 _adv(pos)
@@ -1097,8 +1082,7 @@ fn _primary(p: P, pos: vec[int]) -> int {
         let lname = _name_id(p, "__lambda_" + len(p.fns).to_str())
         let body = _block(p, pos)
         let fi = len(p.fns)
-        p.fns.push(Fn { name: lname, np: np, p0: q0, p1: q1, p2: -1, p3: -1,
-                        p0t: t0, p1t: t1, p2t: TY_INT, p3t: TY_INT,
+        p.fns.push(Fn { name: lname, np: np, pbase: pbase,
                         ret_t: rt, body: body, nbody: 0, nlocals: -1 })
         return _postfix(p, pos, _node(p, E_CLOSURE, fi, -1, -1))
     }
@@ -1213,12 +1197,9 @@ fn _primary(p: P, pos: vec[int]) -> int {
         }
         if _is_p(p, pos, P_LPAREN) {
             _adv(pos)
-            // 实参最多 4 个：b/c/n/slot 四个槽（聚合返回还要占一个寄存器）
+            // 实参：前 4 个放 b/c/n/slot，第 5 个起挂 nx 链（v2.29 放开个数）
             let args = vec[int].new(4)
             while !_is_p(p, pos, P_RPAREN) {
-                if len(args) >= 4 {
-                    _fail(p, pos, "实参最多 4 个")
-                }
                 args.push(_expr(p, pos))
                 if _is_p(p, pos, P_COMMA) {
                     _adv(pos)
@@ -1236,6 +1217,22 @@ fn _primary(p: P, pos: vec[int]) -> int {
             let cid = _node(p, E_CALL, nid, a0, a1)
             p.nodes.set(cid, Node { op: E_CALL, a: nid, b: a0, c: a1, n: a2,
                                    slot: a3, ty: 0, nx: -1 })
+            if len(args) > 4 {
+                let mut first = -1
+                let mut last = -1
+                let mut i = 4
+                while i < len(args) {
+                    let id = _node(p, E_AINIT, args.get(i), -1, -1)
+                    if first < 0 {
+                        first = id
+                    } else {
+                        _set_nx(p, last, id)
+                    }
+                    last = id
+                    i = i + 1
+                }
+                _set_nx(p, cid, first)
+            }
             return _postfix(p, pos, cid)
         }
         return _postfix(p, pos, _node(p, E_VAR, nid, -1, -1))
@@ -1414,14 +1411,9 @@ fn _fn(p: P, pos: vec[int], ffi_idx: int) {
     _adv(pos)
     let nid = _name_id(p, nm.s)
     _eat_p(p, pos, P_LPAREN)
-    let mut q0 = -1
-    let mut q1 = -1
-    let mut q2 = -1
-    let mut q3 = -1
-    let mut t0 = TY_INT
-    let mut t1 = TY_INT
-    let mut t2 = TY_INT
-    let mut t3 = TY_INT
+    // 形参表：每条形参追加一条 E_FPARAM 记录（a=名字 id，b=类型），
+    // Fn.pbase 记住基址。**不再限 4 个**——第 5 个起走栈（v2.29）。
+    let pbase = len(p.nodes)
     let mut np = 0
     while !_is_p(p, pos, P_RPAREN) {
         let pn = _cur(p, pos)
@@ -1434,16 +1426,7 @@ fn _fn(p: P, pos: vec[int], ffi_idx: int) {
             _adv(pos)
             pt = _type(p, pos)          // 支持 int/bool/str/struct/enum/[N]T
         }
-        let pid = _name_id(p, pn.s)
-        if np == 0 { q0 = pid }
-        else if np == 1 { q1 = pid }
-        else if np == 2 { q2 = pid }
-        else if np == 3 { q3 = pid }
-        else { _fail(p, pos, "本版最多 4 个形参") }
-        if np == 0 { t0 = pt }
-        else if np == 1 { t1 = pt }
-        else if np == 2 { t2 = pt }
-        else { t3 = pt }
+        _node(p, E_FPARAM, _name_id(p, pn.s), pt, -1)
         np = np + 1
         if _is_p(p, pos, P_COMMA) {
             _adv(pos)
@@ -1468,8 +1451,7 @@ fn _fn(p: P, pos: vec[int], ffi_idx: int) {
         body = _block(p, pos)
         nbody = 0
     }
-    p.fns.push(Fn { name: nid, np: np, p0: q0, p1: q1, p2: q2, p3: q3,
-                    p0t: t0, p1t: t1, p2t: t2, p3t: t3, ret_t: rt,
+    p.fns.push(Fn { name: nid, np: np, pbase: pbase, ret_t: rt,
                     body: body, nbody: 0, nlocals: ffi_idx })
 }
 
@@ -1793,6 +1775,14 @@ fn _mov_store(code: vec[int], base: int, disp: int, src: int) {
     _w32(code, disp)
 }
 
+/// `mov [rsp + disp], src`——RSP 作基址必须带 SIB 字节（不能用 _mov_store）
+fn _mov_store_rsp(code: vec[int], disp: int, src: int) {
+    _rex2(code, 1, src, RSP)
+    _b(code, 0x89)
+    _modrm_sib(code, 2, src)
+    _w32(code, disp)
+}
+
 // [rsp+disp32] 的 modrm 带 SIB
 fn _modrm_sib(code: vec[int], mod: int, reg: int) {
     _modrm(code, mod, reg, 4)
@@ -2056,6 +2046,11 @@ const OP_SHL = 43      // dst = a << b
 const OP_SAR = 44      // dst = a >> b（算术右移，符号位扩展）
 const OP_SHR = 45      // dst = a >>> b（逻辑右移，高位补 0）
 const OP_BNOT = 46     // dst = ~a
+// 栈参数（v2.29）：第 5 个起走栈
+const OP_PARAMSTK = 47 // dst = [rbp + imm]（被调方取栈上的形参）
+const OP_STKALLOC = 48 // sub rsp, imm（调用点开 shadow space + 栈实参）
+const OP_STKARG = 49   // [rsp + imm] = a（写栈实参）
+const OP_STKFREE = 50  // add rsp, imm
 
 struct Ir {
     op: int
@@ -2135,6 +2130,10 @@ const C_BD = 4
 const C_ADDRTY = 5
 const C_SRET = 6        // 聚合返回的隐藏指针（vreg）
 const C_DEF = 7         // defer 栈深度
+// v2.29：本函数 push 了几个 callee-saved（发射期才知道）。栈形参的偏移要用它：
+// 序言是「先 push callee-saved，最后 push rbp」，所以返回地址在
+// [rbp + 8 + 8*nsaved]，而不是 [rbp+8]——这个坑让第一版栈形参全读成垃圾。
+const C_NSAVED = 8
 const FRAME = 4096          // 帧大小（512 个 8 字节槽）
 const MAX_VAR = 64          // 变量最多占 64 个寄存器位（其余落槽）
 const SLOT_TEMP = 256       // 0..255 给变量与聚合区域；256..511 给临时值溢出
@@ -2185,18 +2184,12 @@ fn _name_id_ro(ctx: Ctx, s: str) -> int {
     return -1
 }
 
-fn _param_name(f: Fn, k: int) -> int {
-    if k == 0 { return f.p0 }
-    if k == 1 { return f.p1 }
-    if k == 2 { return f.p2 }
-    return f.p3
+fn _param_name(fc: FnCtx, f: Fn, k: int) -> int {
+    return fc.nodes.get(f.pbase + k).a
 }
 
-fn _param_type(f: Fn, k: int) -> int {
-    if k == 0 { return f.p0t }
-    if k == 1 { return f.p1t }
-    if k == 2 { return f.p2t }
-    return f.p3t
+fn _param_type(fc: FnCtx, f: Fn, k: int) -> int {
+    return fc.nodes.get(f.pbase + k).b
 }
 
 /// 第 k 个入参落在哪个寄存器（Win64：RCX/RDX/R8/R9）
@@ -2356,9 +2349,10 @@ fn _fc_reset(fc: FnCtx) {
 /// 一个线程建一次，之后每个函数 `_fc_reset` 复用——并行时堆分配是争用点
 fn _new_fc(nodes: vec[Node], names: vec[str], fns: vec[Fn], rt: vec[int],
            stt: vec[int]) -> FnCtx {
-    let cells = vec[int].new(8)
+    // 9 个计数器/状态单元：C_ST..C_NSAVED（加新索引时这里和 C_* 常量要一起改）
+    let cells = vec[int].new(9)
     let mut ci = 0
-    while ci < 8 {
+    while ci < 9 {
         cells.push(0)
         ci = ci + 1
     }
@@ -2604,6 +2598,62 @@ fn _cc_inv(cc: int) -> int {
     if cc == 0x8D { return 0x8C }
     if cc == 0x8E { return 0x8F }
     return 0x8E
+}
+
+/// 收集一个 E_CALL 的实参节点 id：前 4 个在 b/c/n/slot，第 5 个起挂在 nx 链上
+fn _call_args(fc: FnCtx, nd: Node) -> vec[int] {
+    let av = vec[int].new(4)
+    if nd.b >= 0 { av.push(nd.b) }
+    if nd.c >= 0 { av.push(nd.c) }
+    if nd.n >= 0 { av.push(nd.n) }
+    if nd.slot >= 0 { av.push(nd.slot) }
+    let mut x = nd.nx
+    while x >= 0 {
+        av.push(fc.nodes.get(x).a)
+        x = fc.nodes.get(x).nx
+    }
+    return av
+}
+
+/// 摆实参：寄存器部分走 OP_ARG，超出 nreg 的走栈（v2.29）。
+/// `argbase` = 1 表示聚合返回占了第 0 个实参寄存器（sret）。
+/// 返回为栈实参预留的字节数（0 = 没开栈），调用方在 call 之后要用
+/// `_emit_call_free` 收回去。
+fn _emit_call_args(fc: FnCtx, vals: vec[int], argbase: int) -> int {
+    let nreg = 4 - argbase
+    let mut nstk = len(vals) - nreg
+    if nstk < 0 {
+        nstk = 0
+    }
+    let mut stk = 0
+    if nstk > 0 {
+        // shadow space 32 + 每个栈实参 8；再补到 16 的倍数——
+        // Win64 要求 `call` 那一刻 rsp ≡ 0 (mod 16)，不然被调方里
+        // 用对齐 SSE 存取的 Win32 API 会直接 AV。
+        stk = 32 + 8 * nstk
+        if stk % 16 != 0 {
+            stk = stk + 8
+        }
+        _ir_emit(fc, OP_STKALLOC, 0, 0, 0, stk)
+    }
+    let mut ai = 0
+    let mut k = 0
+    while ai < len(vals) {
+        if ai < nreg {
+            _ir_emit(fc, OP_ARG, 0, vals.get(ai), 0, argbase + ai)
+        } else {
+            _ir_emit(fc, OP_STKARG, 0, vals.get(ai), 0, 32 + 8 * k)
+            k = k + 1
+        }
+        ai = ai + 1
+    }
+    return stk
+}
+
+fn _emit_call_free(fc: FnCtx, stk: int) {
+    if stk > 0 {
+        _ir_emit(fc, OP_STKFREE, 0, 0, 0, stk)
+    }
 }
 
 /// 两个操作数已经求好，把 `l <op> r` 发进 dst，返回结果类型
@@ -2902,25 +2952,26 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
             // 不是顶层函数：可能是闭包变量
             let cv = _try_var(fc, nd.a)
             if cv >= 0 && fc.vty.get(cv) == TY_FN {
-                let av = vec[int].new(2)
-                if nd.b >= 0 { av.push(_lower_expr(fc, nd.b)) }
-                if nd.c >= 0 { av.push(_lower_expr(fc, nd.c)) }
-                if len(av) > 2 {
-                    eprint("qlmc: 闭包调用最多 2 个实参")
-                    exit(2)
-                }
+                let av = _call_args(fc, nd)
+                let vals = vec[int].new(2)
                 let mut ai = 0
                 while ai < len(av) {
-                    _ir_emit(fc, OP_ARG, 0, av.get(ai), 0, ai)
+                    vals.push(_lower_expr(fc, av.get(ai)))
                     ai = ai + 1
                 }
-                // nd.a 是**名字 id**，不是节点 id：直接取闭包变量的区域地址
-                let cl = _vnew(fc)
-                fc.vty.set(cl, TY_INT)
-                _ir_emit(fc, OP_ADDRV, cl, 0, 0, -fc.vloc.get(cv) - 1)
+                // 闭包变量的区域地址：先算，再摆实参（见下面的 pin 说明）
+                let cl0 = _vnew(fc)
+                fc.vty.set(cl0, TY_INT)
+                _ir_emit(fc, OP_ADDRV, cl0, 0, 0, -fc.vloc.get(cv) - 1)
+                let stk = _emit_call_args(fc, vals, 0)
+                // nd.a 是**名字 id**，不是节点 id：直接取闭包变量的区域地址。
+                // 必须在摆实参**之前**算好并 pin——OP_ARG 会写 R8/R9，
+                // 而闭包地址的临时值很可能就落在那里。
+                let cl = _pin(fc, cl0)
                 let d = _vnew(fc)
                 fc.vty.set(d, TY_INT)
                 _ir_emit(fc, OP_CALLR, d, cl, 0, 0)
+                _emit_call_free(fc, stk)
                 return d
             }
             eprint("qlmc: 未定义函数 " + fc.names.get(nd.a))
@@ -2930,28 +2981,27 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         let mut argbase = 0
         let mut sret = 0
         if _ty_is_agg(fret) {
-            // 聚合返回：先给结果开一块区域，把它的地址当第 0 个实参
+            // 聚合返回：先给结果开一块区域，地址留到最后再搬进 RCX。
+            // **必须 pin**：实参求值里可能还有调用（会把 RCX 冲掉），
+            // 而 OP_ARG 本身又写 R8/R9，临时值放寄存器里活不到 call 那一刻。
             let tmp = _new_var(fc, -1, fret)
             let sa = _vnew(fc)
             fc.vty.set(sa, TY_INT)
             _ir_emit(fc, OP_ADDRV, sa, 0, 0, -fc.vloc.get(tmp) - 1)
-            _ir_emit(fc, OP_ARG, 0, sa, 0, 0)
-            sret = sa
+            sret = _pin(fc, sa)
             argbase = 1
         }
-        let av = vec[int].new(4)
-        if nd.b >= 0 { av.push(_lower_expr(fc, nd.b)) }
-        if nd.c >= 0 { av.push(_lower_expr(fc, nd.c)) }
-        if nd.n >= 0 { av.push(_lower_expr(fc, nd.n)) }
-        if nd.slot >= 0 { av.push(_lower_expr(fc, nd.slot)) }
-        if len(av) + argbase > 4 {
-            eprint("qlmc: 实参 + sret 超过 4 个寄存器")
-            exit(2)
-        }
+        let av = _call_args(fc, nd)
+        let vals = vec[int].new(4)
         let mut ai = 0
         while ai < len(av) {
-            _ir_emit(fc, OP_ARG, 0, av.get(ai), 0, argbase + ai)
+            vals.push(_lower_expr(fc, av.get(ai)))
             ai = ai + 1
+        }
+        let stk = _emit_call_args(fc, vals, argbase)
+        if sret != 0 {
+            // 最后才设 sret：放在这里就不会被实参求值里的任何调用冲掉
+            _ir_emit(fc, OP_ARG, 0, sret, 0, 0)
         }
         let d = _vnew(fc)
         fc.vty.set(d, fret)
@@ -2961,6 +3011,7 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         } else {
             _ir_emit(fc, OP_CALL, d, 0, 0, fi)
         }
+        _emit_call_free(fc, stk)
         if _ty_is_agg(fret) {
             fc.vty.set(sret, fret)   // 聚合结果就是那块区域的地址
             return sret
@@ -3611,20 +3662,34 @@ fn _lower_fn(fc: FnCtx, fi: int) {
     let pvs = vec[int].new(12)
     let mut k = 0
     while k < f.np {
-        let pty = _param_type(f, k)
-        if k + argbase > 3 {
-            eprint("qlmc: 实参超过 4 个寄存器（聚合返回会占一个）")
-            exit(2)
+        let pty = _param_type(fc, f, k)
+        let ai = k + argbase
+        if ai > 3 {
+            // 第 5 个起走栈（v2.29）。imm 只记"第几个栈实参"，真正的
+            // 字节偏移由发射器算（要加 8*nsaved，发射期才知道）。
+            let si = ai - 4
+            if _ty_is_agg(pty) {
+                let p = _new_var(fc, -1, TY_INT)
+                _ir_emit(fc, OP_PARAMSTK, p, 0, 0, si)
+                pvs.push(k)
+                pvs.push(p)
+                pvs.push(pty)
+            } else {
+                let v = _new_var(fc, _param_name(fc, f, k), pty)
+                _ir_emit(fc, OP_PARAMSTK, v, 0, 0, si)
+            }
+            k = k + 1
+            continue
         }
         if _ty_is_agg(pty) {
             let p = _new_var(fc, -1, TY_INT)
-            _ir_emit(fc, OP_PARAM, p, 0, 0, k + argbase)
+            _ir_emit(fc, OP_PARAM, p, 0, 0, ai)
             pvs.push(k)
             pvs.push(p)
             pvs.push(pty)
         } else {
-            let v = _new_var(fc, _param_name(f, k), pty)
-            _ir_emit(fc, OP_PARAM, v, 0, 0, k + argbase)
+            let v = _new_var(fc, _param_name(fc, f, k), pty)
+            _ir_emit(fc, OP_PARAM, v, 0, 0, ai)
         }
         k = k + 1
     }
@@ -3634,7 +3699,7 @@ fn _lower_fn(fc: FnCtx, fi: int) {
         let pk = pvs.get(pi)
         let pp = pvs.get(pi + 1)
         let pty = pvs.get(pi + 2)
-        let v = _new_var(fc, _param_name(f, pk), pty)
+        let v = _new_var(fc, _param_name(fc, f, pk), pty)
         let a0 = _vnew(fc)
         fc.vty.set(a0, TY_INT)
         _ir_emit(fc, OP_ADDRV, a0, 0, 0, -fc.vloc.get(v) - 1)
@@ -4110,6 +4175,41 @@ fn _emit_ir(fc: FnCtx, i: int) {
         _from_reg(fc, fc.vloc.get(ins.dst), _arg_reg_of(ins.imm))
         return
     }
+    if op == OP_PARAMSTK {
+        // 栈上的形参：dst = [rbp + 48 + 8*nsaved + 8*imm]
+        //   返回地址在 [rbp + 8 + 8*nsaved]（序言先 push callee-saved 再 push rbp）
+        //   之后是 32 字节 shadow space，再之后才是第 5 个实参
+        let off = 48 + 8 * fc.cells.get(C_NSAVED) + 8 * ins.imm
+        let dloc = fc.vloc.get(ins.dst)
+        if dloc > 0 {
+            _mov_load(code, dloc - 1, RBP, off)
+        } else {
+            _mov_load(code, RAX, RBP, off)
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+        }
+        return
+    }
+    if op == OP_STKALLOC {
+        _sub_rsp(code, ins.imm)
+        return
+    }
+    if op == OP_STKFREE {
+        _add_rsp(code, ins.imm)
+        return
+    }
+    if op == OP_STKARG {
+        // [rsp + imm] = a。RSP 当基址时 ModRM 的 rm=100 是"SIB 跟在后面"的
+        // 标记，必须补一个 SIB 字节（0x24 = 无 index + base=rsp），
+        // 否则 disp32 会被当成 SIB 解析，整条指令编码就错位了。
+        let aloc = fc.vloc.get(ins.a)
+        if aloc > 0 {
+            _mov_store_rsp(code, ins.imm, aloc - 1)
+        } else {
+            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
+            _mov_store_rsp(code, ins.imm, RAX)
+        }
+        return
+    }
     if op == OP_LEAFN {
         let dloc = fc.vloc.get(ins.dst)
         if dloc > 0 {
@@ -4287,6 +4387,8 @@ fn _emit_fn(fc: FnCtx) {
     if (nsaved + 1) % 2 == 0 {
         frame = FRAME + 8
     }
+    // 栈形参的偏移要加 8*nsaved（见 C_NSAVED 的注释）
+    fc.cells.set(C_NSAVED, nsaved)
     _sub_rsp(code, frame)
     i = 0
     while i < len(fc.ir) {
@@ -5718,7 +5820,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S14：int/bool/str + struct/数组/enum/vec（可扩容）/map/切片 + 位运算/移位 + 进制字面量 + defer + import + @ffi + 闭包 + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S15：int/bool/str + struct/数组/enum/vec（可扩容）/map/切片 + 位运算/移位 + 进制字面量 + defer + import + @ffi + 闭包 + 聚合形参返回 + 形参实参不限个数 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {

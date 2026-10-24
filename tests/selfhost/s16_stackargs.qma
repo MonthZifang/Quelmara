@@ -1,0 +1,78 @@
+// s16_stackargs.qma —— stage-1 编译器（qlmc）超过 4 个形参的差分夹具（v2.29）
+//
+// 覆盖：
+//   1) 5 / 6 / 7 个形参（第 5 个起走栈）
+//   2) 聚合返回（sret 占掉第 0 个实参寄存器）之后仍然有多余实参走栈
+//   3) 聚合形参 + 栈形参混用
+//   4) 递归函数带 5 个形参
+//   5) 实参里再套调用（求值期会调函数，实参值必须活过这些调用）
+// 与 stage-0 做逐字节差分（tests/qlmc_test.py）。
+struct Pt { x: int, y: int }
+
+fn add5(a: int, b: int, c: int, d: int, e: int) -> int {
+    return a + b + c + d + e
+}
+
+fn pack7(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int {
+    return a * 1000000 + b * 100000 + c * 10000 + d * 1000 + e * 100 + f * 10 + g
+}
+
+fn strmix(a: int, b: str, c: int, d: int, e: str, f: int) -> int {
+    print(a)
+    print(b)
+    print(c)
+    print(d)
+    print(e)
+    print(f)
+    return a + f
+}
+
+// 聚合返回：sret 占第 0 个寄存器，所以只有 3 个寄存器留给实参，
+// 第 4、5 个实参走栈。
+fn mkpt(a: int, b: int, c: int, d: int, e: int) -> Pt {
+    return Pt { x: a + b + c, y: d + e }
+}
+
+// 聚合形参（按值传指针，占 1 个寄存器）+ 栈形参
+fn agg5(p: Pt, a: int, b: int, c: int, d: int) -> int {
+    return p.x + p.y + a + b + c + d
+}
+
+fn rec5(n: int, a: int, b: int, c: int, d: int) -> int {
+    if n == 0 {
+        return a + b + c + d
+    }
+    return rec5(n - 1, a + 1, b + 2, c + 3, d + 4)
+}
+
+fn sum6(a: int, b: int, c: int, d: int, e: int, f: int) -> int {
+    return a + b + c + d + e + f
+}
+
+fn main() {
+    // 1) 5 / 7 个形参
+    print(add5(1, 2, 3, 4, 5))
+    print(pack7(1, 2, 3, 4, 5, 6, 7))
+    print(add5(add5(1, 1, 1, 1, 1), 2, 3, 4, 5))
+
+    // 2) str 形参夹在栈形参之间
+    print(strmix(10, "hello", 20, 30, "world", 40))
+
+    // 3) 聚合返回 + 5 个实参
+    let p = mkpt(1, 2, 3, 4, 5)
+    print(p.x)
+    print(p.y)
+
+    // 4) 聚合形参 + 4 个标量（最后一个走栈）
+    let q = Pt { x: 100, y: 200 }
+    print(agg5(q, 1, 2, 3, 4))
+
+    // 5) 递归带 5 个形参
+    print(rec5(5, 0, 0, 0, 0))
+
+    // 6) 实参里套调用：内层调用的结果必须活到外层 call
+    print(sum6(sum6(1, 2, 3, 4, 5, 6), 2, 3, 4, 5, 6))
+    // 注意：`mkpt(...).x`（对调用结果直接取字段）qlmc 还不支持，先用中间变量
+    let r = mkpt(sum6(1, 1, 1, 1, 1, 1), 2, 3, 4, 5)
+    print(r.x)
+}

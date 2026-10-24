@@ -956,7 +956,7 @@ p50 从 1,904 → 473 µs 是 **4.0×**，与 worker 数同阶——多核确实
 降到 4–13 ms；冷路径不变（委托 stage-0，2136 ms）。失效正确性实测：`exit(7)` 改成
 `exit(8)` 后 `qlm run` 的退出码从 7 变 8，产物被重新生成。
 
-### 3.25 stage-1 编译器 `qlmc`（v2.28：子集 S14）
+### 3.25 stage-1 编译器 `qlmc`（v2.29：子集 S15）
 
 口径：本机 20 逻辑核（VBS 开着，噪声见 §3.26，只做纵向比较）；`qlmc` 的耗时是
 **它自己报的**（`now_ns()` 差，排除进程创建税），每个数字取 5 次的最小值。
@@ -978,10 +978,11 @@ p50 从 1,904 → 473 µs 是 **4.0×**，与 worker 数同阶——多核确实
 | `tests/selfhost/s13_closure.qma`（闭包） | 1.1 KB | 3584 B | **5.1 ms** |
 | `tests/selfhost/s14_vecgrow.qma`（扩容 + 别名） | 1.5 KB | 9216 B | **6.1–7.8 ms** |
 | `tests/selfhost/s15_bitops.qma`（位运算/移位/进制） | 2.2 KB | 4096 B | **6.8 ms** |
-| `tests/selfhost/s3_manyfns.qma`（200 函数） | 96 KB | 44 544 B | **16.1 ms** |
+| `tests/selfhost/s16_stackargs.qma`（5/6/7 形参走栈） | 1.9 KB | 5632 B | **5.8 ms** |
+| `tests/selfhost/s3_manyfns.qma`（200 函数） | 96 KB | 44 544 B | **17.0 ms** |
 | └ 其中后端阶段 | — | — | **2.5–3.4 ms（-j1）/ 1.6–2.5 ms（-j4）** |
 
-`build/qlmc.exe` 自身 **1308 KB**（v2.27 1268 KB，+3.2%：位运算发射器 + 进制字面量），
+`build/qlmc.exe` 自身 **1336 KB**（v2.28 1308 KB，+2.1%：栈实参/栈形参四条新指令 + 形参表），
 由 stage-0 编出来。
 
 **`push` 的机器码代价**（v2.27 实测，用 `tools/dev/dumpasm.py` 数指令，不受噪声影响）：
