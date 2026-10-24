@@ -1,0 +1,37 @@
+// qla_bench.qma：`.qla` 函数级增量的测量负载（v2.03）
+//
+// 目的不是"跑得快"，而是**让编译期有足够多的函数**：这里 import 六个
+// 标准库模块（json / regex / sha256 / url / gzip / f64），展开后是一个
+// 上千函数的程序。增量构建要证明的是：改 `main` 里的一个常量时，其余
+// 函数一个都不重新降级。
+//
+// 输出：一行整数（防止整条链路被 DCE 掉）。
+module qla_bench
+
+import std.json
+import std.regex
+import std.sha256
+import std.url
+import std.gzip
+import std.f64
+
+fn work(seed: int) -> int {
+    let u = "https://example.com:8443/a/b?x=1&y=2"
+    let h = sha256_hex("quelmara")
+    let d = json_parse("{\"a\":[1,2,3],\"b\":{\"c\":\"d\"}}")
+    let m = regex_match("^a+$", "aaaa")
+    let f = f64_parse("3.5")
+    let mut acc = seed
+    acc = acc + url_port(u) + len(url_path(u))
+    acc = acc + len(h)
+    if json_ok(d) {
+        acc = acc + 1
+    }
+    acc = acc + m
+    acc = acc + to_int(f)
+    return acc
+}
+
+fn main() {
+    print(work(1))
+}

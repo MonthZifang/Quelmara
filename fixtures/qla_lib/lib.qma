@@ -1,0 +1,39 @@
+// qla_lib：二进制库夹具（v2.03）
+// 编译成 lib.qla 后**源码可以删除**——使用方只拿到签名与类型布局。
+module qla_lib
+
+/// 二维点（库导出的类型：使用方按同一布局编译，不需要源码）
+pub struct Point {
+    x: int,
+    y: int,
+}
+
+/// 两数相加
+pub fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+/// 造一个点
+pub fn point(x: int, y: int) -> Point {
+    return Point { x: x, y: y }
+}
+
+/// 点按比例放大（聚合实参 + 聚合返回值：验 ABI 与布局）
+pub fn scale(p: Point, k: int) -> Point {
+    return Point { x: p.x * k, y: p.y * k }
+}
+
+/// 库内部辅助函数（非 pub：不出现在符号表里，但会被上面的函数用到）
+fn norm1(p: Point) -> int {
+    return p.x + p.y
+}
+
+/// 用内部辅助函数算曼哈顿范数
+pub fn norm(p: Point) -> int {
+    return norm1(p)
+}
+
+/// 字符串拼接（验库与使用方共用一个堆）
+pub fn greet(who: str) -> str {
+    return "hello, " + who
+}

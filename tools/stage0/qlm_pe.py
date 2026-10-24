@@ -232,7 +232,7 @@ class WinCodegen(Codegen):
 WS2_32_FUNCS = {"WSAStartup", "WSACleanup", "socket", "bind", "listen",
                 "accept", "recv", "send", "sendto", "recvfrom",
                 "closesocket", "inet_addr", "connect", "getaddrinfo",
-                "freeaddrinfo",
+                "freeaddrinfo", "getpeername", "getsockname",
                 "htons", "ntohs", "setsockopt", "ioctlsocket"}
 
 
@@ -461,7 +461,8 @@ def build_pe(code, data, reloc_offsets, imports, api_fixups, dbg=None,
 # ---------------------------------------------------------------------------
 
 
-def transpile_win(src_path, dump_ir=False, optimize=True, dbg=False):
+def transpile_win(src_path, dump_ir=False, optimize=True, dbg=False,
+                  reuse=None, libs=None, meta=None):
     from qlm import load_config
     cfg = load_config(src_path)
     main_dir = os.path.dirname(os.path.abspath(src_path))
@@ -475,7 +476,8 @@ def transpile_win(src_path, dump_ir=False, optimize=True, dbg=False):
         prog = qlm_dbinfo.load_program_dbg(src_path, cfg)
     fns, low, cfg = lower_and_optimize(src_path, optimize=optimize,
                                        dump_ir=dump_ir, platform="windows",
-                                       asset_root=asset_root, prog=prog)
+                                       asset_root=asset_root, prog=prog,
+                                       reuse=reuse, libs=libs, meta=meta)
     cg = WinCodegen(fns, low.globals, low=low)   # vtable 需要 low.vtables
     code, data, relocs, imports, api_fixups = cg.gen_all_pe()
     dbg_blob = None
@@ -490,6 +492,51 @@ def transpile_win(src_path, dump_ir=False, optimize=True, dbg=False):
     pe = build_pe(code, data, relocs, imports, api_fixups, dbg=dbg_blob,
                   dwarf=dwarf)
     return pe, cfg
+
+
+def emit_archive(src_path, optimize=True, kind="program", unit=None,
+                 libs=None, reuse=None):
+    """v2.03：编译到 `.qla` 目标文件（不发射机器码）。
+
+    kind="lib"：库没有入口，**不做 DCE**，全部函数与类型表都进档案，
+    源码可以不再分发（使用方只需要档案里的签名与布局）。
+    reuse：上一版档案——按函数哈希复用它的 IR（函数级增量）。
+    """
+    import qlm_qla
+    meta = {}
+    _fns, _low, cfg = lower_and_optimize(
+        src_path, optimize=optimize, platform="windows",
+        asset_root=_asset_root_of(src_path),
+        keep_all=(kind == "lib"), libs=libs, reuse=reuse, meta=meta)
+    if unit is None:
+        unit = os.path.splitext(os.path.basename(src_path))[0]
+    arc = qlm_qla.archive_from_meta(meta, unit, kind=kind, arch="x86_64",
+                                    platform="windows", opt=optimize)
+    arc.unit = unit
+    return arc, meta, cfg
+
+
+def _asset_root_of(src_path):
+    from qlm import load_config
+    cfg = load_config(src_path)
+    main_dir = os.path.dirname(os.path.abspath(src_path))
+    return os.path.normpath(os.path.join(
+        main_dir, cfg.get("src", {}).get("asset", "src/asset")))
+
+
+def link_win(arcs, unit=None):
+    """v2.03：链接多份 `.qla` -> PE 可执行文件（IR 级链接）。
+
+    符号按名字解析（`call` / `fnaddr` / vtable 槽），全局区按单元基址拼接，
+    运行库 helper 同名去重——全进程一个堆、一份空闲链。
+    """
+    import qlm_qla
+    link = qlm_qla.merge(arcs, unit=unit)
+    qlm_qla.check_resolved(link)
+    cg = WinCodegen(link.funcs, link.globals, low=link.low())
+    code, data, relocs, imports, api_fixups = cg.gen_all_pe()
+    pe = build_pe(code, data, relocs, imports, api_fixups)
+    return pe, link
 
 
 def write_exe(path, blob):

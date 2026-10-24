@@ -11,6 +11,8 @@ Quelmara 统一命令行入口（SPEC §8）
   quelmara bench <src>      基准测试 + 回归对比（--baseline / --update-baseline）
   quelmara debug <src|exe>  带调试信息构建 + 源码级调试器（v1.62，Windows PE）
   quelmara cache [--stat]   增量编译缓存（v1.90：查看 / 清空 / 按龄清理）
+  quelmara link  <a.qla...> 链接多份 .qla -> 可执行文件（v2.09）
+  quelmara qla   [--stat]   查看 / 校验 .qla 目标文件（v2.09）
   quelmara version          版本与后端能力
 
 通用选项：
@@ -57,7 +59,7 @@ def require_source(path):
     _rs(path)
 
 # 版本号口径：与 docs/versions/ 下的目录一致（vX.Y → "X.Y.0"，补丁 → "X.Y.Z"）
-VERSION = "2.03.0"
+VERSION = "2.11.0"
 
 def _default_target():
     """当前主机默认只选自研后端；不把 C99 当产品默认链路。"""
@@ -259,6 +261,47 @@ def _build_unit(job):
         return src, None, 0, {}, f"{type(exc).__name__}: {exc}"
 
 
+def _qla_compile(src, out_qla, kind="program", reuse_path=None, lib_paths=(),
+                 optimize=True):
+    """v2.11：编译到 `.qla`（目标文件），返回 (arc, meta, 耗时 ms)。
+
+    旧档案不兼容（换了编译器/配置/优化档）时**退回全量重编**并说明原因——
+    `--incr` 是"省时间"的开关，不该因为档案过期就编译失败；而 `--lib-input`
+    的档案不兼容仍然是硬错误（少一个库不能静默降级）。
+    """
+    import qlm_pe
+    import qlm_qla
+    t0 = time.perf_counter()
+    reuse = None
+    stale = ""
+    if reuse_path and os.path.isfile(reuse_path):
+        reuse = qlm_qla.Archive.load(reuse_path)
+    libs = [qlm_qla.Archive.load(p) for p in lib_paths]
+    try:
+        arc, meta, _cfg = qlm_pe.emit_archive(src, optimize=optimize, kind=kind,
+                                              libs=libs, reuse=reuse)
+    except SyntaxError as exc:
+        if reuse is None or "增量档案" not in str(exc):
+            raise
+        stale = str(exc).split("——")[0]
+        arc, meta, _cfg = qlm_pe.emit_archive(src, optimize=optimize, kind=kind,
+                                              libs=libs, reuse=None)
+    arc.save(out_qla)
+    if stale:
+        meta = dict(meta)
+        meta["stale"] = stale
+    return arc, meta, (time.perf_counter() - t0) * 1000.0
+
+
+def _qla_tag(meta):
+    if meta and meta.get("stale"):
+        return f"旧档案不兼容（{meta['stale']}）→ 全量重编"
+    if not meta or not meta.get("nreused"):
+        return "全量降级"
+    return (f"复用 {meta['nreused']}/{meta['ntotal']} 函数"
+            f"（IR {meta.get('irreused', 0)}/{meta.get('irtotal', 0)} 条）")
+
+
 def cmd_build(args):
     srcs = args.src if isinstance(args.src, list) else [args.src]
     if len(srcs) > 1 and args.out:
@@ -267,6 +310,53 @@ def cmd_build(args):
     if len(srcs) > 1 and args.dump_ir:
         print("[qlm] 多源构建不支持 --dump-ir（IR 输出会互相穿插）")
         return 2
+    # v2.08：`.qla` 目标文件 / 函数级增量 / 二进制库输入
+    want_qla = getattr(args, "emit_qla", False) or getattr(args, "lib", False)
+    incr = getattr(args, "incr", False)
+    lib_inputs = list(getattr(args, "lib_input", None) or [])
+    if (want_qla or incr or lib_inputs) and args.target != "win":
+        print("[qlm] `.qla` 目前只支持 --target win（IR 与 ABI 都按 PE/x86-64 固化）")
+        return 2
+    if (want_qla or incr or lib_inputs) and args.dbg_info:
+        print("[qlm] `--dbg-info` 不走档案（链接产物不带 .qlmdbg，断点调试请直接构建）")
+        return 2
+    if (want_qla or incr or lib_inputs) and len(srcs) > 1:
+        print("[qlm] `.qla` 构建一次只能给一个源（-j 并行是 exe 构建的功能）")
+        return 2
+
+    if want_qla or incr or lib_inputs:
+        src = srcs[0]
+        kind = "lib" if getattr(args, "lib", False) else "program"
+        if args.out and (want_qla or args.out.endswith(".qla")):
+            out_qla = args.out          # 只要档案：-o 指的就是档案路径
+        else:
+            out_qla = os.path.join("build",
+                                   os.path.splitext(os.path.basename(src))[0]
+                                   + ".qla")
+        arc, meta, ms = _qla_compile(
+            src, out_qla, kind=kind,
+            reuse_path=out_qla if incr else None,
+            lib_paths=lib_inputs, optimize=not args.no_opt)
+        n = os.path.getsize(out_qla)
+        print(f"[qlm] {src} -> {out_qla}  ({n} 字节, {len(arc.funcs)} 函数, "
+              f"{arc.ninstrs()} 条 IR, kind={kind})")
+        print(f"[qlm] {_qla_tag(meta)} | {ms:.0f} ms"
+              + (f" | 未定义符号 {len(arc.undefined)}" if arc.undefined else ""))
+        if want_qla:
+            return 0
+        # 不只要档案：接着链接出可执行文件
+        import qlm_pe
+        import qlm_qla
+        arcs = [arc] + [qlm_qla.Archive.load(p) for p in lib_inputs]
+        pe, _link = qlm_pe.link_win(arcs)
+        if args.out and args.out.endswith(".qla"):
+            out = os.path.splitext(args.out)[0] + ".qex"   # -o 指的是档案
+        else:
+            out = args.out or os.path.join(
+                "build", os.path.splitext(os.path.basename(src))[0] + ".qex")
+        qlm_pe.write_exe(out, pe)
+        print(f"[qlm] 链接 {len(arcs)} 份档案 -> {out}  ({len(pe)} 字节)")
+        return 0
 
     if len(srcs) > 1:
         jobs = args.jobs if getattr(args, "jobs", 0) > 0 else min(_default_jobs(),
@@ -300,6 +390,52 @@ def cmd_build(args):
           f"multicore={cfg['core']['multicore']} "
           f"threads={cfg['core']['threads'] or 'auto'} "
           f"opt={cfg['build']['opt']} | {_cache_tag(info)}")
+    return 0
+
+
+def cmd_link(args):
+    """quelmara link（v2.08）：多份 `.qla` -> 一个可执行文件。
+
+    链接是**名字解析**：`call` / `fnaddr` / vtable 槽都按名字找定义，
+    全局数据区按单元拼接，运行库 helper 同名去重（全进程一个堆）。
+    """
+    import qlm_pe
+    import qlm_qla
+    try:
+        arcs = [qlm_qla.Archive.load(p) for p in args.inputs]
+        pe, link = qlm_pe.link_win(arcs)
+    except qlm_qla.LinkError as exc:
+        print(f"[qlm-link] ❌ {exc}")
+        return 1
+    out = args.out or os.path.join(
+        "build", os.path.splitext(os.path.basename(args.inputs[0]))[0] + ".qex")
+    qlm_pe.write_exe(out, pe)
+    units = " + ".join(a.unit for a in arcs)
+    print(f"[qlm-link] {units} -> {out}  ({len(pe)} 字节, "
+          f"{len(link.funcs)} 函数, {len(link.globals)} 个全局块)")
+    return 0
+
+
+def cmd_qla(args):
+    """quelmara qla（v2.08）：查看 / 校验 `.qla` 目标文件。"""
+    import qlm_qla
+    if args.symbols:
+        print(f"[qlm-qla] {args.symbols} 的符号表：")
+        print(qlm_qla.symbols(args.symbols))
+        return 0
+    if args.verify:
+        try:
+            arc = qlm_qla.Archive.load(args.verify)
+        except Exception as exc:                      # noqa: BLE001
+            print(f"[qlm-qla] ❌ {args.verify}: {exc}")
+            return 1
+        print(f"[qlm-qla] ✅ {args.verify} 校验通过"
+              f"（{len(arc.funcs)} 函数 / {arc.ninstrs()} 条 IR）")
+        return 0
+    if not args.stat:
+        print("[qlm-qla] 用法：qla --stat FILE | --symbols FILE | --verify FILE")
+        return 2
+    print(qlm_qla.describe(args.stat))
     return 0
 
 
@@ -789,7 +925,7 @@ def cmd_version(args):
           f"arm64(AArch64 ELF64) / c(C99 交叉验证，不是产品后端)")
     print(f"  优化: 常量折叠 / 强度削减 / 魔数除法 / 内联 / CSE-GVN / LICM / 循环展开 / "
           f"DCE / 复制传播 / 线性扫描寄存器分配")
-    print(f"  工具: build / run / test / fmt / doc / bench / debug / cov / fuzz / cache / lsp")
+    print(f"  工具: build / run / test / fmt / doc / bench / debug / cov / fuzz / cache / lsp / link / qla")
     return 0
 
 
@@ -825,6 +961,24 @@ def main(argv=None):
     p.add_argument("src", nargs="+", help="一个或多个 .qma（多源时各自落到 build/）")
     p.add_argument("-j", "--jobs", type=int, default=0,
                    help="多源并行构建的并发数（默认核数，上限 8；1 = 串行）")
+    p.add_argument("--emit-qla", action="store_true",
+                   help="编译到 .qla 目标文件（QuIR + 符号表，不发射机器码）")
+    p.add_argument("--lib", action="store_true",
+                   help="作为二进制库编译：不做 DCE，全部函数进 .qla（可脱离源码分发）")
+    p.add_argument("--incr", action="store_true",
+                   help="函数级增量：复用 build/<名字>.qla 里未变的函数 IR，"
+                        "产出 .qex（并把新档案写回）")
+    p.add_argument("--lib-input", action="append", default=None, metavar="Q.LA",
+                   help="链接输入的二进制库 .qla（可重复；只取签名与类型布局）")
+
+    p = sub.add_parser("link", help="链接多份 .qla -> 可执行文件（v2.08）")
+    p.add_argument("inputs", nargs="+", help="一个或多个 .qla（第一个通常是程序档案）")
+    p.add_argument("-o", "--out", default=None, help="输出路径（默认 build/<首个>.qex）")
+
+    p = sub.add_parser("qla", help="查看 / 校验 .qla 目标文件（v2.08）")
+    p.add_argument("--stat", default=None, metavar="FILE", help="统计与元数据")
+    p.add_argument("--symbols", default=None, metavar="FILE", help="导出符号表")
+    p.add_argument("--verify", default=None, metavar="FILE", help="校验校验和与格式")
 
     p = sub.add_parser("run", help="编译并运行")
     common(p)
@@ -945,7 +1099,7 @@ def main(argv=None):
     handler = {"build": cmd_build, "run": cmd_run, "test": cmd_test,
                "fmt": cmd_fmt, "doc": cmd_doc, "bench": cmd_bench, "lex": cmd_lex,
                "debug": cmd_debug, "cov": cmd_cov, "fuzz": cmd_fuzz,
-               "cache": cmd_cache,
+               "cache": cmd_cache, "link": cmd_link, "qla": cmd_qla,
                "lsp": cmd_lsp, "version": cmd_version}[args.cmd]
     return handler(args)
 

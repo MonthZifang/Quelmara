@@ -1,0 +1,15 @@
+// qla_app：链接二进制库的程序（v2.03）
+// 本文件**不 import 库源码**：`add` / `Point` / `scale` 全部来自 lib.qla
+// 的符号表（`quelmara build --lib-input lib.qla`）。
+module qla_app
+
+fn main() {
+    let s = add(2, 3)
+    print(s)
+    let p = point(3, 4)
+    let q = scale(p, 2)
+    print(q.x)
+    print(q.y)
+    print(norm(q))
+    print(greet("qla"))
+}
