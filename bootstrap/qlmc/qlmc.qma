@@ -7,7 +7,7 @@
 //
 // ## 它不是什么（重要，别当成"自举完成"）
 //
-// 只覆盖**子集 S5**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
+// 只覆盖**子集 S6**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
 // "链路通 + 后端真"排在"语法全覆盖"前面：后端是自举的承重墙，语法是加法。
 //
 //   支持：fn（int/bool/str 形参与返回，≤4 参）、let/mut（可带类型标注）、赋值、
@@ -16,9 +16,10 @@
 //         && || !（短路）、str 拼接与内容比较、递归、**struct（声明/字面量/
 //         字段读写/值语义拷贝）**、**定长数组 [N]T（字面量/下标读写）**、
 //         **enum（声明/构造/载荷）与 match（表达式/语句/`_`/载荷绑定）**、
-//         **vec[T]（new/push/get/len/下标读写，容量固定不扩容）**
+//         **vec[T]（new/push/get/len/下标读写，容量固定不扩容）**、
+//         **聚合（struct/enum）作形参与返回值（按值传 + sret）**
 //   不支持：map、f64、泛型、闭包、切片、defer、import（多文件）、宏/反射、
-//         @ffi、接口、rc、聚合形参/返回值、嵌套聚合字段、聚合 print
+//         @ffi、接口、rc、嵌套聚合字段、聚合 print
 //
 // ## 分层（v2.16 重写了后端，前端沿用）
 //
@@ -1709,6 +1710,8 @@ const OP_LOAD = 29     // dst = [a]
 const OP_STORE = 30    // [a] = b
 const OP_COPY = 31     // memcpy(a, b, imm)
 const OP_ZERO = 32     // zero(a, imm)
+const OP_RETAGG = 33   // 聚合返回：memcpy([sret], a, imm)；rax = sret
+const OP_RETSRET = 34  // 兜底返回：只把 rax = sret
 
 struct Ir {
     op: int
@@ -1783,6 +1786,7 @@ const C_EP = 2
 const C_LD = 3
 const C_BD = 4
 const C_ADDRTY = 5
+const C_SRET = 6        // 聚合返回的隐藏指针（vreg）
 const FRAME = 4096          // 帧大小（512 个 8 字节槽）
 const MAX_VAR = 64          // 变量最多占 64 个寄存器位（其余落槽）
 const SLOT_TEMP = 256       // 0..255 给变量与聚合区域；256..511 给临时值溢出
@@ -1858,7 +1862,9 @@ fn _arg_reg_of(k: int) -> int {
 /// 第 k 个实参寄存器（我们自己的 ABI：RCX/RDX）
 fn _out_arg_reg(k: int) -> int {
     if k == 0 { return RCX }
-    return RDX
+    if k == 1 { return RDX }
+    if k == 2 { return R8 }
+    return R9
 }
 
 /// 变量池：callee-saved，调用不会清（RDI/RSI 不用——运行库例程会踩它们）
@@ -2445,6 +2451,24 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
             return d
         }
         // 普通调用：实参求值后逐个搬到实参寄存器——实参值不跨调用活
+        let fi = _fn_index(fc, nd.a)
+        if fi < 0 {
+            eprint("qlmc: 未定义函数 " + fc.names.get(nd.a))
+            exit(2)
+        }
+        let fret = fc.fns.get(fi).ret_t
+        let mut argbase = 0
+        let mut sret = 0
+        if _ty_is_agg(fret) {
+            // 聚合返回：先给结果开一块区域，把它的地址当第 0 个实参
+            let tmp = _new_var(fc, -1, fret)
+            let sa = _vnew(fc)
+            fc.vty.set(sa, TY_INT)
+            _ir_emit(fc, OP_ADDRV, sa, 0, 0, -fc.vloc.get(tmp) - 1)
+            _ir_emit(fc, OP_ARG, 0, sa, 0, 0)
+            sret = sa
+            argbase = 1
+        }
         let mut a0 = 0
         let mut a1 = 0
         if nd.b >= 0 {
@@ -2454,19 +2478,18 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
             a1 = _lower_expr(fc, nd.c)
         }
         if a0 > 0 {
-            _ir_emit(fc, OP_ARG, 0, a0, 0, 0)
+            _ir_emit(fc, OP_ARG, 0, a0, 0, argbase)
         }
         if a1 > 0 {
-            _ir_emit(fc, OP_ARG, 0, a1, 0, 1)
-        }
-        let fi = _fn_index(fc, nd.a)
-        if fi < 0 {
-            eprint("qlmc: 未定义函数 " + fc.names.get(nd.a))
-            exit(2)
+            _ir_emit(fc, OP_ARG, 0, a1, 0, argbase + 1)
         }
         let d = _vnew(fc)
-        fc.vty.set(d, fc.fns.get(fi).ret_t)
+        fc.vty.set(d, fret)
         _ir_emit(fc, OP_CALL, d, 0, 0, fi)
+        if _ty_is_agg(fret) {
+            fc.vty.set(sret, fret)   // 聚合结果就是那块区域的地址
+            return sret
+        }
         return d
     }
     if nd.op == E_BIN {
@@ -2745,6 +2768,12 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
     if nd.op == E_STR {
         return TY_STR
     }
+    if nd.op == E_CALL {
+        let fi = _fn_index(fc, nd.a)
+        if fi >= 0 {
+            return fc.fns.get(fi).ret_t
+        }
+    }
     return TY_INT
 }
 
@@ -2954,7 +2983,23 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
     if nd.op == S_RETURN {
         let mut v = 0
         if nd.a >= 0 {
+            let inz = fc.nodes.get(nd.a)
+            if inz.op == E_STRUCTLIT || inz.op == E_ARRLIT {
+                // 聚合字面量不能当右值：先写进隐藏临时，再整块交给 sret
+                let ty = _ty_of_expr(fc, nd.a)
+                let tmp = _new_var(fc, -1, ty)
+                _lower_into(fc, nd.a, tmp)
+                let av = _vnew(fc)
+                fc.vty.set(av, ty)
+                _ir_emit(fc, OP_ADDRV, av, 0, 0, -fc.vloc.get(tmp) - 1)
+                _ir_emit(fc, OP_RETAGG, 0, av, 0, _ty_size(fc, ty))
+                return
+            }
             v = _lower_expr(fc, nd.a)
+        }
+        if v > 0 && _ty_is_agg(fc.vty.get(v)) {
+            _ir_emit(fc, OP_RETAGG, 0, v, 0, _ty_size(fc, fc.vty.get(v)))
+            return
         }
         _ir_emit(fc, OP_RET, 0, v, 0, 0)
         return
@@ -2985,25 +3030,60 @@ fn _lower_fn(fc: FnCtx, fi: int) {
     let f = fc.fns.get(fi)
     let ep = _newlab(fc.labs)
     fc.cells.set(C_EP, ep)
+    // 聚合返回走隐藏的 sret 指针（占第 0 个实参寄存器），其余实参顺延
+    let mut argbase = 0
     if _ty_is_agg(f.ret_t) {
-        eprint("qlmc: 本版不支持聚合返回值（" + fc.names.get(f.name) + "）")
-        exit(2)
+        let sv = _new_var(fc, -1, TY_INT)
+        _ir_emit(fc, OP_PARAM, sv, 0, 0, 0)
+        fc.cells.set(C_SRET, sv)
+        argbase = 1
     }
+    // 第一遍：把**所有**入参寄存器先落到变量里。这一步必须在任何拷贝之前——
+    // 按值拷贝要用 ADDRV/COPY，而 ADDRV 的临时值会落在 R8-R11，正好是第 3/4 个
+    // 实参寄存器；先拷贝就会把还没读的实参覆盖掉（v2.20 实测：两个聚合形参
+    // 加 sret 时，第二个形参读成了第一个）。
+    let pvs = vec[int].new(12)
     let mut k = 0
     while k < f.np {
-        if _ty_is_agg(_param_type(f, k)) {
-            eprint("qlmc: 本版不支持聚合形参（" + fc.names.get(f.name) + "）")
+        let pty = _param_type(f, k)
+        if k + argbase > 3 {
+            eprint("qlmc: 实参超过 4 个寄存器（聚合返回会占一个）")
             exit(2)
         }
-        let v = _new_var(fc, _param_name(f, k), _param_type(f, k))
-        _ir_emit(fc, OP_PARAM, v, 0, 0, k)
+        if _ty_is_agg(pty) {
+            let p = _new_var(fc, -1, TY_INT)
+            _ir_emit(fc, OP_PARAM, p, 0, 0, k + argbase)
+            pvs.push(k)
+            pvs.push(p)
+            pvs.push(pty)
+        } else {
+            let v = _new_var(fc, _param_name(f, k), pty)
+            _ir_emit(fc, OP_PARAM, v, 0, 0, k + argbase)
+        }
         k = k + 1
     }
+    // 第二遍：聚合形参按值拷进自己的帧区域
+    let mut pi = 0
+    while pi < len(pvs) {
+        let pk = pvs.get(pi)
+        let pp = pvs.get(pi + 1)
+        let pty = pvs.get(pi + 2)
+        let v = _new_var(fc, _param_name(f, pk), pty)
+        let a0 = _vnew(fc)
+        fc.vty.set(a0, TY_INT)
+        _ir_emit(fc, OP_ADDRV, a0, 0, 0, -fc.vloc.get(v) - 1)
+        _ir_emit(fc, OP_COPY, 0, a0, pp, _ty_size(fc, pty))
+        pi = pi + 3
+    }
     _lower_block(fc, f.body, ep)
-    let z = _vnew(fc)
-    fc.vty.set(z, TY_INT)
-    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
-    _ir_emit(fc, OP_RET, 0, z, 0, 0)
+    if _ty_is_agg(f.ret_t) {
+        _ir_emit(fc, OP_RETSRET, 0, 0, 0, 0)
+    } else {
+        let z = _vnew(fc)
+        fc.vty.set(z, TY_INT)
+        _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+        _ir_emit(fc, OP_RET, 0, z, 0, 0)
+    }
     _ir_emit(fc, OP_LAB, 0, 0, 0, ep)
 }
 
@@ -3384,6 +3464,24 @@ fn _emit_ir(fc: FnCtx, i: int) {
     }
     if op == OP_PARAM {
         _from_reg(fc, fc.vloc.get(ins.dst), _arg_reg_of(ins.imm))
+        return
+    }
+    if op == OP_RETAGG {
+        let sv = fc.cells.get(C_SRET)
+        _to_reg(fc, RDI, sv)
+        _to_reg(fc, RSI, ins.a)
+        _mov_imm(code, RCX, ins.imm)
+        let p = _call_rel(code)
+        _addfix(fc.fixes, p, RT_MEMCPY, FK_RT)
+        _to_reg(fc, RAX, sv)
+        let p2 = _jmp(code)
+        _addfix(fc.fixes, p2, fc.cells.get(C_EP), FK_LAB)
+        return
+    }
+    if op == OP_RETSRET {
+        _to_reg(fc, RAX, fc.cells.get(C_SRET))
+        let p2 = _jmp(code)
+        _addfix(fc.fixes, p2, fc.cells.get(C_EP), FK_LAB)
         return
     }
     if op == OP_ADDRV {
@@ -4500,7 +4598,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S5：int/bool/str + struct/数组/enum/match/vec + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S6：int/bool/str + struct/数组/enum/match/vec + 聚合形参/返回 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
@@ -4684,7 +4782,7 @@ fn main() {
     }
     write_file(out, blob)
     let t_all = (now_ns() - t0) / 1000
-    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S5)" +
+    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S6)" +
           "  编译 " + t_all.to_str() + " us（进程内）  后端 " +
           ((fn_end - rt_end) / 1000).to_str() + " us  -j" + nt.to_str())
 }

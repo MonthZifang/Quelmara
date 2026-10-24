@@ -1,0 +1,61 @@
+// s7_aggfn.qma —— stage-1 编译器（qlmc）子集 S6 的差分夹具（v2.20）
+//
+// 覆盖：聚合（struct / enum）作**形参**与**返回值**——
+// 按值传（被调方拿到自己的副本）、sret 隐藏指针返回、多个聚合形参。
+// 与 stage-0 逐字节差分（tests/qlmc_test.py）。
+struct P {
+    x: int
+    y: int
+}
+
+enum Shape {
+    Dot
+    Circle(r: int)
+}
+
+fn total(p: P) -> int {
+    return p.x + p.y
+}
+
+fn add(a: P, b: P) -> P {
+    return P { x: a.x + b.x, y: a.y + b.y }
+}
+
+fn scale(p: P, k: int) -> P {
+    return P { x: p.x * k, y: p.y * k }
+}
+
+fn kind(s: Shape) -> int {
+    return match s {
+        Shape.Dot => 0
+        Shape.Circle(r) => r
+    }
+}
+
+fn make(x: int) -> Shape {
+    return Shape.Circle(r: x * 2)
+}
+
+fn main() {
+    let a = P { x: 1, y: 2 }
+    let b = P { x: 10, y: 20 }
+    print(total(a))
+
+    let c = add(a, b)
+    print(c.x)
+    print(c.y)
+
+    let d = scale(c, 3)
+    print(total(d))
+
+    // 按值传：被调方改自己的副本，不影响调用方
+    let e = scale(a, 100)
+    print(total(e))
+    print(total(a))
+
+    // enum 作形参与返回值
+    print(kind(Shape.Dot))
+    print(kind(Shape.Circle(r: 7)))
+    let s = make(4)
+    print(kind(s))
+}
