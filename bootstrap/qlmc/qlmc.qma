@@ -7,7 +7,7 @@
 //
 // ## 它不是什么（重要，别当成"自举完成"）
 //
-// 只覆盖**子集 S9**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
+// 只覆盖**子集 S10**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
 // "链路通 + 后端真"排在"语法全覆盖"前面：后端是自举的承重墙，语法是加法。
 //
 //   支持：fn（int/bool/str 形参与返回，≤4 参）、let/mut（可带类型标注）、赋值、
@@ -19,9 +19,9 @@
 //         **vec[T]（new/push/get/len/下标读写，容量固定不扩容）**、
 //         **聚合（struct/enum）作形参与返回值（按值传 + sret）**、
 //         **map[K]V（固定容量线性扫描）**、**切片 []T（视图）**、**defer**、
-//         **≤4 个实参**
-//   不支持：f64、泛型、闭包、import（多文件）、宏/反射、
-//         @ffi、接口、rc/Drop、嵌套聚合字段、聚合 print
+//         **≤4 个实参**、**import（同目录多文件）**
+//   不支持：f64、泛型、闭包、宏/反射、@ffi、接口、rc/Drop、
+//         pub 可见性与限定调用、嵌套聚合字段、聚合 print
 //
 // ## 分层（v2.16 重写了后端，前端沿用）
 //
@@ -1280,6 +1280,13 @@ fn _fn(p: P, pos: vec[int]) {
         _adv(pos)
         rt = _type(p, pos)
     }
+    let mut fi = 0
+    while fi < len(p.fns) {
+        if p.fns.get(fi).name == nid {
+            _fail(p, pos, "函数重复定义 " + nm.s)
+        }
+        fi = fi + 1
+    }
     let body = _block(p, pos)
     p.fns.push(Fn { name: nid, np: np, p0: q0, p1: q1, p2: q2, p3: q3,
                     p0t: t0, p1t: t1, p2t: t2, p3t: t3, ret_t: rt,
@@ -1288,13 +1295,18 @@ fn _fn(p: P, pos: vec[int]) {
 
 /// 顶层：`module x` 忽略；`import` 本版不支持；`fn` 逐个解析。
 fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
-         fns: vec[Fn], cname: vec[int], cval: vec[int], stt: vec[int]) -> int {
+         fns: vec[Fn], cname: vec[int], cval: vec[int], stt: vec[int],
+         imports: vec[str]) -> int {
     let p = P { toks: toks, nodes: nodes, names: names, strs: strs, fns: fns,
                 cname: cname, cval: cval, stt: stt }
     let pos = vec[int].new(1)
     pos.push(0)
     while _cur(p, pos).k != T_EOF {
         let t = _cur(p, pos)
+        if t.k == T_NAME && t.s == "pub" {
+            _adv(pos)          // 本版不做可见性检查，pub 当无操作
+            continue
+        }
         if t.k == T_KW && t.n == K_MODULE {
             while _cur(p, pos).k != T_EOF && _cur(p, pos).line == t.line {
                 _adv(pos)
@@ -1302,7 +1314,28 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
             continue
         }
         if t.k == T_KW && t.n == K_IMPORT {
-            _fail(p, pos, "import 本版不支持（单文件编译）")
+            _adv(pos)
+            let nm = _cur(p, pos)
+            if nm.k != T_NAME {
+                _fail(p, pos, "import 后期望模块名")
+            }
+            _adv(pos)
+            let mut path = nm.s
+            while _is_p(p, pos, P_DOT) {
+                _adv(pos)
+                let seg = _cur(p, pos)
+                if seg.k != T_NAME {
+                    _fail(p, pos, "import 路径期望标识符")
+                }
+                _adv(pos)
+                path = path + "/" + seg.s
+            }
+            // 版本要求（`import foo ">=1.2"`）暂不校验，跳过
+            if _cur(p, pos).k == T_STR {
+                _adv(pos)
+            }
+            imports.push(path)
+            continue
         }
         if t.k == T_KW && t.n == K_STRUCT {
             _adv(pos)
@@ -5028,6 +5061,19 @@ fn write_file(path: str, buf: vec[int]) -> int {
 // 主流程
 // ---------------------------------------------------------------------------
 
+/// 取路径的目录部分（含结尾分隔符）
+fn _dir_of(path: str) -> str {
+    let mut i = len(path) - 1
+    while i >= 0 {
+        let c = path[i]
+        if c == 47 || c == 92 {
+            return substr(path, 0, i + 1)
+        }
+        i = i - 1
+    }
+    return ""
+}
+
 fn _usage() {
     eprint("用法: qlmc build <src.qma> [-o out.exe] [-j N] | qlmc dump <src.qma> | qlmc version")
 }
@@ -5075,7 +5121,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S9：int/bool/str + struct/数组/enum/vec/map/切片 + defer + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S10：int/bool/str + struct/数组/enum/vec/map/切片 + defer + import + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
@@ -5116,7 +5162,37 @@ fn main() {
         stt.push(0)
         ti = ti + 1
     }
-    parse(toks, nodes, names, strs, fns, cname, cval, stt)
+    let imports = vec[str].new(4)
+    parse(toks, nodes, names, strs, fns, cname, cval, stt, imports)
+
+    // 装载 import 的模块：同一个模块只装一次，装的过程中可能又收集到新的 import
+    let loaded = vec[str].new(4)
+    let dir = _dir_of(src)
+    let mut ii = 0
+    while ii < len(imports) {
+        let mod = imports.get(ii)
+        let mut seen = 0
+        let mut kk = 0
+        while kk < len(loaded) {
+            if loaded.get(kk) == mod {
+                seen = 1
+            }
+            kk = kk + 1
+        }
+        if seen == 0 {
+            loaded.push(mod)
+            let mpath = dir + mod + ".qma"
+            if !file_exists(mpath) {
+                eprint("qlmc: 找不到模块 " + mpath)
+                exit(2)
+            }
+            let mt = read_text(mpath)
+            let mtk = vec[Tok].new(256)
+            lex(mt, mtk)
+            parse(mtk, nodes, names, strs, fns, cname, cval, stt, imports)
+        }
+        ii = ii + 1
+    }
 
     if cmd == "dump" {
         print("tokens   : " + len(toks).to_str())
@@ -5259,7 +5335,7 @@ fn main() {
     }
     write_file(out, blob)
     let t_all = (now_ns() - t0) / 1000
-    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S9)" +
+    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S10)" +
           "  编译 " + t_all.to_str() + " us（进程内）  后端 " +
           ((fn_end - rt_end) / 1000).to_str() + " us  -j" + nt.to_str())
 }

@@ -1,0 +1,22 @@
+// s11_import.qma —— stage-1 编译器（qlmc）子集 S10 的差分夹具（v2.24）
+//
+// 覆盖：import 单文件模块、跨模块调用（含聚合返回与循环）。与 stage-0 差分。
+import mod_util
+
+struct P {
+    x: int
+    y: int
+}
+
+fn local_add(p: P) -> int {
+    return add(p.x, p.y)
+}
+
+fn main() {
+    print(add(3, 4))
+    print(twice(21))
+    print(sum_to(10))
+    let p = P { x: 5, y: 6 }
+    print(local_add(p))
+    print(add(twice(5), sum_to(4)))
+}

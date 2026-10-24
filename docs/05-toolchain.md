@@ -662,7 +662,7 @@ build/qlm.exe version
 - 命令行里的路径必须转成 `\\`：`system()` 走 cmd.exe，不认 `build/hello.exe`
   （实测报"不是内部或外部命令"并把退出码吞成 1）。
 
-### 1.11 stage-1 编译器 `qlmc`（v2.23：真 IR + 线性扫描 + 多核，子集 S9）
+### 1.11 stage-1 编译器 `qlmc`（v2.24：真 IR + 线性扫描 + 多核，子集 S10）
 
 `bootstrap/qlmc/qlmc.qma`（约 3.3 千行 Quelmara）是一个**能出 exe** 的编译器：
 `.qma` -> PE32+，全程本语言，不经过 Python、不链接 CRT、不依赖第三方。
@@ -723,7 +723,7 @@ main             按 fi 升序拷字节 + 回填 → 线程数不影响产物字
   这条由 `tests/qlmc_test.py` 的「并行确定性」段钉住。
 - 并行只覆盖**函数体**：词法 / 语法仍是单线程，是当前墙钟的主要部分。
 
-**支持（S9）**：
+**支持（S10）**：
 
 | 类别 | 覆盖 |
 |---|---|
@@ -731,7 +731,7 @@ main             按 fi 升序拷字节 + 回填 → 线程数不影响产物字
 | 语句 | `let`/`mut`（可带类型标注，可省初始化）、赋值、`if`/`else`、`while`、**`for i in lo..hi`**、**`break`/`continue`**、`return`、`exit`、表达式语句 |
 | 内建 | `print(int\|str\|bool)`、`len(str)`、`assert(cond, msg)`（失败写 stderr 后退 1） |
 | 类型 | int（64 位）/ bool / str（`[len][bytes][NUL]`，值 = 数据指针）/ **struct** / **`[N]T` 定长数组** / **enum** / **`vec[T]`** |
-| 聚合 | **struct 字面量 / 字段读写 / 值语义拷贝**、**数组字面量 / 下标读写**、**enum 构造 / match**、**`vec[T].new(n)` / `.push` / `.get` / `.len()` / `v[i]` 读写 / `len(v)`**（容量固定，push 超限 `exit(1)`）；**聚合可作形参与返回值**（按值传 + `sret` 隐藏指针）、**`map[K]V`**（new/set/get/has/len，固定容量线性扫描）、**切片 `[]T`**（`a[lo..hi]`、下标读写、作形参、视图不拷贝）、**`defer`**（块级、LIFO、`return` 前跑但返回值先定）；聚合值一律在帧里，"值 = 区域地址" |
+| 聚合 | **struct 字面量 / 字段读写 / 值语义拷贝**、**数组字面量 / 下标读写**、**enum 构造 / match**、**`vec[T].new(n)` / `.push` / `.get` / `.len()` / `v[i]` 读写 / `len(v)`**（容量固定，push 超限 `exit(1)`）；**聚合可作形参与返回值**（按值传 + `sret` 隐藏指针）、**`map[K]V`**（new/set/get/has/len，固定容量线性扫描）、**切片 `[]T`**（`a[lo..hi]`、下标读写、作形参、视图不拷贝）、**`defer`**（块级、LIFO、`return` 前跑但返回值先定）、**`import`（同目录多文件，无可见性/限定调用）**；聚合值一律在帧里，"值 = 区域地址" |
 | 运算 | `+ - * / %`（int）、`+`（str 拼接，走堆）、`== !=`（str 走内容比较）、
 `< <= > >=`、`&& \|\| !`（短路）、一元负号 |
 | 其它 | 递归与互调用、数字分隔符、单行注释、`module`（忽略） |

@@ -1,0 +1,21 @@
+// mod_util.qma —— s11_import 的依赖模块（v2.24）
+//
+// 被 `import mod_util` 装载；导出 pub 函数。注意 qlmc 本版**不做 pub 可见性
+// 检查**（全部导出），也没有限定调用 `mod_util.add(...)`——直接写 `add(...)`。
+module mod_util
+
+pub fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+pub fn twice(x: int) -> int {
+    return x * 2
+}
+
+pub fn sum_to(n: int) -> int {
+    let mut s = 0
+    for i in 0..n {
+        s = s + i
+    }
+    return s
+}
