@@ -1,0 +1,132 @@
+// bench/net6_bench.qma —— IPv6 / 双栈 socket 路径的时延（v2.07）
+// 用法：python tools/stage0/qlm_cli.py run bench/net6_bench.qma --target win
+//
+// 口径：
+//   * 全部进程内 now_ns()，不含进程启动；服务端在 spawn 出来的线程里跑，
+//     客户端在主线程，两边都在同一台机器的环回上（不经网卡）；
+//   * connect 一栏 = connect + close 一整圈（含 WSAStartup、getaddrinfo、
+//     socket、connect、closesocket 与内核三次握手/四次挥手），服务端每圈
+//     accept 一次；**这一栏由平台环回成本主导**：同机 CPython 的
+//     connect+close 也是 ~1.1 ms/圈（本沙箱的 WFP 过滤），不是 Quelmara 的账；
+//   * pingpong 一栏 = 已建连接上 send+recv 一个来回，量的是"协议栈往返 +
+//     内建调用开销"，不含建连；
+//   * 三种目标同一份代码，只有地址不同：
+//       v4         = tcp_listen（AF_INET 0.0.0.0）+ 127.0.0.1
+//       v6         = tcp_listen6（AF_INET6 双栈）+ ::1
+//       localhost6 = tcp_listen6 + "localhost"（系统解析先给 ::1，一次命中）
+//   * "localhost 回退到 v4"这一路不进基准：它要先付一次**被拒连接**，
+//     本沙箱里被拒连接固定 ~2 s（Python 同样如此），会把 N 次循环拖到几百秒；
+//     正确性由 tests/t140_net6.qma 断言，代价只在 07-gaps.md 里记口径；
+//   * 数字取 3 次运行的中位；单次运行内部已含 N 次取平均。
+module net6_bench
+
+import std.net
+
+const N_CONN = 200
+const N_PING = 2000
+
+// 每接受一个连接就把收到的字节原样回写，直到对端关闭
+fn echo_srv(fd: int, conns: int) {
+    let mut k = 0
+    while k < conns {
+        let c = accept(fd)
+        let mut go = 1
+        while go == 1 {
+            let s = recv(c, 64)
+            if len(s) == 0 {
+                go = 0
+            } else {
+                send(c, s)
+            }
+        }
+        close_conn(c)
+        k = k + 1
+    }
+    close_conn(fd)
+}
+
+fn srv6(port: int, conns: int) {
+    echo_srv(listen6(port), conns)
+}
+
+fn srv4(port: int, conns: int) {
+    echo_srv(listen(port), conns)
+}
+
+// connect + close 一整圈
+fn bench_connect(host: str, port: int, n: int) -> int {
+    let t0 = now_ns()
+    let mut i = 0
+    let mut sink = 0
+    while i < n {
+        let c = connect(host, port)
+        sink = sink + c
+        close_conn(c)
+        i = i + 1
+    }
+    let dt = now_ns() - t0
+    if sink == 0 - 1 {
+        print("")                       // 防 DCE（正常不会命中）
+    }
+    return dt
+}
+
+// 已建连接上的 send+recv 往返
+fn bench_pingpong(host: str, port: int, n: int) -> int {
+    let c = connect(host, port)
+    let mut sink = 0
+    let t0 = now_ns()
+    let mut i = 0
+    while i < n {
+        send(c, "x")
+        let r = recv(c, 8)
+        sink = sink + len(r)
+        i = i + 1
+    }
+    let dt = now_ns() - t0
+    close_conn(c)
+    if sink < 0 {
+        print("")
+    }
+    return dt
+}
+
+fn main() {
+    let p4 = 45911
+    let p6 = 45912
+    let pl = 45913
+
+    // ---- 1. connect + close 一圈 ----
+    let h4 = spawn srv4(p4, N_CONN)
+    sleep_ms(200)
+    let c4 = bench_connect("127.0.0.1", p4, N_CONN)
+    join(h4)
+    print("connect_v4      " + (c4 / N_CONN).to_str() + " ns/op")
+
+    let h6 = spawn srv6(p6, N_CONN)
+    sleep_ms(200)
+    let c6 = bench_connect("::1", p6, N_CONN)
+    join(h6)
+    print("connect_v6      " + (c6 / N_CONN).to_str() + " ns/op")
+
+    let hl = spawn srv6(pl, N_CONN)
+    sleep_ms(200)
+    let cl = bench_connect("localhost", pl, N_CONN)
+    join(hl)
+    print("connect_local6  " + (cl / N_CONN).to_str() + " ns/op")
+
+    // ---- 2. 已建连接上的往返 ----
+    let h4b = spawn srv4(p4, 1)
+    sleep_ms(200)
+    let t4 = bench_pingpong("127.0.0.1", p4, N_PING)
+    join(h4b)
+    print("pingpong_v4     " + (t4 / N_PING).to_str() + " ns/op")
+
+    let h6b = spawn srv6(p6, 1)
+    sleep_ms(200)
+    let t6 = bench_pingpong("::1", p6, N_PING)
+    join(h6b)
+    print("pingpong_v6     " + (t6 / N_PING).to_str() + " ns/op")
+
+    print("ok net6_bench")
+}

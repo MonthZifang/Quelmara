@@ -1,0 +1,123 @@
+// t140_net6.qma：IPv6 全链路（v2.07）
+// 覆盖：
+//   1. 字面量判定 ip_family（IPv4 严格口径 / IPv6 "::" 与组数校验 / 域名不算字面量）
+//   2. 解析 <-> 格式化往返 ip6_parse / ip6_format（RFC 5952：小写、无前导零、
+//      最长 0 段压成 "::"）+ 点分四段 ip4_format + 方括号剥离
+//   3. 环回 E2E：listen6（AF_INET6 + IPV6_V6ONLY=0）同时接 "::1" 与 "127.0.0.1"
+//      （后者在内核里是 ::ffff:127.0.0.1，addr_text 还原成点分）；
+//      服务端用 peer_ip/peer_port 回报对端地址，客户端逐字比对
+//   4. 家族回退：v4-only 的 listen 上 connect("localhost") —— getaddrinfo 先给
+//      ::1 时必须沿 ai_next 退回 127.0.0.1（否则放宽 family 就等于弄丢这条路径）
+module t140
+
+import std.net
+import std.net.addr
+import std.str
+
+// 双栈监听：两次 accept（先 ::1，后 127.0.0.1），各自把对端地址回报给客户端
+fn t140_srv6(port: int) {
+    let fd = listen6(port)
+    let mut k = 0
+    while k < 2 {
+        let c = accept(fd)
+        let raw = peer_raw(c)
+        assert(addr_family(raw) == 23, "dual-stack accept family is AF_INET6")
+        let req = recv(c, 256)
+        send(c, peer_ip(c) + "|" + peer_port(c).to_str() + "|" + req)
+        close_conn(c)
+        k = k + 1
+    }
+    close_conn(fd)
+}
+
+// v4-only 监听：验证 connect("localhost") 的 ai_next 回退
+fn t140_srv4(port: int) {
+    let fd = listen(port)
+    let c = accept(fd)
+    let raw = peer_raw(c)
+    assert(addr_family(raw) == 2, "v4-only accept family is AF_INET")
+    let req = recv(c, 256)
+    send(c, "v4:" + req)
+    close_conn(c)
+    close_conn(fd)
+}
+
+fn main() {
+    // ---- 1. 字面量判定 ----
+    assert(ip_family("1.2.3.4") == 4, "v4 literal")
+    assert(ip_family("0.0.0.0") == 4, "v4 zero")
+    assert(ip_family("255.255.255.255") == 4, "v4 max")
+    assert(ip_family("1.2.3.256") == 0, "v4 octet overflow")
+    assert(ip_family("1.2.3") == 0, "v4 three octets")
+    assert(ip_family("1.2.3.4.5") == 0, "v4 five octets")
+    assert(ip_family("1..3.4") == 0, "v4 empty octet")
+    assert(ip_family("1.2.3.a") == 0, "v4 non-digit")
+    assert(ip_family("::1") == 6, "v6 loopback")
+    assert(ip_family("::") == 6, "v6 unspecified")
+    assert(ip_family("2001:db8::ff00:42:8329") == 6, "v6 doc address")
+    assert(ip_family("1:2:3:4:5:6:7:8") == 6, "v6 eight groups")
+    assert(ip_family("::ffff:1.2.3.4") == 6, "v6 mapped with v4 tail")
+    assert(ip_family("1::2::3") == 0, "v6 two double-colons")
+    assert(ip_family(":::") == 0, "v6 triple colon")
+    assert(ip_family("1:2:3:4:5:6:7:8:9") == 0, "v6 nine groups")
+    assert(ip_family("12345::1") == 0, "v6 group too long")
+    assert(ip_family("1:2:3:4:5:6:7") == 0, "v6 seven groups no dbl")
+    assert(ip_family("::g") == 0, "v6 bad hex")
+    assert(ip_family("localhost") == 0, "hostname is not a literal")
+    assert(ip_family("") == 0, "empty is not a literal")
+
+    // ---- 2. 解析 <-> 格式化 ----
+    assert(len(ip6_parse("::1")) == 16, "parse length 16")
+    assert(ip6_format(ip6_parse("::1")) == "::1", "roundtrip ::1")
+    assert(ip6_format(ip6_parse("::")) == "::", "roundtrip ::")
+    assert(ip6_format(ip6_parse("2001:db8::1")) == "2001:db8::1", "roundtrip 2001:db8::1")
+    assert(ip6_format(ip6_parse("2001:0db8:0000:0000:0000:0000:0000:0001")) == "2001:db8::1",
+           "normalize leading zeros and longest zero run")
+    assert(ip6_format(ip6_parse("fe80::1")) == "fe80::1", "roundtrip fe80::1")
+    assert(ip6_format(ip6_parse("1:0:0:2:0:0:0:3")) == "1:0:0:2::3", "longest run wins")
+    assert(ip6_format(ip6_parse("1:0:0:2:0:0:3:4")) == "1::2:0:0:3:4", "equal runs take leftmost")
+    assert(ip6_format(ip6_parse("0:0:0:0:0:0:0:1")) == "::1", "all-zero prefix compresses")
+    assert(ip6_format(ip6_parse("1:2:3:4:5:6:7:0")) == "1:2:3:4:5:6:7:0", "single zero not compressed")
+    // 映射地址按纯十六进制输出（点分还原是 addr_text 的职责，不是 ip6_format）
+    assert(ip6_format(ip6_parse("::ffff:1.2.3.4")) == "::ffff:102:304", "mapped as pure hex")
+    assert(len(ip6_parse("::g")) == 0, "parse rejects bad hex")
+    assert(len(ip6_parse("1::2::3")) == 0, "parse rejects two double-colons")
+    assert(ip6_format("") == "", "format rejects short input")
+    assert(ip4_format(chr(127) + chr(0) + chr(0) + chr(1)) == "127.0.0.1", "ip4_format")
+    assert(ip4_format(chr(10) + chr(0) + chr(255) + chr(3)) == "10.0.255.3", "ip4_format bytes")
+    assert(strip_brackets("[::1]") == "::1", "strip brackets")
+    assert(strip_brackets("1.2.3.4") == "1.2.3.4", "no brackets untouched")
+
+    // ---- 3. 双栈环回 E2E ----
+    let port = 45801
+    let h = spawn t140_srv6(port)
+    sleep_ms(150)
+
+    let c1 = connect("::1", port)
+    send(c1, "ping6")
+    let r1 = recv(c1, 256)
+    close_conn(c1)
+    assert(str_starts_with(r1, "::1|"), "server sees ::1")
+    assert(str_ends_with(r1, "|ping6"), "echo over ipv6")
+
+    let c2 = connect("127.0.0.1", port)
+    send(c2, "ping4")
+    let r2 = recv(c2, 256)
+    close_conn(c2)
+    assert(str_starts_with(r2, "127.0.0.1|"), "mapped peer text is dotted quad")
+    assert(str_ends_with(r2, "|ping4"), "echo over mapped ipv4")
+    join(h)
+
+    // ---- 4. localhost 家族回退（v4-only 服务端）----
+    let port4 = 45802
+    let h4 = spawn t140_srv4(port4)
+    sleep_ms(150)
+    let c3 = connect("localhost", port4)
+    send(c3, "ping3")
+    let r3 = recv(c3, 256)
+    close_conn(c3)
+    assert(r3 == "v4:ping3", "localhost falls back to AF_INET")
+    join(h4)
+
+    print("ok t140_net6")
+}
