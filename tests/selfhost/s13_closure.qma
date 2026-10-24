@@ -1,0 +1,34 @@
+// s13_closure.qma —— stage-1 编译器（qlmc）子集 S12 的差分夹具（v2.26）
+//
+// 覆盖：闭包字面量 `fn(...) -> T { ... }`、闭包变量调用、闭包别名、
+// 闭包作实参传给普通函数（函数指针语义）。本版**没有捕获**（闭包体只能
+// 用自己的形参和全局函数）。与 stage-0 逐字节差分。
+fn apply2(f: int, x: int) -> int {
+    return x + 1
+}
+
+fn twice(x: int) -> int {
+    return x * 2
+}
+
+fn main() {
+    let double = fn(x: int) -> int { return x * 2 }
+    print(double(21))
+
+    let add3 = fn(a: int, b: int) -> int { return a + b + 3 }
+    print(add3(10, 20))
+
+    // 别名：拷贝闭包值
+    let f = double
+    print(f(5))
+
+    // 闭包里调普通函数
+    let g = fn(x: int) -> int { return twice(x) + 1 }
+    print(g(7))
+
+    // 同一函数里多个闭包互不干扰
+    let a = fn(x: int) -> int { return x + 100 }
+    let b = fn(x: int) -> int { return x + 200 }
+    print(a(1))
+    print(b(1))
+}

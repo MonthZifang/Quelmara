@@ -7,7 +7,7 @@
 //
 // ## 它不是什么（重要，别当成"自举完成"）
 //
-// 只覆盖**子集 S11**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
+// 只覆盖**子集 S12**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
 // "链路通 + 后端真"排在"语法全覆盖"前面：后端是自举的承重墙，语法是加法。
 //
 //   支持：fn（int/bool/str 形参与返回，≤4 参）、let/mut（可带类型标注）、赋值、
@@ -19,8 +19,9 @@
 //         **vec[T]（new/push/get/len/下标读写，容量固定不扩容）**、
 //         **聚合（struct/enum）作形参与返回值（按值传 + sret）**、
 //         **map[K]V（固定容量线性扫描）**、**切片 []T（视图）**、**defer**、
-//         **≤4 个实参**、**import（同目录多文件）**、**@ffi（任意 DLL）**
-//   不支持：f64、泛型、闭包、宏/反射、接口、rc/Drop、
+//         **≤4 个实参**、**import（同目录多文件）**、**@ffi（任意 DLL）**、
+//         **闭包（无捕获）**
+//   不支持：f64、泛型、宏/反射、接口、rc/Drop、闭包的捕获、
 //         pub 可见性与限定调用、嵌套聚合字段、聚合 print
 //
 // ## 分层（v2.16 重写了后端，前端沿用）
@@ -167,6 +168,7 @@ const E_METHOD = 55    // a = 接收者，b = 方法名 id，c = 实参（-1 = �
 const E_VECNEW = 56    // a = 元素类型，b = 容量表达式
 const E_MAPNEW = 57    // a = 键类型，b = 容量表达式，c = 值类型
 const E_SLICE = 58     // a = 基址表达式，b = lo，c = hi（`a[lo..hi]`）
+const E_CLOSURE = 59   // a = 合成函数的序号
 const E_ARM = 54       // a = 变体序号（-1 = 通配），b = 绑定名 id（-1 = 不绑定），c = 体      // a = 字符串表 id
 
 // 语句
@@ -210,6 +212,7 @@ const TY_ENUM = 0x2000
 const TY_VEC = 0x8000        // 0x8000+elem：vec 句柄是标量（8 字节）
 const TY_MAP = 0x10000       // 0x10000+(K<<8)+V：map 句柄也是标量
 const TY_SLICE = 0x20000     // 0x20000+elem：切片 = (ptr, len) 两字聚合
+const TY_FN = 0x30000        // 闭包 = {code, env} 两字聚合（本版 env 恒为 0）
 const TY_ARRAY = 0x100000
 const ST_STRIDE = 18        // 每个 struct 在 stt 里占 18 字：name, nf, 8*(fname, fty)
 const MAX_FIELD = 8
@@ -930,6 +933,57 @@ fn _primary(p: P, pos: vec[int]) -> int {
             v = 1
         }
         return _postfix(p, pos, _node(p, E_NUM, v, -1, -1))
+    }
+    if t.k == T_KW && t.n == K_FN {
+        // 闭包字面量：合成一个顶层函数，表达式值 = {code, 0}
+        _adv(pos)
+        _eat_p(p, pos, P_LPAREN)
+        let mut q0 = -1
+        let mut q1 = -1
+        let mut t0 = TY_INT
+        let mut t1 = TY_INT
+        let mut np = 0
+        while !_is_p(p, pos, P_RPAREN) {
+            let pn = _cur(p, pos)
+            if pn.k != T_NAME {
+                _fail(p, pos, "闭包形参期望名字")
+            }
+            _adv(pos)
+            let mut pt = TY_INT
+            if _is_p(p, pos, P_COLON) {
+                _adv(pos)
+                pt = _type(p, pos)
+            }
+            if pt >= TY_STRUCT {
+                _fail(p, pos, "闭包形参只支持 int/bool/str")
+            }
+            if np == 0 {
+                q0 = _name_id(p, pn.s)
+                t0 = pt
+            } else if np == 1 {
+                q1 = _name_id(p, pn.s)
+                t1 = pt
+            } else {
+                _fail(p, pos, "闭包最多 2 个形参")
+            }
+            np = np + 1
+            if _is_p(p, pos, P_COMMA) {
+                _adv(pos)
+            }
+        }
+        _eat_p(p, pos, P_RPAREN)
+        let mut rt = TY_VOID
+        if _is_p(p, pos, P_ARROW) {
+            _adv(pos)
+            rt = _type(p, pos)
+        }
+        let lname = _name_id(p, "__lambda_" + len(p.fns).to_str())
+        let body = _block(p, pos)
+        let fi = len(p.fns)
+        p.fns.push(Fn { name: lname, np: np, p0: q0, p1: q1, p2: -1, p3: -1,
+                        p0t: t0, p1t: t1, p2t: TY_INT, p3t: TY_INT,
+                        ret_t: rt, body: body, nbody: 0, nlocals: -1 })
+        return _postfix(p, pos, _node(p, E_CLOSURE, fi, -1, -1))
     }
     if t.k == T_KW && t.n == K_MATCH {
         return _postfix(p, pos, _match(p, pos, 0))
@@ -1871,7 +1925,9 @@ const OP_ZERO = 32     // zero(a, imm)
 const OP_RETAGG = 33   // 聚合返回：memcpy([sret], a, imm)；rax = sret
 const OP_RETSRET = 34  // 兜底返回：只把 rax = sret
 const OP_ZERON = 35
-const OP_CALLIAT = 36  // dst = call [rip+iat[imm]]（@ffi）    // zero(a, b)：按 b 给的**字节数**清零（动态长度）
+const OP_CALLIAT = 36  // dst = call [rip+iat[imm]]（@ffi）
+const OP_LEAFN = 37    // dst = &函数 imm（取函数地址，给闭包用）
+const OP_CALLR = 38    // dst = call [a]（a = 闭包值地址，间接调用）    // zero(a, b)：按 b 给的**字节数**清零（动态长度）
 
 struct Ir {
     op: int
@@ -2216,14 +2272,17 @@ fn _ir_emit(fc: FnCtx, op: int, dst: int, a: int, b: int, imm: int) -> int {
 }
 
 fn _ty_is_agg(ty: int) -> bool {
-    let mut r = 0
-    if ty >= TY_STRUCT && ty < TY_VEC {
-        r = 1
+    // 标量：int/bool/str(0..3)、vec 句柄、map 句柄；其余（struct/enum/array/slice/闭包）都是聚合
+    if ty < TY_STRUCT {
+        return false
     }
-    if ty >= TY_ARRAY {
-        r = 1
+    if ty >= TY_VEC && ty < TY_MAP {
+        return false
     }
-    return r == 1
+    if ty >= TY_MAP && ty < TY_SLICE {
+        return false
+    }
+    return true
 }
 
 fn _st_nf(fc: FnCtx, si: int) -> int {
@@ -2331,6 +2390,25 @@ fn _bind_push(fc: FnCtx, nid: int, v: int) {
 
 fn _bind_pop(fc: FnCtx) {
     fc.cells.set(C_BD, fc.cells.get(C_BD) - 1)
+}
+
+/// 找变量，找不到返回 -1（`_var_id` 是 fail-fast 版）
+fn _try_var(fc: FnCtx, nid: int) -> int {
+    let mut b = fc.cells.get(C_BD) - 1
+    while b >= 0 {
+        if fc.bind.get(b * 2) == nid {
+            return fc.bind.get(b * 2 + 1)
+        }
+        b = b - 1
+    }
+    let mut i = len(fc.vmap) - 1
+    while i >= 0 {
+        if fc.vmap.get(i) == nid {
+            return fc.vval.get(i)
+        }
+        i = i - 1
+    }
+    return -1
 }
 
 fn _var_id(fc: FnCtx, nid: int) -> int {
@@ -2659,6 +2737,30 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         // 普通调用：实参求值后逐个搬到实参寄存器——实参值不跨调用活
         let fi = _fn_index(fc, nd.a)
         if fi < 0 {
+            // 不是顶层函数：可能是闭包变量
+            let cv = _try_var(fc, nd.a)
+            if cv >= 0 && fc.vty.get(cv) == TY_FN {
+                let av = vec[int].new(2)
+                if nd.b >= 0 { av.push(_lower_expr(fc, nd.b)) }
+                if nd.c >= 0 { av.push(_lower_expr(fc, nd.c)) }
+                if len(av) > 2 {
+                    eprint("qlmc: 闭包调用最多 2 个实参")
+                    exit(2)
+                }
+                let mut ai = 0
+                while ai < len(av) {
+                    _ir_emit(fc, OP_ARG, 0, av.get(ai), 0, ai)
+                    ai = ai + 1
+                }
+                // nd.a 是**名字 id**，不是节点 id：直接取闭包变量的区域地址
+                let cl = _vnew(fc)
+                fc.vty.set(cl, TY_INT)
+                _ir_emit(fc, OP_ADDRV, cl, 0, 0, -fc.vloc.get(cv) - 1)
+                let d = _vnew(fc)
+                fc.vty.set(d, TY_INT)
+                _ir_emit(fc, OP_CALLR, d, cl, 0, 0)
+                return d
+            }
             eprint("qlmc: 未定义函数 " + fc.names.get(nd.a))
             exit(2)
         }
@@ -2750,6 +2852,24 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
     }
     if nd.op == E_SLICE {
         return _lower_slice(fc, nd)
+    }
+    if nd.op == E_CLOSURE {
+        // 值 = {code, env}；本版没有捕获，env 恒为 0
+        let v = _new_var(fc, -1, TY_FN)
+        let va = _vnew(fc)
+        fc.vty.set(va, TY_INT)
+        _ir_emit(fc, OP_ADDRV, va, 0, 0, -fc.vloc.get(v) - 1)
+        let code = _vnew(fc)
+        fc.vty.set(code, TY_INT)
+        _ir_emit(fc, OP_LEAFN, code, 0, 0, nd.a)
+        _ir_emit(fc, OP_STORE, 0, va, code, 8)
+        let z = _map_const(fc, 0)
+        let la = _vnew(fc)
+        fc.vty.set(la, TY_INT)
+        _ir_emit(fc, OP_ADDRF, la, va, 0, 8)
+        _ir_emit(fc, OP_STORE, 0, la, z, 8)
+        fc.vty.set(va, TY_FN)
+        return va
     }
     if nd.op == E_ENUMCTOR {
         // 枚举值 = 一个 16 字节区域的地址：[tag][载荷]
@@ -2968,6 +3088,9 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
     }
     if nd.op == E_MAPNEW {
         return TY_MAP + (nd.a << 8) + nd.c
+    }
+    if nd.op == E_CLOSURE {
+        return TY_FN
     }
     if nd.op == E_SLICE {
         let bty = _ty_of_expr(fc, nd.a)
@@ -3380,7 +3503,8 @@ fn _alloc(fc: FnCtx) {
         cp.push(c)
         if i < n {
             let ins = fc.ir.get(i)
-            if ins.op == OP_CALL || ins.op == OP_CALLRT || ins.op == OP_CALLIAT {
+            if ins.op == OP_CALL || ins.op == OP_CALLRT || ins.op == OP_CALLIAT ||
+               ins.op == OP_CALLR {
                 c = c + 1          // 三类调用都会清 caller-saved
             }
         }
@@ -3743,6 +3867,31 @@ fn _emit_ir(fc: FnCtx, i: int) {
     }
     if op == OP_PARAM {
         _from_reg(fc, fc.vloc.get(ins.dst), _arg_reg_of(ins.imm))
+        return
+    }
+    if op == OP_LEAFN {
+        let dloc = fc.vloc.get(ins.dst)
+        if dloc > 0 {
+            let at = len(code) + 3
+            _lea_rip(code, dloc - 1, 0)
+            _addfix(fc.fixes, at, ins.imm, FK_FN)
+        } else {
+            let at = len(code) + 3
+            _lea_rip(code, RAX, 0)
+            _addfix(fc.fixes, at, ins.imm, FK_FN)
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+        }
+        return
+    }
+    if op == OP_CALLR {
+        _to_reg(fc, RAX, ins.a)
+        _mov_load(code, R11, RAX, 0)       // r11 = [闭包] = code
+        _b(code, 0x41)                     // call r11
+        _b(code, 0xFF)
+        _b(code, 0xD3)
+        if ins.dst > 0 {
+            _store_rax(fc, fc.vloc.get(ins.dst))
+        }
         return
     }
     if op == OP_CALLIAT {
@@ -5244,7 +5393,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S11：int/bool/str + struct/数组/enum/vec/map/切片 + defer + import + @ffi + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S12：int/bool/str + struct/数组/enum/vec/map/切片 + defer + import + @ffi + 闭包 + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
@@ -5460,7 +5609,7 @@ fn main() {
     }
     write_file(out, blob)
     let t_all = (now_ns() - t0) / 1000
-    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S11)" +
+    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S12)" +
           "  编译 " + t_all.to_str() + " us（进程内）  后端 " +
           ((fn_end - rt_end) / 1000).to_str() + " us  -j" + nt.to_str())
 }

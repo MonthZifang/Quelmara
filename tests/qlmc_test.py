@@ -47,6 +47,7 @@ CASES = [
     ("s10_defer", "tests/selfhost/s10_defer.qma"),
     ("s11_import", "tests/selfhost/s11_import.qma"),
     ("s12_ffi", "tests/selfhost/s12_ffi.qma"),
+    ("s13_closure", "tests/selfhost/s13_closure.qma"),
 ]
 
 npass = 0
