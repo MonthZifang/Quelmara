@@ -296,6 +296,20 @@ def test_iface_rc():
         else bad(f"iface_rc 输出 {stdout!r}")
 
 
+def test_qlmc():
+    """stage-1 编译器（`bootstrap/qlmc/qlmc.qma`）：与 stage-0 逐字节差分（v2.14）
+
+    同一份源码分别用两个编译器编，比较 stdout 与退出码。覆盖子集 S1 的三组用例。
+    """
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "tests/qlmc_test.py")],
+                       capture_output=True, text=True, cwd=ROOT)
+    tail = [ln for ln in (r.stdout or "").splitlines() if ln.startswith("PASS=")]
+    if r.returncode == 0 and tail:
+        ok(f"stage-1 编译器 qlmc 差分：{tail[-1]}")
+    else:
+        bad(f"qlmc 差分失败：{(r.stdout or '')[-500:]}{(r.stderr or '')[-300:]}")
+
+
 def test_exitcode():
     """exit(运行期值) 的退出码必须真的传出去（v2.13）
 
@@ -1107,6 +1121,9 @@ def main():
 
     print("== [9] AArch64 接口 vtable（ELF + 模拟器执行级） ==")
     test_a64_iface()
+
+    print("== [9b] stage-1 编译器（qlmc，子集 S1）差分 ==")
+    test_qlmc()
 
     print("== [10] 语言服务器（索引对拍 / 补全 / 跳转 / 重命名 / 协议） ==")
     test_lsp()

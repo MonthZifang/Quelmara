@@ -1,0 +1,53 @@
+// s1_basics.qma —— stage-1 编译器（qlmc）子集 S1 的差分夹具
+//
+// 只允许 S1 的构造：int/bool、let/mut、赋值、if/else、while、return、
+// 算术 + - * / %、比较、&& || !、递归、print(int) / print("字面量")、exit。
+// 与 examples/fib.qma、examples/loop_sum.qma 一起由 tests/qlmc_test.py
+// 做**差分**：同一份源码分别用 stage-0 与 qlmc 编译，比 stdout 与退出码。
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+fn max2(a: int, b: int) -> int {
+    if a > b {
+        return a
+    } else {
+        return b
+    }
+}
+
+fn fact(n: int) -> int {
+    if n <= 1 {
+        return 1
+    }
+    return n * fact(n - 1)
+}
+
+fn main() {
+    print("s1 basics")
+    print(add(20, 22))
+    print(max2(7, 3))
+    print(max2(3, 7))
+    print(fact(10))
+    let mut i = 0
+    let mut acc = 0
+    while i < 10 {
+        if i % 2 == 0 {
+            acc = acc + i
+        } else {
+            acc = acc - 1
+        }
+        i = i + 1
+    }
+    print(acc)
+    print(1 == 1)
+    print(1 != 2)
+    print(!(1 == 2))
+    print((1 < 2) && (3 > 2))
+    print((1 > 2) || (3 > 2))
+    print(-5 + 3)
+    print(100 / 7)
+    print(100 % 7)
+    print(7 * (3 + 4))
+    exit(0)
+}

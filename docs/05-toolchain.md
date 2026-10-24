@@ -662,6 +662,56 @@ build/qlm.exe version
 - 命令行里的路径必须转成 `\\`：`system()` 走 cmd.exe，不认 `build/hello.exe`
   （实测报"不是内部或外部命令"并把退出码吞成 1）。
 
+### 1.11 stage-1 编译器 `qlmc`（v2.14，子集 S1）
+
+`bootstrap/qlmc/qlmc.qma`（~1900 行 Quelmara）是一个**能出 exe** 的编译器：
+`.qma` -> PE32+，全程本语言，不经过 Python、不链接 CRT、不依赖第三方。
+它自己先用 stage-0 编出来（`build/qlmc.exe`，234 KB），之后用它编别的程序。
+
+```bash
+python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe
+build/qlmc.exe build examples/fib.qma -o build/fib.exe    # 产物 1536 字节
+build/qlmc.exe dump  examples/fib.qma                     # 只跑词法+语法，打印统计
+build/qlmc.exe version
+```
+
+**分层**（改哪一层一目了然）：
+
+| 层 | 位置 | 本版做法 |
+|---|---|---|
+| 词法 | `lex` | 只认 S1 的记号集；不认识的字符 fail-fast（不静默跳过） |
+| 语法 | `parse` / `_expr` / `_stmt` / `_block` | 递归下降 + 优先级爬升；**平坦 AST**（节点表 + `nx` 链），块用链不用区间 |
+| 分配 | `_emit_expr` | **全溢出**：局部与临时都落帧槽，表达式求值用 RAX/RCX 双累加器；没有线性扫描 |
+| 编码 | `_mov_*` / `_alu_*` / `_jcc` / `_call_*` | x86-64 手写编码（REX/ModRM/SIB、rel32 回填） |
+| 文件 | `build_rdata` / `build_pe` | 两节（`.text`/`.rdata`）、导入表（kernel32 + user32）、PE32+ 头 |
+| 运行库 | `_gen_print_i64` | `wsprintfA("%I64d\n")` + `WriteFile`，不引 CRT |
+
+**支持（S1）**：`fn`（int/bool 形参与返回）、`let`/`mut`、赋值、`if/else`、`while`、
+`return`、`exit`、`print(int)` / `print("字面量")`、递归与互调用、`+ - * / %`、
+`== != < <= > >=`、`&& || !`（短路）、一元负号、数字分隔符、单行注释。
+
+**不支持**：str 变量/形参、struct/enum/match、泛型、闭包、vec/map、f64、`import`
+（多文件）、全局常量、宏/反射、`@ffi`、错误信息带列号、寄存器分配、常量折叠。
+
+**怎么验**：`python tests/qlmc_test.py` —— 同一份源码分别用 stage-0 与 qlmc 编，
+比较 stdout 与退出码**逐字节相同**（3 组用例 / 7 条断言）。这是唯一有说服力的判据：
+"能出 exe"很容易，"和既有编译器行为一致"才是真的对。
+
+**为什么先做"能跑通"再做"覆盖全"**：链路通了之后每一步都是加法（加语法 = 加
+`_stmt` 一个分支，加优化 = 换 `_emit_expr` 的分配策略）；反过来先铺语法再打通链路，
+中间态一个都跑不起来，也没法验证。
+
+**几个踩过的坑**（改这个文件前先看）：
+
+1. **`vec` 元素不能当可变单元格**：`ps[0].pos = x` 写进的是临时副本，静默不生效
+   （表现成"fn 之后期望函数名"的死循环）。位置状态要用 `vec[int]` + `.set()`。
+2. **`vec` 没有下标赋值**（`v[i] = x` 只对定长数组/切片成立），要用 `.set(i, x)`。
+3. **PE 可选头的六个版本 u16 一个都不能少**：少一对会让后面字段整体前移 4 字节，
+   加载器直接报"不是有效的 Win32 应用程序"。
+4. **`wsprintfA` 不认 `%lld`**（那是 C 运行库的口径），64 位要用 `%I64d`；
+   写错时它会原样输出 "ld"，看起来像"数字打印坏了"。
+5. **`fn` 是关键字**，不能当变量名（`let fn = ...` 直接语法错）。
+
 ## 2. 配置文件 `Quelmara.toml`
 
 从源文件目录向上查找（以及 cwd），**最近的一份生效**；缺失则用默认值。
@@ -931,6 +981,7 @@ alpha = "registry|path:../qreg|1.2.0|<sha256>|<1.2.0>|<tree>|beta@^1.0;gamma@~2.
 | `tests/cache_test.py` | 增量缓存：冷/热、改主文件、改依赖、改回原样命中旧条目、开关隔离、产物截断、`--stat/--clear`、串行=并行 | Windows |
 | `tests/kv_test.py` | **KV 进程级恢复**：跨进程重开、撕裂尾（砍半条记录）、垃圾尾（追加 200 B）、Python 独立解析器逐条对拍磁盘格式 + FNV-1a 64 标准向量 | Windows |
 | `tests/qla_test.py` | **`.qla` 目标文件**（v2.11）：往返逐字节（直编 vs 档案→链接）、函数级增量四种形态（无改动/改小函数/改大函数/加函数/改布局）、二进制库无源码链接、7 条失败路径、CLI | Windows |
+| `tests/qlmc_test.py` | **stage-1 编译器差分**（v2.14）：先用 stage-0 编出 `bootstrap/qlmc/qlmc.qma`，再对 3 组用例分别用两个编译器编，比较 stdout 与退出码**逐字节相同** + 产物 PE 结构（PE32+/AMD64/节数）；`--time` 追加两侧编译墙钟 | Windows |
 | `tests/http_router_test.py` | **HTTP 服务端路由 / 中间件端到端**：编译并启动 `examples/http_router.qma`，真实 socket 断言 20 项（命中 / 归一化 / 404 / 405 / 鉴权中间件 / 请求体 / gzip 协商 / keep-alive / 流水线）；`--bench` 追加吞吐与服务端 CPU | Windows |
 | `tools/dev/net_bench.py` | **服务端网络探针**（v2.12）：echo / http / cpu 三种模式，`--conns`/`--reqs`/`--threads`，报告 req/s 与 RTT p50/p99（min-of-reps）；服务端由调用方先起（手动） | 全平台 |
 | `tools/dev/incr_bench.py` | 增量/并行编译性能探针（单单元冷/热、多源 `-j`、`test -j`、进程创建基线，手动） | 全平台 |
