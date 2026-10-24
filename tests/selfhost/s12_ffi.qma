@@ -1,0 +1,28 @@
+// s12_ffi.qma —— stage-1 编译器（qlmc）子集 S11 的差分夹具（v2.25）
+//
+// 覆盖：@ffi 声明与调用——往导入表里加用户符号（含**新的 DLL** user32 与
+// kernel32 的新符号），走 `call [rip+IAT]`。只挑**确定性**的 API（屏幕尺寸、
+// 进程 ID > 0），否则没法做逐字节差分。
+@ffi("user32.dll", "GetSystemMetrics")
+fn metric(i: int) -> int
+
+@ffi("kernel32.dll", "GetCurrentProcessId")
+fn pid() -> int
+
+@ffi("kernel32.dll", "GetTickCount")
+fn tick() -> int
+
+fn main() {
+    print(metric(0))
+    print(metric(1))
+    // PID / TickCount 的值每次运行都不同，只能验证"调用没崩 + 条件成立"
+    let p = pid()
+    if p > 0 {
+        print(1)
+    }
+    let t = tick()
+    if t > 0 {
+        print(2)
+    }
+    print(metric(0) + metric(1))
+}

@@ -7,7 +7,7 @@
 //
 // ## 它不是什么（重要，别当成"自举完成"）
 //
-// 只覆盖**子集 S10**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
+// 只覆盖**子集 S11**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
 // "链路通 + 后端真"排在"语法全覆盖"前面：后端是自举的承重墙，语法是加法。
 //
 //   支持：fn（int/bool/str 形参与返回，≤4 参）、let/mut（可带类型标注）、赋值、
@@ -19,8 +19,8 @@
 //         **vec[T]（new/push/get/len/下标读写，容量固定不扩容）**、
 //         **聚合（struct/enum）作形参与返回值（按值传 + sret）**、
 //         **map[K]V（固定容量线性扫描）**、**切片 []T（视图）**、**defer**、
-//         **≤4 个实参**、**import（同目录多文件）**
-//   不支持：f64、泛型、闭包、宏/反射、@ffi、接口、rc/Drop、
+//         **≤4 个实参**、**import（同目录多文件）**、**@ffi（任意 DLL）**
+//   不支持：f64、泛型、闭包、宏/反射、接口、rc/Drop、
 //         pub 可见性与限定调用、嵌套聚合字段、聚合 print
 //
 // ## 分层（v2.16 重写了后端，前端沿用）
@@ -132,6 +132,7 @@ const P_DOTDOT = 25
 const P_LBRACK = 26
 const P_RBRACK = 27
 const P_FATARROW = 28
+const P_AT = 29
 
 struct Tok {
     k: int          // T_*
@@ -418,6 +419,7 @@ fn lex(src: str, toks: vec[Tok]) -> int {
         else if c == 62 { p1 = P_GT }
         else if c == 33 { p1 = P_NOT }
         else if c == 46 { p1 = P_DOT }
+        else if c == 64 { p1 = P_AT }
         else if c == 91 { p1 = P_LBRACK }
         else if c == 93 { p1 = P_RBRACK }
         if p1 == 0 {
@@ -448,6 +450,8 @@ struct P {
     cname: vec[int]     // const 名字 id
     cval: vec[int]      // const 值（本版只支持整型字面量）
     stt: vec[int]       // struct 表：stt[0]=个数，每个 struct 占 ST_STRIDE 字
+    fdll: vec[str]      // @ffi 的 DLL 名（与 fsym 平行）
+    fsym: vec[str]      // @ffi 的符号名
 }
 
 fn _st_base(si: int) -> int {
@@ -1230,7 +1234,7 @@ fn _block(p: P, pos: vec[int]) -> int {
     return head
 }
 
-fn _fn(p: P, pos: vec[int]) {
+fn _fn(p: P, pos: vec[int], ffi_idx: int) {
     _adv(pos)                                // fn
     let nm = _cur(p, pos)
     if nm.k != T_NAME {
@@ -1287,18 +1291,23 @@ fn _fn(p: P, pos: vec[int]) {
         }
         fi = fi + 1
     }
-    let body = _block(p, pos)
+    let mut body = -1
+    let mut nbody = 0
+    if ffi_idx < 0 {
+        body = _block(p, pos)
+        nbody = 0
+    }
     p.fns.push(Fn { name: nid, np: np, p0: q0, p1: q1, p2: q2, p3: q3,
                     p0t: t0, p1t: t1, p2t: t2, p3t: t3, ret_t: rt,
-                    body: body, nbody: 0, nlocals: np })
+                    body: body, nbody: 0, nlocals: ffi_idx })
 }
 
 /// 顶层：`module x` 忽略；`import` 本版不支持；`fn` 逐个解析。
 fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
          fns: vec[Fn], cname: vec[int], cval: vec[int], stt: vec[int],
-         imports: vec[str]) -> int {
+         imports: vec[str], fdll: vec[str], fsym: vec[str]) -> int {
     let p = P { toks: toks, nodes: nodes, names: names, strs: strs, fns: fns,
-                cname: cname, cval: cval, stt: stt }
+                cname: cname, cval: cval, stt: stt, fdll: fdll, fsym: fsym }
     let pos = vec[int].new(1)
     pos.push(0)
     while _cur(p, pos).k != T_EOF {
@@ -1443,7 +1452,36 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
             continue
         }
         if t.k == T_KW && t.n == K_FN {
-            _fn(p, pos)
+            _fn(p, pos, -1)
+            continue
+        }
+        if t.k == T_PUNCT && t.n == P_AT {
+            _adv(pos)
+            let kw = _cur(p, pos)
+            if kw.k != T_NAME || kw.s != "ffi" {
+                _fail(p, pos, "只支持 @ffi(\"dll\", \"Sym\")")
+            }
+            _adv(pos)
+            _eat_p(p, pos, P_LPAREN)
+            let ds = _cur(p, pos)
+            if ds.k != T_STR {
+                _fail(p, pos, "@ffi 第一个实参是 DLL 名字符串")
+            }
+            _adv(pos)
+            _eat_p(p, pos, P_COMMA)
+            let ss = _cur(p, pos)
+            if ss.k != T_STR {
+                _fail(p, pos, "@ffi 第二个实参是符号名字符串")
+            }
+            _adv(pos)
+            _eat_p(p, pos, P_RPAREN)
+            if !(_cur(p, pos).k == T_KW && _cur(p, pos).n == K_FN) {
+                _fail(p, pos, "@ffi 后面必须紧跟 fn 声明")
+            }
+            let idx = len(p.fdll)
+            p.fdll.push(ds.s)
+            p.fsym.push(ss.s)
+            _fn(p, pos, idx)
             continue
         }
         if t.k == T_KW && t.n == K_CONST {
@@ -1508,6 +1546,7 @@ const SCN_RDATA = 0xC0000040
 
 // 导入符号（顺序 = IAT 槽顺序，别乱动）
 const I_GETSTD = 0
+const I_USER = 4        // 用户 @ffi 符号从第 4 个 IAT 槽开始
 const I_WRITE = 1
 const I_EXIT = 2
 const I_WSPRINTF = 3
@@ -1831,7 +1870,8 @@ const OP_COPY = 31     // memcpy(a, b, imm)
 const OP_ZERO = 32     // zero(a, imm)
 const OP_RETAGG = 33   // 聚合返回：memcpy([sret], a, imm)；rax = sret
 const OP_RETSRET = 34  // 兜底返回：只把 rax = sret
-const OP_ZERON = 35    // zero(a, b)：按 b 给的**字节数**清零（动态长度）
+const OP_ZERON = 35
+const OP_CALLIAT = 36  // dst = call [rip+iat[imm]]（@ffi）    // zero(a, b)：按 b 给的**字节数**清零（动态长度）
 
 struct Ir {
     op: int
@@ -1871,6 +1911,8 @@ struct Ctx {
     str_false: int
     nl: vec[int]
     rt_pos: vec[int]
+    fdll: vec[str]      // @ffi 的 DLL 名（与 fsym 平行）
+    fsym: vec[str]      // @ffi 的符号名
 }
 
 // 单个函数的编译状态。结构体按值传，**标量字段改了不会回传**，
@@ -2649,7 +2691,12 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         }
         let d = _vnew(fc)
         fc.vty.set(d, fret)
-        _ir_emit(fc, OP_CALL, d, 0, 0, fi)
+        if fc.fns.get(fi).body < 0 {
+            // @ffi：`call [rip+IAT]`，槽号 = 内置 4 个之后
+            _ir_emit(fc, OP_CALLIAT, d, 0, 0, I_USER + fc.fns.get(fi).nlocals)
+        } else {
+            _ir_emit(fc, OP_CALL, d, 0, 0, fi)
+        }
         if _ty_is_agg(fret) {
             fc.vty.set(sret, fret)   // 聚合结果就是那块区域的地址
             return sret
@@ -3257,6 +3304,9 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
 
 fn _lower_fn(fc: FnCtx, fi: int) {
     let f = fc.fns.get(fi)
+    if f.body < 0 {
+        return                  // @ffi 声明：没有函数体，只占一个 IAT 槽
+    }
     let ep = _newlab(fc.labs)
     fc.cells.set(C_EP, ep)
     // 聚合返回走隐藏的 sret 指针（占第 0 个实参寄存器），其余实参顺延
@@ -3330,8 +3380,8 @@ fn _alloc(fc: FnCtx) {
         cp.push(c)
         if i < n {
             let ins = fc.ir.get(i)
-            if ins.op == OP_CALL || ins.op == OP_CALLRT {
-                c = c + 1
+            if ins.op == OP_CALL || ins.op == OP_CALLRT || ins.op == OP_CALLIAT {
+                c = c + 1          // 三类调用都会清 caller-saved
             }
         }
         i = i + 1
@@ -3693,6 +3743,14 @@ fn _emit_ir(fc: FnCtx, i: int) {
     }
     if op == OP_PARAM {
         _from_reg(fc, fc.vloc.get(ins.dst), _arg_reg_of(ins.imm))
+        return
+    }
+    if op == OP_CALLIAT {
+        let p = _call_rip(code)
+        _addfix(fc.fixes, p, ins.imm, FK_IAT)
+        if ins.dst > 0 {
+            _store_rax(fc, fc.vloc.get(ins.dst))
+        }
         return
     }
     if op == OP_RETAGG {
@@ -4707,97 +4765,166 @@ fn _pad_to(buf: vec[int], n: int) {
 
 fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     let rd: vec[int] = ctx.rdata
-    let g = "GetStdHandle"
-    let w = "WriteFile"
-    let e = "ExitProcess"
-    let sp = "wsprintfA"
-    let dk = "kernel32.dll"
-    let du = "user32.dll"
-    let ilt_k = 64
-    let iat_k = ilt_k + 8 * 4
-    let ilt_u = iat_k + 8 * 4
-    let iat_u = ilt_u + 8 * 2
-    let mut cur = iat_u + 8 * 2
-    let hn_g = cur
-    cur = cur + 2 + len(g) + 1
-    if cur % 2 != 0 {
-        cur = cur + 1
+
+    // ---- 汇总导入：内置 4 个 + 用户 @ffi（DLL 按首次出现排序）----
+    let dnames = vec[str].new(4)
+    dnames.push("kernel32.dll")
+    dnames.push("user32.dll")
+    let dsym = vec[str].new(8)
+    let ddll = vec[int].new(8)
+    dsym.push("GetStdHandle")
+    ddll.push(0)
+    dsym.push("WriteFile")
+    ddll.push(0)
+    dsym.push("ExitProcess")
+    ddll.push(0)
+    dsym.push("wsprintfA")
+    ddll.push(1)
+    let mut k = 0
+    while k < len(ctx.fsym) {
+        let dn = ctx.fdll.get(k)
+        let mut di = -1
+        let mut t = 0
+        while t < len(dnames) {
+            if dnames.get(t) == dn {
+                di = t
+            }
+            t = t + 1
+        }
+        if di < 0 {
+            dnames.push(dn)
+            di = len(dnames) - 1
+        }
+        dsym.push(ctx.fsym.get(k))
+        ddll.push(di)
+        k = k + 1
     }
-    let hn_w = cur
-    cur = cur + 2 + len(w) + 1
-    if cur % 2 != 0 {
-        cur = cur + 1
+    let ndll = len(dnames)
+    let nsym = len(dsym)
+
+    // ---- 布局（先算偏移，再写字节）----
+    let mut p = _align_up((ndll + 1) * 20, 8)
+    let ilt = vec[int].new(8)
+    let iatb = vec[int].new(8)
+    let mut d = 0
+    while d < ndll {
+        let mut n = 0
+        let mut s = 0
+        while s < nsym {
+            if ddll.get(s) == d {
+                n = n + 1
+            }
+            s = s + 1
+        }
+        ilt.push(p)
+        p = p + (n + 1) * 8
+        iatb.push(p)
+        p = p + (n + 1) * 8
+        d = d + 1
     }
-    let hn_e = cur
-    cur = cur + 2 + len(e) + 1
-    if cur % 2 != 0 {
-        cur = cur + 1
+    let hn = vec[int].new(8)
+    let mut s2 = 0
+    while s2 < nsym {
+        hn.push(p)
+        p = p + 2 + len(dsym.get(s2)) + 1
+        if p % 2 != 0 {
+            p = p + 1
+        }
+        s2 = s2 + 1
     }
-    let hn_s = cur
-    cur = cur + 2 + len(sp) + 1
-    if cur % 2 != 0 {
-        cur = cur + 1
+    let dn = vec[int].new(4)
+    d = 0
+    while d < ndll {
+        dn.push(p)
+        p = p + len(dnames.get(d)) + 1
+        if p % 2 != 0 {
+            p = p + 1
+        }
+        d = d + 1
     }
-    let dn_k = cur
-    cur = cur + len(dk) + 1
-    let dn_u = cur
-    cur = cur + len(du) + 1
-    if cur % 2 != 0 {
-        cur = cur + 1
+
+    // ---- 描述符（每 DLL 20 字节 + 一个全零结尾）----
+    d = 0
+    while d < ndll {
+        _w32(rd, rdata_rva + ilt.get(d))
+        _w32(rd, 0)
+        _w32(rd, 0)
+        _w32(rd, rdata_rva + dn.get(d))
+        _w32(rd, rdata_rva + iatb.get(d))
+        d = d + 1
     }
-    _w32(rd, rdata_rva + ilt_k)
-    _w32(rd, 0)
-    _w32(rd, 0)
-    _w32(rd, rdata_rva + dn_k)
-    _w32(rd, rdata_rva + iat_k)
-    _w32(rd, rdata_rva + ilt_u)
-    _w32(rd, 0)
-    _w32(rd, 0)
-    _w32(rd, rdata_rva + dn_u)
-    _w32(rd, rdata_rva + iat_u)
     _zero(rd, 20)
-    _pad_to(rd, 64)
-    _w64(rd, rdata_rva + hn_g)
-    _w64(rd, rdata_rva + hn_w)
-    _w64(rd, rdata_rva + hn_e)
-    _w64(rd, 0)
-    _w64(rd, rdata_rva + hn_g)
-    _w64(rd, rdata_rva + hn_w)
-    _w64(rd, rdata_rva + hn_e)
-    _w64(rd, 0)
-    _w64(rd, rdata_rva + hn_s)
-    _w64(rd, 0)
-    _w64(rd, rdata_rva + hn_s)
-    _w64(rd, 0)
-    _w16(rd, 0)
-    _bytes(rd, g)
-    _b(rd, 0)
-    _pad_to(rd, hn_w)
-    _w16(rd, 0)
-    _bytes(rd, w)
-    _b(rd, 0)
-    _pad_to(rd, hn_e)
-    _w16(rd, 0)
-    _bytes(rd, e)
-    _b(rd, 0)
-    _pad_to(rd, hn_s)
-    _w16(rd, 0)
-    _bytes(rd, sp)
-    _b(rd, 0)
-    _pad_to(rd, dn_k)
-    _bytes(rd, dk)
-    _b(rd, 0)
-    _pad_to(rd, dn_u)
-    _bytes(rd, du)
-    _b(rd, 0)
-    // 字符串表：每个 `[len:8][bytes][NUL]`，strpos = 数据指针的偏移
+
+    // ---- 每 DLL 一组 ILT + IAT ----
+    d = 0
+    while d < ndll {
+        _pad_to(rd, ilt.get(d))
+        let mut s3 = 0
+        while s3 < nsym {
+            if ddll.get(s3) == d {
+                _w64(rd, rdata_rva + hn.get(s3))
+            }
+            s3 = s3 + 1
+        }
+        _w64(rd, 0)
+        _pad_to(rd, iatb.get(d))
+        s3 = 0
+        while s3 < nsym {
+            if ddll.get(s3) == d {
+                _w64(rd, rdata_rva + hn.get(s3))
+            }
+            s3 = s3 + 1
+        }
+        _w64(rd, 0)
+        d = d + 1
+    }
+
+    // ---- hint/name 与 DLL 名 ----
+    s2 = 0
+    while s2 < nsym {
+        _pad_to(rd, hn.get(s2))
+        _w16(rd, 0)
+        _bytes(rd, dsym.get(s2))
+        _b(rd, 0)
+        s2 = s2 + 1
+    }
+    d = 0
+    while d < ndll {
+        _pad_to(rd, dn.get(d))
+        _bytes(rd, dnames.get(d))
+        _b(rd, 0)
+        d = d + 1
+    }
+
+    // ---- 记 IAT 槽位：内置 4 个 + 用户符号 ----
+    iat.set(I_GETSTD, rdata_rva + iatb.get(0))
+    iat.set(I_WRITE, rdata_rva + iatb.get(0) + 8)
+    iat.set(I_EXIT, rdata_rva + iatb.get(0) + 16)
+    iat.set(I_WSPRINTF, rdata_rva + iatb.get(1))
+    k = 0
+    while k < len(ctx.fsym) {
+        let g = I_USER + k
+        let di = ddll.get(g)
+        let mut idx = 0
+        let mut t2 = 0
+        while t2 < g {
+            if ddll.get(t2) == di {
+                idx = idx + 1
+            }
+            t2 = t2 + 1
+        }
+        iat.set(g, rdata_rva + iatb.get(di) + idx * 8)
+        k = k + 1
+    }
+
+    // ---- 字符串表：每个 `[len:8][bytes][NUL]`，strpos = 数据指针的偏移 ----
     let mut i = 0
     while i < len(ctx.strs) {
         _pad_to(rd, _align_up(len(rd), 8))
-        let s = ctx.strs[i]
-        _w64(rd, len(s))
+        let st = ctx.strs[i]
+        _w64(rd, len(st))
         ctx.strpos.set(i, len(rd))
-        _bytes(rd, s)
+        _bytes(rd, st)
         _b(rd, 0)
         i = i + 1
     }
@@ -4809,10 +4936,6 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     ctx.strpos.set(len(ctx.strpos) - 1, len(rd))
     _bytes(rd, "%I64d\n")
     _b(rd, 0)
-    iat.set(I_GETSTD, rdata_rva + iat_k)
-    iat.set(I_WRITE, rdata_rva + iat_k + 8)
-    iat.set(I_EXIT, rdata_rva + iat_k + 16)
-    iat.set(I_WSPRINTF, rdata_rva + iat_u)
 }
 // ---------------------------------------------------------------------------
 // 回填（v2.16）
@@ -5121,7 +5244,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S10：int/bool/str + struct/数组/enum/vec/map/切片 + defer + import + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S11：int/bool/str + struct/数组/enum/vec/map/切片 + defer + import + @ffi + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
@@ -5163,7 +5286,9 @@ fn main() {
         ti = ti + 1
     }
     let imports = vec[str].new(4)
-    parse(toks, nodes, names, strs, fns, cname, cval, stt, imports)
+    let fdll = vec[str].new(4)
+    let fsym = vec[str].new(4)
+    parse(toks, nodes, names, strs, fns, cname, cval, stt, imports, fdll, fsym)
 
     // 装载 import 的模块：同一个模块只装一次，装的过程中可能又收集到新的 import
     let loaded = vec[str].new(4)
@@ -5189,7 +5314,7 @@ fn main() {
             let mt = read_text(mpath)
             let mtk = vec[Tok].new(256)
             lex(mt, mtk)
-            parse(mtk, nodes, names, strs, fns, cname, cval, stt, imports)
+            parse(mtk, nodes, names, strs, fns, cname, cval, stt, imports, fdll, fsym)
         }
         ii = ii + 1
     }
@@ -5227,7 +5352,7 @@ fn main() {
     }
     let iat = vec[int].new(4)
     si = 0
-    while si < 4 {
+    while si < 4 + len(fsym) {
         iat.push(0)
         si = si + 1
     }
@@ -5250,7 +5375,7 @@ fn main() {
     let ctx = Ctx { code: code, labs: labs, fixes: fixes, nodes: nodes,
                     names: names, strs: strs, fns: fns, fnpos: fnpos,
                     rdata: rdata, strpos: strpos, str_true: s_true, str_false: s_false,
-                    nl: nl, rt_pos: rt_pos }
+                    nl: nl, rt_pos: rt_pos, fdll: fdll, fsym: fsym }
 
     // **入口必须落在 .text 偏移 0**（AddressOfEntryPoint 恒等于 TEXT_RVA）
     _gen_entry(ctx)
@@ -5335,7 +5460,7 @@ fn main() {
     }
     write_file(out, blob)
     let t_all = (now_ns() - t0) / 1000
-    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S10)" +
+    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S11)" +
           "  编译 " + t_all.to_str() + " us（进程内）  后端 " +
           ((fn_end - rt_end) / 1000).to_str() + " us  -j" + nt.to_str())
 }
