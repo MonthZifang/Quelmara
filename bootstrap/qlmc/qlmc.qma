@@ -7,7 +7,7 @@
 //
 // ## 它不是什么（重要，别当成"自举完成"）
 //
-// 只覆盖**子集 S8**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
+// 只覆盖**子集 S9**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
 // "链路通 + 后端真"排在"语法全覆盖"前面：后端是自举的承重墙，语法是加法。
 //
 //   支持：fn（int/bool/str 形参与返回，≤4 参）、let/mut（可带类型标注）、赋值、
@@ -18,9 +18,10 @@
 //         **enum（声明/构造/载荷）与 match（表达式/语句/`_`/载荷绑定）**、
 //         **vec[T]（new/push/get/len/下标读写，容量固定不扩容）**、
 //         **聚合（struct/enum）作形参与返回值（按值传 + sret）**、
-//         **map[K]V（固定容量线性扫描）**、**切片 []T（视图）**、**≤4 个实参**
-//   不支持：f64、泛型、闭包、defer、import（多文件）、宏/反射、
-//         @ffi、接口、rc、嵌套聚合字段、聚合 print
+//         **map[K]V（固定容量线性扫描）**、**切片 []T（视图）**、**defer**、
+//         **≤4 个实参**
+//   不支持：f64、泛型、闭包、import（多文件）、宏/反射、
+//         @ffi、接口、rc/Drop、嵌套聚合字段、聚合 print
 //
 // ## 分层（v2.16 重写了后端，前端沿用）
 //
@@ -100,6 +101,7 @@ const K_CONTINUE = 18
 const K_STRUCT = 19
 const K_ENUM = 20
 const K_MATCH = 21
+const K_DEFER = 22
 
 // 标点 id（多字符的按"最长匹配"先行）
 const P_LPAREN = 1
@@ -180,7 +182,8 @@ const S_BREAK = 19
 const S_CONTINUE = 20
 const S_ASG_FIELD = 21   // a = 基址，b = 字段名 id，c = 值
 const S_ASG_INDEX = 22   // a = 基址，b = 下标，c = 值
-const S_MATCH = 23       // 同 E_MATCH，但按语句降级    // a = 值
+const S_MATCH = 23
+const S_DEFER = 24        // a = 被延迟的语句节点（S_EXPR / S_ASSIGN）       // 同 E_MATCH，但按语句降级    // a = 值
 
 struct Node {
     op: int
@@ -279,6 +282,7 @@ fn _kw_id(w: str) -> int {
     if w == "struct" { return K_STRUCT }
     if w == "enum" { return K_ENUM }
     if w == "match" { return K_MATCH }
+    if w == "defer" { return K_DEFER }
     return 0
 }
 
@@ -1110,6 +1114,16 @@ fn _stmt(p: P, pos: vec[int]) -> int {
         }
         return id
     }
+    if t.k == T_KW && t.n == K_DEFER {
+        _adv(pos)
+        let inner = _stmt(p, pos)
+        let inz = p.nodes.get(inner)
+        if inz.op != S_EXPR && inz.op != S_ASSIGN && inz.op != S_ASG_FIELD &&
+           inz.op != S_ASG_INDEX && inz.op != S_PRINT {
+            _fail(p, pos, "defer 只支持表达式语句或赋值")
+        }
+        return _node(p, S_DEFER, inner, -1, -1)
+    }
     if t.k == T_KW && t.n == K_MATCH {
         let m = _match(p, pos, 1)
         let nd = p.nodes.get(m)
@@ -1846,6 +1860,7 @@ struct FnCtx {
     cells: vec[int]     // 计数器组：C_ST / C_NV / C_EP / C_LD / C_BD / C_ADDRTY
     rt: vec[int]        // 运行库例程位置（顺序段填好后共享）
     stt: vec[int]       // struct 表（只读，跨线程共享）
+    df: vec[int]        // defer 栈：登记的被延迟语句节点
     bind: vec[int]      // 臂内绑定栈：(名字 id, vreg) 成对
     loops: vec[int]     // 循环栈：(continue 标签, break 标签) 成对
     cp: vec[int]        // 复用缓冲：调用前缀和
@@ -1860,6 +1875,7 @@ const C_LD = 3
 const C_BD = 4
 const C_ADDRTY = 5
 const C_SRET = 6        // 聚合返回的隐藏指针（vreg）
+const C_DEF = 7         // defer 栈深度
 const FRAME = 4096          // 帧大小（512 个 8 字节槽）
 const MAX_VAR = 64          // 变量最多占 64 个寄存器位（其余落槽）
 const SLOT_TEMP = 256       // 0..255 给变量与聚合区域；256..511 给临时值溢出
@@ -2073,6 +2089,7 @@ fn _fc_reset(fc: FnCtx) {
     fc.cells.set(C_LD, 0)
     fc.cells.set(C_BD, 0)
     fc.cells.set(C_ADDRTY, 0)
+    fc.df.clear()
     fc.bind.clear()
     fc.cells.set(C_BD, 0)
 }
@@ -2094,6 +2111,7 @@ fn _new_fc(nodes: vec[Node], names: vec[str], fns: vec[Fn], rt: vec[int],
                      vpin: vec[int].new(32), vmap: vec[int].new(16),
                      vval: vec[int].new(16), cells: cells,
                      rt: rt, stt: stt,
+                     df: vec[int].new(16),
                      bind: vec[int].new(16), loops: vec[int].new(16),
                      cp: vec[int].new(64), rend: vec[int].new(4),
                      send: vec[int].new(64) }
@@ -3002,12 +3020,27 @@ fn _loop_pop(fc: FnCtx) {
     fc.cells.set(C_LD, fc.cells.get(C_LD) - 1)
 }
 
+/// 逆序执行 [base, C_DEF) 里登记的 defer（块退出 / return / break / continue）
+fn _emit_defers(fc: FnCtx, base: int, ep: int) {
+    let mut i = fc.cells.get(C_DEF) - 1
+    while i >= base {
+        let inner = fc.df.get(i)
+        fc.cells.set(C_DEF, i)          // 防递归重复登记
+        _lower_stmt(fc, inner, ep)
+        i = i - 1
+    }
+    fc.cells.set(C_DEF, base)
+}
+
 fn _lower_block(fc: FnCtx, head: int, ep: int) {
+    let base = fc.cells.get(C_DEF)
     let mut cur = head
     while cur >= 0 {
         _lower_stmt(fc, cur, ep)
         cur = fc.nodes.get(cur).nx
     }
+    // 块退出：本块登记的 defer 逆序执行（LIFO）
+    _emit_defers(fc, base, ep)
 }
 
 fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
@@ -3080,6 +3113,16 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
         _ir_emit(fc, OP_LAB, 0, 0, 0, lend)
         return
     }
+    if nd.op == S_DEFER {
+        let d = fc.cells.get(C_DEF)
+        if len(fc.df) > d {
+            fc.df.set(d, nd.a)
+        } else {
+            fc.df.push(nd.a)
+        }
+        fc.cells.set(C_DEF, d + 1)
+        return
+    }
     if nd.op == S_MATCH {
         _lower_match(fc, id, 0, ep)
         return
@@ -3125,24 +3168,33 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
         return
     }
     if nd.op == S_RETURN {
+        // 口径：**先定下返回值，再跑 defer**（stage-0 就是这么做的）。
+        // 所以先求值并钉进变量，再 _emit_defers，最后才 RET。
         let mut v = 0
+        let mut vty = TY_INT
         if nd.a >= 0 {
             let inz = fc.nodes.get(nd.a)
             if inz.op == E_STRUCTLIT || inz.op == E_ARRLIT {
-                // 聚合字面量不能当右值：先写进隐藏临时，再整块交给 sret
                 let ty = _ty_of_expr(fc, nd.a)
                 let tmp = _new_var(fc, -1, ty)
                 _lower_into(fc, nd.a, tmp)
-                let av = _vnew(fc)
+                let av0 = _vnew(fc)
+                fc.vty.set(av0, TY_INT)
+                _ir_emit(fc, OP_ADDRV, av0, 0, 0, -fc.vloc.get(tmp) - 1)
+                let av = _pin(fc, av0)
                 fc.vty.set(av, ty)
-                _ir_emit(fc, OP_ADDRV, av, 0, 0, -fc.vloc.get(tmp) - 1)
-                _ir_emit(fc, OP_RETAGG, 0, av, 0, _ty_size(fc, ty))
-                return
+                v = av
+                vty = ty
+            } else {
+                let t = _lower_expr(fc, nd.a)
+                vty = fc.vty.get(t)
+                v = _pin(fc, t)
+                fc.vty.set(v, vty)
             }
-            v = _lower_expr(fc, nd.a)
         }
-        if v > 0 && _ty_is_agg(fc.vty.get(v)) {
-            _ir_emit(fc, OP_RETAGG, 0, v, 0, _ty_size(fc, fc.vty.get(v)))
+        _emit_defers(fc, 0, ep)
+        if v > 0 && _ty_is_agg(vty) {
+            _ir_emit(fc, OP_RETAGG, 0, v, 0, _ty_size(fc, vty))
             return
         }
         _ir_emit(fc, OP_RET, 0, v, 0, 0)
@@ -5023,7 +5075,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S8：int/bool/str + struct/数组/enum/vec/map/切片 + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S9：int/bool/str + struct/数组/enum/vec/map/切片 + defer + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
@@ -5207,7 +5259,7 @@ fn main() {
     }
     write_file(out, blob)
     let t_all = (now_ns() - t0) / 1000
-    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S8)" +
+    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S9)" +
           "  编译 " + t_all.to_str() + " us（进程内）  后端 " +
           ((fn_end - rt_end) / 1000).to_str() + " us  -j" + nt.to_str())
 }
