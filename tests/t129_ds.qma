@@ -1,0 +1,230 @@
+// t129_ds.qma：std/ds 定容环形缓冲 + 二叉最小堆（v2.05 补 pub 后首次回归）
+// 覆盖：RingBuf 的 FIFO 顺序 / 绕回（head 非 0）/ 满与空哨兵 / clear 复用 / 负值 /
+//       容量下界归一化；MinHeap 的升降序 / 重复 key / 负 key / 扩容 / 交错 push-pop /
+//       1000 条伪随机 key 的全弹出有序性；以及"key 打包句柄"这一推荐用法。
+// 全部断言自校验，退出码 0 = 通过。
+module t129_ds
+
+import std.ds
+
+fn main() {
+    // ================= RingBuf =================
+
+    // ---- 1. 建 + 容量下界归一化 ----
+    let rb = rb_new(4)
+    assert(rb_cap(rb) == 4, "cap 4")
+    assert(rb_count(rb) == 0, "new 为空")
+    let r0 = rb_new(0)
+    assert(rb_cap(r0) == 1, "cap 0 归一化为 1")
+    let rn = rb_new(-7)
+    assert(rb_cap(rn) == 1, "负 cap 归一化为 1")
+    assert(rb_count(rn) == 0, "负 cap 新建仍为空")
+    rb_free(r0)
+    rb_free(rn)
+
+    // ---- 2. 空容器的哨兵 ----
+    assert(rb_pop(rb) == -1, "空 pop = -1")
+    assert(rb_peek(rb) == -1, "空 peek = -1")
+    assert(rb_count(rb) == 0, "空操作不改 count")
+
+    // ---- 3. FIFO 顺序 + peek 不出队 ----
+    assert(rb_push(rb, 10) == 0, "push 10")
+    assert(rb_push(rb, 20) == 0, "push 20")
+    assert(rb_push(rb, 30) == 0, "push 30")
+    assert(rb_count(rb) == 3, "count 3")
+    assert(rb_peek(rb) == 10, "peek 头")
+    assert(rb_count(rb) == 3, "peek 不改 count")
+    assert(rb_pop(rb) == 10, "pop 10")
+    assert(rb_peek(rb) == 20, "peek 后移")
+    assert(rb_pop(rb) == 20, "pop 20")
+    assert(rb_pop(rb) == 30, "pop 30")
+    assert(rb_pop(rb) == -1, "pop 空")
+
+    // ---- 4. 满：push 返回 -1，且**不覆盖最老的** ----
+    let mut i = 0
+    while i < 4 {
+        assert(rb_push(rb, i) == 0, "填满")
+        i += 1
+    }
+    assert(rb_count(rb) == 4, "满 count = cap")
+    assert(rb_push(rb, 99) == -1, "满 push = -1")
+    assert(rb_count(rb) == 4, "满 push 不改 count")
+    assert(rb_peek(rb) == 0, "满 push 不覆盖最老的")
+
+    // ---- 5. 绕回：head 非 0 时尾部从 0 继续 ----
+    assert(rb_pop(rb) == 0, "绕回前 pop 0")
+    assert(rb_pop(rb) == 1, "绕回前 pop 1")
+    // 此刻 head = 2，count = 2（2,3）
+    assert(rb_push(rb, 40) == 0, "绕回 push 40")
+    assert(rb_push(rb, 41) == 0, "绕回 push 41")
+    assert(rb_count(rb) == 4, "绕回后满")
+    assert(rb_pop(rb) == 2, "绕回顺序 2")
+    assert(rb_pop(rb) == 3, "绕回顺序 3")
+    assert(rb_pop(rb) == 40, "绕回顺序 40")
+    assert(rb_pop(rb) == 41, "绕回顺序 41")
+    assert(rb_pop(rb) == -1, "绕回后取空")
+
+    // ---- 6. clear 复用：count/head 归零，容量不变 ----
+    rb_push(rb, 5)
+    rb_push(rb, 6)
+    rb_clear(rb)
+    assert(rb_count(rb) == 0, "clear 后 count 0")
+    assert(rb_cap(rb) == 4, "clear 不改 cap")
+    assert(rb_pop(rb) == -1, "clear 后 pop = -1")
+    assert(rb_push(rb, 7) == 0, "clear 后可再 push")
+    assert(rb_peek(rb) == 7, "clear 后新元素在头")
+
+    // ---- 7. 负值可存（哨兵同域的已知取舍）----
+    rb_clear(rb)
+    rb_push(rb, -5)
+    rb_push(rb, -100)
+    assert(rb_count(rb) == 2, "负值 count")
+    assert(rb_pop(rb) == -5, "负值 -5")
+    assert(rb_pop(rb) == -100, "负值 -100")
+
+    // ---- 8. 大容量顺序（1000 条，整轮进出）----
+    let big = rb_new(1000)
+    i = 0
+    while i < 1000 {
+        assert(rb_push(big, i * 3) == 0, "大容量填满")
+        i += 1
+    }
+    assert(rb_push(big, 0) == -1, "大容量满")
+    i = 0
+    while i < 1000 {
+        assert(rb_pop(big) == i * 3, "大容量顺序")
+        i += 1
+    }
+    assert(rb_count(big) == 0, "大容量取空")
+    rb_free(big)
+    rb_free(rb)
+
+    // ================= MinHeap =================
+
+    // ---- 9. 空堆哨兵 ----
+    let h = heap_new(4)
+    assert(heap_len(h) == 0, "空堆 len 0")
+    assert(heap_peek(h) == -1, "空堆 peek = -1")
+    assert(heap_pop(h) == -1, "空堆 pop = -1")
+    assert(heap_len(h) == 0, "空堆 pop 不改 len")
+
+    // ---- 10. 降序入、升序出 ----
+    i = 10
+    while i > 0 {
+        heap_push(h, i)
+        i -= 1
+    }
+    assert(heap_len(h) == 10, "len 10")
+    assert(heap_peek(h) == 1, "最小在顶")
+    i = 1
+    while i <= 10 {
+        assert(heap_pop(h) == i, "升序出堆")
+        i += 1
+    }
+    assert(heap_len(h) == 0, "出空")
+    assert(heap_pop(h) == -1, "出空后再 pop = -1")
+
+    // ---- 11. 重复 key 与负 key ----
+    heap_push(h, 5)
+    heap_push(h, 5)
+    heap_push(h, 5)
+    heap_push(h, -3)
+    heap_push(h, -8)
+    assert(heap_pop(h) == -8, "负 key 最小")
+    assert(heap_pop(h) == -3, "负 key 次小")
+    assert(heap_pop(h) == 5, "重复 5 第一个")
+    assert(heap_pop(h) == 5, "重复 5 第二个")
+    assert(heap_pop(h) == 5, "重复 5 第三个")
+    assert(heap_len(h) == 0, "重复 key 出空")
+
+    // ---- 12. 交错 push / pop 保持堆序 ----
+    let h2 = heap_new(2)
+    heap_push(h2, 7)
+    heap_push(h2, 2)
+    assert(heap_pop(h2) == 2, "交错 pop 2")
+    heap_push(h2, 9)
+    heap_push(h2, 1)
+    assert(heap_pop(h2) == 1, "交错 pop 1")
+    heap_push(h2, 4)
+    assert(heap_peek(h2) == 4, "交错 peek 4")
+    assert(heap_pop(h2) == 4, "交错 pop 4")
+    assert(heap_pop(h2) == 7, "交错 pop 7")
+    assert(heap_pop(h2) == 9, "交错 pop 9")
+    assert(heap_len(h2) == 0, "交错出空")
+
+    // ---- 13. 扩容：初始 2 槽塞 300 条 ----
+    let h3 = heap_new(2)
+    i = 0
+    while i < 300 {
+        heap_push(h3, (i * 37) % 300)
+        i += 1
+    }
+    assert(heap_len(h3) == 300, "扩容后 len 300")
+    let mut prev = -1
+    i = 0
+    while i < 300 {
+        let v = heap_pop(h3)
+        assert(v >= prev, "扩容后升序")
+        prev = v
+        i += 1
+    }
+    assert(heap_len(h3) == 0, "扩容后出空")
+
+    // ---- 14. 1000 条伪随机 key 全弹出有序（确定性 LCG，不依赖 rand）----
+    let h4 = heap_new(16)
+    let mut s = 12345
+    let keys = vec[int].new(1000)
+    i = 0
+    while i < 1000 {
+        s = (s * 1103515245 + 12345) % 2147483648
+        let k = s % 100000
+        keys.push(k)
+        heap_push(h4, k)
+        i += 1
+    }
+    assert(heap_len(h4) == 1000, "随机 1000 条")
+    let minv = vec[int].new(1)
+    minv.push(keys.get(0))
+    i = 1
+    while i < 1000 {
+        if keys.get(i) < minv.get(0) {
+            minv.set(0, keys.get(i))
+        }
+        i += 1
+    }
+    assert(heap_peek(h4) == minv.get(0), "随机堆顶 = 全量最小")
+    prev = -1
+    let mut cnt = 0
+    let mut go = 1
+    while go == 1 {
+        let v = heap_pop(h4)
+        if v == -1 {
+            go = 0
+        } else {
+            assert(v >= prev, "随机全弹出升序")
+            prev = v
+            cnt += 1
+        }
+    }
+    assert(cnt == 1000, "随机全弹出 1000 条")
+    assert(heap_len(h4) == 0, "随机出空")
+
+    // ---- 15. 推荐用法：key 打包句柄（定时器轮形状）----
+    // 到期时刻 due 左移 10 位、低 10 位放 id；弹出后 id = k % 1024
+    let h5 = heap_new(8)
+    heap_push(h5, 500 * 1024 + 3)
+    heap_push(h5, 100 * 1024 + 1)
+    heap_push(h5, 500 * 1024 + 4)
+    heap_push(h5, 100 * 1024 + 2)
+    let mut a = heap_pop(h5)
+    assert(a / 1024 == 100 && a % 1024 == 1, "打包 key：最早到期 + id 1")
+    a = heap_pop(h5)
+    assert(a / 1024 == 100 && a % 1024 == 2, "打包 key：同 due 按 id")
+    a = heap_pop(h5)
+    assert(a / 1024 == 500 && a % 1024 == 3, "打包 key：晚到期")
+    a = heap_pop(h5)
+    assert(a / 1024 == 500 && a % 1024 == 4, "打包 key：最后一条")
+    assert(heap_pop(h5) == -1, "打包 key 出空")
+
+    print("ds ok")
+}

@@ -1,0 +1,178 @@
+// bench/ds_bench.qma —— std/ds（RingBuf / MinHeap）的单价（v2.05）
+// 用法：python tools/stage0/qlm_cli.py run bench/ds_bench.qma --target win
+//
+// 口径：
+//   * 全部用进程内 now_ns()，不含进程启动与内存分配之外的准备（键/数据预先生成，不计时）；
+//   * RingBuf 跑**稳态**：先填到 cap-1，再循环 push+pop 配对——每一轮都跨过
+//     "尾部绕回 0"这条路径，量的是真实稳态而不是"一次性填满"；
+//   * 对照 1 = `vec[int]` 的 push/pop（同一形状，无环、无取模、无句柄）；
+//     对照 2 = `std/deque` 的 push_back/pop_front（同形状但可扩容、句柄是盒子）；
+//   * MinHeap 与"一次性排序"对比：同一批 20 万 key，heap push+pop 全流程 vs
+//     `sort_int`（排序不做增量插入，两者用途不同，比的是"优先队列的额外代价"）；
+//   * key 由确定性 LCG 生成（x = x*1103515245+12345 mod 2^31），**不计时**。
+module ds_bench
+
+import std.ds
+import std.deque
+import std.sort
+
+fn gen_keys(n: int) -> vec[int] {
+    let out = vec[int].new(n)
+    let mut s = 12345
+    let mut i = 0
+    while i < n {
+        s = (s * 1103515245 + 12345) % 2147483648
+        out.push(s % 1000000)
+        i += 1
+    }
+    return out
+}
+
+// 一轮 push 全量 + pop 全量，返回 [push_ns/次, pop_ns/次, n]。
+// 两种规模各跑一轮：20 万（1.6 MB，超出 L2，每层下沉几乎必miss）
+// 与 1 万（80 KB，装得进 L2）——两者之差就是**访存延迟**，不是方法调用开销。
+fn heap_round(n: int) -> vec[int] {
+    let keys = gen_keys(n)
+    let h = heap_new(n)
+    let t0 = now_ns()
+    let mut i = 0
+    while i < n {
+        heap_push(h, keys.get(i))
+        i += 1
+    }
+    let t1 = now_ns()
+    let mut prev = -1
+    let mut bad = 0
+    let mut acc = 0
+    i = 0
+    while i < n {
+        let k = heap_pop(h)
+        if k < prev {
+            bad += 1
+        }
+        prev = k
+        acc += k
+        i += 1
+    }
+    let t2 = now_ns()
+    assert(bad == 0, "弹出必须有序")
+    assert(acc > 0, "非空")
+    let out = vec[int].new(3)
+    out.push((t1 - t0) / n)
+    out.push((t2 - t1) / n)
+    out.push(n)
+    return out
+}
+
+fn main() {
+    let N = 1000000
+    let CAP = 4096
+
+    // ---------- RingBuf 稳态：push + pop 配对 100 万次 ----------
+    let rb = rb_new(CAP)
+    let mut i = 0
+    while i < CAP - 1 {
+        rb_push(rb, i)
+        i += 1
+    }
+    // 预热 1000 轮（走同一路径，把首次触碰的页错误摊掉）
+    i = 0
+    while i < 1000 {
+        rb_push(rb, i)
+        rb_pop(rb)
+        i += 1
+    }
+    let mut acc = 0
+    let t0 = now_ns()
+    i = 0
+    while i < N {
+        rb_push(rb, i)
+        acc += rb_pop(rb)
+        i += 1
+    }
+    let t1 = now_ns()
+    assert(rb_count(rb) == CAP - 1, "稳态 count 不变")
+    print("rb push+pop 100 万对: " + ((t1 - t0) / 1000000).to_str() + " ms  ("
+        + ((t1 - t0) / N).to_str() + " ns/对)")
+
+    // ---------- RingBuf peek 100 万次 ----------
+    let t2 = now_ns()
+    i = 0
+    while i < N {
+        acc += rb_peek(rb)
+        i += 1
+    }
+    let t3 = now_ns()
+    print("rb peek 100 万次: " + ((t3 - t2) / 1000000).to_str() + " ms  ("
+        + ((t3 - t2) / N).to_str() + " ns/次)")
+    rb_free(rb)
+
+    // ---------- 对照 1：vec[int] push + pop 配对 ----------
+    let v = vec[int].new(CAP)
+    i = 0
+    while i < CAP - 1 {
+        v.push(i)
+        i += 1
+    }
+    let t4 = now_ns()
+    i = 0
+    while i < N {
+        v.push(i)
+        acc += v.get(len(v) - 1)
+        v.pop()
+        i += 1
+    }
+    let t5 = now_ns()
+    assert(len(v) == CAP - 1, "vec 稳态 len 不变")
+    print("vec push+pop 100 万对: " + ((t5 - t4) / 1000000).to_str() + " ms  ("
+        + ((t5 - t4) / N).to_str() + " ns/对)")
+
+    // ---------- 对照 2：deque push_back + pop_front 配对 ----------
+    let d = dq_new(CAP)
+    i = 0
+    while i < CAP - 1 {
+        dq_push_back(d, i)
+        i += 1
+    }
+    let t6 = now_ns()
+    i = 0
+    while i < N {
+        dq_push_back(d, i)
+        acc += dq_pop_front(d)
+        i += 1
+    }
+    let t7 = now_ns()
+    assert(dq_len(d) == CAP - 1, "deque 稳态 len 不变")
+    print("dq push_back+pop_front 100 万对: " + ((t7 - t6) / 1000000).to_str() + " ms  ("
+        + ((t7 - t6) / N).to_str() + " ns/对)")
+    dq_free(d)
+
+    // ---------- MinHeap：20 万（超 L2）与 1 万（装得进 L2）----------
+    let M = 200000
+    let r1 = heap_round(M)
+    print("heap push 20 万: " + r1.get(0).to_str() + " ns/次"
+        + "  pop 20 万: " + r1.get(1).to_str() + " ns/次"
+        + "  （堆 1.6 MB）")
+    let r2 = heap_round(10000)
+    print("heap push 1 万: " + r2.get(0).to_str() + " ns/次"
+        + "  pop 1 万: " + r2.get(1).to_str() + " ns/次"
+        + "  （堆 80 KB）")
+    let keys = gen_keys(M)
+
+    // ---------- 对照 3：同一批 key 一次性排序 ----------
+    let c = vec[int].new(M)
+    i = 0
+    while i < M {
+        c.push(keys.get(i))
+        i += 1
+    }
+    let t12 = now_ns()
+    sort_int(c)
+    let t13 = now_ns()
+    print("sort_int 20 万: " + ((t13 - t12) / 1000000).to_str() + " ms  ("
+        + ((t13 - t12) / M).to_str() + " ns/元素)")
+
+    // acc 只用来阻止"整个循环被当成无副作用删掉"，顺便给个校验值
+    assert(acc > 0, "acc 非零")
+    print("ds bench done")
+}

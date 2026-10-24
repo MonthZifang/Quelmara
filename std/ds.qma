@@ -1,17 +1,36 @@
-// std/ds.qma —— 数据结构（v1.17）
-// RingBuf：定容环形缓冲（O(1) 两端操作，游戏/流式场景）
-// MinHeap：二叉最小堆（timer 轮的底座，优先队列）
-// 全部纯 Quelmara（mem 块 + vec），零系统调用。
+// std/ds.qma —— 数据结构：定容环形缓冲 + 二叉最小堆（v1.17 起；v2.05 补 pub 与文档）
+//
+// 为什么需要它：
+//   * RingBuf 是**定容**环形缓冲：一次分配、两端 O(1)、不扩容、不搬移。
+//     "固定窗口 / 帧队列 / 有界通道"这三种形状容量天然有界，用可扩容的
+//     std/deque 反而要处理"扩到多大"和扩容时的搬移抖动。
+//   * MinHeap 是二叉最小堆：优先队列的底座（定时器轮 / 任务调度 / Top-K），
+//     push/pop 都是 O(log n)、peek 是 O(1)，比"每次排序"或"线性找最小"都稳。
+//
+// 选型：两端进出且要自动扩容 → std/deque；按键查值且要淘汰 → std/lru；
+//       只需要"有界 FIFO" → 本模块 RingBuf。
+//
+// 实现：全部纯 Quelmara（mem 块 + vec），零系统调用；RingBuf 只在 rb_new 分配一次。
+//
+// 语义纪律（写进文档，不做惊喜）：
+//   * 空 / 满一律返回 -1，**与元素值同域**：存了 -1 的容器分不清"空"与"值是 -1"，
+//     需要区分就自己包一层（例如存 v+1）——这是换取"零错误类型"的代价；
+//   * 不做 fail-fast：容量与长度是运行期数据，不是编程错误（越界 panic 留给编程错误）；
+//   * 没有迭代器：RingBuf 用 rb_count 次 rb_pop 取空，MinHeap 用 heap_len 次 heap_pop 取空；
+//   * 非线程安全：同一句柄不要跨线程共享（语言层不加内部锁，也不做引用计数）。
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // RingBuf：定容 int 环形缓冲
-// 布局：16 字节头（cap/count/head）+ cap*8 数据
-//   槽 0 = cap, 槽 1 = count, 槽 2 = head
-// full 时 push 返回 -1（fail-fast 的温和版：调用方可选处理）
+// 布局：24 字节头（cap / count / head）+ cap 个 8 字节槽
+//   槽 0 = cap，槽 1 = count，槽 2 = head（下一个出队位置）
+//   逻辑下标 i 的物理位置 = (head + i) % cap
+// push 只动 count，pop 只动 head —— 两端都不搬数据
 // ---------------------------------------------------------------------------
 
-fn rb_new(cap: int) -> int {
+/// rb_new(cap) -> int：建一个容量 cap 的环形缓冲，返回句柄（cap <= 0 按 1 算）。
+/// 整个生命周期只在这里分配一次内存（24 + cap*8 字节）。
+pub fn rb_new(cap: int) -> int {
     if cap <= 0 {
         cap = 1
     }
@@ -22,16 +41,18 @@ fn rb_new(cap: int) -> int {
     return rb
 }
 
-fn rb_count(rb: int) -> int {
+/// rb_count(rb) -> int：当前元素个数，O(1)。
+pub fn rb_count(rb: int) -> int {
     return mem_load64(rb, 1)
 }
 
-fn rb_cap(rb: int) -> int {
+/// rb_cap(rb) -> int：容量（建时定下，永不变化），O(1)。
+pub fn rb_cap(rb: int) -> int {
     return mem_load64(rb, 0)
 }
 
-// rb_push(rb, v)：尾部入队。满返回 -1，否则 0。
-fn rb_push(rb: int, v: int) -> int {
+/// rb_push(rb, v) -> int：尾部入队。0 = 成功；-1 = 已满（**不覆盖最老的元素**）。
+pub fn rb_push(rb: int, v: int) -> int {
     let cap = mem_load64(rb, 0)
     let count = mem_load64(rb, 1)
     if count >= cap {
@@ -45,8 +66,8 @@ fn rb_push(rb: int, v: int) -> int {
     return 0
 }
 
-// rb_pop(rb) -> int：头部出队。空返回 -1（配合 rb_count 判别）。
-fn rb_pop(rb: int) -> int {
+/// rb_pop(rb) -> int：头部出队。空返回 -1（先看 rb_count 才能与"值就是 -1"区分）。
+pub fn rb_pop(rb: int) -> int {
     let count = mem_load64(rb, 1)
     if count == 0 {
         return 0 - 1
@@ -59,8 +80,8 @@ fn rb_pop(rb: int) -> int {
     return v
 }
 
-// rb_peek(rb) -> int：看头部不出队。空返回 -1。
-fn rb_peek(rb: int) -> int {
+/// rb_peek(rb) -> int：看头部但不出队。空返回 -1。
+pub fn rb_peek(rb: int) -> int {
     let count = mem_load64(rb, 1)
     if count == 0 {
         return 0 - 1
@@ -68,71 +89,106 @@ fn rb_peek(rb: int) -> int {
     return mem_load64(mem_ptr(rb, 24), mem_load64(rb, 2))
 }
 
+/// rb_clear(rb)：清空（count 与 head 归零），**不释放内存**——容量留给下次复用。
+pub fn rb_clear(rb: int) {
+    mem_store64(rb, 1, 0)
+    mem_store64(rb, 2, 0)
+}
+
+/// rb_free(rb)：释放整块内存（句柄之后不可再用；头与数据在同一块里，一次 mem_free 即可）。
+/// 注意 `mem_free` 是**两参**（指针 + 字节数），字节数由 rb_cap 反算，调用方不用记。
+pub fn rb_free(rb: int) {
+    mem_free(rb, 24 + rb_cap(rb) * 8)
+}
+
 // ---------------------------------------------------------------------------
-// MinHeap：二叉最小堆（vec[int]，动态扩容）
-// timer 轮的底座：到期时间作 key，句柄作 value——键值打包进一个 int
-// （调用方用 key*2^20 | id 的组合，或分两个堆）。
-// 这里提供 key-only 版本：push(key) / peek() / pop()。
+// MinHeap：二叉最小堆（vec[int] 承载，push 时自动扩容）
+//
+// 只存 key：定时器轮 / Top-K 这类场景的"句柄"要么打包进 key 的低位
+// （例如 key*2^20 | id，取用时 id = k % 2^20），要么在外面维护平行 vec。
+// 为什么不内置 (key, value)：Quelmara 的 vec 元素是标量，存对就要么两个平行 vec
+// （swap 时两处同步，容易写漏），要么装箱——两条路都比"打包进一个 int"更容易错。
+//
+// 稳定性：不保证相等 key 的先后（sift 只比较大小，不比较插入序）。
 // ---------------------------------------------------------------------------
 
-fn heap_new(cap: int) -> vec[int] {
+/// heap_new(cap) -> vec[int]：建堆，cap 是预分配槽数（只影响扩容次数，不影响语义）。
+pub fn heap_new(cap: int) -> vec[int] {
     return vec[int].new(cap + 1)
 }
 
-fn heap_push(h: vec[int], key: int) {
+/// heap_len(h) -> int：堆内元素个数，O(1)。
+pub fn heap_len(h: vec[int]) -> int {
+    return len(h)
+}
+
+/// heap_push(h, key)：插入一个 key，O(log n)。
+/// 挖洞上浮：key 先挂在末尾，父节点下移让位，最后一次性落到空位——
+/// 每层只读一次父、写一次子（朴素写法是"读父读子 + 写父写子"四次）。
+pub fn heap_push(h: vec[int], key: int) {
     h.push(key)
     let mut i = len(h) - 1
     while i > 0 {
         let parent = (i - 1) / 2
-        if h.get(parent) <= h.get(i) {
+        let pv = h.get(parent)
+        if pv <= key {
             break
         }
-        let t = h.get(parent)
-        h.set(parent, h.get(i))
-        h.set(i, t)
+        h.set(i, pv)
         i = parent
     }
+    h.set(i, key)
 }
 
-// heap_peek(h) -> int：最小 key。空返回 -1。
-fn heap_peek(h: vec[int]) -> int {
+/// heap_peek(h) -> int：最小 key（不出堆）。空返回 -1。
+pub fn heap_peek(h: vec[int]) -> int {
     if len(h) == 0 {
         return 0 - 1
     }
     return h.get(0)
 }
 
-// heap_pop(h) -> int：弹出最小 key。空返回 -1。
-fn heap_pop(h: vec[int]) -> int {
+/// heap_pop(h) -> int：弹出最小 key，O(log n)。空返回 -1。
+/// 同样是挖洞下沉：末元素先取出，逐层把较小孩子上提，最后一次性落位——
+/// 每层 2 次读（左右孩子）+ 1 次写，且**先 pop 再下沉**，不需要临时把末元素写回根。
+pub fn heap_pop(h: vec[int]) -> int {
     let n = len(h)
     if n == 0 {
         return 0 - 1
     }
     let top = h.get(0)
     let last = h.get(n - 1)
-    h.set(0, last)
     h.pop()
-    let n = len(h)
+    let m = n - 1
+    if m == 0 {
+        return top
+    }
     let mut i = 0
     let mut go = 1
     while go == 1 {
         let l = i * 2 + 1
-        let r = i * 2 + 2
-        let mut m = i
-        if l < n && h.get(l) < h.get(m) {
-            m = l
-        }
-        if r < n && h.get(r) < h.get(m) {
-            m = r
-        }
-        if m == i {
+        if l >= m {
             go = 0
         } else {
-            let t = h.get(i)
-            h.set(i, h.get(m))
-            h.set(m, t)
-            i = m
+            let lv = h.get(l)
+            let mut c = l
+            let mut cv = lv
+            let r = l + 1
+            if r < m {
+                let rv = h.get(r)
+                if rv < lv {
+                    c = r
+                    cv = rv
+                }
+            }
+            if cv >= last {
+                go = 0
+            } else {
+                h.set(i, cv)
+                i = c
+            }
         }
     }
+    h.set(i, last)
     return top
 }
