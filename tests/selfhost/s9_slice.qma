@@ -1,0 +1,39 @@
+// s9_slice.qma —— stage-1 编译器（qlmc）子集 S8 的差分夹具（v2.22）
+//
+// 覆盖：切片 []T —— 定长数组切片 `a[lo..hi]`、切片再切片、切片作形参、
+// 下标读写（含别名：通过切片写回原数组）、len。与 stage-0 逐字节差分。
+fn sum(s: []int) -> int {
+    let mut t = 0
+    for i in 0..len(s) {
+        t = t + s[i]
+    }
+    return t
+}
+
+fn main() {
+    let a = [10, 20, 30, 40, 50]
+
+    let s = a[1..4]
+    print(len(s))
+    print(s[0])
+    print(s[2])
+    print(sum(s))
+
+    // 切片再切片（视图套视图）
+    let t = s[1..3]
+    print(len(t))
+    print(t[0])
+    print(sum(t))
+
+    // 直接传数组切片
+    print(sum(a[0..3]))
+
+    // 别名：通过切片写回原数组
+    s[1] = 99
+    print(a[2])
+    print(sum(a[0..5]))
+
+    // 空切片
+    let e = a[2..2]
+    print(len(e))
+}

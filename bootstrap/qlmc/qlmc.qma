@@ -7,7 +7,7 @@
 //
 // ## 它不是什么（重要，别当成"自举完成"）
 //
-// 只覆盖**子集 S7**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
+// 只覆盖**子集 S8**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
 // "链路通 + 后端真"排在"语法全覆盖"前面：后端是自举的承重墙，语法是加法。
 //
 //   支持：fn（int/bool/str 形参与返回，≤4 参）、let/mut（可带类型标注）、赋值、
@@ -18,8 +18,8 @@
 //         **enum（声明/构造/载荷）与 match（表达式/语句/`_`/载荷绑定）**、
 //         **vec[T]（new/push/get/len/下标读写，容量固定不扩容）**、
 //         **聚合（struct/enum）作形参与返回值（按值传 + sret）**、
-//         **map[K]V（固定容量线性扫描）**、**≤4 个实参**
-//   不支持：f64、泛型、闭包、切片、defer、import（多文件）、宏/反射、
+//         **map[K]V（固定容量线性扫描）**、**切片 []T（视图）**、**≤4 个实参**
+//   不支持：f64、泛型、闭包、defer、import（多文件）、宏/反射、
 //         @ffi、接口、rc、嵌套聚合字段、聚合 print
 //
 // ## 分层（v2.16 重写了后端，前端沿用）
@@ -163,6 +163,7 @@ const E_MATCH = 53     // a = 被匹配表达式，b = 首个 E_ARM（nx 链）�
 const E_METHOD = 55    // a = 接收者，b = 方法名 id，c = 实参（-1 = 无）
 const E_VECNEW = 56    // a = 元素类型，b = 容量表达式
 const E_MAPNEW = 57    // a = 键类型，b = 容量表达式，c = 值类型
+const E_SLICE = 58     // a = 基址表达式，b = lo，c = hi（`a[lo..hi]`）
 const E_ARM = 54       // a = 变体序号（-1 = 通配），b = 绑定名 id（-1 = 不绑定），c = 体      // a = 字符串表 id
 
 // 语句
@@ -204,6 +205,7 @@ const TY_STRUCT = 0x1000
 const TY_ENUM = 0x2000
 const TY_VEC = 0x8000        // 0x8000+elem：vec 句柄是标量（8 字节）
 const TY_MAP = 0x10000       // 0x10000+(K<<8)+V：map 句柄也是标量
+const TY_SLICE = 0x20000     // 0x20000+elem：切片 = (ptr, len) 两字聚合
 const TY_ARRAY = 0x100000
 const ST_STRIDE = 18        // 每个 struct 在 stt 里占 18 字：name, nf, 8*(fname, fty)
 const MAX_FIELD = 8
@@ -526,6 +528,15 @@ fn _type(p: P, pos: vec[int]) -> int {
     let t = _cur(p, pos)
     if t.k == T_PUNCT && t.n == P_LBRACK {
         _adv(pos)
+        if _is_p(p, pos, P_RBRACK) {
+            // []T = 切片（视图）
+            _adv(pos)
+            let e = _type(p, pos)
+            if e >= TY_STRUCT {
+                _fail(p, pos, "本版切片元素只支持 int/bool/str")
+            }
+            return TY_SLICE + e
+        }
         let n = _cur(p, pos)
         if n.k != T_NUM {
             _fail(p, pos, "数组长度期望整数常量")
@@ -696,6 +707,13 @@ fn _postfix(p: P, pos: vec[int], base: int) -> int {
         if _is_p(p, pos, P_LBRACK) {
             _adv(pos)
             let ix = _expr(p, pos)
+            if _is_p(p, pos, P_DOTDOT) {
+                _adv(pos)
+                let hi = _expr(p, pos)
+                _eat_p(p, pos, P_RBRACK)
+                e = _node(p, E_SLICE, e, ix, hi)
+                continue
+            }
             _eat_p(p, pos, P_RBRACK)
             e = _node(p, E_INDEX, e, ix, -1)
             continue
@@ -2151,6 +2169,9 @@ fn _ty_size(fc: FnCtx, ty: int) -> int {
     if ty >= TY_ARRAY {
         return ((ty - TY_ARRAY) >> 8) * 8
     }
+    if ty >= TY_SLICE && ty < TY_ARRAY {
+        return 16                       // (ptr, len)
+    }
     if ty >= TY_ENUM {
         return 16
     }
@@ -2400,17 +2421,37 @@ fn _addr_field(fc: FnCtx, base_nid: int, fname: int) -> int {
 fn _addr_index(fc: FnCtx, base_nid: int, ix_nid: int) -> int {
     // vec：句柄本身就是基址，数据从 +16 开始；数组：区域地址直接当下标基址
     let bty0 = _ty_of_expr(fc, base_nid)
-    if bty0 >= TY_VEC && bty0 < TY_ARRAY {
+    if bty0 >= TY_VEC && bty0 < TY_MAP {
         let h = _lower_expr(fc, base_nid)
         let i = _lower_expr(fc, ix_nid)
         _vec_check(fc, h, i)
         fc.cells.set(C_ADDRTY, bty0 - TY_VEC)
         return _vec_elem_addr(fc, h, i)
     }
+    if bty0 >= TY_SLICE && bty0 < TY_ARRAY {
+        // 切片：(ptr, len)，先查边界再用 ptr 当下标基址
+        let sv = _lower_expr(fc, base_nid)
+        let ptr = _vnew(fc)
+        fc.vty.set(ptr, TY_INT)
+        _ir_emit(fc, OP_LOAD, ptr, sv, 0, 8)
+        let len = _vnew(fc)
+        fc.vty.set(len, TY_INT)
+        let la = _vnew(fc)
+        fc.vty.set(la, TY_INT)
+        _ir_emit(fc, OP_ADDRF, la, sv, 0, 8)
+        _ir_emit(fc, OP_LOAD, len, la, 0, 8)
+        let i = _lower_expr(fc, ix_nid)
+        _slice_check(fc, i, len)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_ADDRX, d, ptr, i, 8)
+        fc.cells.set(C_ADDRTY, bty0 - TY_SLICE)
+        return d
+    }
     let base = _addr_of(fc, base_nid)
     let bty = fc.cells.get(C_ADDRTY)
     if bty < TY_ARRAY {
-        eprint("qlmc: 只有定长数组能下标")
+        eprint("qlmc: 只有定长数组能切片下标")
         exit(2)
     }
     let ix = _lower_expr(fc, ix_nid)
@@ -2488,6 +2529,16 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         // 内建 len(s)
         if fc.names.get(nd.a) == "len" && nd.b >= 0 {
             let aty = _ty_of_expr(fc, nd.b)
+            if aty >= TY_SLICE && aty < TY_ARRAY {
+                let sv = _lower_expr(fc, nd.b)
+                let la = _vnew(fc)
+                fc.vty.set(la, TY_INT)
+                _ir_emit(fc, OP_ADDRF, la, sv, 0, 8)
+                let d = _vnew(fc)
+                fc.vty.set(d, TY_INT)
+                _ir_emit(fc, OP_LOAD, d, la, 0, 8)
+                return d
+            }
             if aty >= TY_MAP && aty < TY_ARRAY {
                 let h = _lower_expr(fc, nd.b)
                 let d = _vnew(fc)
@@ -2598,6 +2649,9 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
     }
     if nd.op == E_MAPNEW {
         return _map_new(fc, nd)
+    }
+    if nd.op == E_SLICE {
+        return _lower_slice(fc, nd)
     }
     if nd.op == E_ENUMCTOR {
         // 枚举值 = 一个 16 字节区域的地址：[tag][载荷]
@@ -2816,6 +2870,19 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
     }
     if nd.op == E_MAPNEW {
         return TY_MAP + (nd.a << 8) + nd.c
+    }
+    if nd.op == E_SLICE {
+        let bty = _ty_of_expr(fc, nd.a)
+        if bty >= TY_SLICE && bty < TY_ARRAY {
+            return bty
+        }
+        if bty >= TY_VEC && bty < TY_MAP {
+            return TY_SLICE + (bty - TY_VEC)
+        }
+        if bty >= TY_ARRAY {
+            return TY_SLICE + _ty_elem(bty)
+        }
+        return TY_SLICE + TY_INT
     }
     if nd.op == E_METHOD {
         let rty = _ty_of_expr(fc, nd.a)
@@ -3830,6 +3897,92 @@ fn _gen_print_bool(ctx: Ctx) {
     _call_rt(ctx, RT_PSTR)
     _setlab(labs, code, le)
     _ret(code)
+}
+
+// ---- 切片（v2.22）：视图 = (ptr, len) 两字聚合 ----
+
+/// i >= len 就 exit(1)（无符号比较，负数也拦）
+fn _slice_check(fc: FnCtx, i: int, n: int) {
+    let lfail = _newlab(fc.labs)
+    let lok = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x83, i, n, lfail)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, lok)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
+    let one = _map_const(fc, 1)
+    _ir_emit(fc, OP_EXIT, 0, one, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
+}
+
+/// `a[lo..hi]`：数组 / vec / 切片都能切，结果是一个 (ptr, len) 视图
+fn _lower_slice(fc: FnCtx, nd: Node) -> int {
+    let bty = _ty_of_expr(fc, nd.a)
+    let mut elem = TY_INT
+    let mut base = 0
+    let mut blen = 0
+    if bty >= TY_SLICE && bty < TY_ARRAY {
+        let sv = _lower_expr(fc, nd.a)
+        elem = bty - TY_SLICE
+        base = _vnew(fc)
+        fc.vty.set(base, TY_INT)
+        _ir_emit(fc, OP_LOAD, base, sv, 0, 8)
+        let la = _vnew(fc)
+        fc.vty.set(la, TY_INT)
+        _ir_emit(fc, OP_ADDRF, la, sv, 0, 8)
+        blen = _vnew(fc)
+        fc.vty.set(blen, TY_INT)
+        _ir_emit(fc, OP_LOAD, blen, la, 0, 8)
+    } else if bty >= TY_VEC && bty < TY_MAP {
+        let h = _lower_expr(fc, nd.a)
+        elem = bty - TY_VEC
+        base = _pin(fc, _map_base(fc, h))
+        blen = _vec_field(fc, h, 0)
+    } else if bty >= TY_ARRAY {
+        elem = _ty_elem(bty)
+        base = _addr_of(fc, nd.a)
+        blen = _map_const(fc, _ty_size(fc, bty) / 8)
+    } else {
+        eprint("qlmc: 只有数组 / vec / 切片能切片")
+        exit(2)
+    }
+    let lo = _pin(fc, _lower_expr(fc, nd.b))
+    let hi = _pin(fc, _lower_expr(fc, nd.c))
+    // lo <= hi 且 hi <= blen
+    let l1 = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x87, lo, hi, l1)      // ja：lo > hi → 越界
+    let l2 = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x87, hi, blen, l2)    // hi > blen → 越界
+    let lok = _newlab(fc.labs)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, lok)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, l1)
+    let one = _map_const(fc, 1)
+    _ir_emit(fc, OP_EXIT, 0, one, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, l2)
+    let one2 = _map_const(fc, 1)
+    _ir_emit(fc, OP_EXIT, 0, one2, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
+    // 视图落进隐藏聚合变量
+    let ty = TY_SLICE + elem
+    let v = _new_var(fc, -1, ty)
+    let va = _vnew(fc)
+    fc.vty.set(va, TY_INT)
+    _ir_emit(fc, OP_ADDRV, va, 0, 0, -fc.vloc.get(v) - 1)
+    let eight = _map_const(fc, 8)
+    let off8 = _vnew(fc)
+    fc.vty.set(off8, TY_INT)
+    _ir_emit(fc, OP_MUL, off8, lo, eight, 0)
+    let ptr = _vnew(fc)
+    fc.vty.set(ptr, TY_INT)
+    _ir_emit(fc, OP_ADD, ptr, base, off8, 0)
+    _ir_emit(fc, OP_STORE, 0, va, ptr, 8)
+    let la2 = _vnew(fc)
+    fc.vty.set(la2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, la2, va, 0, 8)
+    let n = _vnew(fc)
+    fc.vty.set(n, TY_INT)
+    _ir_emit(fc, OP_SUB, n, hi, lo, 0)
+    _ir_emit(fc, OP_STORE, 0, la2, n, 8)
+    fc.vty.set(va, ty)
+    return va
 }
 
 // ---- map（v2.21）：固定容量 + 线性扫描；布局 [cap][count] + cap*(key,val) ----
@@ -4870,7 +5023,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S7：int/bool/str + struct/数组/enum/vec/map + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S8：int/bool/str + struct/数组/enum/vec/map/切片 + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
@@ -5054,7 +5207,7 @@ fn main() {
     }
     write_file(out, blob)
     let t_all = (now_ns() - t0) / 1000
-    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S7)" +
+    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S8)" +
           "  编译 " + t_all.to_str() + " us（进程内）  后端 " +
           ((fn_end - rt_end) / 1000).to_str() + " us  -j" + nt.to_str())
 }

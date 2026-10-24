@@ -43,6 +43,7 @@ CASES = [
     ("s6_vec", "tests/selfhost/s6_vec.qma"),
     ("s7_aggfn", "tests/selfhost/s7_aggfn.qma"),
     ("s8_map", "tests/selfhost/s8_map.qma"),
+    ("s9_slice", "tests/selfhost/s9_slice.qma"),
 ]
 
 npass = 0
