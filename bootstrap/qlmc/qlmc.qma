@@ -7,7 +7,7 @@
 //
 // ## 它不是什么（重要，别当成"自举完成"）
 //
-// 只覆盖**子集 S4**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
+// 只覆盖**子集 S5**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
 // "链路通 + 后端真"排在"语法全覆盖"前面：后端是自举的承重墙，语法是加法。
 //
 //   支持：fn（int/bool/str 形参与返回，≤4 参）、let/mut（可带类型标注）、赋值、
@@ -15,8 +15,9 @@
 //         assert、len(str)、const（解析期内联）、算术 + - * / %、比较、
 //         && || !（短路）、str 拼接与内容比较、递归、**struct（声明/字面量/
 //         字段读写/值语义拷贝）**、**定长数组 [N]T（字面量/下标读写）**、
-//         **enum（声明/构造/载荷）与 match（表达式/语句/`_`/载荷绑定）**
-//   不支持：vec/map、f64、泛型、闭包、切片、defer、import（多文件）、宏/反射、
+//         **enum（声明/构造/载荷）与 match（表达式/语句/`_`/载荷绑定）**、
+//         **vec[T]（new/push/get/len/下标读写，容量固定不扩容）**
+//   不支持：map、f64、泛型、闭包、切片、defer、import（多文件）、宏/反射、
 //         @ffi、接口、rc、聚合形参/返回值、嵌套聚合字段、聚合 print
 //
 // ## 分层（v2.16 重写了后端，前端沿用）
@@ -157,6 +158,8 @@ const E_FINIT = 50     // a = 字段序号，b = 值
 const E_AINIT = 51     // a = 值
 const E_ENUMCTOR = 52  // a = enum 序号，b = 变体序号，c = 载荷表达式（-1 = 无）
 const E_MATCH = 53     // a = 被匹配表达式，b = 首个 E_ARM（nx 链），c = 结果类型
+const E_METHOD = 55    // a = 接收者，b = 方法名 id，c = 实参（-1 = 无）
+const E_VECNEW = 56    // a = 元素类型，b = 容量表达式
 const E_ARM = 54       // a = 变体序号（-1 = 通配），b = 绑定名 id（-1 = 不绑定），c = 体      // a = 字符串表 id
 
 // 语句
@@ -196,6 +199,7 @@ const TY_VOID = 3
 // 聚合类型编码（v2.17）：0x1000+si = struct；0x100000+(count<<8)+elem = 数组
 const TY_STRUCT = 0x1000
 const TY_ENUM = 0x2000
+const TY_VEC = 0x8000        // 0x8000+elem：vec 句柄是标量（8 字节）
 const TY_ARRAY = 0x100000
 const ST_STRIDE = 18        // 每个 struct 在 stt 里占 18 字：name, nf, 8*(fname, fty)
 const MAX_FIELD = 8
@@ -530,6 +534,16 @@ fn _type(p: P, pos: vec[int]) -> int {
         }
         return TY_ARRAY + (n.n << 8) + e
     }
+    if t.k == T_NAME && t.s == "vec" {
+        _adv(pos)
+        _eat_p(p, pos, P_LBRACK)
+        let e = _type(p, pos)
+        _eat_p(p, pos, P_RBRACK)
+        if e >= TY_STRUCT {
+            _fail(p, pos, "本版 vec 元素只支持 int/bool/str")
+        }
+        return TY_VEC + e
+    }
     if t.k == T_NAME {
         _adv(pos)
         if t.s == "int" { return TY_INT }
@@ -643,6 +657,16 @@ fn _postfix(p: P, pos: vec[int], base: int) -> int {
                 _fail(p, pos, ". 后期望字段名")
             }
             _adv(pos)
+            if _is_p(p, pos, P_LPAREN) {
+                _adv(pos)
+                let mut arg = -1
+                if !_is_p(p, pos, P_RPAREN) {
+                    arg = _expr(p, pos)
+                }
+                _eat_p(p, pos, P_RPAREN)
+                e = _node(p, E_METHOD, e, _name_id(p, nm.s), arg)
+                continue
+            }
             e = _node(p, E_FIELD, e, _name_id(p, nm.s), -1)
             continue
         }
@@ -889,6 +913,23 @@ fn _primary(p: P, pos: vec[int]) -> int {
         let v = _expr(p, pos)
         _eat_p(p, pos, P_RPAREN)
         return _postfix(p, pos, v)
+    }
+    if t.k == T_NAME && t.s == "vec" && _t(p, pos[0] + 1).k == T_PUNCT &&
+       _t(p, pos[0] + 1).n == P_LBRACK {
+        _adv(pos)
+        _eat_p(p, pos, P_LBRACK)
+        let et = _type(p, pos)
+        _eat_p(p, pos, P_RBRACK)
+        _eat_p(p, pos, P_DOT)
+        let nm = _cur(p, pos)
+        if nm.k != T_NAME || nm.s != "new" {
+            _fail(p, pos, "vec[T] 之后只支持 .new(n)")
+        }
+        _adv(pos)
+        _eat_p(p, pos, P_LPAREN)
+        let cnt = _expr(p, pos)
+        _eat_p(p, pos, P_RPAREN)
+        return _postfix(p, pos, _node(p, E_VECNEW, et, cnt, -1))
     }
     if t.k == T_NAME {
         _adv(pos)
@@ -2003,7 +2044,14 @@ fn _ir_emit(fc: FnCtx, op: int, dst: int, a: int, b: int, imm: int) -> int {
 }
 
 fn _ty_is_agg(ty: int) -> bool {
-    return ty >= TY_STRUCT
+    let mut r = 0
+    if ty >= TY_STRUCT && ty < TY_VEC {
+        r = 1
+    }
+    if ty >= TY_ARRAY {
+        r = 1
+    }
+    return r == 1
 }
 
 fn _st_nf(fc: FnCtx, si: int) -> int {
@@ -2073,7 +2121,8 @@ fn _new_var(fc: FnCtx, nid: int, ty: int) -> int {
     let v = _vnew(fc)
     fc.vpin.set(v, 1)
     fc.vty.set(v, ty)
-    if _ty_is_agg(ty) {
+    let isagg = _ty_is_agg(ty)
+    if isagg {
         let units = _ty_size(fc, ty) / 8
         let u = _st_units(fc, units)
         fc.vloc.set(v, -(u + units))
@@ -2224,6 +2273,21 @@ fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
     return TY_INT
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 /// 左值取地址：变量（聚合）/ 字段 / 下标。结果 vreg 存地址，类型放 fc.addrty
 fn _addr_of(fc: FnCtx, nid: int) -> int {
     let nd = fc.nodes.get(nid)
@@ -2246,6 +2310,7 @@ fn _addr_of(fc: FnCtx, nid: int) -> int {
     if nd.op == E_INDEX {
         return _addr_index(fc, nd.a, nd.b)
     }
+
     eprint("qlmc: 这个表达式不能取地址")
     exit(2)
     return 0
@@ -2272,6 +2337,15 @@ fn _addr_field(fc: FnCtx, base_nid: int, fname: int) -> int {
 }
 
 fn _addr_index(fc: FnCtx, base_nid: int, ix_nid: int) -> int {
+    // vec：句柄本身就是基址，数据从 +16 开始；数组：区域地址直接当下标基址
+    let bty0 = _ty_of_expr(fc, base_nid)
+    if bty0 >= TY_VEC && bty0 < TY_ARRAY {
+        let h = _lower_expr(fc, base_nid)
+        let i = _lower_expr(fc, ix_nid)
+        _vec_check(fc, h, i)
+        fc.cells.set(C_ADDRTY, bty0 - TY_VEC)
+        return _vec_elem_addr(fc, h, i)
+    }
     let base = _addr_of(fc, base_nid)
     let bty = fc.cells.get(C_ADDRTY)
     if bty < TY_ARRAY {
@@ -2352,9 +2426,17 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         }
         // 内建 len(s)
         if fc.names.get(nd.a) == "len" && nd.b >= 0 {
+            let aty = _ty_of_expr(fc, nd.b)
+            if aty >= TY_VEC && aty < TY_ARRAY {
+                let h = _lower_expr(fc, nd.b)
+                let d = _vnew(fc)
+                fc.vty.set(d, TY_INT)
+                _ir_emit(fc, OP_MOV, d, _vec_field(fc, h, 0), 0, 0)
+                return d
+            }
             let a = _lower_expr(fc, nd.b)
             if fc.vty.get(a) != TY_STR {
-                eprint("qlmc: len() 目前只支持 str")
+                eprint("qlmc: len() 只支持 str 与 vec")
                 exit(2)
             }
             let d = _vnew(fc)
@@ -2422,6 +2504,12 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         let t = _emit_bin(fc, nd.a, d, l, r)
         fc.vty.set(d, t)
         return d
+    }
+    if nd.op == E_VECNEW {
+        return _lower_vecnew(fc, nd)
+    }
+    if nd.op == E_METHOD {
+        return _lower_vecmethod(fc, nd)
     }
     if nd.op == E_ENUMCTOR {
         // 枚举值 = 一个 16 字节区域的地址：[tag][载荷]
@@ -2621,6 +2709,9 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
     }
     if nd.op == E_INDEX {
         let bty = _ty_of_expr(fc, nd.a)
+        if bty >= TY_VEC && bty < TY_ARRAY {
+            return bty - TY_VEC
+        }
         if bty >= TY_ARRAY {
             return _ty_elem(bty)
         }
@@ -2631,6 +2722,19 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
     }
     if nd.op == E_ENUMCTOR {
         return TY_ENUM + nd.a
+    }
+    if nd.op == E_VECNEW {
+        return TY_VEC + nd.a
+    }
+    if nd.op == E_METHOD {
+        let rty = _ty_of_expr(fc, nd.a)
+        if rty >= TY_VEC && rty < TY_ARRAY {
+            let m = fc.names.get(nd.b)
+            if m == "get" {
+                return rty - TY_VEC
+            }
+        }
+        return TY_INT
     }
     if nd.op == E_MATCH {
         return _ty_of_expr(fc, fc.nodes.get(nd.b).c)
@@ -3545,6 +3649,148 @@ fn _gen_print_bool(ctx: Ctx) {
     _setlab(labs, code, le)
     _ret(code)
 }
+
+// ---- vec 运行时辅助（v2.19；放在文件末尾，避免扰动既有函数的代码布局）----
+
+/// 读 vec 头字段：[h + off]（off = 0 长度 / 8 容量）
+fn _vec_field(fc: FnCtx, h: int, off: int) -> int {
+    let a = _vnew(fc)
+    fc.vty.set(a, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a, h, 0, off)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_LOAD, d, a, 0, 8)
+    return d
+}
+
+/// 越界就 exit(1)：`jb` 是**无符号**比较，负数下标也会被拦下
+fn _vec_check(fc: FnCtx, h: int, i: int) {
+    let n = _vec_field(fc, h, 0)
+    let lfail = _newlab(fc.labs)
+    let lok = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x83, i, n, lfail)   // jae：i >= len 就越界
+    _ir_emit(fc, OP_JMP, 0, 0, 0, lok)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
+    let one = _vnew(fc)
+    fc.vty.set(one, TY_INT)
+    _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+    _ir_emit(fc, OP_EXIT, 0, one, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
+}
+
+/// 元素地址 = h + 16 + i*8（数据紧跟在 [len][cap] 之后）
+fn _vec_elem_addr(fc: FnCtx, h: int, i: int) -> int {
+    let base = _vnew(fc)
+    fc.vty.set(base, TY_INT)
+    _ir_emit(fc, OP_ADDRF, base, h, 0, 16)
+    let a = _vnew(fc)
+    fc.vty.set(a, TY_INT)
+    _ir_emit(fc, OP_ADDRX, a, base, i, 8)
+    return a
+}
+
+/// vec[T].new(n)：句柄 = 堆块首地址，布局 [len][cap][data...]
+fn _lower_vecnew(fc: FnCtx, nd: Node) -> int {
+    let n = _lower_expr(fc, nd.b)
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    let bytes = _vnew(fc)
+    fc.vty.set(bytes, TY_INT)
+    _ir_emit(fc, OP_MUL, bytes, n, eight, 0)
+    let sixteen = _vnew(fc)
+    fc.vty.set(sixteen, TY_INT)
+    _ir_emit(fc, OP_CONST, sixteen, 0, 0, 16)
+    let total = _vnew(fc)
+    fc.vty.set(total, TY_INT)
+    _ir_emit(fc, OP_ADD, total, bytes, sixteen, 0)
+    _ir_emit(fc, OP_ARG, 0, total, 0, 0)
+    let h = _vnew(fc)
+    fc.vty.set(h, TY_VEC + nd.a)
+    _ir_emit(fc, OP_CALLRT, h, 0, 0, RT_ALLOC)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    let a0 = _vnew(fc)
+    fc.vty.set(a0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a0, h, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, a0, z, 8)
+    let a1 = _vnew(fc)
+    fc.vty.set(a1, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a1, h, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, a1, n, 8)
+    return h
+}
+
+/// v.push(x) / v.get(i) / v.len()
+fn _lower_vecmethod(fc: FnCtx, nd: Node) -> int {
+    let h = _lower_expr(fc, nd.a)
+    let hty = fc.vty.get(h)
+    if hty < TY_VEC || hty >= TY_ARRAY {
+        eprint("qlmc: 只有 vec 有 .push/.get/.len 方法")
+        exit(2)
+    }
+    let et = hty - TY_VEC
+    let m = fc.names.get(nd.b)
+    if m == "len" {
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_MOV, d, _vec_field(fc, h, 0), 0, 0)
+        return d
+    }
+    if m == "push" {
+        if nd.c < 0 {
+            eprint("qlmc: push 需要一个实参")
+            exit(2)
+        }
+        let x = _lower_expr(fc, nd.c)
+        let len = _vec_field(fc, h, 0)
+        let cap = _vec_field(fc, h, 8)
+        let lok = _newlab(fc.labs)
+        _ir_emit(fc, OP_JCMP, 0x8C, len, cap, lok)     // jl：还有空间
+        let one = _vnew(fc)
+        fc.vty.set(one, TY_INT)
+        _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+        _ir_emit(fc, OP_EXIT, 0, one, 0, 0)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
+        let addr = _vec_elem_addr(fc, h, len)
+        _ir_emit(fc, OP_STORE, 0, addr, x, 8)
+        let one2 = _vnew(fc)
+        fc.vty.set(one2, TY_INT)
+        _ir_emit(fc, OP_CONST, one2, 0, 0, 1)
+        let nl = _vnew(fc)
+        fc.vty.set(nl, TY_INT)
+        _ir_emit(fc, OP_ADD, nl, len, one2, 0)
+        let ah = _vnew(fc)
+        fc.vty.set(ah, TY_INT)
+        _ir_emit(fc, OP_ADDRF, ah, h, 0, 0)
+        _ir_emit(fc, OP_STORE, 0, ah, nl, 8)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+        return d
+    }
+    if m == "get" {
+        if nd.c < 0 {
+            eprint("qlmc: get 需要一个实参")
+            exit(2)
+        }
+        let i = _lower_expr(fc, nd.c)
+        _vec_check(fc, h, i)
+        let addr = _vec_elem_addr(fc, h, i)
+        let d = _vnew(fc)
+        fc.vty.set(d, et)
+        _ir_emit(fc, OP_LOAD, d, addr, 0, 8)
+        return d
+    }
+    eprint("qlmc: vec 只支持 .push(x) / .get(i) / .len()")
+    exit(2)
+    return 0
+}
+
+
+
+
 // 运行库（机器码手写）
 //
 // 约定：入口 rsp ≡ 8 (mod 16)；先 `sub rsp, 0x58`（88 → 8+88 ≡ 0）再调 Win32，
@@ -4254,7 +4500,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S4：int/bool/str + struct/数组/enum/match + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S5：int/bool/str + struct/数组/enum/match/vec + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
@@ -4438,7 +4684,7 @@ fn main() {
     }
     write_file(out, blob)
     let t_all = (now_ns() - t0) / 1000
-    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S4)" +
+    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S5)" +
           "  编译 " + t_all.to_str() + " us（进程内）  后端 " +
           ((fn_end - rt_end) / 1000).to_str() + " us  -j" + nt.to_str())
 }

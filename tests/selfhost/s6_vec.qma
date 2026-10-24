@@ -1,0 +1,32 @@
+// s6_vec.qma —— stage-1 编译器（qlmc）子集 S5 的差分夹具（v2.19）
+//
+// 覆盖：vec[int] / vec[str] 的 new / push / get / len、下标读 `v[i]`、
+// 循环里按下标累加。与 stage-0 做逐字节差分（tests/qlmc_test.py）。
+// 注意：`v[i] = x` 只有 qlmc 支持（stage-0 报"下标赋值只能用于定长数组或切片"），
+// 所以不进差分夹具，另有 tests/selfhost/ 之外的手工验证。
+fn main() {
+    let v = vec[int].new(4)
+    v.push(10)
+    v.push(20)
+    v.push(30)
+    print(len(v))
+    print(v.get(0))
+    print(v[1])
+
+    let mut s = 0
+    for i in 0..len(v) {
+        s = s + v[i]
+    }
+    print(s)
+
+    let t = vec[str].new(2)
+    t.push("ab")
+    t.push("cde")
+    print(len(t))
+    print(t[1])
+    print(len(t[0]))
+
+    // 空 vec
+    let e = vec[int].new(1)
+    print(len(e))
+}

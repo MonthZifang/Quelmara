@@ -11398,6 +11398,20 @@ class Codegen:
                 frame += 8
             if frame:
                 enc.alu_ri("sub", RSP, frame)
+                # §7.17（v2.19 修）：帧 > 4 KB 时 `sub rsp` 会**跳过** guard page，
+                # Windows 不会自动扩栈，函数体第一次写帧就 AV（表现为"随机崩在
+                # 某个 call / 某条 mov"）。这里逐页 touch 一遍，等价于 __chkstk
+                # 的效果：每 4 KB 一条 `mov qword [rsp+off], 0`（帧是全新的，
+                # 写 0 不会破坏任何已初始化数据）。
+                if frame > 0x1000:
+                    # 必须**从高往低**逐页 touch（和 __chkstk 一样）：先碰最靠近
+                    # 旧 rsp 的那一页（它才是 guard page），Windows 才会把栈扩下来。
+                    # 反过来从低往高，第一条就落在未提交页上，直接 AV。
+                    off = frame - 0x1000
+                    while off >= 0:
+                        enc.emit(b"\x48\xc7\x84\x24",
+                                 struct.pack("<I", off), b"\x00\x00\x00\x00")
+                        off -= 0x1000
             for ins in fn.instrs:
                 ins_off.append(enc.pos())
                 self.gen_instr(ins)

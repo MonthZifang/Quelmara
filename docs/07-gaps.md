@@ -69,7 +69,7 @@
 | 性能回归门禁 | ✅ v1.88 | **`tools/dev/bench_gate.py`**：`bench/gate_bench.qma`（**Quelmara 写**，输出 `QLMBENCH`/`QLMCAL`/`QLMDIGEST`）+ 校准归一化（换机器仍可比）+ 噪声闸 + 双模式（本机基线 `--check` / CI 同机交错 A/B `--ab REV`）+ 校验和与体积硬判；CI 独立 `perf` job。边界：基线按 CPU 型号分 key（换机器 SKIP，不误判）；不做统计显著性检验（min-of-N + 离散度）；不是微架构计数器（无 cycles / 分支失败率）；`quelmara bench` 的进程墙钟口径保留，两者分工见 `05-toolchain.md` §1.3 |
 | 覆盖率 / fuzz | ✅ v1.83 | **行 + 分支覆盖**：`quelmara cov` = 调试器逐行/逐 `jcc` 断点采集 + `tools/qlm_cov.qma`（**用 Quelmara 写**，自己读 PE 节表 + `.qlmdbg` JSON）汇总；行/分支/函数/文件四级，`--min`/`--min-branch` 双门禁，`--append` 多次运行累加。分支判定用 EFLAGS 不单步；只收"目标为语句入口"的源码级分支（`assert` 失败块/越界 panic 块/`args()` 展开不计入）。**fuzz ✅**：`quelmara fuzz` = `tools/qlm_fuzz.qma`（Quelmara 写的变异器，确定性 LCG）+ `qlm_fuzz.py` 判定（built/rejected/deep/bug/slow 五分类，`bug` 退出码 1）。边界：不采条件级 MC/DC（`&&` 子条件按各自 `jcc` 自然计数）；采集靠断点，大文件线性慢；fuzz 默认只跑前端；非 UTF-8 源文件抛 `UnicodeDecodeError`（§7.11） |
 | 服务端运行时自举 | ✅ v2.12 | **IOCP reactor 从 stage-0 搬到 `std/net/reactor.qma`**（Quelmara 源码）：v1.4 起手搓的 400 行 IR（`__net_serve` / `__net_worker` / rec 池 / accept 循环）全部删除，stage-0 只留 `thread_start`（Win64 线程入口 ABI）与 `net_config`（编译期读 `[net]`）。worker 数 = `[net] io_threads`（默认物理核数），完成端口共用一个（per-reactor 实测更差，见 `06-status.md` §3.23）。分层：`std/net/reactor.qma` 仅 Windows PE（`@ffi`）/ `std/net.qma` 不含 `@ffi`（但 `tcp_*` 内建目前也只在 Windows 实现）/ `std/net/core.qma` 槽位层。边界：**仍只有 Windows**（Linux epoll/io_uring reactor 未做）；accept 在**主线程单点**（未做多 acceptor + `SO_REUSEPORT`，`[net] reuse_port` 目前是声明未用）；`max_conns` 用 `atomic_add` 计数、拒绝发生在 accept 之后（连接已被内核接受一次）。回归：主回归 + `tests/http_router_test.py`（20 项 E2E） | 服务端链路（http/ws/sse/router/reactor）100% 本语言实现；改事件循环不用再碰编译器 |
-| stage-1 编译器 | 🚧 v2.18 | **`bootstrap/qlmc/qlmc.qma`**（约 3.9 千行 Quelmara）：`.qma` -> PE32+ **全链路**，后端为三地址 IR + 两段式寄存器分配 + `cmp/jcc` 融合 + **按函数多核并行**（`-j N`，产物与线程数无关）。**子集 S4**：int/bool/str、struct（声明/字面量/字段读写/值语义）、定长数组 `[N]T`、**enum（声明/构造/载荷）与 match（表达式/语句/`_`/载荷绑定）**、`for`/`break`/`continue`、`while`、`let`/`mut`、`const`、`print`、`len(str)`、`assert`、递归、算术/比较/短路逻辑、str 拼接与内容比较。与 stage-0 **逐字节差分**通过（`tests/qlmc_test.py`：9 组用例 + 并行确定性 2 条）。**缺**：vec/map、f64、泛型、闭包、切片、`defer`、`import`（多文件）、宏/反射、`@ffi`、接口、`rc`、聚合作形参/返回值、嵌套聚合字段、聚合 print、match 穷尽性检查、常量折叠 / 强度削减 / CSE、前端并行。实测数字见 `06-status.md` §3.25。自举进度仍按 §4 的 9 个组件算 |
+| stage-1 编译器 | 🚧 v2.19 | **`bootstrap/qlmc/qlmc.qma`**（约 4.2 千行 Quelmara）：`.qma` -> PE32+ **全链路**，后端为三地址 IR + 两段式寄存器分配 + `cmp/jcc` 融合 + **按函数多核并行**（`-j N`，产物与线程数无关）。**子集 S5**：int/bool/str、struct、定长数组 `[N]T`、enum/match、**vec[T]（new/push/get/len/下标读写，容量固定不扩容）**、`for`/`break`/`continue`、`while`、`let`/`mut`、`const`、`print`、`len`、`assert`、递归、算术/比较/短路逻辑、str 拼接与内容比较。与 stage-0 **逐字节差分**通过（`tests/qlmc_test.py`：10 组用例 + 并行确定性 2 条）。**缺**：map、f64、泛型、闭包、切片、`defer`、`import`（多文件）、宏/反射、`@ffi`、接口、`rc`、聚合作形参/返回值、vec 扩容、match 穷尽性检查、常量折叠 / 强度削减 / CSE、前端并行。实测数字见 `06-status.md` §3.25 |
 | 对拍脚本耗时 | ✅ | `irdiff` 并行后 60 s（原 5 min 41 s）；`emitdiff` 10 s 内 |
 | `version` 口径 | ✅ | `tools/stage0/qlm_cli.py` 的 `VERSION` 与最新 `docs/versions/vX.Y/` 一致（v1.24 起 1.24.0，由 `check_docs.py` 校验） |
 
@@ -494,7 +494,7 @@ r=140697867661375      ← 把 str 数据指针当 int 原样返回
 - 回归：`tests/t142_exitcode.qma` + `run_win_tests.py::test_exitcode()`（期望 42，
   且 `exit` 之前的输出已刷出、之后的语句不执行）。
 
-### 7.17 待查（v2.18/v2.19）：布局敏感误编译，现在挡在自举路上
+### 7.17 已修（v2.19）：大帧跳过 guard page —— 曾连续三个版本挡住自举
 
 现象统一是"qlmc 编出来的二进制有时能用、换一批无关代码就崩"，且 `--no-opt` 与 `-O`
 表现不同。两个版本里踩到三个独立触发点：
@@ -530,10 +530,12 @@ r=140697867661375      ← 把 str 数据指针当 int 原样返回
    `rsp` 在调用点就已经是错的）。
 4. `--no-opt` 与 `-O` 通过的用例集合也不同（`--no-opt` 下 vec 全部用例通过、fib 崩）。
 
-**下一步的定位建议**：用 `--dbg-info` 编 qlmc，崩了以后用现成的调试器
-（`tools/stage0/qlm_dbg.py`，v1.75）看崩溃点的 `rsp`/`rbp` 与当前函数名，直接定位到
-是哪个函数的帧算错了；再对照 `qlm_native.py` 的帧布局计算（栈实参偏移
-`[rbp + 8*(2+len(used_callee)) + 8j]`）找差一。
+**最终定位（v2.19，已修）**：`tools/dev/fault_probe.py` 抓到 AV 地址恰好等于 `rsp`，
+`tools/dev/frame_scan.py` 扫出全程序 12 个函数帧 ≥ 4 KB（最大 15 KB）。根因是
+**序言只发 `sub rsp, frame`，帧 > 4 KB 时会跨过 guard page**，Windows 不再自动扩栈，
+函数体第一次写帧就 AV。修法：帧 > 4 KB 时**自高向低**逐页 touch（等价 `__chkstk`；
+从低往高写会直接落在未提交页上，照样崩——顺序是关键）。修完 `r1.qma` 连跑 6 次全过，
+主回归 290 不变。
 
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。

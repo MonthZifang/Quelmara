@@ -40,6 +40,7 @@ CASES = [
     ("s3_manyfns", "tests/selfhost/s3_manyfns.qma"),
     ("s4_agg", "tests/selfhost/s4_agg.qma"),
     ("s5_enum", "tests/selfhost/s5_enum.qma"),
+    ("s6_vec", "tests/selfhost/s6_vec.qma"),
 ]
 
 npass = 0

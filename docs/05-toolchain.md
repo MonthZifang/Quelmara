@@ -662,7 +662,7 @@ build/qlm.exe version
 - 命令行里的路径必须转成 `\\`：`system()` 走 cmd.exe，不认 `build/hello.exe`
   （实测报"不是内部或外部命令"并把退出码吞成 1）。
 
-### 1.11 stage-1 编译器 `qlmc`（v2.18：真 IR + 线性扫描 + 多核，子集 S4）
+### 1.11 stage-1 编译器 `qlmc`（v2.19：真 IR + 线性扫描 + 多核，子集 S5）
 
 `bootstrap/qlmc/qlmc.qma`（约 3.3 千行 Quelmara）是一个**能出 exe** 的编译器：
 `.qma` -> PE32+，全程本语言，不经过 Python、不链接 CRT、不依赖第三方。
@@ -723,20 +723,20 @@ main             按 fi 升序拷字节 + 回填 → 线程数不影响产物字
   这条由 `tests/qlmc_test.py` 的「并行确定性」段钉住。
 - 并行只覆盖**函数体**：词法 / 语法仍是单线程，是当前墙钟的主要部分。
 
-**支持（S4）**：
+**支持（S5）**：
 
 | 类别 | 覆盖 |
 |---|---|
 | 声明 | `fn`（最多 4 个形参，int/bool/str 形参与返回）、`const`（整型字面量，解析期内联）、**`struct`（≤8 字段，字段限 int/bool/str）** |
 | 语句 | `let`/`mut`（可带类型标注，可省初始化）、赋值、`if`/`else`、`while`、**`for i in lo..hi`**、**`break`/`continue`**、`return`、`exit`、表达式语句 |
 | 内建 | `print(int\|str\|bool)`、`len(str)`、`assert(cond, msg)`（失败写 stderr 后退 1） |
-| 类型 | int（64 位）/ bool / str（`[len][bytes][NUL]`，值 = 数据指针）/ **struct** / **`[N]T` 定长数组** / **enum** |
-| 聚合 | **struct 字面量 / 字段读写 / 值语义拷贝**、**数组字面量 / 下标读写**、**enum 构造 / match（表达式与语句）/ `_` / 载荷绑定（臂内作用域）**；聚合值一律在帧里，"值 = 区域地址" |
+| 类型 | int（64 位）/ bool / str（`[len][bytes][NUL]`，值 = 数据指针）/ **struct** / **`[N]T` 定长数组** / **enum** / **`vec[T]`** |
+| 聚合 | **struct 字面量 / 字段读写 / 值语义拷贝**、**数组字面量 / 下标读写**、**enum 构造 / match**、**`vec[T].new(n)` / `.push` / `.get` / `.len()` / `v[i]` 读写 / `len(v)`**（容量固定，push 超限 `exit(1)`）；聚合值一律在帧里，"值 = 区域地址" |
 | 运算 | `+ - * / %`（int）、`+`（str 拼接，走堆）、`== !=`（str 走内容比较）、
 `< <= > >=`、`&& \|\| !`（短路）、一元负号 |
 | 其它 | 递归与互调用、数字分隔符、单行注释、`module`（忽略） |
 
-**不支持**：vec/map、f64、泛型、闭包、切片、`defer`、`import`（多文件）、
+**不支持**：map、f64、泛型、闭包、切片、`defer`、`import`（多文件）、
 宏/反射、`@ffi`、接口、`rc`、**聚合作形参/返回值**（ABI 只传标量，已 fail-fast）、
 **字段/元素/载荷是聚合**（无递归布局）、**print 聚合**、**match 穷尽性检查**、
 错误信息带列号、常量折叠 / 强度削减 / CSE。
@@ -788,7 +788,10 @@ main             按 fi 升序拷字节 + 回填 → 线程数不影响产物字
     `cells` 数组压回 22 字段才恢复。要加状态就往 `cells` 里加索引。
 17. **函数签名的类型必须用 `_type` 解析**：早期用的是只认 int/bool/str 的 `_ty_id`，
     于是 `l: Light`、`p: Point` 被静默当成 int（v2.14–v2.17 一直如此）。
-18. **`for` 的上界必须钉进变量**：临时值的活跃区间不跨循环回边（线性扫描的固有限制），
+18. **帧 > 4 KB 的函数必须做栈探测**（v2.19 修，见 §7.17）：只发 `sub rsp, frame`
+    会跨过 guard page，Windows 不扩栈，函数体第一次写帧就 AV——表现为"随机崩在
+    某个 call"。stage-0 已按 `__chkstk` 的方式**自高向低**逐页 touch。
+19. **`for` 的上界必须钉进变量**：临时值的活跃区间不跨循环回边（线性扫描的固有限制），
     上界留在临时值里，第二轮比较就会读到被别的临时值覆盖的寄存器——v2.17 实测是
     `for k in 0..3` 死循环。隐藏变量 `_new_var(fc, -1, …)` 是标准做法。
 
@@ -1084,6 +1087,8 @@ alpha = "registry|path:../qreg|1.2.0|<sha256>|<1.2.0>|<tree>|beta@^1.0;gamma@~2.
 | `tools/dev/check_names.py` | 旧项目名残留、`.ros` 扩展名残留、C 运行时符号自洽 |  <!-- legacy-ok -->
 | `tools/dev/check_origin.py` | 只用标准库、无异语言运行时特征、无第三方目录 |
 | `tools/dev/check_docs.py` | 过期断言黑名单、文档索引完整性、版本目录完整性、数字单一来源、`VERSION` 与版本目录同源 |
+| `tools/dev/fault_probe.py` | **v2.19**：让 exe 在调试器下跑，捕获访问违例并打印 RIP/RSP/RBP、AV 地址、rbp 链（支持 `PROBE_TRIES=n` 重试，因为这类崩溃常常是间歇的） |
+| `tools/dev/frame_scan.py` | **v2.19**：扫 PE 里所有函数的帧大小（`push rbp; mov rbp,rsp; sub rsp,N`），报出 ≥ 阈值的——帧 > 4 KB 必须做栈探测，见 §7.17 |
 | `quelmara doc std --missing` + `gen_stdlib_doc.py --check --require-doc` | 公开 API 面缺 `///` 文档、doc 块脱离、`03-stdlib.md` 与源码漂移 |
 
 ```bash
