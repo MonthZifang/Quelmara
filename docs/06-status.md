@@ -956,18 +956,22 @@ p50 从 1,904 → 473 µs 是 **4.0×**，与 worker 数同阶——多核确实
 降到 4–13 ms；冷路径不变（委托 stage-0，2136 ms）。失效正确性实测：`exit(7)` 改成
 `exit(8)` 后 `qlm run` 的退出码从 7 变 8，产物被重新生成。
 
-### 3.25 stage-1 编译器 `qlmc`（v2.14）
+### 3.25 stage-1 编译器 `qlmc`（v2.14 / v2.15 扩到 str）
 
 口径：本机 20 核；`qlmc` 的耗时是**它自己报的**（`now_ns()` 差，排除进程创建）。
 
 | 用例 | 源码 | 产物 | qlmc 编译（进程内，3 次） | stage-0 编译（墙钟） |
 |---|---|---|---|---|
 | `examples/fib.qma` | 0.2 KB | 1536 B | 3.3 / 4.2 / 4.3 ms | 2711 ms |
-| `examples/loop_sum.qma` | 0.3 KB | 1536 B | — | 2757 ms |
-| `tests/selfhost/s1_basics.qma` | 1.0 KB | 3584 B | 3.7 / 5.0 / 5.2 ms | 1795 ms |
+| `examples/loop_sum.qma` | 0.3 KB | 1536 B | 4.2 ms | 2757 ms |
+| `tests/selfhost/s1_basics.qma` | 1.0 KB | 3584 B | 3.7 / 4.6 / 5.2 ms | 1795 ms |
+| `tests/selfhost/s2_str.qma` | 0.8 KB | 3072 B | 4.6 ms | — |
+| `tests/selfhost/s2_const.qma` | 0.4 KB | 2560 B | — | — |
 
-`build/qlmc.exe` 自身 234 KB（lexer + parser + codegen + PE 写出全在里面），
-由 stage-0 编出来；产物 `1536 B` 是"两节 + 导入表 + 一条 print 运行库"的地板价。
+`build/qlmc.exe` 自身 330 KB（lexer + parser + codegen + 6 个运行库例程 + PE 写出
+全在里面），由 stage-0 编出来；产物 1536 B 是"三节 + 导入表 + 一条 print 运行库"
+的地板价。v2.15 加 str 之后多了 `.bss`（1 MB 堆，不占文件体积）与
+`__str_cat`/`__str_eq`/`__memcpy`/`__alloc` 四个例程。
 
 **关于"比 C 快 5 倍"**：本机**没有 gcc/clang**（`07-gaps.md` §4 登记过），而且任何
 进程创建要 ~370 ms（§3.24），所以这条**没有在本机测**。能给的硬数字是"编一个

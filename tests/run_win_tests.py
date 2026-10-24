@@ -1122,7 +1122,7 @@ def main():
     print("== [9] AArch64 接口 vtable（ELF + 模拟器执行级） ==")
     test_a64_iface()
 
-    print("== [9b] stage-1 编译器（qlmc，子集 S1）差分 ==")
+    print("== [9b] stage-1 编译器（qlmc，子集 S2）差分 ==")
     test_qlmc()
 
     print("== [10] 语言服务器（索引对拍 / 补全 / 跳转 / 重命名 / 协议） ==")

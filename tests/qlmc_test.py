@@ -34,6 +34,9 @@ CASES = [
     ("fib", "examples/fib.qma"),
     ("loop_sum", "examples/loop_sum.qma"),
     ("s1_basics", "tests/selfhost/s1_basics.qma"),
+    ("s2_str", "tests/selfhost/s2_str.qma"),
+    ("s2_const", "tests/selfhost/s2_const.qma"),
+    ("s2_assert", "tests/selfhost/s2_assert.qma"),
 ]
 
 npass = 0

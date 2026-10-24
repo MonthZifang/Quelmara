@@ -662,11 +662,11 @@ build/qlm.exe version
 - 命令行里的路径必须转成 `\\`：`system()` 走 cmd.exe，不认 `build/hello.exe`
   （实测报"不是内部或外部命令"并把退出码吞成 1）。
 
-### 1.11 stage-1 编译器 `qlmc`（v2.14，子集 S1）
+### 1.11 stage-1 编译器 `qlmc`（v2.14 起，子集 S2）
 
 `bootstrap/qlmc/qlmc.qma`（~1900 行 Quelmara）是一个**能出 exe** 的编译器：
 `.qma` -> PE32+，全程本语言，不经过 Python、不链接 CRT、不依赖第三方。
-它自己先用 stage-0 编出来（`build/qlmc.exe`，234 KB），之后用它编别的程序。
+它自己先用 stage-0 编出来（`build/qlmc.exe`，330 KB），之后用它编别的程序。
 
 ```bash
 python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe
@@ -679,22 +679,36 @@ build/qlmc.exe version
 
 | 层 | 位置 | 本版做法 |
 |---|---|---|
-| 词法 | `lex` | 只认 S1 的记号集；不认识的字符 fail-fast（不静默跳过） |
+| 词法 | `lex` | 只认 S2 的记号集；不认识的字符 fail-fast（不静默跳过） |
 | 语法 | `parse` / `_expr` / `_stmt` / `_block` | 递归下降 + 优先级爬升；**平坦 AST**（节点表 + `nx` 链），块用链不用区间 |
+| 类型 | `_emit_expr` 的返回值 | **最小类型跟踪**（int/bool/str/void）：只为选对指令——`+` 是 `add` 还是 `__str_cat`、`print` 走哪个通道。不做类型检查 |
 | 分配 | `_emit_expr` | **全溢出**：局部与临时都落帧槽，表达式求值用 RAX/RCX 双累加器；没有线性扫描 |
 | 编码 | `_mov_*` / `_alu_*` / `_jcc` / `_call_*` | x86-64 手写编码（REX/ModRM/SIB、rel32 回填） |
-| 文件 | `build_rdata` / `build_pe` | 两节（`.text`/`.rdata`）、导入表（kernel32 + user32）、PE32+ 头 |
-| 运行库 | `_gen_print_i64` | `wsprintfA("%I64d\n")` + `WriteFile`，不引 CRT |
+| 文件 | `build_rdata` / `build_pe` | **三节**（`.text`/`.rdata`/`.bss`）、导入表（kernel32 + user32）、PE32+ 头；`.bss` 1 MB 当堆（不占文件体积） |
+| 运行库 | `_gen_*` | 6 个手写例程：print_i64（`wsprintfA("%I64d\n")`）/ print_str / memcpy / alloc（bump）/ str_cat / str_eq / die。全走 Win32，不引 CRT |
 
-**支持（S1）**：`fn`（int/bool 形参与返回）、`let`/`mut`、赋值、`if/else`、`while`、
-`return`、`exit`、`print(int)` / `print("字面量")`、递归与互调用、`+ - * / %`、
-`== != < <= > >=`、`&& || !`（短路）、一元负号、数字分隔符、单行注释。
+**支持（S2）**：
 
-**不支持**：str 变量/形参、struct/enum/match、泛型、闭包、vec/map、f64、`import`
-（多文件）、全局常量、宏/反射、`@ffi`、错误信息带列号、寄存器分配、常量折叠。
+| 类别 | 覆盖 |
+|---|---|
+| 声明 | `fn`（最多 4 个形参，int/bool/str 形参与返回）、`const`（整型字面量，解析期内联） |
+| 语句 | `let`/`mut`、赋值、`if`/`else`、`while`、`return`、`exit`、表达式语句 |
+| 内建 | `print(int\|str\|bool)`、`len(str)`、`assert(cond, msg)`（失败写 stderr 后退 1） |
+| 类型 | int（64 位）/ bool / str（`[len][bytes][NUL]`，值 = 数据指针） |
+| 运算 | `+ - * / %`（int）、`+`（str 拼接，走堆）、`== !=`（str 走内容比较）、
+`< <= > >=`、`&& \|\| !`（短路）、一元负号 |
+| 其它 | 递归与互调用、数字分隔符、单行注释、`module`（忽略） |
+
+**不支持**：struct/enum/match、数组 `[N]T`、vec/map、f64、泛型、闭包、切片、`defer`、
+`for`、`break`/`continue`、`import`（多文件）、宏/反射、`@ffi`、接口、`rc`、
+错误信息带列号、寄存器分配、常量折叠。
+
+**口径对齐（差分逼出来的）**：`&&`/`||` 与 **str 比较**产生 bool（打印 `true`/`false`），
+而 int 比较与 `!` 产生 int（打印 `1`/`0`）——这是 stage-0 的实际行为，qlmc 照抄，
+不"统一"。
 
 **怎么验**：`python tests/qlmc_test.py` —— 同一份源码分别用 stage-0 与 qlmc 编，
-比较 stdout 与退出码**逐字节相同**（3 组用例 / 7 条断言）。这是唯一有说服力的判据：
+比较 stdout 与退出码**逐字节相同**（6 组用例 / 13 条断言）。这是唯一有说服力的判据：
 "能出 exe"很容易，"和既有编译器行为一致"才是真的对。
 
 **为什么先做"能跑通"再做"覆盖全"**：链路通了之后每一步都是加法（加语法 = 加
@@ -711,6 +725,15 @@ build/qlmc.exe version
 4. **`wsprintfA` 不认 `%lld`**（那是 C 运行库的口径），64 位要用 `%I64d`；
    写错时它会原样输出 "ld"，看起来像"数字打印坏了"。
 5. **`fn` 是关键字**，不能当变量名（`let fn = ...` 直接语法错）。
+6. **入口必须落在 `.text` 偏移 0**（`AddressOfEntryPoint` 恒等于 `TEXT_RVA`）：
+   先发入口再发运行库。顺序反了入口就跳到第一个运行库例程——现象是"空 `main`
+   打印一个地址、退出码 1"。
+7. **手写 REX 前缀别漏**：`test r8, r8` 是 `4D 85 C0`，写成 `48 85 C0` 就是
+   `test rax, rax`（现象：str 比较直接访问冲突）。
+8. **运行库的实参寄存器要在调用点摆好**：`+` 的两操作数是 RAX/RCX，而
+   `__str_cat` 要 RCX/RDX——先 `mov rdx, rcx` 再 `mov rcx, rax`，反了会覆盖左操作数。
+9. **结构体是按值传的**：`ctx.some_int = x` 写的是副本（静默失效）。可变标量状态
+   要么放 `vec[int]` 单元素 cell（`.set` 写句柄），要么从函数返回。
 
 ## 2. 配置文件 `Quelmara.toml`
 

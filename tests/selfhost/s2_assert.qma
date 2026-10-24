@@ -1,0 +1,19 @@
+// s2_assert.qma —— 子集 S2 的 assert 夹具（v2.15）
+// 先跑几条通过的断言，最后一条**故意失败**：两个编译器都必须退 1，
+// 且失败之前写出的 stdout 逐字节相同（差分只看 stdout 与退出码）。
+fn check(n: int) -> int {
+    assert(n > 0, "n must be positive")
+    return n * 2
+}
+
+fn main() {
+    print("start")
+    print(check(21))
+    assert(1 + 1 == 2, "math")
+    let s = "abc"
+    assert(len(s) == 3, "len")
+    assert(s + "d" == "abcd", "cat")
+    print("all good")
+    assert(1 == 2, "deliberate failure")
+    print("not reached")
+}

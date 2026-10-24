@@ -1,0 +1,41 @@
+// s2_str.qma —— 子集 S2 的字符串夹具（v2.15）
+//
+// 覆盖：str 变量 / 形参 / 返回、字面量、`+` 拼接（走堆）、`==`/`!=` 内容比较、
+// `len`、print(str)、空串、循环里反复拼接（堆 bump 分配）。
+// 由 tests/qlmc_test.py 做差分：与 stage-0 的输出必须逐字节相同。
+fn greet(name: str) -> str {
+    return "hello, " + name
+}
+
+fn repeat(s: str, n: int) -> str {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = out + s
+        i = i + 1
+    }
+    return out
+}
+
+fn main() {
+    let s = "abc"
+    print(s)
+    print(len(s))
+    print(s + "def")
+    print(s == "abc")
+    print(s != "abd")
+    print(len(""))
+    let t = greet("world")
+    print(t)
+    print(len(t))
+    print(repeat("xy", 4))
+    let mut acc = ""
+    let mut i = 0
+    while i < 3 {
+        acc = acc + "z"
+        i = i + 1
+    }
+    print(acc)
+    print(len(acc))
+    print(greet("") == "hello, ")
+}

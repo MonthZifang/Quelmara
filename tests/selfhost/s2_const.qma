@@ -1,0 +1,22 @@
+// s2_const.qma —— 子集 S2 的 const 夹具（v2.15）
+// const 在解析期内联成字面量（本版只支持整型字面量），不占运行期存储。
+const LIMIT = 5
+const STEP = 2
+const ZERO = 0
+
+fn main() {
+    print(LIMIT)
+    print(LIMIT * STEP)
+    let mut i = ZERO
+    let mut acc = ZERO
+    while i < LIMIT {
+        acc = acc + i * STEP
+        i = i + 1
+    }
+    print(acc)
+    if acc == 20 {
+        print("const ok")
+    } else {
+        print("const bad")
+    }
+}
