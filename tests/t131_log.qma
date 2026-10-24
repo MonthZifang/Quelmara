@@ -1,0 +1,198 @@
+// t131_log.qma：std/log 时间戳/通道 + std/logfile 轮转 —— v2.03 自校验
+// 覆盖：绝对时间戳形态与长度、时区偏移（正/负）、相对模式、级别过滤、
+//       stdout/stderr 切换、文件通道（追加/重开/超长行/结构化字段）、
+//       按大小轮转（保留份数、单文件不超阈值、旧份被覆盖）、失败路径。
+module t131_log
+
+import std.log
+import std.logfile
+import std.str
+import std.fs
+
+const LOG = "build/t131_log.log"
+
+// 边写边读：日志文件是以"允许共享"打开的（fs_open_shared），
+// 所以写入方还握着句柄时，另一个句柄也能读到已冲刷的内容（tail 的前提）。
+fn peek(path: str) -> str {
+    let h = fs_open_shared(path, "r")
+    if h == -1 {
+        return ""
+    }
+    let n = fs_size(h)
+    let mut s = ""
+    if n > 0 {
+        s = fs_read(h, n)
+    }
+    fs_close(h)
+    return s
+}
+
+fn digit(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return 1
+    }
+    return 0
+}
+
+fn rm_all() {
+    fs_remove(LOG)
+    let mut i = 1
+    while i <= 4 {
+        fs_remove(LOG + "." + i.to_str())
+        i += 1
+    }
+}
+
+fn main() {
+    // ---------------- 1. 绝对时间戳形态 ----------------
+    let msg = "hello"
+    let line = log_format("INFO", msg)
+    assert(len(line) == 7 + 29 + 1 + len(msg), "行长度 = [tag] + 29 + 空格 + msg")
+    assert(line[0] == 91, "行首 [")
+    assert(line[5] == 93, "tag 结束 ]")
+    assert(line[6] == 32, "tag 后空格")
+    assert(line[36] == 32, "时间戳后空格")
+    let ts = substr(line, 7, 29)
+    assert(len(ts) == 29, "时间戳 29 字节")
+    // YYYY-MM-DDTHH:MM:SS.mmm+HH:MM
+    let mut i = 0
+    while i < 4 {
+        assert(digit(ts[i]) == 1, "年份是数字")
+        i += 1
+    }
+    assert(ts[4] == 45 && ts[7] == 45, "日期分隔符 -")
+    assert(ts[10] == 84, "日期与时间之间 T")
+    assert(ts[13] == 58 && ts[16] == 58, "时间分隔符 :")
+    assert(ts[19] == 46, "毫秒前小数点")
+    assert(digit(ts[20]) == 1 && digit(ts[21]) == 1 && digit(ts[22]) == 1, "三位毫秒")
+    assert(ts[23] == 43 || ts[23] == 45, "偏移符号 +/-")
+    assert(ts[26] == 58, "偏移分隔符 :")
+    assert(digit(ts[24]) == 1 && digit(ts[27]) == 1, "偏移是数字")
+
+    // ---------------- 2. 时区偏移 ----------------
+    assert(log_tz_offset() == 0, "默认 UTC")
+    let utc = substr(log_format("INFO", msg), 7, 29)
+    assert(substr(utc, 24, 5) == "00:00", "UTC 偏移显示 +00:00")
+    log_set_tz_offset(480)
+    assert(log_tz_offset() == 480, "时区读回")
+    let east = substr(log_format("INFO", msg), 7, 29)
+    assert(substr(east, 23, 6) == "+08:00", "东八区显示 +08:00")
+    // 小时数应当差 8（跨日按 24 取模）
+    let hu = to_int(substr(utc, 11, 2))
+    let he = to_int(substr(east, 11, 2))
+    assert((hu + 8) % 24 == he, "东八区小时 = UTC + 8")
+    log_set_tz_offset(-300)
+    let west = substr(log_format("INFO", msg), 7, 29)
+    assert(substr(west, 23, 6) == "-05:00", "西五区显示 -05:00")
+    log_set_tz_offset(0)
+
+    // ---------------- 3. 相对时间戳（老格式） ----------------
+    log_set_time_mode(1)
+    assert(log_time_mode() == 1, "相对模式读回")
+    let rel = log_format("INFO", msg)
+    assert(rel[0] == 91 && rel[5] == 93 && rel[6] == 91, "相对格式 [INFO][")
+    assert(str_ends_with(rel, "] " + msg), "相对格式以 ms] msg 结尾")
+    assert(str_contains(rel, "ms]"), "相对格式带 ms 后缀")
+    log_set_time_mode(0)
+    assert(log_time_mode() == 0, "绝对模式读回")
+
+    // ---------------- 4. 级别过滤 ----------------
+    assert(log_level() == 0, "默认级别 0")
+    assert(log_enabled(0) && log_enabled(1) && log_enabled(2), "级别 0 全开")
+    log_set_level(2)
+    assert(!log_enabled(0) && !log_enabled(1) && log_enabled(2), "级别 2 只留 error")
+    log_set_level(3)
+    assert(!log_enabled(2), "级别 3 全静默")
+    log_info("这条不该出现")
+    log_warn("这条也不该出现")
+    log_error("这条同样不该出现")
+    log_set_level(0)
+
+    // ---------------- 5. 通道切换（stderr 走 eprint） ----------------
+    assert(log_sink() == 0, "默认 stdout")
+    log_set_sink(1)
+    assert(log_sink() == 1, "切到 stderr")
+    log_warn("stderr 通道自检行（应当出现在 stderr）")
+    log_set_sink(0)
+    assert(log_sink() == 0, "切回 stdout")
+    log_emit("[RAW] 直接写一行")
+    let kv = vec[str].new(4)
+    kv.push("id")
+    kv.push("7")
+    assert(log_kv("NET", "accepted", kv) == 0, "log_kv 返回 0")
+    assert(log_kv_lv(2, "DB", "slow query", kv) == 0, "log_kv_lv 返回 0")
+    // 级别不够时 log_kv 整行跳过（返回值仍是 0）
+    log_set_level(2)
+    assert(log_kv("NET", "skipped", kv) == 0, "静默时 log_kv 返回 0")
+    log_set_level(0)
+
+    // ---------------- 6. 文件通道：基本写入 / 结构化字段 ----------------
+    rm_all()
+    assert(logf_active() == false, "未打开时不活跃")
+    assert(logf_open(LOG, 0, 0) == 0, "logf_open")
+    assert(logf_active(), "打开后活跃")
+    logf_info("first line")
+    logf_warn("second line")
+    logf_kv("HTTP", "request done", kv)
+    assert(logf_flush() == 0, "logf_flush")
+    assert(logf_size() > 0, "size 非零")
+    let c1 = peek(LOG)
+    assert(str_contains(c1, "first line"), "文件里有 first line")
+    assert(str_contains(c1, "second line"), "文件里有 second line")
+    assert(str_contains(c1, "request done id=7"), "文件里有结构化字段 id=7")
+    assert(str_contains(c1, "[HTTP] "), "文件里有 tag")
+    assert(str_contains(c1, "[WARN] "), "文件里有 WARN 级别")
+    assert(len(str_lines(c1)) == 3, "三行")
+
+    // ---------------- 7. 关掉再开：追加而不是截断 ----------------
+    assert(logf_close() == 0, "logf_close")
+    assert(logf_active() == false, "关闭后不活跃")
+    assert(logf_open(LOG, 0, 0) == 0, "reopen")
+    logf_info("after reopen")
+    assert(logf_close() == 0, "close 2")
+    let c2 = read_text(LOG)
+    assert(str_contains(c2, "first line"), "重开后旧内容还在")
+    assert(str_contains(c2, "after reopen"), "重开后新内容写入")
+    assert(str_find(c2, "first line") < str_find(c2, "after reopen"), "顺序：旧在前")
+
+    // ---------------- 8. 超长行（> 64 KB 缓冲）不截断 ----------------
+    rm_all()
+    assert(logf_open(LOG, 0, 0) == 0, "open for huge")
+    let huge = str_repeat("x", 70000)
+    logf_info(huge)
+    assert(logf_flush() == 0, "huge flush")
+    assert(logf_close() == 0, "huge close")
+    let c3 = read_text(LOG)
+    assert(len(c3) > 70000, "超长行整行落盘")
+    assert(str_contains(c3, huge), "超长行内容完整")
+
+    // ---------------- 9. 轮转：阈值、保留份数、单文件不超阈值 ----------------
+    rm_all()
+    assert(logf_open(LOG, 512, 2) == 0, "open for rotation")
+    let r0 = logf_rotations()
+    i = 0
+    while i < 200 {
+        logf_info("rotate me " + i.to_str())
+        i += 1
+    }
+    assert(logf_flush() == 0, "rotation flush")
+    let rots = logf_rotations() - r0
+    let cur = logf_size()
+    assert(logf_close() == 0, "rotation close")
+    assert(rots > 0, "应当发生过轮转")
+    assert(cur <= 512, "当前文件不超过阈值")
+    assert(file_exists(LOG + ".1"), "有 .1")
+    assert(file_exists(LOG + ".2"), "有 .2")
+    assert(file_exists(LOG + ".3") == false, "keep=2 时不该有 .3")
+    let b1 = read_text(LOG + ".1")
+    assert(len(b1) <= 512, ".1 不超过阈值")
+    assert(len(b1) > 0, ".1 非空")
+
+    // ---------------- 10. 失败路径 ----------------
+    assert(logf_open("build/no_such_dir/x.log", 0, 0) == -1, "打不开的路径返回 -1")
+    assert(logf_active() == false, "失败后不活跃")
+    logf_info("写不进去也不崩")   // 空操作
+    assert(logf_flush() == -1 || logf_flush() == 0, "失败后 flush 不崩")
+
+    print("log ok")
+}

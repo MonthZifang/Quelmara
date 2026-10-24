@@ -179,6 +179,26 @@ def case_selfcheck(name, src):
         else bad(f"{name} 失败 rc={rc} stderr={stderr[-200:]!r}")
 
 
+def test_log_streams():
+    """std/log 的通道分流：stdout 只有 out-line*，stderr 只有 err-line。"""
+    out = os.path.join(ROOT, "build", "win_log_streams.exe")
+    build(os.path.join(ROOT, "tests/log_streams.qma"), out)
+    r = run(out, timeout=120)
+    if r is None:
+        skip("log_streams: 非 Windows 平台，跳过执行")
+        return
+    rc, stdout, stderr = r
+    so = stdout.decode("utf-8", "replace")
+    se = stderr.decode("utf-8", "replace")
+    ok("log_streams 退出码 0") if rc == 0 else bad(f"log_streams 退出码 {rc}")
+    ok("log_streams：stdout 收到 info 行") if "out-line" in so and "out-line-2" in so \
+        else bad(f"log_streams：stdout 缺 info 行 {so!r}")
+    ok("log_streams：stderr 收到 warn 行") if "err-line" in se \
+        else bad(f"log_streams：stderr 缺 warn 行 {se!r}")
+    ok("log_streams：两路不串") if "err-line" not in so and "out-line" not in se \
+        else bad(f"log_streams：串流了 stdout={so!r} stderr={se!r}")
+
+
 def test_single_core():
     tmp = tempfile.mkdtemp(prefix="qlm_win_1c_")
     try:
@@ -1006,6 +1026,12 @@ def main():
     # t127 在单进程内校验 API 语义；t128 钉住"void 早退不能污染退出码"
     case_selfcheck("kv", "tests/t127_kv.qma")
     case_output("mainret", "tests/t128_mainret.qma", ["mainret ok"])
+
+    print("== [3i4] 日志：std/log 时间戳/通道 + std/logfile 轮转（v2.03） ==")
+    # t131 自校验时间戳形态、时区、级别、文件通道、轮转与失败路径；
+    # log_streams 单独钉住 stdout/stderr 分流（程序看不到自己的两个流）
+    case_selfcheck("log", "tests/t131_log.qma")
+    test_log_streams()
 
     print("== [3j] 高并发网络：IOCP reactor + 回调（v1.4） ==")
     test_net_reactor()

@@ -1,133 +1,341 @@
-// std/log.qma —— 极简日志（v1.16，v1.19 补级别过滤）
-// 每行：[级别][启动以来毫秒] 消息。输出到 stdout（print 通道，行缓冲）。
-// 级别过滤（v1.19）：log_set_level(0..3) 控制输出量，默认 0（全开）。
-// stderr 通道、绝对时间戳、轮转——登记 docs/07-gaps.md。
+// std/log.qma —— 日志核心：级别过滤 + 绝对时间戳 + stdout/stderr 双通道（v2.03）
+//
+// ## 行格式
+//
+// 绝对模式（默认，RFC 3339 毫秒精度 + 时区偏移，时间戳固定 29 字节）：
+//
+//     [INFO] 2026-10-24T14:33:47.123+00:00 消息 k1=v1 k2=v2
+//
+// 默认 UTC（`+00:00`），`log_set_tz_offset(480)` 换成 UTC+8 的显示。
+// 相对模式（`log_set_time_mode(1)`）回到 v1.16 的老格式——微基准里相对毫秒更好读：
+//
+//     [INFO][1234ms] 消息
+//
+// ## 通道
+//
+// `log_set_sink(0)` = stdout（默认）、`log_set_sink(1)` = stderr。
+// 诊断/告警走 stderr 是老规矩：stdout 留给业务输出，重定向时不混在一起。
+// 文件通道 + 按大小轮转在 `std/logfile`（走 `std/fs`，仅 Windows PE）——
+// 本模块**不含 @ffi**，所以 `import std.log` 照样能编到 ELF / AArch64。
+//
+// ## 级别
+//
+// 0=全部 1=只 warn/error 2=只 error 3=静默（v1.19 语义，未改）。
+// 过滤发生在**格式化之前**：被过滤掉的行不分配、不取时间戳，热路径只读一个静态字。
+//
+// ## 并发
+//
+// 每次输出持一把进程级自旋锁（`std/sync`），所以多线程写同一个通道时**行不交错**：
+// 一行（含换行）是一次临界区。代价是每行约 20 ns 的锁成本（见 `06-status.md` §3.17）。
+// 锁不覆盖"先格式化再取锁"的部分——时间戳与消息拼接在锁外做，只有写操作在锁内。
+//
 // ---------------------------------------------------------------------------
 
 import std.core
-import std.str
+import std.sync
 
-const _T0_W = 9          // static_word(9) = 首条日志的 now_ns（相对时间基准）
+const _T0_W = 9          // static_word(9) = 首条日志的 now_ns（相对模式基准）
 const _LVL_W = 10        // static_word(10) = 当前级别阈值
+const _SINK_W = 13       // static_word(13) = 输出通道（0=stdout 1=stderr）
+const _TZ_W = 14         // static_word(14) = 时区偏移（分钟，默认 0=UTC）
+const _TMODE_W = 15      // static_word(15) = 时间戳模式（0=绝对 1=相对）
+const _LOCK_W = 16       // static_word(16) = 输出锁句柄（0 = 还没建）
+const _TSBUF_W = 28      // static_word(28) = 时间戳缓存块（29 字节，惰性分配）
+const _TSKEY_W = 29      // static_word(29) = 缓存键（毫秒 × 2048 + 时区 + 1024）
 
-/// 级别：0=全部  1=只 warn/error  2=只 error  3=静默
+const _ABS_LEN = 29      // "YYYY-MM-DDTHH:MM:SS.mmm+HH:MM"
+
+// ---------------------------------------------------------------------------
+// 静态字读写（模块级状态：Quelmara 没有顶层 let，状态一律落 static_word）
+// ---------------------------------------------------------------------------
+
+fn _get(w: int) -> int {
+    return mem_load64(static_word(w), 0)
+}
+
+fn _set(w: int, v: int) {
+    mem_store64(static_word(w), 0, v)
+}
+
+fn _lock() -> int {
+    let m = _get(_LOCK_W)
+    if m == 0 {
+        m = mutex_new()
+        _set(_LOCK_W, m)
+    }
+    return m
+}
+
+fn _t0() -> int {
+    let mut t0 = _get(_T0_W)
+    if t0 == 0 {
+        t0 = now_ns()
+        _set(_T0_W, t0)
+    }
+    return t0
+}
+
+// ---------------------------------------------------------------------------
+// 配置
+// ---------------------------------------------------------------------------
+
+/// 级别阈值：0=全部 1=只 warn/error 2=只 error 3=静默。返回设置后的值。
 pub fn log_set_level(lv: int) -> int {
-    mem_store64(static_word(_LVL_W), 0, lv)
+    _set(_LVL_W, lv)
     return lv
 }
 
 /// 当前级别阈值（0=全开 1=只 warn/error 2=只 error 3=静默）。
 pub fn log_level() -> int {
-    return mem_load64(static_word(_LVL_W), 0)
+    return _get(_LVL_W)
 }
 
-fn _log_line(tag: str, msg: str) {
-    let st = static_word(_T0_W)
-    let mut t0 = mem_load64(st, 0)
-    if t0 == 0 {
-        t0 = now_ns()
-        mem_store64(st, 0, t0)
+/// 这条级别的日志会不会被输出（`lv`：0=info 1=warn 2=error）。
+/// 调用方要拼昂贵的载荷（JSON、hexdump）时先问一句，省掉无用的分配。
+pub fn log_enabled(lv: int) -> bool {
+    return log_level() <= lv
+}
+
+/// 输出通道：0=stdout（默认）1=stderr；其他值按 stdout 处理。返回设置后的值。
+pub fn log_set_sink(kind: int) -> int {
+    _set(_SINK_W, kind)
+    return kind
+}
+
+/// 当前输出通道（0=stdout 1=stderr）。
+pub fn log_sink() -> int {
+    return _get(_SINK_W)
+}
+
+/// 时间戳模式：0=绝对（默认）1=相对启动毫秒。返回设置后的值。
+pub fn log_set_time_mode(m: int) -> int {
+    _set(_TMODE_W, m)
+    return m
+}
+
+/// 当前时间戳模式（0=绝对 1=相对）。
+pub fn log_time_mode() -> int {
+    return _get(_TMODE_W)
+}
+
+/// 时区偏移（分钟，东八区 = 480；默认 0 = UTC）。只影响**显示**，不改变时刻。
+pub fn log_set_tz_offset(min: int) -> int {
+    _set(_TZ_W, min)
+    return min
+}
+
+/// 当前时区偏移（分钟）。
+pub fn log_tz_offset() -> int {
+    return _get(_TZ_W)
+}
+
+// ---------------------------------------------------------------------------
+// 时间戳
+// ---------------------------------------------------------------------------
+
+// 29 字节 RFC 3339 时间戳：YYYY-MM-DDTHH:MM:SS.mmm+HH:MM
+// 数字直接按字节写进预分配缓冲——一次分配、8 次存储，不经过 to_str 的中间串。
+fn _ts_build(p: int, ms: int) {
+    let sec = ms / 1000
+    let msec = ms - sec * 1000
+    let days = sec / 86400
+    let sod = sec - days * 86400
+    let hh = sod / 3600
+    let mi = (sod - hh * 3600) / 60
+    let ss = sod - hh * 3600 - mi * 60
+    // 天数 → 年月日（Howard Hinnant civil_from_days，对 1970 之后全部成立）
+    let z = days + 719468
+    let era = z / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let mut y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let mut m = mp + 3
+    if mp >= 10 {
+        m = mp - 9
     }
-    let ms = (now_ns() - t0) / 1000000
-    // 一行：[tag][ms] msg\n —— str_alloc 批量构造（v1.14 原语）
+    if m <= 2 {
+        y = y + 1
+    }
+    // 偏移的符号与绝对值（东区 '+', 西区 '-'）
+    let off = _get(_TZ_W)
+    let mut sign = 43
+    let mut aoff = off
+    if off < 0 {
+        sign = 45
+        aoff = -off
+    }
+    let oh = aoff / 60
+    let om = aoff - oh * 60
+    // 0..7： Y Y Y Y - M M -
+    mem_store64(p, 0,
+        (48 + y / 1000) | ((48 + (y / 100) % 10) << 8) | ((48 + (y / 10) % 10) << 16)
+        | ((48 + y % 10) << 24) | (45 << 32) | ((48 + m / 10) << 40)
+        | ((48 + m % 10) << 48) | (45 << 56))
+    // 8..15： D D T H H : M M
+    mem_store64(p, 1,
+        (48 + d / 10) | ((48 + d % 10) << 8) | (84 << 16) | ((48 + hh / 10) << 24)
+        | ((48 + hh % 10) << 32) | (58 << 40) | ((48 + mi / 10) << 48)
+        | ((48 + mi % 10) << 56))
+    // 16..23： : S S . m m m sign
+    mem_store64(p, 2,
+        58 | ((48 + ss / 10) << 8) | ((48 + ss % 10) << 16) | (46 << 24)
+        | ((48 + msec / 100) << 32) | ((48 + (msec / 10) % 10) << 40)
+        | ((48 + msec % 10) << 48) | (sign << 56))
+    // 24..28：偏移 HH:MM
+    mem_store8(p, 24, 48 + oh / 10)
+    mem_store8(p, 25, 48 + oh % 10)
+    mem_store8(p, 26, 58)
+    mem_store8(p, 27, 48 + om / 10)
+    mem_store8(p, 28, 48 + om % 10)
+}
+
+// 把 29 字节时间戳写进 dst，**同一毫秒内复用上次的结果**（v2.03）。
+//
+// 为什么值得缓存：日历换算 + 19 个数字位的除模是这条路径上最贵的一段
+// （实测约 500 ns），而日志天然成簇——同一毫秒里往往有几十行。
+// 缓存的键是「wall_ms × 2048 + 时区偏移 + 1024」：毫秒或时区一变就重建。
+// 语义上没有任何变化——毫秒精度下，同一毫秒内的两行本来就该有同一个时间戳。
+fn _ts_into(dst: int) {
+    let off = _get(_TZ_W)
+    let ms = wall_ms()
+    let key = ms * 2048 + off + 1024
+    let mut buf = _get(_TSBUF_W)
+    if buf == 0 {
+        buf = mem_alloc(_ABS_LEN)
+        _set(_TSBUF_W, buf)
+        _set(_TSKEY_W, 0)
+    }
+    if key != _get(_TSKEY_W) {
+        _ts_build(buf, ms + off * 60000)
+        _set(_TSKEY_W, key)
+    }
+    mem_copy(dst, buf, _ABS_LEN)
+}
+
+// ---------------------------------------------------------------------------
+// 格式化（与通道解耦：std/logfile 复用这两个函数写文件）
+// ---------------------------------------------------------------------------
+
+/// 拼一行 `[tag] 时间戳 消息`（不含换行）。时间戳形态由 `log_set_time_mode` 决定。
+/// 需要自己决定去向（文件 / 网络 / 测试断言）时用它，再用 `log_emit` 输出。
+pub fn log_format(tag: str, msg: str) -> str {
     let tn = len(tag)
     let mn = len(msg)
-    let line = str_alloc(tn + mn + 1)
-    let w = mem_ptr(line, 0)
-    mem_copy(w, tag, tn)
-    w = mem_ptr(w, tn)
-    // [ms] 数字：手写 itoa（reverse 顺序写入缓冲尾部再拷）——用 to_str()
-    let ms_s = ms.to_str()
-    mem_copy(w, "[", 1)
-    w = mem_ptr(w, 1)
-    mem_copy(w, ms_s, len(ms_s))
-    w = mem_ptr(w, len(ms_s))
-    mem_copy(w, "] ", 2)
-    w = mem_ptr(w, 2)
-    mem_copy(w, msg, mn)
-    w = mem_ptr(w, mn)
-    mem_store8(w, 0, 10)
-    print(line)
-}
-
-/// 写一行 [INFO][启动ms] msg；级别 >=1 时直接返回（不格式化、不分配）。
-pub fn log_info(msg: str) {
-    if log_level() >= 1 {
-        return
+    if _get(_TMODE_W) == 1 {
+        let rel = ((now_ns() - _t0()) / 1000000).to_str()
+        let rn = len(rel)
+        let s = str_alloc(tn + rn + mn + 7)
+        let p = mem_ptr(s, 0)
+        mem_store8(p, 0, 91)                       // '['
+        mem_copy(mem_ptr(p, 1), tag, tn)
+        mem_store8(p, tn + 1, 93)                  // ']'
+        mem_store8(p, tn + 2, 91)                  // '['
+        mem_copy(mem_ptr(p, tn + 3), rel, rn)
+        mem_copy(mem_ptr(p, tn + 3 + rn), "ms] ", 4)
+        mem_copy(mem_ptr(p, tn + 7 + rn), msg, mn)
+        return s
     }
-    _log_line("[INFO]", msg)
+    let s = str_alloc(tn + mn + 33)
+    let p = mem_ptr(s, 0)
+    mem_store8(p, 0, 91)                           // '['
+    mem_copy(mem_ptr(p, 1), tag, tn)
+    mem_copy(mem_ptr(p, tn + 1), "] ", 2)
+    _ts_into(mem_ptr(p, tn + 3))
+    mem_store8(p, tn + 32, 32)                     // ' '
+    mem_copy(mem_ptr(p, tn + 33), msg, mn)
+    return s
 }
 
-/// 写一行 [WARN][启动ms] msg；级别 >=2 时跳过。
-pub fn log_warn(msg: str) {
-    if log_level() >= 2 {
-        return
-    }
-    _log_line("[WARN]", msg)
-}
-
-/// 写一行 [ERROR][启动ms] msg；级别 >=3（静默）时跳过。
-pub fn log_error(msg: str) {
-    if log_level() >= 3 {
-        return
-    }
-    _log_line("[ERROR]", msg)
-}
-
-/// log_kv(tag, msg, kv)：结构化字段（v1.17g）。
-/// kv 是**交替**的 key/value 串（k1,v1,k2,v2,...），行格式：
-///   [INFO][启动ms] msg k1=v1 k2=v2
-/// 值非 str 时调用方先 to_str()（与 log_info 同约定）。
-pub fn log_kv(tag: str, msg: str, kv: vec[str]) -> int {
+/// 在 `log_format` 的行尾追加 `k=v` 字段（`kv` 是交替的 key/value 串）。
+pub fn log_format_kv(tag: str, msg: str, kv: vec[str]) -> str {
+    let base = log_format(tag, msg)
+    let bn = len(base)
     let n = len(kv)
-    let tn = len(tag)
-    let mn = len(msg)
-    let mut kvs = 0
+    let mut extra = 0
     let mut i = 0
     while i < n {
-        kvs = kvs + len(kv.get(i)) + 1   // +1 等号或空格
+        extra = extra + len(kv.get(i)) + 1
         i = i + 1
     }
-    // [tag][ms] msg + 字段（t0 惰性基准与 _log_line 同款 static_word）
-    let st = static_word(_T0_W)
-    let mut t0 = mem_load64(st, 0)
-    if t0 == 0 {
-        t0 = now_ns()
-        mem_store64(st, 0, t0)
-    }
-    let ms = (now_ns() - t0) / 1000000
-    let msn = len(ms.to_str())
-    let line = str_alloc(tn + 7 + msn + 1 + mn + kvs)
-    let w = mem_ptr(line, 0)
-    mem_copy(w, "[", 1)
-    w = mem_ptr(w, 1)
-    mem_copy(w, tag, tn)
-    w = mem_ptr(w, tn)
-    mem_copy(w, "][", 2)
-    w = mem_ptr(w, 2)
-    let mstr = ms.to_str()
-    mem_copy(w, mstr, msn)
-    w = mem_ptr(w, msn)
-    mem_copy(w, "] ", 2)
-    w = mem_ptr(w, 2)
-    mem_copy(w, msg, mn)
-    w = mem_ptr(w, mn)
-    let mut i = 0
+    let s = str_alloc(bn + extra)
+    mem_copy(mem_ptr(s, 0), base, bn)
+    let mut w = mem_ptr(s, bn)
+    i = 0
     while i < n {
         if i % 2 == 0 {
-            mem_copy(w, " ", 1)
-            w = mem_ptr(w, 1)
+            mem_store8(w, 0, 32)                   // ' '
         } else {
-            mem_copy(w, "=", 1)
-            w = mem_ptr(w, 1)
+            mem_store8(w, 0, 61)                   // '='
         }
+        w = mem_ptr(w, 1)
         let item = kv.get(i)
         let ln = len(item)
         mem_copy(w, item, ln)
         w = mem_ptr(w, ln)
         i = i + 1
     }
-    mem_copy(w, "\n", 1)
-    print(line)
+    return s
+}
+
+// ---------------------------------------------------------------------------
+// 输出
+// ---------------------------------------------------------------------------
+
+/// 把一行写到当前通道（stdout / stderr）。**不加换行**——换行由 print/eprint 补。
+/// 写操作在进程级锁内，多线程同时写不会让两行交错。
+pub fn log_emit(line: str) {
+    let m = _lock()
+    mutex_lock(m)
+    if _get(_SINK_W) == 1 {
+        eprint(line)
+    } else {
+        print(line)
+    }
+    mutex_unlock(m)
+}
+
+/// 写一行 `[INFO] 时间戳 消息`；级别 >=1 时直接返回（不格式化、不分配）。
+pub fn log_info(msg: str) {
+    if log_level() >= 1 {
+        return
+    }
+    log_emit(log_format("INFO", msg))
+}
+
+/// 写一行 `[WARN] 时间戳 消息`；级别 >=2 时跳过。
+pub fn log_warn(msg: str) {
+    if log_level() >= 2 {
+        return
+    }
+    log_emit(log_format("WARN", msg))
+}
+
+/// 写一行 `[ERROR] 时间戳 消息`；级别 >=3（静默）时跳过。
+pub fn log_error(msg: str) {
+    if log_level() >= 3 {
+        return
+    }
+    log_emit(log_format("ERROR", msg))
+}
+
+/// 带结构化字段的 INFO 行：`[tag] 时间戳 消息 k1=v1 k2=v2`。
+/// `kv` 是**交替**的 key/value 串；值非 str 时调用方先 `to_str()`。
+pub fn log_kv(tag: str, msg: str, kv: vec[str]) -> int {
+    if log_level() >= 1 {
+        return 0
+    }
+    log_emit(log_format_kv(tag, msg, kv))
+    return 0
+}
+
+/// 指定级别的结构化行（`lv`：0=info 1=warn 2=error），级别不够时整行跳过。
+pub fn log_kv_lv(lv: int, tag: str, msg: str, kv: vec[str]) -> int {
+    if log_level() > lv {
+        return 0
+    }
+    log_emit(log_format_kv(tag, msg, kv))
     return 0
 }

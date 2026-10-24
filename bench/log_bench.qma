@@ -1,0 +1,180 @@
+// bench/log_bench.qma —— std/log 的格式化/过滤/落盘成本（v2.03）
+// 用法：python tools/stage0/qlm_cli.py run bench/log_bench.qma --target win
+//
+// 口径：
+//   * 全部用进程内 now_ns()，不含进程启动；跑 3 遍取中位；
+//   * `过滤` = 级别 3 下调 log_info：一次静态字读 + 比较就返回，**不格式化**；
+//   * `格式化` = log_format("INFO", msg)：同一毫秒内走**时间戳缓存**（v2.03），
+//     只有每毫秒第一行要算日历；
+//   * `格式化(冷)` = 每次调用前改一次时区偏移，强制缓存失效——等价于
+//     每毫秒第一行的成本，已经减掉改时区本身的开销；
+//   * `文件通道` = logf_info：格式化 + 拷进 64 KB 缓冲，每满一批一次 WriteFile
+//     （进内核，不刷盘）；吞吐按行字节数折算；
+//   * `轮转` = 每次轮转（改名 N 次 + 删 1 次 + 新建）的固定成本，用很小的
+//     max_bytes 逼出多次轮转单独计时；**本机文件操作本身很贵**，所以同时打出
+//     同机基线（open/close、rename），读者可以直接对照；
+//   * `控制台` 一栏单独列，且 N 小两个数量级——它的耗时由终端/管道决定，
+//     不是日志库的成本。
+module log_bench
+
+import std.log
+import std.logfile
+import std.fs
+
+fn main() {
+    let N = 20000
+    let MSG = "GET /api/v1/items?page=3 200 12ms user=42"
+
+    // ---------- 1. 级别过滤（热路径上被丢掉的行） ----------
+    log_set_level(3)
+    let t0 = now_ns()
+    let mut i = 0
+    while i < N {
+        log_info(MSG)
+        i += 1
+    }
+    let t1 = now_ns()
+    log_set_level(0)
+    print("过滤 " + N.to_str() + " 行: " + ((t1 - t0) / N).to_str() + " ns/行")
+
+    // ---------- 2. 只格式化（同毫秒走时间戳缓存） ----------
+    let mut acc = 0
+    let t2 = now_ns()
+    i = 0
+    while i < N {
+        acc += len(log_format("INFO", MSG))
+        i += 1
+    }
+    let t3 = now_ns()
+    assert(acc > 0, "format 非空")
+    print("格式化 " + N.to_str() + " 行: " + ((t3 - t2) / N).to_str() + " ns/行")
+
+    // ---------- 3. 强制缓存失效（= 每毫秒第一行） ----------
+    let t4 = now_ns()
+    i = 0
+    while i < N {
+        log_set_tz_offset(i % 700)
+        acc += len(log_format("INFO", MSG))
+        i += 1
+    }
+    let t5 = now_ns()
+    let t6 = now_ns()
+    i = 0
+    while i < N {
+        log_set_tz_offset(i % 700)
+        i += 1
+    }
+    let t7 = now_ns()
+    log_set_tz_offset(0)
+    assert(acc > 0, "cold 非空")
+    print("格式化(冷, 每行重建) " + N.to_str() + " 行: "
+        + (((t5 - t4) - (t7 - t6)) / N).to_str() + " ns/行")
+
+    // ---------- 4. 相对时间戳（老格式） ----------
+    log_set_time_mode(1)
+    let t8 = now_ns()
+    acc = 0
+    i = 0
+    while i < N {
+        acc += len(log_format("INFO", MSG))
+        i += 1
+    }
+    let t9 = now_ns()
+    log_set_time_mode(0)
+    assert(acc > 0, "relative 非空")
+    print("格式化(相对) " + N.to_str() + " 行: " + ((t9 - t8) / N).to_str() + " ns/行")
+
+    // ---------- 5. 文件通道（攒批 + 落盘） ----------
+    fs_remove("build/log_bench.log")
+    fs_remove("build/log_bench.log.1")
+    fs_remove("build/log_bench.log.2")
+    let r = logf_open("build/log_bench.log", 4194304, 2)
+    assert(r == 0, "logf_open")
+    let ta = now_ns()
+    i = 0
+    while i < N {
+        logf_info(MSG)
+        i += 1
+    }
+    let tb = now_ns()
+    assert(logf_flush() == 0, "flush")
+    let bytes = logf_size()
+    logf_close()
+    let el = tb - ta
+    print("文件通道 " + N.to_str() + " 行: " + (el / 1000000).to_str() + " ms  ("
+        + (el / N).to_str() + " ns/行, " + (bytes / 1024).to_str() + " KB)")
+    print("文件通道吞吐: " + ((bytes * 1000000000) / el / 1048576).to_str() + " MB/s")
+
+    // ---------- 6. 结构化字段（kv 交替串） ----------
+    let kv = vec[str].new(4)
+    kv.push("status")
+    kv.push("200")
+    kv.push("ms")
+    kv.push("12")
+    let tc = now_ns()
+    acc = 0
+    i = 0
+    while i < N {
+        acc += len(log_format_kv("HTTP", MSG, kv))
+        i += 1
+    }
+    let td = now_ns()
+    assert(acc > 0, "kv 非空")
+    print("格式化+kv " + N.to_str() + " 行: " + ((td - tc) / N).to_str() + " ns/行")
+
+    // ---------- 7. 同机文件操作基线（对照轮转用） ----------
+    let b0 = now_ns()
+    let mut k = 0
+    while k < 100 {
+        let h = fs_open("build/log_bench.base", "w")
+        fs_write(h, "x")
+        fs_close(h)
+        k += 1
+    }
+    let b1 = now_ns()
+    k = 0
+    while k < 100 {
+        fs_rename("build/log_bench.base", "build/log_bench.base.bak")
+        fs_rename("build/log_bench.base.bak", "build/log_bench.base")
+        k += 1
+    }
+    let b2 = now_ns()
+    fs_remove("build/log_bench.base")
+    print("基线: open/write/close " + ((b1 - b0) / 100).to_str()
+        + " ns, rename " + ((b2 - b1) / 200).to_str() + " ns/次")
+
+    // ---------- 8. 轮转固定成本（max_bytes=1024，约 20 行转一次） ----------
+    fs_remove("build/log_rot.log")
+    k = 1
+    while k <= 5 {
+        fs_remove("build/log_rot.log." + k.to_str())
+        k += 1
+    }
+    assert(logf_open("build/log_rot.log", 1024, 5) == 0, "rot open")
+    let rot0 = logf_rotations()
+    let te = now_ns()
+    i = 0
+    while i < 1000 {
+        logf_info(MSG)
+        i += 1
+    }
+    assert(logf_flush() == 0, "rot flush")
+    let tf = now_ns()
+    let rots = logf_rotations() - rot0
+    logf_close()
+    assert(rots > 0, "应当发生轮转")
+    print("轮转 " + rots.to_str() + " 次 / 1000 行: " + ((tf - te) / 1000000).to_str()
+        + " ms  (" + ((tf - te) / rots / 1000).to_str() + " µs/次)")
+
+    // ---------- 9. 控制台通道（终端速度，不是库速度） ----------
+    let M = 2000
+    let tg = now_ns()
+    i = 0
+    while i < M {
+        log_info(MSG)
+        i += 1
+    }
+    let th = now_ns()
+    print("控制台 " + M.to_str() + " 行: " + ((th - tg) / 1000000).to_str() + " ms  ("
+        + ((th - tg) / M).to_str() + " ns/行)")
+}

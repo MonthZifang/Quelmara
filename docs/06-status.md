@@ -9,7 +9,7 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=275 FAIL=0 SKIP=1**（本版实测；SKIP 为 WSL 交叉验证，本机被沙箱拦。新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
+| PE 回归（主回归） | **PASS=280 FAIL=0 SKIP=1**（本版实测；SKIP 为 WSL 交叉验证，本机被沙箱拦。新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
 | 词法器对拍 | **PASS=238 FAIL=0**（241 个源文件；SKIP 3 个含 `f"..."` 插值的文件——stage-1 词法器不认 `FSTR`，v1.61 插值未移植。**闭包不再进 SKIP 名单**：`fn(x: int) -> int { ... }` 用的全是既有记号，`t126_closure` 逐记号一致（v1.95）） | `python tests/lexdiff.py` |
 | 声明级 AST 对拍 | **PASS=149 FAIL=1**（150 个源文件；唯一 FAIL 是 `tests/t115_derive.qma`——并行轨的 enum 派生让声明顺序变了、自举 parser 还没跟上，**与并发改动无关**。跳过 17 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer` / `t99_generic_struct` / `t101_bounds` / `t102_generic_impl` / `t103_generic_enum` / `t104_generic_enum_impl` / `t116_iface_multi` / `iface_rc` / `iface_rc_a64` / `t118_iface_own` / `t119_drop` / `t123_derive_enum` / `t124_macro` / `t125_refl_dyn`——自举 parser 未做 interface/impl/泛型单态化、类型约束、泛型 impl 与泛型 enum，v1.96 的 enum 派生 / token 宏 / 运行时下标反射也未移植；v1.97 把 `iface_rc_a64` 与 `t118_iface_own` 按同一口径记账，`t120_ffi` / `t115_derive` / `dpub_*` 两侧逐行一致） | `python tests/parsediff.py` |
 | 函数体 dump 对拍 | **一致 1719 / 分叉 1608 / SKIP 同步 26 / SKIP 不同步 44**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |
@@ -30,12 +30,12 @@
 | 覆盖率链路（行 + 分支，v1.83） | **PASS=23 FAIL=0**（`cov.qma` 行 4/5、分支 1/2 且列出未覆盖分支 `8->9`；`main.qma` 行/分支双 100%；行与分支两种阈值各退出码 1；`cov2.qma` 两次运行合并后行 8/8、分支 4/4；`--lines-only` 分支显示 `0/0`） | `python tests/cov_test.py` |
 | 模糊测试链路（v1.83） | **PASS=12 FAIL=0**（同 seed 逐字节一致 / 不同 seed 不同 / 变异生效且仍是合法 UTF-8 / built·rejected·bug 三分类口径 / 端到端 8 例 0 崩溃） | `python tests/fuzz_test.py` |
 | doc comment 链路（v1.92） | **PASS=31 FAIL=0**（语法规则 10 / 前端挂载 6 / 工具链 14 / 产物逐字节相同 1） | `python tests/doc_test.py` |
-| 文档生成门禁（v1.92） | **PASS**：60 个模块 / **409 个公开声明全部有 `///`**，0 个脱离块；`03-stdlib.md` 与源码一致 | `python tools/stage0/qlm_cli.py doc std --missing` + `python tools/dev/gen_stdlib_doc.py --check --require-doc` |
+| 文档生成门禁（v1.92） | **PASS**：61 个模块 / **433 个公开声明全部有 `///`**，0 个脱离块；`03-stdlib.md` 与源码一致 | `python tools/stage0/qlm_cli.py doc std --missing` + `python tools/dev/gen_stdlib_doc.py --check --require-doc` |
 | 语言服务器（v1.91） | **PASS=38 FAIL=0**（五段：词法对拍 321 文件 / 213208 记号分叉 0；容错索引 2 个前端解析不了的文件；索引语义；真 JSON-RPC 协议；性能阈值） | `python tests/lsp_test.py` |
 | 性能门禁自测（v1.88） | **PASS=12 FAIL=0**（建基线 / 同产物判 PASS / 伪造 2× 回归必须 FAIL / 校验和与体积必须拦住） | `python tests/bench_gate_test.py` |
 | 闭包 / 捕获（v1.95） | **t126 的 11 组断言全过**（无捕获 / 单捕获 / str+f64 / 逃逸 / 快照 / 嵌套 / 捕获 vec 句柄 / 循环建多个 / 聚合返回 + 聚合形参 / 6·8 参走栈）；负向 3 个编译期拦下（捕获 struct、体内写捕获变量、裸函数名当闭包传）；`--no-opt` 与 `--dbg-info` 构建输出一致；AArch64 构建通过（同一条 `callr`）；C 后端 fail-fast | `python tools/stage0/qlm_cli.py run tests/t126_closure.qma --target win` （主回归总数见 §1 主行；本版新增 1 正 + 3 负用例） |
 | 包管理 qpm（v1.99） | **PASS=61 FAIL=0**（确定性打包逐字节一致 / 打包跳过产物 / 恶意 tar 拒绝 / spec 十一种形态 / registry 索引与包体落盘 / 同版本不可覆盖 / 传递依赖选版本 / 区间交集合并 / 无交集与跨来源冲突的诊断文案 / yank 后回退 / `--locked` 不升级且检出清单漂移 / `verify` 检出磁盘被改 / 依赖环可安装 / HTTP PUT 发布与 GET 安装 / 401 拒发 / 装完能被编译器 import 并跑出依赖里的字符串） | `python tests/qpm_test.py` |
-| 五道门禁 | check_names / check_origin / check_docs 全 PASS；`gen_stdlib_doc.py --check --require-doc` PASS（60 个模块 / 406 个公开函数） | `python tools/dev/check_*.py` + `python tools/dev/gen_stdlib_doc.py --check` |
+| 五道门禁 | check_names / check_origin / check_docs 全 PASS；`gen_stdlib_doc.py --check --require-doc` PASS（61 个模块 / 430 个公开函数） | `python tools/dev/check_*.py` + `python tools/dev/gen_stdlib_doc.py --check` |
 
 `run_win_tests.py` 的 10 组覆盖：PE 结构（MZ/PE32+/AMD64/无 CRT 符号）、基础语义、
 语言特性（struct/enum/match/宽度/@simd/rc/所有权/vec/map/切片/函数值/**@ffi**）、多核
@@ -689,6 +689,40 @@ p95 1.6–1.9 ms**（多次运行的区间，单次请求到出结果）。词�
 >
 > ③ **`vec[u8]` 槽压缩**：查了全库——`std/` 里 `vec[u8]`/`u16`/`u32` 一共只有 **3 处**，
 > 而 `vec[int]` 339 处、`vec[str]` 42 处。压缩对真实代码没有收益，已从 §5 的优先级里降级。
+
+### 3.18 日志（`bench/log_bench.qma`，v2.03）
+
+`std/log` = 级别过滤 + 绝对时间戳 + stdout/stderr 双通道；`std/logfile` = 追加写 +
+按大小轮转（走 `std/fs`，Windows PE）。进程内 `now_ns()`，2 万行，跑 5 遍取中位；
+行内容固定 50 字节（`GET /api/v1/items?page=3 200 12ms user=42`）。
+
+| 项 | 结果 | 说明 |
+|---|---|---|
+| 级别过滤（被丢掉的行） | **2 ns/行** | 一次静态字读 + 比较就返回，不格式化、不分配 |
+| 格式化（同一毫秒内） | **101 ns/行** | 时间戳走缓存：只有每毫秒第一行要算日历 |
+| 格式化（每行强制重建） | **375 ns/行** | 日历换算 + 19 个数字位，用改时区强制缓存失效测得 |
+| 格式化（相对时间戳） | **205 ns/行** | 老格式 `[1234ms]`；每行都 `to_str`，比绝对时间戳**慢约 2 倍** |
+| 格式化 + 结构化字段（4 个 kv） | **351 ns/行** | `log_format_kv` |
+| 文件通道（64 KB 攒批） | **434 ns/行，173 MB/s** | 含格式化 + 拷进缓冲；每批一次 `WriteFile` |
+| 控制台通道 | **19.3 µs/行** | 终端/管道速度，不是日志库成本（单独列） |
+| 轮转一次（改名 5 次 + 新建） | **15.7 ms** | 环境数字，见下 |
+
+> **为什么绝对时间戳反而更快**：v1.16 的相对格式每行都要 `(now_ns()-t0)/1e6` 再
+> `to_str()`（一次分配 + 一次整数转字符串）；v2.03 的绝对时间戳在**同一毫秒内复用**
+> 上一次的结果（一次 `wall_ms()` + 一次比较 + 29 字节 `mem_copy`），毫秒精度下语义
+> 完全等价。2 万行只跨 2–3 毫秒，日历换算总共只发生 2–3 次，所以稳态就是 101 ns。
+>
+> **轮转 15.7 ms/次 是环境数字，不是库成本**：同机基线 `open/write/close` ≈ 2.8–3.9 ms、
+> `rename` ≈ 2.3–2.9 ms/次（本机开着 Defender，文件过滤驱动把每次元数据操作都拖到毫秒
+> 级）。一次轮转 = 5 次改名 + 1 次新建，正好对得上。部署里 4 MB 轮一次，等于每 10 万行
+> 付一次这个钱。实现上刻意**不用 `fs_remove`**：`MoveFileEx(REPLACE_EXISTING)` 会把最旧
+> 一份直接覆盖掉，省掉一次 unlink——本机 `DeleteFile` 约 100 ms，比 rename 贵两个数量级
+> （这一改动把轮转从 122 ms/次 降到 15.7 ms/次）。
+>
+> 正确性：`tests/t131_log.qma` 自校验时间戳形态（29 字节 / 分隔符 / 三位毫秒 / 偏移符号）、
+> 时区正负偏移、相对模式、级别过滤、文件通道（追加 / 重开 / 7 万字节超长行 / 结构化字段）、
+> 轮转（保留份数 / 单文件不超阈值 / 旧份被覆盖）与失败路径；`tests/log_streams.qma`
+> 单独钉住 stdout / stderr 不串流。
 
 ## 4. 自举
 

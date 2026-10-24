@@ -1,0 +1,312 @@
+// std/logfile.qma —— 文件日志通道 + 按大小轮转（Windows PE，v2.03）
+//
+// 为什么单独一个模块：日志**核心**（级别、时间戳、格式化、stdout/stderr）在
+// `std/log`，是纯内建实现、可移植；**落盘**要走 `std/fs`（`@ffi` → kernel32），
+// 只有 Windows PE 后端能编。拆成两个模块以后 `import std.log` 仍能编到
+// ELF / AArch64，只是没有文件通道——不会因为要写日志就把整个模块绑死在 Windows 上。
+//
+// ## 语义
+//
+//   * **追加写**：打开时定位到文件尾，重启后接着写。
+//   * **攒批**：行先拷进 64 KB 缓冲，满了一批 `WriteFile` 写一次（v2.03）。
+//     单行一次 WriteFile 的固定成本约 16 µs，攒批把它摊到几十行上。
+//   * **轮转**：当前文件到 `max_bytes` 就把 `<path>` 改名成 `<path>.1`，
+//     原来的 `.1` → `.2` … 最多留 `keep` 份，第 `keep` 份直接删掉，然后新建空文件。
+//     `max_bytes <= 0` 表示不轮转；`keep == 0` 表示不保留备份（只清空）。
+//   * **崩溃窗口**：攒在缓冲里的行还没进内核，进程被强杀会丢（最多 64 KB）。
+//     要"写到就落盘"就在关键处调 `logf_flush`（代价是每批一次 WriteFile）。
+//     掉电仍要 `fs_sync`——本模块不自动刷盘。
+//   * **多线程安全**：追加/冲刷/轮转在同一把进程级自旋锁里，缓冲不会被写坏。
+//     行与行之间不交错，但**不保证**"先调用的先落盘"以外的顺序语义。
+//
+// ## 与 `std/log` 的关系
+//
+//   级别过滤、时间戳格式（`log_set_time_mode` / `log_set_tz_offset`）与行格式
+//   全部复用 `std/log`：本模块只负责"把拼好的行写进文件"。
+//   `logf_tee(1)` 打开后，同一行也照 `std/log` 的通道（stdout/stderr）打一份。
+//
+// ---------------------------------------------------------------------------
+
+import std.fs
+import std.log
+import std.sync
+
+const _P_PTR_W = 17      // static_word(17) = 路径字节指针（模块生命周期内不回收）
+const _P_LEN_W = 18      // static_word(18) = 路径长度
+const _MAX_W = 19        // static_word(19) = 轮转阈值（字节，<=0 不轮转）
+const _KEEP_W = 20       // static_word(20) = 保留份数
+const _H_W = 21          // static_word(21) = 文件句柄（0=未打开 -1=失败）
+const _SIZE_W = 22       // static_word(22) = 当前文件已写字节
+const _BUF_W = 23        // static_word(23) = 缓冲块指针
+const _USED_W = 24       // static_word(24) = 缓冲已用字节
+const _ROT_W = 25        // static_word(25) = 累计轮转次数
+const _TEE_W = 26        // static_word(26) = 是否同时打控制台
+const _LK_W = 27         // static_word(27) = 写锁句柄（0 = 还没建）
+
+const _CAP = 65536       // 缓冲大小：一次 WriteFile 写一批
+
+fn _get(w: int) -> int {
+    return mem_load64(static_word(w), 0)
+}
+
+fn _set(w: int, v: int) {
+    mem_store64(static_word(w), 0, v)
+}
+
+fn _lock() -> int {
+    let m = _get(_LK_W)
+    if m == 0 {
+        m = mutex_new()
+        _set(_LK_W, m)
+    }
+    return m
+}
+
+// 存进来的路径是**拷贝**：调用方的 str 可能来自临时拼接，本模块要留到进程结束。
+fn _keep_path(path: str) {
+    let n = len(path)
+    let cp = str_alloc(n)
+    mem_copy(mem_ptr(cp, 0), path, n)
+    _set(_P_PTR_W, mem_ptr(cp, 0))
+    _set(_P_LEN_W, n)
+}
+
+fn _path() -> str {
+    return str_from_mem(_get(_P_PTR_W), _get(_P_LEN_W))
+}
+
+// 轮转：<path> → <path>.1 → <path>.2 …，保留 keep 份，然后新建空文件。
+// 调用方必须已持锁。
+fn _rotate() -> int {
+    let path = _path()
+    let keep = _get(_KEEP_W)
+    let h = _get(_H_W)
+    if h != 0 && h != -1 {
+        fs_close(h)
+    }
+    if keep > 0 {
+        // 从最旧一份往上改：MoveFileEx(REPLACE_EXISTING) 会直接覆盖目标，
+        // 所以第 keep 份是被 `.keep-1 → .keep` 这一步替换掉的——不需要单独 unlink
+        // （本机 DeleteFile 约 100 ms，比 rename 贵两个数量级，见 06-status.md §3.17）。
+        let mut i = keep - 1
+        while i >= 1 {
+            fs_rename(path + "." + i.to_str(), path + "." + (i + 1).to_str())
+            i = i - 1
+        }
+        fs_rename(path, path + ".1")
+    }
+    let nh = fs_open_shared(path, "w")
+    _set(_H_W, nh)
+    _set(_SIZE_W, 0)
+    _set(_ROT_W, _get(_ROT_W) + 1)
+    if nh == -1 {
+        return -1
+    }
+    return 0
+}
+
+// 把缓冲写进文件（只写，不轮转——轮转由 _append_locked 在写入前判定）。
+// 调用方必须已持锁。
+fn _flush_locked() -> int {
+    let used = _get(_USED_W)
+    if used == 0 {
+        return 0
+    }
+    let h = _get(_H_W)
+    if h == 0 || h == -1 {
+        return -1
+    }
+    let chunk = str_from_mem(_get(_BUF_W), used)
+    let n = fs_write(h, chunk)
+    if n < 0 {
+        return -1          // 不清空缓冲：调用方还能重试
+    }
+    _set(_USED_W, 0)
+    _set(_SIZE_W, _get(_SIZE_W) + n)
+    return 0
+}
+
+// 追加一行（自动补换行）。调用方必须已持锁。
+//
+// 轮转判定在**写入之前**做（`已落盘 + 缓冲里 + 这一行` 会不会越过阈值），
+// 这样单个文件不会因为"攒满一整批才检查"而超出阈值一整批的量——
+// 超过阈值最多一行。判定命中时先冲刷缓冲，再轮转，然后把这行写进新文件。
+fn _append_locked(line: str) -> int {
+    let ln = len(line)
+    let need = ln + 1
+    let mx = _get(_MAX_W)
+    if mx > 0 && _get(_SIZE_W) + _get(_USED_W) + need > mx
+        && _get(_SIZE_W) + _get(_USED_W) > 0 {
+        let r = _flush_locked()
+        if r < 0 {
+            return -1
+        }
+        let r2 = _rotate()
+        if r2 < 0 {
+            return -1
+        }
+    }
+    if _get(_USED_W) + need > _CAP {
+        let r3 = _flush_locked()
+        if r3 < 0 {
+            return -1
+        }
+    }
+    if need > _CAP {
+        // 单行超过缓冲：直接写文件，不进缓冲（不截断、不丢行）
+        let h = _get(_H_W)
+        if h == 0 || h == -1 {
+            return -1
+        }
+        let mut r4 = fs_write(h, line)
+        if r4 >= 0 {
+            r4 = fs_write(h, "\n")
+        }
+        if r4 < 0 {
+            return -1
+        }
+        _set(_SIZE_W, _get(_SIZE_W) + need)
+        return 0
+    }
+    let w = mem_ptr(_get(_BUF_W), _get(_USED_W))
+    mem_copy(w, line, ln)
+    mem_store8(w, ln, 10)
+    _set(_USED_W, _get(_USED_W) + need)
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// 生命周期
+// ---------------------------------------------------------------------------
+
+/// 打开（或续写）`path`，并设定轮转策略：`max_bytes <= 0` 不轮转，
+/// `keep` 是保留的备份份数（`.1` … `.keep`）。成功返回 0，失败返回 -1
+/// （失败后 `logf_active()` 为 false，写日志是空操作）。
+pub fn logf_open(path: str, max_bytes: int, keep: int) -> int {
+    if _get(_H_W) != 0 {
+        logf_close()
+    }
+    let h = fs_open_shared(path, "a")
+    if h == -1 {
+        _set(_H_W, -1)
+        return -1
+    }
+    _keep_path(path)
+    let sz = fs_size(h)
+    _set(_SIZE_W, 0)
+    if sz > 0 {
+        _set(_SIZE_W, sz)
+    }
+    _set(_BUF_W, mem_alloc(_CAP))
+    _set(_USED_W, 0)
+    _set(_MAX_W, max_bytes)
+    _set(_KEEP_W, keep)
+    _set(_H_W, h)
+    return 0
+}
+
+/// 冲刷缓冲（一次 WriteFile）。0 成功 / -1 失败。
+pub fn logf_flush() -> int {
+    let m = _lock()
+    mutex_lock(m)
+    let r = _flush_locked()
+    mutex_unlock(m)
+    return r
+}
+
+/// 冲刷并关闭。0 成功 / -1 失败（缓冲写不进去时返回 -1，但句柄照样关）。
+pub fn logf_close() -> int {
+    let m = _lock()
+    mutex_lock(m)
+    let r = _flush_locked()
+    let h = _get(_H_W)
+    if h != 0 && h != -1 {
+        fs_close(h)
+    }
+    _set(_H_W, 0)
+    _set(_USED_W, 0)
+    _set(_SIZE_W, 0)
+    mutex_unlock(m)
+    return r
+}
+
+/// 当前是否有一个可用通道（打开成功且没关）。
+pub fn logf_active() -> bool {
+    let h = _get(_H_W)
+    return h != 0 && h != -1
+}
+
+/// 当前文件的逻辑字节数（已落盘 + 缓冲里还没写的）。
+pub fn logf_size() -> int {
+    return _get(_SIZE_W) + _get(_USED_W)
+}
+
+/// 累计轮转次数（跨多次打开累计，便于测试与监控断言）。
+pub fn logf_rotations() -> int {
+    return _get(_ROT_W)
+}
+
+/// 同时往 `std/log` 的通道（stdout/stderr）打一份：1 开 / 0 关。
+pub fn logf_tee(on: int) -> int {
+    _set(_TEE_W, on)
+    return on
+}
+
+// ---------------------------------------------------------------------------
+// 写
+// ---------------------------------------------------------------------------
+
+/// 写一行（不加级别前缀，`tag` 由调用方给）。0 成功 / -1 失败。
+pub fn logf_line(tag: str, msg: str) -> int {
+    let line = log_format(tag, msg)
+    let m = _lock()
+    mutex_lock(m)
+    let r = _append_locked(line)
+    let tee = _get(_TEE_W)
+    mutex_unlock(m)
+    if tee == 1 {
+        log_emit(line)
+    }
+    return r
+}
+
+/// INFO 行；级别 >=1 时跳过。
+pub fn logf_info(msg: str) {
+    if !log_enabled(0) {
+        return
+    }
+    logf_line("INFO", msg)
+}
+
+/// WARN 行；级别 >=2 时跳过。
+pub fn logf_warn(msg: str) {
+    if !log_enabled(1) {
+        return
+    }
+    logf_line("WARN", msg)
+}
+
+/// ERROR 行；级别 >=3（静默）时跳过。
+pub fn logf_error(msg: str) {
+    if !log_enabled(2) {
+        return
+    }
+    logf_line("ERROR", msg)
+}
+
+/// 带结构化字段的 INFO 行（`kv` 是交替的 key/value 串）。0 成功 / -1 失败。
+pub fn logf_kv(tag: str, msg: str, kv: vec[str]) -> int {
+    if !log_enabled(0) {
+        return 0
+    }
+    let line = log_format_kv(tag, msg, kv)
+    let m = _lock()
+    mutex_lock(m)
+    let r = _append_locked(line)
+    let tee = _get(_TEE_W)
+    mutex_unlock(m)
+    if tee == 1 {
+        log_emit(line)
+    }
+    return r
+}

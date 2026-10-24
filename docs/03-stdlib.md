@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-60 个模块，**406 个公开函数**（另有 535 个内部函数）
+61 个模块，**430 个公开函数**（另有 549 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -24,7 +24,7 @@
 | `std/deque` | 双端队列（两端 O(1) + 自动扩容） | 13 / 21 |
 | `std/ds` | 环形缓冲与二叉最小堆 | 0 / 10 |
 | `std/f64` | 十进制文本 ↔ f64（严格十进制解析 + Clinger 快路径，非十进制 fail-fast） | 3 / 16 |
-| `std/fs` | 文件读写（open/read/write/seek/size/sync/close/rename；Windows PE，@ffi 直调 kernel32） | 10 / 18 |
+| `std/fs` | 文件读写（open/read/write/seek/size/sync/close/rename；Windows PE，@ffi 直调 kernel32） | 11 / 20 |
 | `std/gen` | 泛型算法库（min/max/clamp/dist/contains/index_of/reverse，调用点推导单态化） | 0 / 9 |
 | `std/gzip` | DEFLATE 编码 + gzip 包装 + CRC-32；v1.19 起含 inflate 解码 | 5 / 33 |
 | `std/hash` | FNV-1a 32/64 非密码学哈希（缓存键 / 分片） | 4 / 4 |
@@ -35,7 +35,8 @@
 | `std/httpdate` | HTTP 日期（RFC 7231 IMF-fixdate）格式化与解析 + If-Modified-Since 判定 | 3 / 13 |
 | `std/json` | DOM 式 JSON 解析与 builder | 32 / 85 |
 | `std/kv` | 持久化键值存储（追加日志 + 内存索引；重开重放 / 撕裂尾恢复 / 压缩；Windows PE） | 11 / 16 |
-| `std/log` | 分级日志（stdout）+ 结构化字段 + 级别过滤 | 6 / 7 |
+| `std/log` | 日志核心（级别过滤 / 绝对时间戳 / stdout·stderr 双通道 / 结构化字段） | 17 / 23 |
+| `std/logfile` | 日志文件通道 + 按大小轮转（攒批写 + 共享打开可 tail；Windows PE） | 12 / 20 |
 | `std/lru` | LRU 缓存（开放寻址表 + 双向链表，单句柄 O(1)） | 10 / 24 |
 | `std/math` | 浮点与整数数学（exp/log/pow/sin/cos/atan/双曲/hypot + sqrt/cbrt/取整/gcd） | 44 / 51 |
 | `std/md5` | MD5（RFC 1321，仅兼容用途，不要用于密码） | 1 / 5 |
@@ -331,6 +332,11 @@ fn f64_repr(x: f64) -> str
 /// `mode`：`"r"` 只读（必须存在）/ `"w"` 读写并截断 / `"a"` 读写并定位到末尾
 /// （不存在则新建）。
 fn fs_open(path: str, mode: str) -> int
+/// 与 `fs_open` 同形，但**允许别人同时读**（`FILE_SHARE_READ|FILE_SHARE_WRITE`）。
+/// 给"边写边 tail"的场景用（`std/logfile` 就是它）：独占打开的日志文件
+/// 没法被 `tail -f` 或另一个进程读到刚写进去的内容。
+/// 代价是并发写不设防——两个进程往同一个文件写会交错，要独占安全就用 `fs_open`。
+fn fs_open_shared(path: str, mode: str) -> int
 /// 关闭句柄：0 成功 / -1 失败。
 fn fs_close(h: int) -> int
 /// 从当前偏移读最多 `n` 字节，返回读到的内容。
@@ -594,24 +600,80 @@ fn kv_file_size(db: Kv) -> int
 
 ### `std/log.qma`
 
-分级日志（stdout）+ 结构化字段 + 级别过滤
+日志核心（级别过滤 / 绝对时间戳 / stdout·stderr 双通道 / 结构化字段）
 
 ```quelmara
-/// 级别：0=全部  1=只 warn/error  2=只 error  3=静默
+/// 级别阈值：0=全部 1=只 warn/error 2=只 error 3=静默。返回设置后的值。
 fn log_set_level(lv: int) -> int
 /// 当前级别阈值（0=全开 1=只 warn/error 2=只 error 3=静默）。
 fn log_level() -> int
-/// 写一行 [INFO][启动ms] msg；级别 >=1 时直接返回（不格式化、不分配）。
+/// 这条级别的日志会不会被输出（`lv`：0=info 1=warn 2=error）。
+/// 调用方要拼昂贵的载荷（JSON、hexdump）时先问一句，省掉无用的分配。
+fn log_enabled(lv: int) -> bool
+/// 输出通道：0=stdout（默认）1=stderr；其他值按 stdout 处理。返回设置后的值。
+fn log_set_sink(kind: int) -> int
+/// 当前输出通道（0=stdout 1=stderr）。
+fn log_sink() -> int
+/// 时间戳模式：0=绝对（默认）1=相对启动毫秒。返回设置后的值。
+fn log_set_time_mode(m: int) -> int
+/// 当前时间戳模式（0=绝对 1=相对）。
+fn log_time_mode() -> int
+/// 时区偏移（分钟，东八区 = 480；默认 0 = UTC）。只影响**显示**，不改变时刻。
+fn log_set_tz_offset(min: int) -> int
+/// 当前时区偏移（分钟）。
+fn log_tz_offset() -> int
+/// 拼一行 `[tag] 时间戳 消息`（不含换行）。时间戳形态由 `log_set_time_mode` 决定。
+/// 需要自己决定去向（文件 / 网络 / 测试断言）时用它，再用 `log_emit` 输出。
+fn log_format(tag: str, msg: str) -> str
+/// 在 `log_format` 的行尾追加 `k=v` 字段（`kv` 是交替的 key/value 串）。
+fn log_format_kv(tag: str, msg: str, kv: vec[str]) -> str
+/// 把一行写到当前通道（stdout / stderr）。**不加换行**——换行由 print/eprint 补。
+/// 写操作在进程级锁内，多线程同时写不会让两行交错。
+fn log_emit(line: str)
+/// 写一行 `[INFO] 时间戳 消息`；级别 >=1 时直接返回（不格式化、不分配）。
 fn log_info(msg: str)
-/// 写一行 [WARN][启动ms] msg；级别 >=2 时跳过。
+/// 写一行 `[WARN] 时间戳 消息`；级别 >=2 时跳过。
 fn log_warn(msg: str)
-/// 写一行 [ERROR][启动ms] msg；级别 >=3（静默）时跳过。
+/// 写一行 `[ERROR] 时间戳 消息`；级别 >=3（静默）时跳过。
 fn log_error(msg: str)
-/// log_kv(tag, msg, kv)：结构化字段（v1.17g）。
-/// kv 是**交替**的 key/value 串（k1,v1,k2,v2,...），行格式：
-///   [INFO][启动ms] msg k1=v1 k2=v2
-/// 值非 str 时调用方先 to_str()（与 log_info 同约定）。
+/// 带结构化字段的 INFO 行：`[tag] 时间戳 消息 k1=v1 k2=v2`。
+/// `kv` 是**交替**的 key/value 串；值非 str 时调用方先 `to_str()`。
 fn log_kv(tag: str, msg: str, kv: vec[str]) -> int
+/// 指定级别的结构化行（`lv`：0=info 1=warn 2=error），级别不够时整行跳过。
+fn log_kv_lv(lv: int, tag: str, msg: str, kv: vec[str]) -> int
+```
+
+### `std/logfile.qma`
+
+日志文件通道 + 按大小轮转（攒批写 + 共享打开可 tail；Windows PE）
+
+```quelmara
+/// 打开（或续写）`path`，并设定轮转策略：`max_bytes <= 0` 不轮转，
+/// `keep` 是保留的备份份数（`.1` … `.keep`）。成功返回 0，失败返回 -1
+/// （失败后 `logf_active()` 为 false，写日志是空操作）。
+fn logf_open(path: str, max_bytes: int, keep: int) -> int
+/// 冲刷缓冲（一次 WriteFile）。0 成功 / -1 失败。
+fn logf_flush() -> int
+/// 冲刷并关闭。0 成功 / -1 失败（缓冲写不进去时返回 -1，但句柄照样关）。
+fn logf_close() -> int
+/// 当前是否有一个可用通道（打开成功且没关）。
+fn logf_active() -> bool
+/// 当前文件的逻辑字节数（已落盘 + 缓冲里还没写的）。
+fn logf_size() -> int
+/// 累计轮转次数（跨多次打开累计，便于测试与监控断言）。
+fn logf_rotations() -> int
+/// 同时往 `std/log` 的通道（stdout/stderr）打一份：1 开 / 0 关。
+fn logf_tee(on: int) -> int
+/// 写一行（不加级别前缀，`tag` 由调用方给）。0 成功 / -1 失败。
+fn logf_line(tag: str, msg: str) -> int
+/// INFO 行；级别 >=1 时跳过。
+fn logf_info(msg: str)
+/// WARN 行；级别 >=2 时跳过。
+fn logf_warn(msg: str)
+/// ERROR 行；级别 >=3（静默）时跳过。
+fn logf_error(msg: str)
+/// 带结构化字段的 INFO 行（`kv` 是交替的 key/value 串）。0 成功 / -1 失败。
+fn logf_kv(tag: str, msg: str, kv: vec[str]) -> int
 ```
 
 ### `std/lru.qma`

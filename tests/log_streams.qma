@@ -1,0 +1,15 @@
+// log_streams.qma：std/log 的通道分流（v2.03 夹具）
+// stdout 只该有 out-line，stderr 只该有 err-line —— 由 run_win_tests.py 的
+// test_log_streams() 分开断言。程序自己不断言（它看不到自己的两个流）。
+module log_streams
+
+import std.log
+
+fn main() {
+    log_info("out-line")
+    log_set_sink(1)
+    log_warn("err-line")
+    log_set_sink(0)
+    log_info("out-line-2")
+    print("done")
+}

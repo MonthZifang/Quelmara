@@ -711,7 +711,7 @@ alpha = "registry|path:../qreg|1.2.0|<sha256>|<1.2.0>|<tree>|beta@^1.0;gamma@~2.
 
 | 目录 | 内容 |
 |---|---|
-| `tests/*.qma` | 142 个正向夹具，多数用 `assert` 自校验 |
+| `tests/*.qma` | 144 个正向夹具，多数用 `assert` 自校验 |
 | `tests/bad/*.qma` | 67 个负向夹具，**必须编译失败**（工作区口径；HEAD 为 70，差 3 个 v1.96 能力翻转后失效、待决定去留的旧夹具） |
 | `examples/*.qma` | 18 个可运行示例 |
 | `bench/*.qma` | 24 个基准 |

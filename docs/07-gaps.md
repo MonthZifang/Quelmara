@@ -45,7 +45,7 @@
 | IPv6 | socket 家族改造（AF_INET6 + sockaddr_in6 + 字面量解析） | 现代部署基本要求 |
 | TCP 批量收发 | 只有单次 `tcp_send/recv` | 高吞吐场景 syscall 太多 |
 | 可靠 UDP | UDP 四件之上未做 | 游戏/实时传输 |
-| 日志 | 无 stderr 通道、无轮转、无绝对时间戳（级别过滤 v1.19 已补） | 生产可观测性 |
+| 日志 | ✅ v2.03：**`std/log`**（级别过滤 / **绝对时间戳**（RFC 3339 毫秒 + 时区偏移，同一毫秒内复用缓存）/ **stdout·stderr 双通道** / 结构化 `k=v` 字段 / 每行持锁不交错）+ **`std/logfile`**（追加写 + **按大小轮转** `.1`…`.keep` + 64 KB 攒批 + `logf_tee` 同时打控制台 + 共享打开可边写边 tail）。边界：文件通道走 `std/fs`，**仅 Windows PE**；攒批的崩溃窗口最多 64 KB（要即时落盘调 `logf_flush`，掉电仍要 `fs_sync`）；不做 syslog/网络输出、不做压缩归档、级别不能热加载 | 生产可观测性：日志能对上外部系统的时钟，stdout 留业务、stderr 留诊断，文件自己滚动；写路径 434 ns/行（173 MB/s），被过滤的行 2 ns |
 | 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠；**f64 打印已修（v1.51）**：定点/科学计数按 C 后端口径逐位一致（`__f64_to_str` 有限值路径漏长度前缀已补），仍缺最短往返表示（grisu/ryu） |
 | 数学 | ✅ v1.47：`exp`/`log`/`log2`/`log10`/`pow`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`hypot` + 常数助手（Cody–Waite 双字归约；sin/cos 误差随 |x|·1.1e-16 增长，多字 π 归约未做） | 图形、统计、复利 |
 | 哈希 | ✅ v1.35：SHA-1 / SHA-256 / FNV-1a 32/64 / MD5（仅兼容用途）；✅ v1.53：**SHA-512 / SHA-384 + HMAC-SHA512** + **CRC-64/XZ**（FIPS 180-4 / RFC 4231 / ECMA-182 向量全过） | ✅ v1.55：**BLAKE2b**（RFC 7693，含 keyed 与变长输出）；仍无 SHA-512/224、SHA-3 |

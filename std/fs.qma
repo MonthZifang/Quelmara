@@ -60,6 +60,18 @@ fn _MoveFileExA(from: int, to: int, flags: int) -> bool
 /// `mode`：`"r"` 只读（必须存在）/ `"w"` 读写并截断 / `"a"` 读写并定位到末尾
 /// （不存在则新建）。
 pub fn fs_open(path: str, mode: str) -> int {
+    return _open_share(path, mode, 0)
+}
+
+/// 与 `fs_open` 同形，但**允许别人同时读**（`FILE_SHARE_READ|FILE_SHARE_WRITE`）。
+/// 给"边写边 tail"的场景用（`std/logfile` 就是它）：独占打开的日志文件
+/// 没法被 `tail -f` 或另一个进程读到刚写进去的内容。
+/// 代价是并发写不设防——两个进程往同一个文件写会交错，要独占安全就用 `fs_open`。
+pub fn fs_open_shared(path: str, mode: str) -> int {
+    return _open_share(path, mode, 3)
+}
+
+fn _open_share(path: str, mode: str, share: int) -> int {
     let mut access = _GEN_READ
     let mut disp = _OPEN_EXISTING
     let mut at_end = 0
@@ -71,7 +83,7 @@ pub fn fs_open(path: str, mode: str) -> int {
         disp = _OPEN_ALWAYS
         at_end = 1
     }
-    let h = _CreateFileA(cstr(path), access, 0, 0, disp, _ATTR_NORMAL, 0)
+    let h = _CreateFileA(cstr(path), access, share, 0, disp, _ATTR_NORMAL, 0)
     if h == -1 {
         return -1
     }
