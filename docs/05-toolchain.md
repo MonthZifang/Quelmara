@@ -632,6 +632,36 @@ python tools/dev/net_bench.py echo --conns 32 --reqs 200 --threads 4   # 吞吐
 多核标定用 `bench/net_cpu_bench.qma`（handler 里烧固定 CPU，吞吐随 `io_threads` 走）；
 改 `[net] io_threads` 后重编才能生效——它是**编译期常量**。
 
+### 1.10 原生驱动器 `qlm.exe`（v2.13）
+
+`bootstrap/driver/qlm_drv.qma` 编译出的 `build/qlm.exe` 把**入口**从 Python 换成
+Quelmara：先在原生代码里判"输入有没有变"，没变直接复用产物，变了才委托 stage-0。
+动机是实测的启动成本——本机 `python -c pass` 561 ms、`import qlm_native` 1740 ms，
+而"源码没动"时编译器其实无事可做（数字见 `06-status.md` §3.24）。
+
+```bash
+python tools/stage0/qlm_cli.py build bootstrap/driver/qlm_drv.qma --target win -o build/qlm.exe
+build/qlm.exe run examples/hello.qma      # 变则编、不变则直接跑（开发主循环）
+build/qlm.exe build examples/hello.qma    # 只保证产物最新（不跑）
+build/qlm.exe stat examples/hello.qma     # 打印闭包、各输入 mtime、判定与自身耗时
+build/qlm.exe version
+```
+
+**判定规则**（宁可重编，不可给旧产物）：产物 `build/.drv/<源路径转义>.exe` 比
+**全部输入**都新就复用；输入 = 源文件 + 递归 `import` 闭包 + 编译器 5 个核心 `.py`
++ `Quelmara.toml`。闭包里出现**解析不了的模块**（`src/` 根、第三方包）→ 一律重编。
+`--force` / `-f` 跳过判定直接委托。
+
+**边界**：
+
+- **它不是编译器**：类型推断 / 降级 / 优化 / 编码 / PE 写出仍在 stage-0（组件自举进度见
+  `06-status.md` §4）。它自举的是驱动器，不碰语义。
+- 闭包解析只认 `std.*` 与同目录兄弟模块；解析不了就重编（fail-safe）。
+- 判新鲜度用 **mtime** 而不是内容哈希：读 1 MB 源码算哈希在原生侧也要十几毫秒，
+  而"改编译器必然改 mtime"这条前提在开发循环里成立。
+- 命令行里的路径必须转成 `\\`：`system()` 走 cmd.exe，不认 `build/hello.exe`
+  （实测报"不是内部或外部命令"并把退出码吞成 1）。
+
 ## 2. 配置文件 `Quelmara.toml`
 
 从源文件目录向上查找（以及 cwd），**最近的一份生效**；缺失则用默认值。
@@ -857,7 +887,7 @@ alpha = "registry|path:../qreg|1.2.0|<sha256>|<1.2.0>|<tree>|beta@^1.0;gamma@~2.
 
 | 目录 | 内容 |
 |---|---|
-| `tests/*.qma` | 148 个正向夹具，多数用 `assert` 自校验（v2.10 实测口径；含 `t130_router_dispatch` / `t131_timer` / `t140_net6`） |
+| `tests/*.qma` | 150 个正向夹具，多数用 `assert` 自校验（v2.13 口径；含 `t130_router_dispatch` / `t132_timer` / `t140_net6` / `t141_vecindex` / `t142_exitcode`） |
 | `tests/bad/*.qma` | 68 个负向夹具，**必须编译失败**（v2.12 新增 `net_serve_builtin`：reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断） |
 | `examples/*.qma` | 19 个可运行示例 |
 | `bench/*.qma` | 32 个基准（v2.10 `http_router_bench`；v2.12 新增 `echo_bench`（无日志的 reactor echo 服务端）与 `net_cpu_bench`（handler 烧固定 CPU，用于多核标定）） |

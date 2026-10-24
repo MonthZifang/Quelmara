@@ -842,7 +842,7 @@ fn make_adder(k: int) -> closure {          // 闭包逃逸：环境在堆上
 |---|---|
 | `print(x)` | 输出 + 换行，接受 int/str/f64/bool |
 | `eprint(x)` | 输出到 stderr |
-| `exit(code)` | 退出进程 |
+| `exit(code)` | 退出进程。`code` 可以是字面量也可以是**运行期值**（v2.13 修：此前 vreg 号被当立即数，`exit(变量)` 静默退 0，见 `07-gaps.md` §7.16） |
 | `args()` / `arg(i)` | 命令行参数（`args()[0]` 起） |
 | `cores()` | 物理核数 |
 | `assert(cond, msg)` | 失败 → stderr + 退出码 1 |

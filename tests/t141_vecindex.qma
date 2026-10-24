@@ -1,0 +1,73 @@
+// t141_vecindex.qma —— vec[T] 下标（v2.13）
+//
+// 背景：文档一直写 `v[i]`，但 eval 的下标分支只有"定长数组 / 切片 / str"三条路，
+// vec 句柄落到最后就报 `下标只能用于定长数组、切片或 str`——**局部变量和形参都不行**，
+// 于是 `std/sort.qma`（整篇 `v[i]` 的快排）根本编不出来，而没人发现是因为
+// 没有测试 import 它。v2.13 补上 vec 分支（降级同 `.get(i)`，越界由 __vec_get
+// fail-fast），这个夹具把四种形态都钉住：局部 / 形参 / 嵌套 vec / str 与聚合元素。
+module t141
+
+struct P {
+    x: int
+    y: int
+}
+
+fn head(v: vec[int]) -> int {
+    return v[0]
+}
+
+fn sum_all(v: vec[int]) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < len(v) {
+        s = s + v[i]
+        i = i + 1
+    }
+    return s
+}
+
+fn main() {
+    // 1) 局部 vec
+    let a = vec[int].new(4)
+    a.push(10)
+    a.push(20)
+    a.push(30)
+    assert(a[0] == 10, "local-0")
+    assert(a[2] == 30, "local-2")
+    assert(a[len(a) - 1] == 30, "local-last")
+
+    // 2) vec 形参（std/sort 的写法）
+    assert(head(a) == 10, "param-0")
+    assert(sum_all(a) == 60, "param-loop")
+
+    // 3) 嵌套 vec：`rows[0][0]` 要逐层重挂类型标签
+    let rows = vec[vec[int]].new(2)
+    let r0 = vec[int].new(2)
+    r0.push(7)
+    r0.push(8)
+    rows.push(r0)
+    assert(rows[0][0] == 7, "nested")
+    assert(rows[0][1] == 8, "nested-1")
+
+    // 4) str 元素：下标要带 str 标记，len/拼接才认
+    let names = vec[str].new(2)
+    names.push("abc")
+    names.push("de")
+    assert(names[0] == "abc", "str-eq")
+    assert(len(names[1]) == 2, "str-len")
+    assert(names[0] + names[1] == "abcde", "str-cat")
+
+    // 5) 聚合元素：按值拷进临时槽（同 .get 的 __vec_get_n 路径）
+    let ps = vec[P].new(2)
+    ps.push(P { x: 1, y: 2 })
+    assert(ps[0].x == 1, "agg-x")
+    assert(ps[0].y == 2, "agg-y")
+
+    // 6) 下标写在表达式里（不是 let 的目标），也要能用
+    let b = vec[int].new(2)
+    b.push(5)
+    b.push(6)
+    assert(b[0] + b[1] == 11, "expr")
+
+    print("vecindex ok")
+}

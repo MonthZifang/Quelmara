@@ -13,7 +13,7 @@
 | 泛型 struct / 泛型方法 / 泛型 enum | ✅ v1.63 | **泛型 struct**（解析期单态化 `Box[int]` → `Box__int`）；**泛型方法**（`impl Box[int] : Iface` 具体实例 + `impl Box[T] : Iface` 模板按实例展开成 `Box__X__m`，静态派发与 vtable 都通）；**泛型 enum**（`Opt[int]` 现场合成枚举，构造/模式/穷尽性按实例检查，嵌套实例与容器元素可用）。边界：实参须具名类型；泛型函数里 `Box[T]`/`Opt[T]` fail-fast；泛型 impl 泛型 enum 未做 | 通用容器与自定义和类型（Opt/Either/Tree）都能写；库层不用再按类型手写特化 |
 | 类型约束（trait bound） | ✅ v1.61 | **能力约束** `Ord`/`Eq`/`Num`/`Bit` + **接口约束**（`impl T : Iface` 表校验）：声明期查"模板体不超过约束"，实例化期查"实参满足约束"，没写约束的模板按体内实际运算核对具体类型；泛型 struct 只接受能力约束 | 违反在调用点编译失败（此前"T 须支持 <"只是文档约定，struct 实参被静默按地址比较）；聚合（struct/enum）不满足 `Eq`，见 §7.6 |
 | `map[K]V` | ✅ v1.41 | V 支持 int/bool/str + 具名 struct/enum（值槽按 agg 布局 N 字，set/get 按值拷入拷出）；**键仍限标量**；复合容器（vec/map）作值不做（需 mapinner 标签链） | 配置表/符号表不再拆平行 map |
-| `vec[T]` | ✅ v1.37 | 标量/str/具名聚合/嵌套 vec（任意深度）/map 句柄全支持 | 元素即用即取，无扁平化成本 |
+| `vec[T]` | ✅ v1.37 | 标量/str/具名聚合/嵌套 vec（任意深度）/map 句柄全支持；**下标 `v[i]` v2.13 才真的能编**（此前只有 `.get(i)` 可用，`std/sort` 因此编不出来，见 §7.15） | 元素即用即取，无扁平化成本 |
 | struct 内嵌套聚合 | ✅ v1.39 | 字段可装 vec/map/chan/slice/struct——vec/map/chan 按句柄 1 槽、slice 按 2 槽视图；方法/下标/派发全部可用 | 无（句柄语义即设计） |
 | 函数值 | ✅ v1.42 | `callr` 8 参 + struct/slice 实参（x86-64 第 7 参起走栈传参；A64 用满 X0-X7，>8 fail-fast）；裸函数名**无捕获**（捕获用闭包，见下行）；聚合返回值的目标不可间接调用 | 回调带聚合载荷可行；闭包是独立条目（v1.95 已绿） |
 | 所有权检查 | ✅ v1.84 | rc 线性（use-after-drop / double-drop / move-then-use + 泄漏警告）+ **视图生命周期**（本帧栈视图从 return / 堆容器 / spawn 逃逸即报错，含结构体字段的污染传播）+ **写别名**（同基址独立视图区间可能重叠且都被写）+ **跨线程**（rc 句柄、栈视图进 spawn）。不查：多线程写同一堆内存的**数据竞争**、`mem_str` 裸指针来源、跨函数别名（被调方写 `[]T` 形参）。边界与口径见 `02-language.md` §8.3 | 切片/结构体字段的生命周期错误编译期拦下；仍**不是**"Rust 那套借用检查"（没有独占借用，切片零拷贝共享是显式语义） |
@@ -466,6 +466,32 @@ r=140697867661375      ← 把 str 数据指针当 int 原样返回
 - 影响：写错一个实参顺序 = 段错误（v2.07 踩到一次），而不是编译错误。
 - 复核：把上面 4 行存成 `build/tc.qma`，`python tools/stage0/qlm_cli.py run build/tc.qma
   --target win`——能跑出数字就说明这个缺口还在。
+
+### 7.15 已修（v2.13）：`vec[T][i]` 编不过（文档写了两年，实现里没有）
+
+- 现象：`let v = vec[int].new(4); v[0]` → `SyntaxError: 下标只能用于定长数组、
+  切片或 str`。**局部变量和 `vec[T]` 形参都一样**，`.get(i)` 反而是好的。
+- 根因：`eval` 的 `index` 分支只认三条路（`_arr_of` 定长数组 / `_is_slice` 切片 /
+  `_is_str`），vec 句柄落到函数末尾直接 raise——没有第四条。
+- 为什么一直没发现：`std/sort.qma` 整篇是 `v[i]` 的快排，**这个模块根本编不出来**，
+  而没有任何测试 `import std.sort`（§7.13 的"0 导出模块"审计只看了解析，没看降级）。
+- 修法：补第四条路，降级与 `.get(i)` 完全同构（`__vec_get` / `__vec_get_n`，
+  越界由运行时 fail-fast，元素标签按 str / 嵌套 vec / `vec[map]` 三条重挂）。
+- 回归：`tests/t141_vecindex.qma`（局部 / 形参 / 嵌套 / str / 聚合 / 表达式位置 6 组）。
+
+### 7.16 已修（v2.13）：`exit(变量)` 静默退 0（vreg 号被当立即数）
+
+- 现象：`fn main() { let c = 3; exit(c) }` 的进程退出码是 **0**，不是 3。
+  `exit(3)`（字面量）却是对的——所以只看字面量的用例全绿。
+- 根因：`emit_exit(fn, code)` 的实现是
+  `arg = ("imm", code) if isinstance(code, int) else code`——而 **vreg 号也是 int**，
+  于是运行期值被当成立即数（vreg 0 → 退出码 0）。
+- 影响：任何"把错误码算出来再退出"的程序（驱动器、测试脚本、CLI）都静默退 0；
+  `assert` / 越界 / panic 走的是字面量 1，所以没暴露。
+- 修法：裸 int 一律按 **vreg** 解释，立即数必须写成 `("imm", n)`；14 个内部调用点
+  改成显式 imm。
+- 回归：`tests/t142_exitcode.qma` + `run_win_tests.py::test_exitcode()`（期望 42，
+  且 `exit` 之前的输出已刷出、之后的语句不执行）。
 
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。

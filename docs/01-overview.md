@@ -79,7 +79,7 @@ fn main() {
 ├── tests/                 # .qma 回归 + 负向夹具 + 对拍/回归脚本
 ├── std/                   # 标准库模块（.qma 源码，编译期合并）
 │   └── net/               # core.qma（槽位层）/ reactor.qma（IOCP 事件循环）/ udp.qma
-├── bootstrap/             # 自举层：lexer/ + parser/（Quelmara 写的）
+├── bootstrap/             # 自举层：lexer/ + parser/ + driver/（Quelmara 写的）
 ├── tools/
 │   ├── stage0/            # Python 引导层（当前唯一完整编译器）
 │   ├── dev/               # 门禁、自举进度、推送、迁移脚本
@@ -100,6 +100,7 @@ fn main() {
 | `tools/stage0/qlm_cli.py` | 命令行驱动 |
 | `bootstrap/lexer/qlm_lex.qma` | 自举词法器（已对拍通过） |
 | `bootstrap/parser/qlm_parse.qma` | 自举声明级 parser（已对拍通过） |
+| `bootstrap/driver/qlm_drv.qma` | **原生驱动器**（v2.13）：`qlm run/build/stat`，判输入新鲜度、委托 stage-0，见 `05-toolchain.md` §1.10 |
 | `std/net/reactor.qma` | 服务端事件循环（IOCP reactor，v2.12 起由 Quelmara 实现；`net_serve` 在这里，不再是内建） |
 
 各模块的**行数、职责边界、要改它当什么**见 [`04-compiler.md`](04-compiler.md) §2；

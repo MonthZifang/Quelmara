@@ -1,0 +1,23 @@
+// t142_exitcode.qma —— exit(运行期值) 必须成为真实退出码（v2.13）
+//
+// 旧行为：`emit_exit` 把裸 int（**vreg 号**）当成立即数，于是 `exit(变量)`
+// 静默退 0——`let c = 3; exit(c)` 退的是 vreg 0，`f(4)` 里 `exit(c)` 也是 0。
+// 内部调用点（assert / 越界 / panic）传的都是字面量 1，所以只有"退出码是
+// 运行期算出来的"这一条路坏，回归从来没覆盖到（t142 就是补这条）。
+// 期望退出码 42：见 tests/run_win_tests.py 的 test_exitcode()。
+fn half(n: int) -> int {
+    return n / 2
+}
+
+fn pick(flag: bool) -> int {
+    if flag {
+        exit(half(84))
+    }
+    return 0
+}
+
+fn main() {
+    print("before exit")
+    pick(true)
+    print("not reached")
+}

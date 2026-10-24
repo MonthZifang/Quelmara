@@ -1,0 +1,389 @@
+// bootstrap/driver/qlm_drv.qma —— 原生入口 / 构建驱动器（v2.13，Quelmara 写）
+//
+// ## 为什么要有它
+//
+// `quelmara build x.qma` 今天的第一步是 **Python 解释器启动**：本机实测
+// `python -c pass` 561 ms、`import qlm_native` 1740 ms、编译 `examples/hello.qma`
+// 2136 ms（连"缓存命中"都要 1071 ms，因为命中也得先把 34k 行 Python 读进来）。
+// 而"源码和依赖都没动"时编译器其实无事可做——那两秒全花在启动上。
+//
+// 这个二进制把**入口**从 Python 换成 Quelmara：先在原生代码里算一遍
+// 「输入有没有变」（源文件 + import 闭包 + 编译器自身 + Quelmara.toml 的 mtime），
+// 没变就直接复用上次的产物（毫秒级），变了才把真正的编译交给 stage-0。
+//
+// ## 它不是编译器
+//
+// 代码生成还在 stage-0（自举 2/9，见 docs/06-status.md §4）。它自举的是**驱动器**：
+// 找仓库根、解析 import 闭包、判新鲜度、调子进程、传播退出码。这是"把 Python
+// 引导层换成自己语言"的第一块，也是最省事的一块——因为它不碰语义。
+//
+// ## 判新鲜度的规则（宁可重编，不可给旧产物）
+//
+//   产物 build/.drv/<源路径转义>.exe 比**全部输入**都新 -> 直接复用
+//   输入 = 源文件 + 递归 import 闭包 + 编译器 5 个核心 .py + Quelmara.toml
+//   闭包里出现**解析不了的模块**（src/ 根、第三方包）-> 一律重编（fail-safe）
+//
+// 编译器文件按 mtime 而不是内容判：改 qlm_native.py 必然改 mtime，
+// 而读 1 MB 源码算哈希在原生侧也要十几毫秒，不划算。
+//
+// ## 用法
+//
+//   qlm run <src.qma>        变则编、不变则直接跑（开发主循环）
+//   qlm build <src.qma>      只保证产物是最新的（不跑）
+//   qlm stat <src.qma>       打印闭包与新鲜度判定（排查用）
+//   qlm version              版本
+//   任意子命令加 --force/-f   忽略新鲜度，强制走 stage-0
+import std.core
+import std.mem
+import std.path
+
+@ffi("kernel32.dll", "GetFileAttributesExA")
+fn _GetFileAttributesExA(name: int, level: int, data: int) -> bool
+
+@ffi("kernel32.dll", "GetCurrentDirectoryA")
+fn _GetCurrentDirectoryA(n: int, buf: int) -> int
+
+@ffi("ucrtbase.dll", "system")
+fn _system(cmd: int) -> int
+
+const DRIVER_VERSION = "2.13.0"
+const UNRESOLVED_W = 20      // static_word(20)：闭包里出现解析不了的模块
+
+// 编译器自身的核心文件（改它们必须重编）
+const CFG = "/Quelmara.toml"
+const CC1 = "/tools/stage0/qlm_cli.py"
+const CC2 = "/tools/stage0/qlm.py"
+const CC3 = "/tools/stage0/qlm_native.py"
+const CC4 = "/tools/stage0/qlm_opt.py"
+const CC5 = "/tools/stage0/qlm_pe.py"
+
+// ---------------------------------------------------------------------------
+// 小工具
+// ---------------------------------------------------------------------------
+
+/// 文件最后写入时间（FILETIME，100 ns 单位）；不存在返回 -1。
+/// 用 GetFileAttributesExA 一次调用拿全（不 CreateFile，不占句柄）。
+fn _mt(p: str) -> int {
+    let b = mem_alloc(64)
+    mem_zero(b, 64)
+    if !_GetFileAttributesExA(cstr(p), 0, b) {
+        return -1
+    }
+    let lo = mem_load32(b, 20)          // ftLastWriteTime.dwLowDateTime
+    let hi = mem_load32(b, 24)          // ftLastWriteTime.dwHighDateTime
+    return (hi << 32) | lo
+}
+
+fn _cwd() -> str {
+    let b = mem_alloc(1024)
+    mem_zero(b, 1024)
+    if _GetCurrentDirectoryA(1024, b) <= 0 {
+        return "."
+    }
+    return cstr_read(b)
+}
+
+/// 从 cwd 向上找 Quelmara.toml（最多 12 层）；找不到就退回 cwd。
+fn _root() -> str {
+    let mut d = _cwd()
+    let mut i = 0
+    while i < 12 {
+        if file_exists(d + CFG) {
+            return d
+        }
+        let up = path_dir(d)
+        if up == d || len(up) == 0 {
+            break
+        }
+        d = up
+        i = i + 1
+    }
+    return _cwd()
+}
+
+/// t 从 off 起是否以 p 开头
+fn _at(t: str, off: int, p: str) -> bool {
+    let n = len(t)
+    let m = len(p)
+    if off < 0 || off + m > n {
+        return false
+    }
+    let mut i = 0
+    while i < m {
+        if t[off + i] != p[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn _has(v: vec[str], s: str) -> bool {
+    let mut i = 0
+    while i < len(v) {
+        if v[i] == s {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// 把路径转成文件名安全的形式（非字母数字 -> '_'），给产物命名用。
+/// 走 chr 拼接而不是往 str_alloc 里写字节：str 不可变，逐字节改写要绕
+/// mem_ptr，代价比这点拼接大。
+fn _san(s: str) -> str {
+    let n = len(s)
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        let c = s[i]
+        let keep = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+        if keep {
+            out = out + chr(c)
+        } else {
+            out = out + "_"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 命令行里用的路径：把 `/` 换成 `\\`。
+/// cmd.exe 不认 `build/hello.exe`（实测报"不是内部或外部命令"、退出码变 1），
+/// 而仓库内部的路径统一用 `/`（Python 与 Win32 API 都收），所以只在拼命令行时转。
+fn _win(s: str) -> str {
+    let n = len(s)
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        if s[i] == 47 {
+            out = out + "\\"
+        } else {
+            out = out + chr(s[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// import 闭包
+// ---------------------------------------------------------------------------
+
+/// 扫一个源文件里的 `import a.b.c` 行，返回模块名（去引号前的裸名字）。
+/// 只做**行首**匹配：注释里的 import 不会命中，字符串里恰好行首的会命中
+/// （多算一个输入只会让缓存更保守，不会给旧产物）。
+fn _imports_of(path: str) -> vec[str] {
+    let out = vec[str].new(4)
+    if !file_exists(path) {
+        return out
+    }
+    let t = read_text(path)
+    let n = len(t)
+    let mut i = 0
+    while i < n {
+        let mut j = i
+        while j < n && (t[j] == 32 || t[j] == 9) {
+            j = j + 1
+        }
+        if _at(t, j, "import") && j + 6 < n && (t[j + 6] == 32 || t[j + 6] == 9) {
+            let mut k = j + 6
+            while k < n && (t[k] == 32 || t[k] == 9) {
+                k = k + 1
+            }
+            let mut m = k
+            while m < n && t[m] != 32 && t[m] != 9 && t[m] != 10 && t[m] != 13 {
+                m = m + 1
+            }
+            if m > k {
+                out.push(substr(t, k, m - k))
+            }
+        }
+        while i < n && t[i] != 10 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 模块名 -> 文件路径：`std.a.b` 走仓库 std/，其余当同目录兄弟模块。
+/// 解析不了返回空串（调用方据此强制重编）。
+fn _modfile(mod: str, root: str, dir: str) -> str {
+    let m = len(mod)
+    if _at(mod, 0, "std.") {
+        let rel = substr(mod, 4, m - 4)
+        // 点 -> 斜杠（逐段拼，避免替换函数）
+        let mut p = root + "/std/"
+        let mut i = 0
+        while i < len(rel) {
+            if rel[i] == 46 {
+                p = p + "/"
+            } else {
+                p = p + chr(rel[i])
+            }
+            i = i + 1
+        }
+        let f = p + ".qma"
+        if file_exists(f) {
+            return f
+        }
+        // std.a.b 也可能是 std/a/b/ 下的默认模块？本仓库没有这种约定，直接算解析失败
+        return ""
+    }
+    let f = dir + "/" + mod + ".qma"
+    if file_exists(f) {
+        return f
+    }
+    return ""
+}
+
+/// 源文件的完整输入集（含编译器自身与配置）。解析不了的模块置 UNRESOLVED 标志。
+fn _closure(src: str, root: str) -> vec[str] {
+    mem_store64(static_word(UNRESOLVED_W), 0, 0)
+    let out = vec[str].new(8)
+    out.push(src)
+    let mut i = 0
+    while i < len(out) {
+        let f = out[i]
+        let dir = path_dir(f)
+        let mods: vec[str] = _imports_of(f)
+        let mut k = 0
+        while k < len(mods) {
+            let p = _modfile(mods[k], root, dir)
+            if len(p) == 0 {
+                mem_store64(static_word(UNRESOLVED_W), 0, 1)
+            } else if !_has(out, p) {
+                out.push(p)
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    out.push(root + CFG)
+    out.push(root + CC1)
+    out.push(root + CC2)
+    out.push(root + CC3)
+    out.push(root + CC4)
+    out.push(root + CC5)
+    return out
+}
+
+fn _newest(v: vec[str]) -> int {
+    let mut mx = 0
+    let mut i = 0
+    while i < len(v) {
+        let m = _mt(v[i])
+        if m > mx {
+            mx = m
+        }
+        i = i + 1
+    }
+    return mx
+}
+
+// ---------------------------------------------------------------------------
+// 构建 / 运行
+// ---------------------------------------------------------------------------
+
+fn _artifact(src: str, root: str) -> str {
+    return root + "/build/.drv/" + _san(src) + ".exe"
+}
+
+/// 返回 0 = 产物已是最新（或刚编好）；非 0 = stage-0 的退出码。
+fn _build(src: str, root: str, force: bool) -> int {
+    let art = _artifact(src, root)
+    let dir = root + "/build/.drv"
+    if !file_exists(dir) {
+        fs_mkdir(dir)
+    }
+    let inputs: vec[str] = _closure(src, root)
+    let unresolved = mem_load64(static_word(UNRESOLVED_W), 0) != 0
+    if !force && !unresolved && file_exists(art) && _mt(art) >= _newest(inputs) {
+        return 0
+    }
+    let cmd = _win("python \"" + root + CC1 + "\" build \"" + src +
+                   "\" --target win -o \"" + art + "\"")
+    return _system(cstr(cmd))
+}
+
+fn _stat(src: str, root: str) -> int {
+    let t0 = now_ns()
+    let inputs: vec[str] = _closure(src, root)
+    let art = _artifact(src, root)
+    let newest = _newest(inputs)
+    let amt = _mt(art)
+    print("root      : " + root)
+    print("artifact  : " + art)
+    if !file_exists(art) {
+        print("            (未生成)")
+    }
+    print("inputs    : " + len(inputs).to_str())
+    let mut i = 0
+    while i < len(inputs) {
+        print("  " + inputs[i] + "  mt=" + _mt(inputs[i]).to_str())
+        i = i + 1
+    }
+    let unresolved = mem_load64(static_word(UNRESOLVED_W), 0) != 0
+    if unresolved {
+        print("判定      : 重编（闭包里有解析不了的模块）")
+    } else if amt >= 0 && amt >= newest {
+        print("判定      : 复用（产物比全部输入都新）")
+    } else {
+        print("判定      : 重编（输入比产物新）")
+    }
+    print("判定耗时  : " + ((now_ns() - t0) / 1000).to_str() + " us（不含进程创建）")
+    return 0
+}
+
+fn _usage() {
+    eprint("用法: qlm run|build|stat <src.qma> [--force]   |   qlm version")
+}
+
+fn main() {
+    let a = args()
+    if len(a) < 1 {
+        _usage()
+        exit(2)
+    }
+    if a[0] == "version" {
+        print("qlm 原生驱动器 " + DRIVER_VERSION + "（编译仍由 stage-0 承担）")
+        return
+    }
+    if len(a) < 2 {
+        _usage()
+        exit(2)
+    }
+    let cmd = a[0]
+    let src = a[1]
+    let mut force = false
+    let mut i = 2
+    while i < len(a) {
+        if a[i] == "--force" || a[i] == "-f" {
+            force = true
+        }
+        i = i + 1
+    }
+    if !file_exists(src) {
+        eprint("qlm: 找不到源文件 " + src)
+        exit(2)
+    }
+    let root = _root()
+    if cmd == "stat" {
+        exit(_stat(src, root))
+    }
+    if cmd != "run" && cmd != "build" {
+        _usage()
+        exit(2)
+    }
+    let code = _build(src, root, force)
+    if code != 0 {
+        exit(code)
+    }
+    if cmd == "build" {
+        return
+    }
+    let art = _artifact(src, root)
+    exit(_system(cstr(_win("\"" + art + "\""))))
+}

@@ -296,6 +296,28 @@ def test_iface_rc():
         else bad(f"iface_rc 输出 {stdout!r}")
 
 
+def test_exitcode():
+    """exit(运行期值) 的退出码必须真的传出去（v2.13）
+
+    此前 emit_exit 把裸 int 当立即数，而 vreg 也是 int——`exit(变量)` 传的是
+    vreg 号，于是 `let c = 3; exit(c)` 静默退 0。内部调用点（assert/越界）
+    都传字面量 1，所以这条路径一直没被测到。
+    """
+    out = os.path.join(ROOT, "build", "win_exitcode.exe")
+    build(os.path.join(ROOT, "tests/t142_exitcode.qma"), out)
+    r = run(out)
+    if r is None:
+        skip("exit 退出码：非 Windows 平台，跳过执行")
+        return
+    rc, stdout, _ = r
+    ok("exit(运行期值) 传播退出码 42") if rc == 42 \
+        else bad(f"exit 退出码 {rc}（期望 42）")
+    ok("exit 之前的输出已刷出") if stdout == b"before exit\n" \
+        else bad(f"exit 输出 {stdout!r}")
+    ok("exit 之后的语句不执行") if b"not reached" not in stdout \
+        else bad("exit 之后仍在执行")
+
+
 def test_assert_fail():
     out = os.path.join(ROOT, "build", "win_assert.exe")
     build(os.path.join(ROOT, "tests/win_assert.qma"), out)
@@ -809,6 +831,8 @@ def main():
     case_selfcheck("t129_ds", "tests/t129_ds.qma")
     # 轮询式定时器（v2.08 重写）：id 序列 / 到期顺序 / cancel / 2000 个扩容
     case_selfcheck("t132_timer", "tests/t132_timer.qma")
+    # vec[T] 下标（v2.13 补实现）：局部 / 形参 / 嵌套 / str / 聚合 / 表达式位置
+    case_selfcheck("t141_vecindex", "tests/t141_vecindex.qma")
     case_selfcheck("t79_sse", "tests/t79_sse.qma")
     case_selfcheck("t80_md5", "tests/t80_md5.qma")
     case_selfcheck("t81_generic_infer", "tests/t81_generic_infer.qma")
@@ -1073,6 +1097,7 @@ def main():
 
     print("== [6] 失败路径（assert） ==")
     test_assert_fail()
+    test_exitcode()
 
     print("== [7] Windows PE × Linux ELF 交叉验证 ==")
     test_cross_verify()

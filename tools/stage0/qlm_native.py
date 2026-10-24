@@ -1361,10 +1361,16 @@ class Lower:
                      ("imm", 0), ("imm", 0), ("imm", 0)])
 
     def emit_exit(self, fn, code):
-        """code 可以是立即数（int / ("imm", n)）或运行期 vreg。"""
+        """code：`("imm", n)` 立即数 / 裸 int = **vreg** / 其它操作数原样传。
+
+        v2.13 修：此前裸 int 被当成立即数，于是 `exit(变量)` 把 **vreg 号**
+        当退出码——`let c = 3; exit(c)` 静默退 0（vreg 0）、`f(4)` 里
+        `exit(c)` 也是 0。内部调用点（assert/越界/panic）传的都是字面量 1，
+        所以只有"退出码是运行期算出来的"这一条路坏，回归也没覆盖到。"""
         if isinstance(code, tuple) and code[0] == "imm":
-            code = code[1]
-        arg = ("imm", code) if isinstance(code, int) else code
+            arg = ("imm", code[1])
+        else:
+            arg = code
         if self.platform == "windows":
             fn.emit("winapi", None, "ExitProcess", [arg])
         else:
@@ -1498,7 +1504,27 @@ class Lower:
                 d = fn.new_v()
                 fn.emit("load8", d, obj, idx)
                 return d
-            raise SyntaxError("下标只能用于定长数组、切片或 str")
+            # vec[T] 下标（v2.13）：文档一直写 `v[i]`，实现里只有定长数组/切片/str
+            # 三条路，vec 句柄落到这里就报错——`std/sort.qma` 因此**整个模块编不过**
+            # （它全是 `v[i]` 的快速排序）。降级同 `.get(i)`：__vec_get 自带越界
+            # fail-fast，元素标签照 .get 的三条重挂路径（str / 嵌套 vec / vec[map]）。
+            if self._is_vec(fn, obj):
+                idx = self.eval(e[2], fn, env)
+                elem = self._vec_elem(fn, obj)
+                if isinstance(elem, tuple) and elem[0] == "agg":
+                    dst = self.alloc_struct(fn, elem[1])
+                    fn.emit("call", None, "__vec_get_n", [obj, idx, dst])
+                    return self._mark_struct(fn, dst, elem[1])
+                d = fn.new_v()
+                fn.emit("call", d, "__vec_get", [obj, idx])
+                if elem == "str":
+                    self._mark_str(fn, d)
+                if isinstance(elem, tuple) and elem[0] == "vecinner":
+                    self._mark_vec(fn, d, elem[1])
+                if isinstance(elem, tuple) and elem[0] == "mapinner":
+                    self._mark_map(fn, d, elem[1], elem[2])
+                return d
+            raise SyntaxError("下标只能用于定长数组、切片、vec 或 str")
         if k == "spawn":
             return self.lower_spawn(e[1], fn, env)
         if k == "chanopen":
@@ -3811,7 +3837,7 @@ class Lower:
             # 注意：write 的长度是【字节数】，不是字符数（中文消息必须按 UTF-8 字节计）
             blen = len((msg + "\n").encode("utf-8"))
             self.emit_write(fn, 2, p, ("imm", blen))
-            self.emit_exit(fn, 1)
+            self.emit_exit(fn, ("imm", 1))
             fn.emit("label", l_ok)
             return ("imm", 0)
         if name == "join" and name not in self.fns_ast:
@@ -6221,7 +6247,7 @@ class Lower:
             oom0 = f.new_v()
             f.emit("movaddr", oom0, gid_oom)
             self.emit_write(f, 2, oom0, ("imm", 46))
-            self.emit_exit(f, 1)
+            self.emit_exit(f, ("imm", 1))
             f.emit("label", l_have)
         f.emit("store", ("ga", self.heap_gid), ("imm", 0), h)
         f.emit("store", ("ga", self.bump_gid), ("imm", 0), ("imm", 0))
@@ -6237,7 +6263,7 @@ class Lower:
         oom = f.new_v()
         f.emit("movaddr", oom, gid_oom)
         self.emit_write(f, 2, oom, ("imm", 46))
-        self.emit_exit(f, 1)
+        self.emit_exit(f, ("imm", 1))
         f.emit("label", l_ok)
         if self.platform == "windows":
             # 按 1MB 粒度提交：512MB 的 heap_limit 只在真正用到时才占提交配额。
@@ -6275,7 +6301,7 @@ class Lower:
             bp = f.new_v()
             f.emit("movaddr", bp, gid_b)
             self.emit_write(f, 2, bp, ("imm", len(msg.encode("utf-8"))))
-            self.emit_exit(f, 1)
+            self.emit_exit(f, ("imm", 1))
             f.emit("ret", ("imm", 0))
             self.out.append(f)
 
@@ -6340,7 +6366,7 @@ class Lower:
                 p = f.new_v()
                 f.emit("movaddr", p, gid)
                 self.emit_write(f, 2, p, ("imm", len(msg.encode("utf-8"))))
-                self.emit_exit(f, 1)
+                self.emit_exit(f, ("imm", 1))
 
             f = Fn("__chan_open")
             cap = f.new_v()
@@ -6889,7 +6915,7 @@ class Lower:
             p = f.new_v()
             f.emit("movaddr", p, gid_nf)
             self.emit_write(f, 2, p, ("imm", len(msg_nf.encode("utf-8"))))
-            self.emit_exit(f, 1)
+            self.emit_exit(f, ("imm", 1))
             f.emit("label", l_ok)
             vt = f.new_v()
             f.emit("load", vt, m, ("imm", 6))
@@ -7020,7 +7046,7 @@ class Lower:
             p = f.new_v()
             f.emit("movaddr", p, gid_nf)
             self.emit_write(f, 2, p, ("imm", len(msg_nf.encode("utf-8"))))
-            self.emit_exit(f, 1)
+            self.emit_exit(f, ("imm", 1))
             f.emit("label", l_ok)
             vt = f.new_v()
             f.emit("load", vt, m, ("imm", 6))
@@ -7105,7 +7131,7 @@ class Lower:
             bp = f.new_v()
             f.emit("movaddr", bp, gid_v)
             self.emit_write(f, 2, bp, ("imm", len(msg.encode("utf-8"))))
-            self.emit_exit(f, 1)
+            self.emit_exit(f, ("imm", 1))
             f.emit("ret", ("imm", 0))
             self.out.append(f)
 
@@ -7407,7 +7433,7 @@ class Lower:
             bp = f.new_v()
             f.emit("movaddr", bp, gid_io)
             self.emit_write(f, 2, bp, ("imm", len(msg.encode("utf-8"))))
-            self.emit_exit(f, 1)
+            self.emit_exit(f, ("imm", 1))
             f.emit("ret", ("imm", 0))
             self.out.append(f)
 
@@ -7480,7 +7506,7 @@ class Lower:
             bp = f.new_v()
             f.emit("movaddr", bp, gid_w)
             self.emit_write(f, 2, bp, ("imm", len(msg_w.encode("utf-8"))))
-            self.emit_exit(f, 1)
+            self.emit_exit(f, ("imm", 1))
             f.emit("ret", ("imm", 0))
             self.out.append(f)
 
@@ -7654,7 +7680,7 @@ class Lower:
                 bp = f.new_v()
                 f.emit("movaddr", bp, gid_nf)
                 self.emit_write(f, 2, bp, ("imm", len(msg_n.encode("utf-8"))))
-                self.emit_exit(f, 1)
+                self.emit_exit(f, ("imm", 1))
                 f.emit("ret", ("imm", 0))
                 self.out.append(f)
 
@@ -8201,7 +8227,7 @@ class Lower:
             bp = f.new_v()
             f.emit("movaddr", bp, gid_s)
             self.emit_write(f, 2, bp, ("imm", len(msg.encode("utf-8"))))
-            self.emit_exit(f, 1)
+            self.emit_exit(f, ("imm", 1))
             f.emit("ret", ("imm", 0))
             self.out.append(f)
 
@@ -8435,7 +8461,7 @@ class Lower:
             bp = f.new_v()
             f.emit("movaddr", bp, gid_f)
             self.emit_write(f, 2, bp, ("imm", len(msg.encode("utf-8"))))
-            self.emit_exit(f, 1)
+            self.emit_exit(f, ("imm", 1))
             f.emit("ret", ("imm", 0))
             self.out.append(f)
 
@@ -8913,7 +8939,7 @@ class Lower:
                 bp = f.new_v()
                 f.emit("movaddr", bp, gid_nf)
                 self.emit_write(f, 2, bp, ("imm", len(msg.encode("utf-8"))))
-                self.emit_exit(f, 1)
+                self.emit_exit(f, ("imm", 1))
                 self.out.append(f)
 
             # sockaddr_in 16B：[0]=family(2)|htons(port)<<16，[1]=ip(网络序)
