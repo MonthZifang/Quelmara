@@ -7,7 +7,7 @@
 //
 // ## 它不是什么（重要，别当成"自举完成"）
 //
-// 只覆盖**子集 S6**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
+// 只覆盖**子集 S7**（见 docs/05-toolchain.md §1.11 的覆盖表）。设计上刻意把
 // "链路通 + 后端真"排在"语法全覆盖"前面：后端是自举的承重墙，语法是加法。
 //
 //   支持：fn（int/bool/str 形参与返回，≤4 参）、let/mut（可带类型标注）、赋值、
@@ -17,8 +17,9 @@
 //         字段读写/值语义拷贝）**、**定长数组 [N]T（字面量/下标读写）**、
 //         **enum（声明/构造/载荷）与 match（表达式/语句/`_`/载荷绑定）**、
 //         **vec[T]（new/push/get/len/下标读写，容量固定不扩容）**、
-//         **聚合（struct/enum）作形参与返回值（按值传 + sret）**
-//   不支持：map、f64、泛型、闭包、切片、defer、import（多文件）、宏/反射、
+//         **聚合（struct/enum）作形参与返回值（按值传 + sret）**、
+//         **map[K]V（固定容量线性扫描）**、**≤4 个实参**
+//   不支持：f64、泛型、闭包、切片、defer、import（多文件）、宏/反射、
 //         @ffi、接口、rc、嵌套聚合字段、聚合 print
 //
 // ## 分层（v2.16 重写了后端，前端沿用）
@@ -161,6 +162,7 @@ const E_ENUMCTOR = 52  // a = enum 序号，b = 变体序号，c = 载荷表达�
 const E_MATCH = 53     // a = 被匹配表达式，b = 首个 E_ARM（nx 链），c = 结果类型
 const E_METHOD = 55    // a = 接收者，b = 方法名 id，c = 实参（-1 = 无）
 const E_VECNEW = 56    // a = 元素类型，b = 容量表达式
+const E_MAPNEW = 57    // a = 键类型，b = 容量表达式，c = 值类型
 const E_ARM = 54       // a = 变体序号（-1 = 通配），b = 绑定名 id（-1 = 不绑定），c = 体      // a = 字符串表 id
 
 // 语句
@@ -201,6 +203,7 @@ const TY_VOID = 3
 const TY_STRUCT = 0x1000
 const TY_ENUM = 0x2000
 const TY_VEC = 0x8000        // 0x8000+elem：vec 句柄是标量（8 字节）
+const TY_MAP = 0x10000       // 0x10000+(K<<8)+V：map 句柄也是标量
 const TY_ARRAY = 0x100000
 const ST_STRIDE = 18        // 每个 struct 在 stt 里占 18 字：name, nf, 8*(fname, fty)
 const MAX_FIELD = 8
@@ -535,6 +538,17 @@ fn _type(p: P, pos: vec[int]) -> int {
         }
         return TY_ARRAY + (n.n << 8) + e
     }
+    if t.k == T_NAME && t.s == "map" {
+        _adv(pos)
+        _eat_p(p, pos, P_LBRACK)
+        let kt = _type(p, pos)
+        _eat_p(p, pos, P_RBRACK)
+        let vt = _type(p, pos)
+        if kt >= TY_STRUCT || vt >= TY_STRUCT {
+            _fail(p, pos, "本版 map 的键/值只支持 int/bool/str")
+        }
+        return TY_MAP + (kt << 8) + vt
+    }
     if t.k == T_NAME && t.s == "vec" {
         _adv(pos)
         _eat_p(p, pos, P_LBRACK)
@@ -661,11 +675,19 @@ fn _postfix(p: P, pos: vec[int], base: int) -> int {
             if _is_p(p, pos, P_LPAREN) {
                 _adv(pos)
                 let mut arg = -1
+                let mut arg2 = -1
                 if !_is_p(p, pos, P_RPAREN) {
                     arg = _expr(p, pos)
+                    if _is_p(p, pos, P_COMMA) {
+                        _adv(pos)
+                        arg2 = _expr(p, pos)
+                    }
                 }
                 _eat_p(p, pos, P_RPAREN)
-                e = _node(p, E_METHOD, e, _name_id(p, nm.s), arg)
+                let mid = _node(p, E_METHOD, e, _name_id(p, nm.s), arg)
+                p.nodes.set(mid, Node { op: E_METHOD, a: e, b: _name_id(p, nm.s),
+                                        c: arg, n: arg2, slot: 0, ty: 0, nx: -1 })
+                e = mid
                 continue
             }
             e = _node(p, E_FIELD, e, _name_id(p, nm.s), -1)
@@ -915,6 +937,25 @@ fn _primary(p: P, pos: vec[int]) -> int {
         _eat_p(p, pos, P_RPAREN)
         return _postfix(p, pos, v)
     }
+    if t.k == T_NAME && t.s == "map" && _t(p, pos[0] + 1).k == T_PUNCT &&
+       _t(p, pos[0] + 1).n == P_LBRACK {
+        _adv(pos)
+        _eat_p(p, pos, P_LBRACK)
+        let kt = _type(p, pos)
+        _eat_p(p, pos, P_RBRACK)
+        let vt = _type(p, pos)
+        _eat_p(p, pos, P_DOT)
+        let nm = _cur(p, pos)
+        if nm.k != T_NAME || nm.s != "new" {
+            _fail(p, pos, "map[K]V 之后只支持 .new(n)")
+        }
+        _adv(pos)
+        _eat_p(p, pos, P_LPAREN)
+        let cnt = _expr(p, pos)
+        _eat_p(p, pos, P_RPAREN)
+        let id = _node(p, E_MAPNEW, kt, cnt, vt)
+        return _postfix(p, pos, id)
+    }
     if t.k == T_NAME && t.s == "vec" && _t(p, pos[0] + 1).k == T_PUNCT &&
        _t(p, pos[0] + 1).n == P_LBRACK {
         _adv(pos)
@@ -975,17 +1016,30 @@ fn _primary(p: P, pos: vec[int]) -> int {
         }
         if _is_p(p, pos, P_LPAREN) {
             _adv(pos)
-            let mut a0 = -1
-            let mut a1 = -1
-            if !_is_p(p, pos, P_RPAREN) {
-                a0 = _expr(p, pos)
+            // 实参最多 4 个：b/c/n/slot 四个槽（聚合返回还要占一个寄存器）
+            let args = vec[int].new(4)
+            while !_is_p(p, pos, P_RPAREN) {
+                if len(args) >= 4 {
+                    _fail(p, pos, "实参最多 4 个")
+                }
+                args.push(_expr(p, pos))
                 if _is_p(p, pos, P_COMMA) {
                     _adv(pos)
-                    a1 = _expr(p, pos)
                 }
             }
             _eat_p(p, pos, P_RPAREN)
-            return _postfix(p, pos, _node(p, E_CALL, nid, a0, a1))
+            let mut a0 = -1
+            let mut a1 = -1
+            let mut a2 = -1
+            let mut a3 = -1
+            if len(args) > 0 { a0 = args.get(0) }
+            if len(args) > 1 { a1 = args.get(1) }
+            if len(args) > 2 { a2 = args.get(2) }
+            if len(args) > 3 { a3 = args.get(3) }
+            let cid = _node(p, E_CALL, nid, a0, a1)
+            p.nodes.set(cid, Node { op: E_CALL, a: nid, b: a0, c: a1, n: a2,
+                                   slot: a3, ty: 0, nx: -1 })
+            return _postfix(p, pos, cid)
         }
         return _postfix(p, pos, _node(p, E_VAR, nid, -1, -1))
     }
@@ -1712,6 +1766,7 @@ const OP_COPY = 31     // memcpy(a, b, imm)
 const OP_ZERO = 32     // zero(a, imm)
 const OP_RETAGG = 33   // 聚合返回：memcpy([sret], a, imm)；rax = sret
 const OP_RETSRET = 34  // 兜底返回：只把 rax = sret
+const OP_ZERON = 35    // zero(a, b)：按 b 给的**字节数**清零（动态长度）
 
 struct Ir {
     op: int
@@ -2433,6 +2488,13 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         // 内建 len(s)
         if fc.names.get(nd.a) == "len" && nd.b >= 0 {
             let aty = _ty_of_expr(fc, nd.b)
+            if aty >= TY_MAP && aty < TY_ARRAY {
+                let h = _lower_expr(fc, nd.b)
+                let d = _vnew(fc)
+                fc.vty.set(d, TY_INT)
+                _ir_emit(fc, OP_MOV, d, _vec_field(fc, h, 8), 0, 0)
+                return d
+            }
             if aty >= TY_VEC && aty < TY_ARRAY {
                 let h = _lower_expr(fc, nd.b)
                 let d = _vnew(fc)
@@ -2469,19 +2531,19 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
             sret = sa
             argbase = 1
         }
-        let mut a0 = 0
-        let mut a1 = 0
-        if nd.b >= 0 {
-            a0 = _lower_expr(fc, nd.b)
+        let av = vec[int].new(4)
+        if nd.b >= 0 { av.push(_lower_expr(fc, nd.b)) }
+        if nd.c >= 0 { av.push(_lower_expr(fc, nd.c)) }
+        if nd.n >= 0 { av.push(_lower_expr(fc, nd.n)) }
+        if nd.slot >= 0 { av.push(_lower_expr(fc, nd.slot)) }
+        if len(av) + argbase > 4 {
+            eprint("qlmc: 实参 + sret 超过 4 个寄存器")
+            exit(2)
         }
-        if nd.c >= 0 {
-            a1 = _lower_expr(fc, nd.c)
-        }
-        if a0 > 0 {
-            _ir_emit(fc, OP_ARG, 0, a0, 0, argbase)
-        }
-        if a1 > 0 {
-            _ir_emit(fc, OP_ARG, 0, a1, 0, argbase + 1)
+        let mut ai = 0
+        while ai < len(av) {
+            _ir_emit(fc, OP_ARG, 0, av.get(ai), 0, argbase + ai)
+            ai = ai + 1
         }
         let d = _vnew(fc)
         fc.vty.set(d, fret)
@@ -2532,7 +2594,10 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         return _lower_vecnew(fc, nd)
     }
     if nd.op == E_METHOD {
-        return _lower_vecmethod(fc, nd)
+        return _lower_method(fc, nd)
+    }
+    if nd.op == E_MAPNEW {
+        return _map_new(fc, nd)
     }
     if nd.op == E_ENUMCTOR {
         // 枚举值 = 一个 16 字节区域的地址：[tag][载荷]
@@ -2749,10 +2814,22 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
     if nd.op == E_VECNEW {
         return TY_VEC + nd.a
     }
+    if nd.op == E_MAPNEW {
+        return TY_MAP + (nd.a << 8) + nd.c
+    }
     if nd.op == E_METHOD {
         let rty = _ty_of_expr(fc, nd.a)
+        let m = fc.names.get(nd.b)
+        if rty >= TY_MAP && rty < TY_ARRAY {
+            if m == "get" {
+                return (rty - TY_MAP) & 0xFF
+            }
+            if m == "has" {
+                return TY_BOOL
+            }
+            return TY_INT
+        }
         if rty >= TY_VEC && rty < TY_ARRAY {
-            let m = fc.names.get(nd.b)
             if m == "get" {
                 return rty - TY_VEC
             }
@@ -3547,6 +3624,13 @@ fn _emit_ir(fc: FnCtx, i: int) {
         _addfix(fc.fixes, p, RT_MEMCPY, FK_RT)
         return
     }
+    if op == OP_ZERON {
+        _to_reg(fc, RDI, ins.a)
+        _to_reg(fc, RCX, ins.b)
+        let p = _call_rel(code)
+        _addfix(fc.fixes, p, RT_ZERO, FK_RT)
+        return
+    }
     if op == OP_ZERO {
         _to_reg(fc, RDI, ins.a)
         _mov_imm(code, RCX, ins.imm)
@@ -3748,6 +3832,172 @@ fn _gen_print_bool(ctx: Ctx) {
     _ret(code)
 }
 
+// ---- map（v2.21）：固定容量 + 线性扫描；布局 [cap][count] + cap*(key,val) ----
+// 约定：键槽为 0 表示空位（所以 int 键不能用 0，str 键的 null 天然表示空）。
+
+/// 把值钉进变量。**跨循环回边存活的值必须 pin**：临时值的活跃区间不覆盖回边，
+/// 分配器会把它的槽位复用掉（v2.21 实测：map 的 cap16 被复用成 slot 地址）。
+fn _pin(fc: FnCtx, v: int) -> int {
+    let d = _new_var(fc, -1, TY_INT)
+    _ir_emit(fc, OP_MOV, d, v, 0, 0)
+    return d
+}
+
+fn _map_base(fc: FnCtx, h: int) -> int {
+    let b = _vnew(fc)
+    fc.vty.set(b, TY_INT)
+    _ir_emit(fc, OP_ADDRF, b, h, 0, 16)
+    return b
+}
+
+fn _map_const(fc: FnCtx, v: int) -> int {
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_CONST, d, 0, 0, v)
+    return d
+}
+
+/// 线性扫描，返回**命中的槽地址**或**第一个空槽地址**（满了就 exit(1)）。
+/// 调用方自己再读一次键就能区分"命中"还是"空位"。
+fn _map_slot_of(fc: FnCtx, h: int, k0: int) -> int {
+    let cap = _vec_field(fc, h, 0)
+    let sixteen = _pin(fc, _map_const(fc, 16))
+    let c16 = _vnew(fc)
+    fc.vty.set(c16, TY_INT)
+    _ir_emit(fc, OP_MUL, c16, cap, sixteen, 0)
+    let cap16 = _pin(fc, c16)
+    let base = _pin(fc, _map_base(fc, h))
+    let off = _pin(fc, _map_const(fc, 0))
+    let zero = _pin(fc, _map_const(fc, 0))
+    let k = _pin(fc, k0)
+    let ltop = _newlab(fc.labs)
+    let lfull = _newlab(fc.labs)
+    let ldone = _newlab(fc.labs)
+    let slot = _pin(fc, _map_const(fc, 0))
+    _ir_emit(fc, OP_LAB, 0, 0, 0, ltop)
+    _ir_emit(fc, OP_JCMP, 0x83, off, cap16, lfull)
+    let sa = _vnew(fc)
+    fc.vty.set(sa, TY_INT)
+    _ir_emit(fc, OP_ADD, sa, base, off, 0)
+    _ir_emit(fc, OP_MOV, slot, sa, 0, 0)
+    let key = _vnew(fc)
+    fc.vty.set(key, TY_INT)
+    _ir_emit(fc, OP_LOAD, key, slot, 0, 8)
+    _ir_emit(fc, OP_JCMP, 0x84, key, zero, ldone)     // 空位 → 就用它
+    _ir_emit(fc, OP_JCMP, 0x84, key, k, ldone)        // 键相同 → 命中
+    let nx = _vnew(fc)
+    fc.vty.set(nx, TY_INT)
+    _ir_emit(fc, OP_ADD, nx, off, sixteen, 0)
+    _ir_emit(fc, OP_MOV, off, nx, 0, 0)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, ltop)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lfull)
+    let one = _map_const(fc, 1)
+    _ir_emit(fc, OP_EXIT, 0, one, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, ldone)
+    return slot
+}
+
+fn _map_new(fc: FnCtx, nd: Node) -> int {
+    let n = _pin(fc, _lower_expr(fc, nd.b))
+    let sixteen = _map_const(fc, 16)
+    let per0 = _vnew(fc)
+    fc.vty.set(per0, TY_INT)
+    _ir_emit(fc, OP_MUL, per0, n, sixteen, 0)
+    let per = _pin(fc, per0)
+    let total = _vnew(fc)
+    fc.vty.set(total, TY_INT)
+    _ir_emit(fc, OP_ADD, total, per, sixteen, 0)
+    _ir_emit(fc, OP_ARG, 0, total, 0, 0)
+    let h = _vnew(fc)
+    fc.vty.set(h, TY_MAP + (nd.a << 8) + nd.c)
+    _ir_emit(fc, OP_CALLRT, h, 0, 0, RT_ALLOC)
+    let a0 = _vnew(fc)
+    fc.vty.set(a0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a0, h, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, a0, n, 8)
+    let z = _map_const(fc, 0)
+    let a1 = _vnew(fc)
+    fc.vty.set(a1, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a1, h, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, a1, z, 8)
+    let a2 = _vnew(fc)
+    fc.vty.set(a2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a2, h, 0, 16)
+    _ir_emit(fc, OP_ZERON, 0, a2, per, 0)
+    return h
+}
+
+/// m.set(k, v)：空位就插入并 count++，已有就覆盖
+fn _map_set(fc: FnCtx, nd: Node, h: int) -> int {
+    let k = _lower_expr(fc, nd.c)
+    let v = _lower_expr(fc, nd.n)
+    let slot = _map_slot_of(fc, h, k)
+    let old = _vnew(fc)
+    fc.vty.set(old, TY_INT)
+    _ir_emit(fc, OP_LOAD, old, slot, 0, 8)
+    let zero = _map_const(fc, 0)
+    let lskip = _newlab(fc.labs)
+    let ldone = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x85, old, zero, lskip)     // 非空 → 只覆盖值
+    _ir_emit(fc, OP_STORE, 0, slot, k, 8)
+    let cnt = _vec_field(fc, h, 8)
+    let one = _map_const(fc, 1)
+    let nc = _vnew(fc)
+    fc.vty.set(nc, TY_INT)
+    _ir_emit(fc, OP_ADD, nc, cnt, one, 0)
+    let ca = _vnew(fc)
+    fc.vty.set(ca, TY_INT)
+    _ir_emit(fc, OP_ADDRF, ca, h, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, ca, nc, 8)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lskip)
+    let va = _vnew(fc)
+    fc.vty.set(va, TY_INT)
+    _ir_emit(fc, OP_ADDRF, va, slot, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, va, v, 8)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, ldone)
+    let d = _map_const(fc, 0)
+    return d
+}
+
+/// m.get(k)：命中读值，空位返回 0
+fn _map_get(fc: FnCtx, nd: Node, vty: int, h: int) -> int {
+    let k = _lower_expr(fc, nd.c)
+    let slot = _map_slot_of(fc, h, k)
+    let old = _vnew(fc)
+    fc.vty.set(old, TY_INT)
+    _ir_emit(fc, OP_LOAD, old, slot, 0, 8)
+    let zero = _map_const(fc, 0)
+    let d = _vnew(fc)
+    fc.vty.set(d, vty)
+    _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+    let lmiss = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x84, old, zero, lmiss)
+    let va = _vnew(fc)
+    fc.vty.set(va, TY_INT)
+    _ir_emit(fc, OP_ADDRF, va, slot, 0, 8)
+    _ir_emit(fc, OP_LOAD, d, va, 0, 8)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lmiss)
+    return d
+}
+
+/// m.has(k) → 1/0
+fn _map_has(fc: FnCtx, nd: Node, h: int) -> int {
+    let k = _lower_expr(fc, nd.c)
+    let slot = _map_slot_of(fc, h, k)
+    let old = _vnew(fc)
+    fc.vty.set(old, TY_INT)
+    _ir_emit(fc, OP_LOAD, old, slot, 0, 8)
+    let zero = _map_const(fc, 0)
+    let d = _map_const(fc, 0)
+    fc.vty.set(d, TY_BOOL)
+    let lmiss = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x84, old, zero, lmiss)
+    let one = _map_const(fc, 1)
+    _ir_emit(fc, OP_MOV, d, one, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lmiss)
+    return d
+}
+
 // ---- vec 运行时辅助（v2.19；放在文件末尾，避免扰动既有函数的代码布局）----
 
 /// 读 vec 头字段：[h + off]（off = 0 长度 / 8 容量）
@@ -3789,7 +4039,7 @@ fn _vec_elem_addr(fc: FnCtx, h: int, i: int) -> int {
 
 /// vec[T].new(n)：句柄 = 堆块首地址，布局 [len][cap][data...]
 fn _lower_vecnew(fc: FnCtx, nd: Node) -> int {
-    let n = _lower_expr(fc, nd.b)
+    let n = _pin(fc, _lower_expr(fc, nd.b))
     let eight = _vnew(fc)
     fc.vty.set(eight, TY_INT)
     _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
@@ -3820,10 +4070,32 @@ fn _lower_vecnew(fc: FnCtx, nd: Node) -> int {
     return h
 }
 
-/// v.push(x) / v.get(i) / v.len()
-fn _lower_vecmethod(fc: FnCtx, nd: Node) -> int {
+/// 方法分发：vec 与 map 共用（按接收者类型分派）
+fn _lower_method(fc: FnCtx, nd: Node) -> int {
     let h = _lower_expr(fc, nd.a)
     let hty = fc.vty.get(h)
+    if hty >= TY_MAP && hty < TY_ARRAY {
+        let hp = _pin(fc, h)      // 句柄要跨循环存活
+        let m = fc.names.get(nd.b)
+        let vt = (hty - TY_MAP) & 0xFF
+        if m == "set" {
+            return _map_set(fc, nd, hp)
+        }
+        if m == "get" {
+            return _map_get(fc, nd, vt, hp)
+        }
+        if m == "has" {
+            return _map_has(fc, nd, hp)
+        }
+        if m == "len" {
+            let d = _vnew(fc)
+            fc.vty.set(d, TY_INT)
+            _ir_emit(fc, OP_MOV, d, _vec_field(fc, hp, 8), 0, 0)
+            return d
+        }
+        eprint("qlmc: map 只支持 .set(k,v) / .get(k) / .has(k) / .len()")
+        exit(2)
+    }
     if hty < TY_VEC || hty >= TY_ARRAY {
         eprint("qlmc: 只有 vec 有 .push/.get/.len 方法")
         exit(2)
@@ -4598,7 +4870,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S6：int/bool/str + struct/数组/enum/match/vec + 聚合形参/返回 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S7：int/bool/str + struct/数组/enum/vec/map + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
@@ -4782,7 +5054,7 @@ fn main() {
     }
     write_file(out, blob)
     let t_all = (now_ns() - t0) / 1000
-    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S6)" +
+    print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S7)" +
           "  编译 " + t_all.to_str() + " us（进程内）  后端 " +
           ((fn_end - rt_end) / 1000).to_str() + " us  -j" + nt.to_str())
 }
