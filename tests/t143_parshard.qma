@@ -1,0 +1,116 @@
+// t143_parshard.qma —— 分片并行写 + 工作线程读共享数据（v2.16）
+//
+// 这是 stage-1 编译器（`bootstrap/qlmc/qlmc.qma`）并行后端所依赖的最小模型：
+//   1) `spawn` 能把**裸指针与 vec 句柄**当标量传进工作线程；
+//   2) 每个线程往 arena 里**自己那段**写字节，互不重叠 → 不需要任何锁；
+//   3) 主线程 join 后按顺序回读，结果与串行**逐字节相同**（确定性）；
+//   4) 8 个形参的 spawn 也能用（编译器要一次把 7 个共享表传下去）。
+//
+// 顺序分片是并行编译安全性的全部理由：只要每个线程只写自己的区间，
+// 就不存在数据竞争；只要拼装顺序固定，线程数就不影响产物字节。
+import std.core
+import std.mem
+
+const CHUNK = 1024
+
+struct P {
+    x: int
+}
+
+fn shard(dst: int, base: int, n: int, seed: int) -> int {
+    let mut i = 0
+    let mut acc = seed
+    while i < n {
+        acc = acc * 31 + i
+        mem_store8(dst, base + i, acc & 0xFF)
+        i = i + 1
+    }
+    return n
+}
+
+fn sum_vec(v: vec[int], n: int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        s = s + v.get(i)
+        i = i + 1
+    }
+    return s
+}
+
+fn wide(a: int, b: int, c: int, d: vec[int], e: vec[str], f: vec[P],
+        g: int, h: int) -> int {
+    let mut s = a + b + c + g + h
+    let mut i = 0
+    while i < len(d) {
+        s = s + d.get(i)
+        i = i + 1
+    }
+    i = 0
+    while i < len(e) {
+        s = s + len(e.get(i))
+        i = i + 1
+    }
+    i = 0
+    while i < len(f) {
+        s = s + f.get(i).x
+        i = i + 1
+    }
+    return s
+}
+
+fn main() {
+    let nthread = 4
+    let total = CHUNK * nthread
+    let serial_buf = mem_alloc(total + 64)
+    let par_buf = mem_alloc(total + 64)
+
+    // 串行基线
+    let mut k = 0
+    while k < nthread {
+        shard(serial_buf, k * CHUNK, CHUNK, k)
+        k = k + 1
+    }
+
+    // 并行：每个线程写自己那段
+    let h0 = spawn shard(par_buf, 0 * CHUNK, CHUNK, 0)
+    let h1 = spawn shard(par_buf, 1 * CHUNK, CHUNK, 1)
+    let h2 = spawn shard(par_buf, 2 * CHUNK, CHUNK, 2)
+    let h3 = spawn shard(par_buf, 3 * CHUNK, CHUNK, 3)
+    let r0 = join(h0)
+    let r1 = join(h1)
+    let r2 = join(h2)
+    let r3 = join(h3)
+    assert(r0 + r1 + r2 + r3 == total, "分片返回值汇总")
+
+    let mut diff = 0
+    k = 0
+    while k < total {
+        if mem_load8(serial_buf, k) != mem_load8(par_buf, k) {
+            diff = diff + 1
+        }
+        k = k + 1
+    }
+    assert(diff == 0, "并行与串行结果必须逐字节相同")
+
+    // 工作线程只读共享 vec（编译器就是这么把 AST/字符串表传下去的）
+    let v = vec[int].new(4)
+    v.push(11)
+    v.push(22)
+    v.push(33)
+    v.push(44)
+    let hv = spawn sum_vec(v, 4)
+    assert(join(hv) == 110, "vec 句柄可以进 spawn（只读）")
+
+    // 8 个形参 + 三个 vec 句柄
+    let e = vec[str].new(2)
+    e.push("ab")
+    e.push("cde")
+    let f = vec[P].new(2)
+    f.push(P { x: 10 })
+    f.push(P { x: 20 })
+    let hw = spawn wide(100, 200, 300, v, e, f, 7, 8)
+    assert(join(hw) == 100 + 200 + 300 + 7 + 8 + 110 + 5 + 30, "8 参 spawn")
+
+    print("parshard ok diff=" + diff.to_str())
+}

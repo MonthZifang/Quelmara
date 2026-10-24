@@ -37,6 +37,7 @@ CASES = [
     ("s2_str", "tests/selfhost/s2_str.qma"),
     ("s2_const", "tests/selfhost/s2_const.qma"),
     ("s2_assert", "tests/selfhost/s2_assert.qma"),
+    ("s3_manyfns", "tests/selfhost/s3_manyfns.qma"),
 ]
 
 npass = 0
@@ -120,6 +121,30 @@ def main():
         if show_time:
             print(f"      编译墙钟：stage-0 {dt0:.0f} ms  |  qlmc {dt1:.0f} ms"
                   f"（含 {370} ms 量级的进程创建税，见 06-status §3.25）")
+
+    # ---- 多核：线程数不得影响产物字节（v2.16） ----
+    print("== 并行确定性（-j1 vs -j4，200 个函数） ==")
+    big = os.path.join(ROOT, "tests/selfhost/s3_manyfns.qma")
+    outs = []
+    for j in ("1", "4"):
+        p = os.path.join(BUILD, f"qlmc_par_j{j}.exe")
+        try:
+            build_with([QLMC, "build", big, "-o", p, "-j", j], p)
+            outs.append(p)
+        except RuntimeError as ex:
+            bad(f"-j{j} 构建失败：{ex}")
+    if len(outs) == 2:
+        d0 = open(outs[0], "rb").read()
+        d1 = open(outs[1], "rb").read()
+        if d0 == d1:
+            ok(f"-j1 与 -j4 产物逐字节相同（{len(d0)} 字节）")
+        else:
+            bad(f"-j1 与 -j4 产物不同（{len(d0)} vs {len(d1)} 字节）")
+        r = subprocess.run([outs[1]], capture_output=True)
+        if r.returncode == 0 and r.stdout == b"123013\n":
+            ok("-j4 产物运行结果正确（200 个函数的累加）")
+        else:
+            bad(f"-j4 产物运行异常 rc={r.returncode} out={r.stdout[:60]!r}")
 
     print("-" * 52)
     print(f"PASS={npass} FAIL={nfail}")

@@ -1,0 +1,2617 @@
+// gen_big.qma —— 并行编译压测夹具（v2.16）：200 个函数，形状各异
+module genbig
+
+fn f0(a: int, b: int) -> int {
+    let mut s = a * 3 + b
+    let mut k = 0
+    while k < 10 {
+        s = s + k * 1 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f1(a: int, b: int) -> int {
+    let mut s = a * 4 + b
+    let mut k = 0
+    while k < 11 {
+        s = s + k * 2 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f2(a: int, b: int) -> int {
+    let mut s = a * 5 + b
+    let mut k = 0
+    while k < 12 {
+        s = s + k * 3 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f3(a: int, b: int) -> int {
+    let mut s = a * 6 + b
+    let mut k = 0
+    while k < 13 {
+        s = s + k * 4 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f4(a: int, b: int) -> int {
+    let mut s = a * 7 + b
+    let mut k = 0
+    while k < 14 {
+        s = s + k * 5 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f5(a: int, b: int) -> int {
+    let mut s = a * 8 + b
+    let mut k = 0
+    while k < 15 {
+        s = s + k * 6 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f6(a: int, b: int) -> int {
+    let mut s = a * 9 + b
+    let mut k = 0
+    while k < 16 {
+        s = s + k * 7 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f7(a: int, b: int) -> int {
+    let mut s = a * 10 + b
+    let mut k = 0
+    while k < 17 {
+        s = s + k * 1 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f8(a: int, b: int) -> int {
+    let mut s = a * 11 + b
+    let mut k = 0
+    while k < 18 {
+        s = s + k * 2 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f9(a: int, b: int) -> int {
+    let mut s = a * 12 + b
+    let mut k = 0
+    while k < 19 {
+        s = s + k * 3 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f10(a: int, b: int) -> int {
+    let mut s = a * 13 + b
+    let mut k = 0
+    while k < 20 {
+        s = s + k * 4 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f11(a: int, b: int) -> int {
+    let mut s = a * 14 + b
+    let mut k = 0
+    while k < 21 {
+        s = s + k * 5 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f12(a: int, b: int) -> int {
+    let mut s = a * 15 + b
+    let mut k = 0
+    while k < 22 {
+        s = s + k * 6 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f13(a: int, b: int) -> int {
+    let mut s = a * 16 + b
+    let mut k = 0
+    while k < 23 {
+        s = s + k * 7 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f14(a: int, b: int) -> int {
+    let mut s = a * 17 + b
+    let mut k = 0
+    while k < 24 {
+        s = s + k * 1 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f15(a: int, b: int) -> int {
+    let mut s = a * 18 + b
+    let mut k = 0
+    while k < 25 {
+        s = s + k * 2 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f16(a: int, b: int) -> int {
+    let mut s = a * 19 + b
+    let mut k = 0
+    while k < 26 {
+        s = s + k * 3 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f17(a: int, b: int) -> int {
+    let mut s = a * 20 + b
+    let mut k = 0
+    while k < 10 {
+        s = s + k * 4 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f18(a: int, b: int) -> int {
+    let mut s = a * 21 + b
+    let mut k = 0
+    while k < 11 {
+        s = s + k * 5 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f19(a: int, b: int) -> int {
+    let mut s = a * 22 + b
+    let mut k = 0
+    while k < 12 {
+        s = s + k * 6 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f20(a: int, b: int) -> int {
+    let mut s = a * 23 + b
+    let mut k = 0
+    while k < 13 {
+        s = s + k * 7 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f21(a: int, b: int) -> int {
+    let mut s = a * 24 + b
+    let mut k = 0
+    while k < 14 {
+        s = s + k * 1 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f22(a: int, b: int) -> int {
+    let mut s = a * 25 + b
+    let mut k = 0
+    while k < 15 {
+        s = s + k * 2 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f23(a: int, b: int) -> int {
+    let mut s = a * 26 + b
+    let mut k = 0
+    while k < 16 {
+        s = s + k * 3 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f24(a: int, b: int) -> int {
+    let mut s = a * 27 + b
+    let mut k = 0
+    while k < 17 {
+        s = s + k * 4 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f25(a: int, b: int) -> int {
+    let mut s = a * 28 + b
+    let mut k = 0
+    while k < 18 {
+        s = s + k * 5 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f26(a: int, b: int) -> int {
+    let mut s = a * 29 + b
+    let mut k = 0
+    while k < 19 {
+        s = s + k * 6 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f27(a: int, b: int) -> int {
+    let mut s = a * 30 + b
+    let mut k = 0
+    while k < 20 {
+        s = s + k * 7 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f28(a: int, b: int) -> int {
+    let mut s = a * 31 + b
+    let mut k = 0
+    while k < 21 {
+        s = s + k * 1 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f29(a: int, b: int) -> int {
+    let mut s = a * 32 + b
+    let mut k = 0
+    while k < 22 {
+        s = s + k * 2 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f30(a: int, b: int) -> int {
+    let mut s = a * 33 + b
+    let mut k = 0
+    while k < 23 {
+        s = s + k * 3 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f31(a: int, b: int) -> int {
+    let mut s = a * 34 + b
+    let mut k = 0
+    while k < 24 {
+        s = s + k * 4 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f32(a: int, b: int) -> int {
+    let mut s = a * 35 + b
+    let mut k = 0
+    while k < 25 {
+        s = s + k * 5 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f33(a: int, b: int) -> int {
+    let mut s = a * 36 + b
+    let mut k = 0
+    while k < 26 {
+        s = s + k * 6 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f34(a: int, b: int) -> int {
+    let mut s = a * 37 + b
+    let mut k = 0
+    while k < 10 {
+        s = s + k * 7 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f35(a: int, b: int) -> int {
+    let mut s = a * 38 + b
+    let mut k = 0
+    while k < 11 {
+        s = s + k * 1 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f36(a: int, b: int) -> int {
+    let mut s = a * 39 + b
+    let mut k = 0
+    while k < 12 {
+        s = s + k * 2 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f37(a: int, b: int) -> int {
+    let mut s = a * 40 + b
+    let mut k = 0
+    while k < 13 {
+        s = s + k * 3 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f38(a: int, b: int) -> int {
+    let mut s = a * 41 + b
+    let mut k = 0
+    while k < 14 {
+        s = s + k * 4 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f39(a: int, b: int) -> int {
+    let mut s = a * 42 + b
+    let mut k = 0
+    while k < 15 {
+        s = s + k * 5 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f40(a: int, b: int) -> int {
+    let mut s = a * 43 + b
+    let mut k = 0
+    while k < 16 {
+        s = s + k * 6 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f41(a: int, b: int) -> int {
+    let mut s = a * 44 + b
+    let mut k = 0
+    while k < 17 {
+        s = s + k * 7 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f42(a: int, b: int) -> int {
+    let mut s = a * 45 + b
+    let mut k = 0
+    while k < 18 {
+        s = s + k * 1 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f43(a: int, b: int) -> int {
+    let mut s = a * 46 + b
+    let mut k = 0
+    while k < 19 {
+        s = s + k * 2 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f44(a: int, b: int) -> int {
+    let mut s = a * 47 + b
+    let mut k = 0
+    while k < 20 {
+        s = s + k * 3 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f45(a: int, b: int) -> int {
+    let mut s = a * 48 + b
+    let mut k = 0
+    while k < 21 {
+        s = s + k * 4 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f46(a: int, b: int) -> int {
+    let mut s = a * 49 + b
+    let mut k = 0
+    while k < 22 {
+        s = s + k * 5 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f47(a: int, b: int) -> int {
+    let mut s = a * 50 + b
+    let mut k = 0
+    while k < 23 {
+        s = s + k * 6 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f48(a: int, b: int) -> int {
+    let mut s = a * 51 + b
+    let mut k = 0
+    while k < 24 {
+        s = s + k * 7 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f49(a: int, b: int) -> int {
+    let mut s = a * 52 + b
+    let mut k = 0
+    while k < 25 {
+        s = s + k * 1 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f50(a: int, b: int) -> int {
+    let mut s = a * 53 + b
+    let mut k = 0
+    while k < 26 {
+        s = s + k * 2 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f51(a: int, b: int) -> int {
+    let mut s = a * 54 + b
+    let mut k = 0
+    while k < 10 {
+        s = s + k * 3 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f52(a: int, b: int) -> int {
+    let mut s = a * 55 + b
+    let mut k = 0
+    while k < 11 {
+        s = s + k * 4 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f53(a: int, b: int) -> int {
+    let mut s = a * 56 + b
+    let mut k = 0
+    while k < 12 {
+        s = s + k * 5 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f54(a: int, b: int) -> int {
+    let mut s = a * 57 + b
+    let mut k = 0
+    while k < 13 {
+        s = s + k * 6 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f55(a: int, b: int) -> int {
+    let mut s = a * 58 + b
+    let mut k = 0
+    while k < 14 {
+        s = s + k * 7 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f56(a: int, b: int) -> int {
+    let mut s = a * 59 + b
+    let mut k = 0
+    while k < 15 {
+        s = s + k * 1 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f57(a: int, b: int) -> int {
+    let mut s = a * 60 + b
+    let mut k = 0
+    while k < 16 {
+        s = s + k * 2 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f58(a: int, b: int) -> int {
+    let mut s = a * 61 + b
+    let mut k = 0
+    while k < 17 {
+        s = s + k * 3 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f59(a: int, b: int) -> int {
+    let mut s = a * 62 + b
+    let mut k = 0
+    while k < 18 {
+        s = s + k * 4 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f60(a: int, b: int) -> int {
+    let mut s = a * 63 + b
+    let mut k = 0
+    while k < 19 {
+        s = s + k * 5 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f61(a: int, b: int) -> int {
+    let mut s = a * 64 + b
+    let mut k = 0
+    while k < 20 {
+        s = s + k * 6 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f62(a: int, b: int) -> int {
+    let mut s = a * 65 + b
+    let mut k = 0
+    while k < 21 {
+        s = s + k * 7 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f63(a: int, b: int) -> int {
+    let mut s = a * 66 + b
+    let mut k = 0
+    while k < 22 {
+        s = s + k * 1 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f64(a: int, b: int) -> int {
+    let mut s = a * 67 + b
+    let mut k = 0
+    while k < 23 {
+        s = s + k * 2 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f65(a: int, b: int) -> int {
+    let mut s = a * 68 + b
+    let mut k = 0
+    while k < 24 {
+        s = s + k * 3 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f66(a: int, b: int) -> int {
+    let mut s = a * 69 + b
+    let mut k = 0
+    while k < 25 {
+        s = s + k * 4 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f67(a: int, b: int) -> int {
+    let mut s = a * 70 + b
+    let mut k = 0
+    while k < 26 {
+        s = s + k * 5 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f68(a: int, b: int) -> int {
+    let mut s = a * 71 + b
+    let mut k = 0
+    while k < 10 {
+        s = s + k * 6 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f69(a: int, b: int) -> int {
+    let mut s = a * 72 + b
+    let mut k = 0
+    while k < 11 {
+        s = s + k * 7 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f70(a: int, b: int) -> int {
+    let mut s = a * 73 + b
+    let mut k = 0
+    while k < 12 {
+        s = s + k * 1 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f71(a: int, b: int) -> int {
+    let mut s = a * 74 + b
+    let mut k = 0
+    while k < 13 {
+        s = s + k * 2 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f72(a: int, b: int) -> int {
+    let mut s = a * 75 + b
+    let mut k = 0
+    while k < 14 {
+        s = s + k * 3 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f73(a: int, b: int) -> int {
+    let mut s = a * 76 + b
+    let mut k = 0
+    while k < 15 {
+        s = s + k * 4 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f74(a: int, b: int) -> int {
+    let mut s = a * 77 + b
+    let mut k = 0
+    while k < 16 {
+        s = s + k * 5 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f75(a: int, b: int) -> int {
+    let mut s = a * 78 + b
+    let mut k = 0
+    while k < 17 {
+        s = s + k * 6 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f76(a: int, b: int) -> int {
+    let mut s = a * 79 + b
+    let mut k = 0
+    while k < 18 {
+        s = s + k * 7 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f77(a: int, b: int) -> int {
+    let mut s = a * 80 + b
+    let mut k = 0
+    while k < 19 {
+        s = s + k * 1 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f78(a: int, b: int) -> int {
+    let mut s = a * 81 + b
+    let mut k = 0
+    while k < 20 {
+        s = s + k * 2 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f79(a: int, b: int) -> int {
+    let mut s = a * 82 + b
+    let mut k = 0
+    while k < 21 {
+        s = s + k * 3 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f80(a: int, b: int) -> int {
+    let mut s = a * 83 + b
+    let mut k = 0
+    while k < 22 {
+        s = s + k * 4 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f81(a: int, b: int) -> int {
+    let mut s = a * 84 + b
+    let mut k = 0
+    while k < 23 {
+        s = s + k * 5 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f82(a: int, b: int) -> int {
+    let mut s = a * 85 + b
+    let mut k = 0
+    while k < 24 {
+        s = s + k * 6 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f83(a: int, b: int) -> int {
+    let mut s = a * 86 + b
+    let mut k = 0
+    while k < 25 {
+        s = s + k * 7 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f84(a: int, b: int) -> int {
+    let mut s = a * 87 + b
+    let mut k = 0
+    while k < 26 {
+        s = s + k * 1 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f85(a: int, b: int) -> int {
+    let mut s = a * 88 + b
+    let mut k = 0
+    while k < 10 {
+        s = s + k * 2 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f86(a: int, b: int) -> int {
+    let mut s = a * 89 + b
+    let mut k = 0
+    while k < 11 {
+        s = s + k * 3 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f87(a: int, b: int) -> int {
+    let mut s = a * 90 + b
+    let mut k = 0
+    while k < 12 {
+        s = s + k * 4 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f88(a: int, b: int) -> int {
+    let mut s = a * 91 + b
+    let mut k = 0
+    while k < 13 {
+        s = s + k * 5 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f89(a: int, b: int) -> int {
+    let mut s = a * 92 + b
+    let mut k = 0
+    while k < 14 {
+        s = s + k * 6 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f90(a: int, b: int) -> int {
+    let mut s = a * 93 + b
+    let mut k = 0
+    while k < 15 {
+        s = s + k * 7 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f91(a: int, b: int) -> int {
+    let mut s = a * 94 + b
+    let mut k = 0
+    while k < 16 {
+        s = s + k * 1 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f92(a: int, b: int) -> int {
+    let mut s = a * 95 + b
+    let mut k = 0
+    while k < 17 {
+        s = s + k * 2 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f93(a: int, b: int) -> int {
+    let mut s = a * 96 + b
+    let mut k = 0
+    while k < 18 {
+        s = s + k * 3 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f94(a: int, b: int) -> int {
+    let mut s = a * 97 + b
+    let mut k = 0
+    while k < 19 {
+        s = s + k * 4 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f95(a: int, b: int) -> int {
+    let mut s = a * 98 + b
+    let mut k = 0
+    while k < 20 {
+        s = s + k * 5 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f96(a: int, b: int) -> int {
+    let mut s = a * 99 + b
+    let mut k = 0
+    while k < 21 {
+        s = s + k * 6 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f97(a: int, b: int) -> int {
+    let mut s = a * 100 + b
+    let mut k = 0
+    while k < 22 {
+        s = s + k * 7 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f98(a: int, b: int) -> int {
+    let mut s = a * 101 + b
+    let mut k = 0
+    while k < 23 {
+        s = s + k * 1 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f99(a: int, b: int) -> int {
+    let mut s = a * 102 + b
+    let mut k = 0
+    while k < 24 {
+        s = s + k * 2 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f100(a: int, b: int) -> int {
+    let mut s = a * 103 + b
+    let mut k = 0
+    while k < 25 {
+        s = s + k * 3 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f101(a: int, b: int) -> int {
+    let mut s = a * 104 + b
+    let mut k = 0
+    while k < 26 {
+        s = s + k * 4 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f102(a: int, b: int) -> int {
+    let mut s = a * 105 + b
+    let mut k = 0
+    while k < 10 {
+        s = s + k * 5 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f103(a: int, b: int) -> int {
+    let mut s = a * 106 + b
+    let mut k = 0
+    while k < 11 {
+        s = s + k * 6 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f104(a: int, b: int) -> int {
+    let mut s = a * 107 + b
+    let mut k = 0
+    while k < 12 {
+        s = s + k * 7 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f105(a: int, b: int) -> int {
+    let mut s = a * 108 + b
+    let mut k = 0
+    while k < 13 {
+        s = s + k * 1 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f106(a: int, b: int) -> int {
+    let mut s = a * 109 + b
+    let mut k = 0
+    while k < 14 {
+        s = s + k * 2 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f107(a: int, b: int) -> int {
+    let mut s = a * 110 + b
+    let mut k = 0
+    while k < 15 {
+        s = s + k * 3 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f108(a: int, b: int) -> int {
+    let mut s = a * 111 + b
+    let mut k = 0
+    while k < 16 {
+        s = s + k * 4 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f109(a: int, b: int) -> int {
+    let mut s = a * 112 + b
+    let mut k = 0
+    while k < 17 {
+        s = s + k * 5 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f110(a: int, b: int) -> int {
+    let mut s = a * 113 + b
+    let mut k = 0
+    while k < 18 {
+        s = s + k * 6 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f111(a: int, b: int) -> int {
+    let mut s = a * 114 + b
+    let mut k = 0
+    while k < 19 {
+        s = s + k * 7 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f112(a: int, b: int) -> int {
+    let mut s = a * 115 + b
+    let mut k = 0
+    while k < 20 {
+        s = s + k * 1 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f113(a: int, b: int) -> int {
+    let mut s = a * 116 + b
+    let mut k = 0
+    while k < 21 {
+        s = s + k * 2 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f114(a: int, b: int) -> int {
+    let mut s = a * 117 + b
+    let mut k = 0
+    while k < 22 {
+        s = s + k * 3 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f115(a: int, b: int) -> int {
+    let mut s = a * 118 + b
+    let mut k = 0
+    while k < 23 {
+        s = s + k * 4 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f116(a: int, b: int) -> int {
+    let mut s = a * 119 + b
+    let mut k = 0
+    while k < 24 {
+        s = s + k * 5 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f117(a: int, b: int) -> int {
+    let mut s = a * 120 + b
+    let mut k = 0
+    while k < 25 {
+        s = s + k * 6 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f118(a: int, b: int) -> int {
+    let mut s = a * 121 + b
+    let mut k = 0
+    while k < 26 {
+        s = s + k * 7 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f119(a: int, b: int) -> int {
+    let mut s = a * 122 + b
+    let mut k = 0
+    while k < 10 {
+        s = s + k * 1 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f120(a: int, b: int) -> int {
+    let mut s = a * 123 + b
+    let mut k = 0
+    while k < 11 {
+        s = s + k * 2 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f121(a: int, b: int) -> int {
+    let mut s = a * 124 + b
+    let mut k = 0
+    while k < 12 {
+        s = s + k * 3 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f122(a: int, b: int) -> int {
+    let mut s = a * 125 + b
+    let mut k = 0
+    while k < 13 {
+        s = s + k * 4 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f123(a: int, b: int) -> int {
+    let mut s = a * 126 + b
+    let mut k = 0
+    while k < 14 {
+        s = s + k * 5 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f124(a: int, b: int) -> int {
+    let mut s = a * 127 + b
+    let mut k = 0
+    while k < 15 {
+        s = s + k * 6 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f125(a: int, b: int) -> int {
+    let mut s = a * 128 + b
+    let mut k = 0
+    while k < 16 {
+        s = s + k * 7 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f126(a: int, b: int) -> int {
+    let mut s = a * 129 + b
+    let mut k = 0
+    while k < 17 {
+        s = s + k * 1 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f127(a: int, b: int) -> int {
+    let mut s = a * 130 + b
+    let mut k = 0
+    while k < 18 {
+        s = s + k * 2 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f128(a: int, b: int) -> int {
+    let mut s = a * 131 + b
+    let mut k = 0
+    while k < 19 {
+        s = s + k * 3 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f129(a: int, b: int) -> int {
+    let mut s = a * 132 + b
+    let mut k = 0
+    while k < 20 {
+        s = s + k * 4 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f130(a: int, b: int) -> int {
+    let mut s = a * 133 + b
+    let mut k = 0
+    while k < 21 {
+        s = s + k * 5 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f131(a: int, b: int) -> int {
+    let mut s = a * 134 + b
+    let mut k = 0
+    while k < 22 {
+        s = s + k * 6 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f132(a: int, b: int) -> int {
+    let mut s = a * 135 + b
+    let mut k = 0
+    while k < 23 {
+        s = s + k * 7 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f133(a: int, b: int) -> int {
+    let mut s = a * 136 + b
+    let mut k = 0
+    while k < 24 {
+        s = s + k * 1 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f134(a: int, b: int) -> int {
+    let mut s = a * 137 + b
+    let mut k = 0
+    while k < 25 {
+        s = s + k * 2 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f135(a: int, b: int) -> int {
+    let mut s = a * 138 + b
+    let mut k = 0
+    while k < 26 {
+        s = s + k * 3 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f136(a: int, b: int) -> int {
+    let mut s = a * 139 + b
+    let mut k = 0
+    while k < 10 {
+        s = s + k * 4 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f137(a: int, b: int) -> int {
+    let mut s = a * 140 + b
+    let mut k = 0
+    while k < 11 {
+        s = s + k * 5 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f138(a: int, b: int) -> int {
+    let mut s = a * 141 + b
+    let mut k = 0
+    while k < 12 {
+        s = s + k * 6 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f139(a: int, b: int) -> int {
+    let mut s = a * 142 + b
+    let mut k = 0
+    while k < 13 {
+        s = s + k * 7 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f140(a: int, b: int) -> int {
+    let mut s = a * 143 + b
+    let mut k = 0
+    while k < 14 {
+        s = s + k * 1 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f141(a: int, b: int) -> int {
+    let mut s = a * 144 + b
+    let mut k = 0
+    while k < 15 {
+        s = s + k * 2 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f142(a: int, b: int) -> int {
+    let mut s = a * 145 + b
+    let mut k = 0
+    while k < 16 {
+        s = s + k * 3 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f143(a: int, b: int) -> int {
+    let mut s = a * 146 + b
+    let mut k = 0
+    while k < 17 {
+        s = s + k * 4 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f144(a: int, b: int) -> int {
+    let mut s = a * 147 + b
+    let mut k = 0
+    while k < 18 {
+        s = s + k * 5 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f145(a: int, b: int) -> int {
+    let mut s = a * 148 + b
+    let mut k = 0
+    while k < 19 {
+        s = s + k * 6 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f146(a: int, b: int) -> int {
+    let mut s = a * 149 + b
+    let mut k = 0
+    while k < 20 {
+        s = s + k * 7 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f147(a: int, b: int) -> int {
+    let mut s = a * 150 + b
+    let mut k = 0
+    while k < 21 {
+        s = s + k * 1 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f148(a: int, b: int) -> int {
+    let mut s = a * 151 + b
+    let mut k = 0
+    while k < 22 {
+        s = s + k * 2 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f149(a: int, b: int) -> int {
+    let mut s = a * 152 + b
+    let mut k = 0
+    while k < 23 {
+        s = s + k * 3 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f150(a: int, b: int) -> int {
+    let mut s = a * 153 + b
+    let mut k = 0
+    while k < 24 {
+        s = s + k * 4 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f151(a: int, b: int) -> int {
+    let mut s = a * 154 + b
+    let mut k = 0
+    while k < 25 {
+        s = s + k * 5 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f152(a: int, b: int) -> int {
+    let mut s = a * 155 + b
+    let mut k = 0
+    while k < 26 {
+        s = s + k * 6 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f153(a: int, b: int) -> int {
+    let mut s = a * 156 + b
+    let mut k = 0
+    while k < 10 {
+        s = s + k * 7 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f154(a: int, b: int) -> int {
+    let mut s = a * 157 + b
+    let mut k = 0
+    while k < 11 {
+        s = s + k * 1 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f155(a: int, b: int) -> int {
+    let mut s = a * 158 + b
+    let mut k = 0
+    while k < 12 {
+        s = s + k * 2 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f156(a: int, b: int) -> int {
+    let mut s = a * 159 + b
+    let mut k = 0
+    while k < 13 {
+        s = s + k * 3 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f157(a: int, b: int) -> int {
+    let mut s = a * 160 + b
+    let mut k = 0
+    while k < 14 {
+        s = s + k * 4 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f158(a: int, b: int) -> int {
+    let mut s = a * 161 + b
+    let mut k = 0
+    while k < 15 {
+        s = s + k * 5 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f159(a: int, b: int) -> int {
+    let mut s = a * 162 + b
+    let mut k = 0
+    while k < 16 {
+        s = s + k * 6 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f160(a: int, b: int) -> int {
+    let mut s = a * 163 + b
+    let mut k = 0
+    while k < 17 {
+        s = s + k * 7 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f161(a: int, b: int) -> int {
+    let mut s = a * 164 + b
+    let mut k = 0
+    while k < 18 {
+        s = s + k * 1 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f162(a: int, b: int) -> int {
+    let mut s = a * 165 + b
+    let mut k = 0
+    while k < 19 {
+        s = s + k * 2 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f163(a: int, b: int) -> int {
+    let mut s = a * 166 + b
+    let mut k = 0
+    while k < 20 {
+        s = s + k * 3 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f164(a: int, b: int) -> int {
+    let mut s = a * 167 + b
+    let mut k = 0
+    while k < 21 {
+        s = s + k * 4 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f165(a: int, b: int) -> int {
+    let mut s = a * 168 + b
+    let mut k = 0
+    while k < 22 {
+        s = s + k * 5 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f166(a: int, b: int) -> int {
+    let mut s = a * 169 + b
+    let mut k = 0
+    while k < 23 {
+        s = s + k * 6 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f167(a: int, b: int) -> int {
+    let mut s = a * 170 + b
+    let mut k = 0
+    while k < 24 {
+        s = s + k * 7 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f168(a: int, b: int) -> int {
+    let mut s = a * 171 + b
+    let mut k = 0
+    while k < 25 {
+        s = s + k * 1 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f169(a: int, b: int) -> int {
+    let mut s = a * 172 + b
+    let mut k = 0
+    while k < 26 {
+        s = s + k * 2 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f170(a: int, b: int) -> int {
+    let mut s = a * 173 + b
+    let mut k = 0
+    while k < 10 {
+        s = s + k * 3 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f171(a: int, b: int) -> int {
+    let mut s = a * 174 + b
+    let mut k = 0
+    while k < 11 {
+        s = s + k * 4 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f172(a: int, b: int) -> int {
+    let mut s = a * 175 + b
+    let mut k = 0
+    while k < 12 {
+        s = s + k * 5 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f173(a: int, b: int) -> int {
+    let mut s = a * 176 + b
+    let mut k = 0
+    while k < 13 {
+        s = s + k * 6 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f174(a: int, b: int) -> int {
+    let mut s = a * 177 + b
+    let mut k = 0
+    while k < 14 {
+        s = s + k * 7 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f175(a: int, b: int) -> int {
+    let mut s = a * 178 + b
+    let mut k = 0
+    while k < 15 {
+        s = s + k * 1 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f176(a: int, b: int) -> int {
+    let mut s = a * 179 + b
+    let mut k = 0
+    while k < 16 {
+        s = s + k * 2 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f177(a: int, b: int) -> int {
+    let mut s = a * 180 + b
+    let mut k = 0
+    while k < 17 {
+        s = s + k * 3 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f178(a: int, b: int) -> int {
+    let mut s = a * 181 + b
+    let mut k = 0
+    while k < 18 {
+        s = s + k * 4 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f179(a: int, b: int) -> int {
+    let mut s = a * 182 + b
+    let mut k = 0
+    while k < 19 {
+        s = s + k * 5 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f180(a: int, b: int) -> int {
+    let mut s = a * 183 + b
+    let mut k = 0
+    while k < 20 {
+        s = s + k * 6 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f181(a: int, b: int) -> int {
+    let mut s = a * 184 + b
+    let mut k = 0
+    while k < 21 {
+        s = s + k * 7 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f182(a: int, b: int) -> int {
+    let mut s = a * 185 + b
+    let mut k = 0
+    while k < 22 {
+        s = s + k * 1 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f183(a: int, b: int) -> int {
+    let mut s = a * 186 + b
+    let mut k = 0
+    while k < 23 {
+        s = s + k * 2 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f184(a: int, b: int) -> int {
+    let mut s = a * 187 + b
+    let mut k = 0
+    while k < 24 {
+        s = s + k * 3 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f185(a: int, b: int) -> int {
+    let mut s = a * 188 + b
+    let mut k = 0
+    while k < 25 {
+        s = s + k * 4 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f186(a: int, b: int) -> int {
+    let mut s = a * 189 + b
+    let mut k = 0
+    while k < 26 {
+        s = s + k * 5 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f187(a: int, b: int) -> int {
+    let mut s = a * 190 + b
+    let mut k = 0
+    while k < 10 {
+        s = s + k * 6 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f188(a: int, b: int) -> int {
+    let mut s = a * 191 + b
+    let mut k = 0
+    while k < 11 {
+        s = s + k * 7 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f189(a: int, b: int) -> int {
+    let mut s = a * 192 + b
+    let mut k = 0
+    while k < 12 {
+        s = s + k * 1 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f190(a: int, b: int) -> int {
+    let mut s = a * 193 + b
+    let mut k = 0
+    while k < 13 {
+        s = s + k * 2 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f191(a: int, b: int) -> int {
+    let mut s = a * 194 + b
+    let mut k = 0
+    while k < 14 {
+        s = s + k * 3 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f192(a: int, b: int) -> int {
+    let mut s = a * 195 + b
+    let mut k = 0
+    while k < 15 {
+        s = s + k * 4 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f193(a: int, b: int) -> int {
+    let mut s = a * 196 + b
+    let mut k = 0
+    while k < 16 {
+        s = s + k * 5 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f194(a: int, b: int) -> int {
+    let mut s = a * 197 + b
+    let mut k = 0
+    while k < 17 {
+        s = s + k * 6 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f195(a: int, b: int) -> int {
+    let mut s = a * 198 + b
+    let mut k = 0
+    while k < 18 {
+        s = s + k * 7 - 0
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f196(a: int, b: int) -> int {
+    let mut s = a * 199 + b
+    let mut k = 0
+    while k < 19 {
+        s = s + k * 1 - 1
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f197(a: int, b: int) -> int {
+    let mut s = a * 200 + b
+    let mut k = 0
+    while k < 20 {
+        s = s + k * 2 - 2
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f198(a: int, b: int) -> int {
+    let mut s = a * 201 + b
+    let mut k = 0
+    while k < 21 {
+        s = s + k * 3 - 3
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn f199(a: int, b: int) -> int {
+    let mut s = a * 202 + b
+    let mut k = 0
+    while k < 22 {
+        s = s + k * 4 - 4
+        if s > 100000 {
+            s = s - 1000
+        }
+        k = k + 1
+    }
+    return s
+}
+
+fn main() {
+    let mut acc = 0
+    acc = acc + f0(0, 3)
+    acc = acc + f20(20, 3)
+    acc = acc + f40(40, 3)
+    acc = acc + f60(60, 3)
+    acc = acc + f80(80, 3)
+    acc = acc + f100(100, 3)
+    acc = acc + f120(120, 3)
+    acc = acc + f140(140, 3)
+    acc = acc + f160(160, 3)
+    acc = acc + f180(180, 3)
+    print(acc)
+}

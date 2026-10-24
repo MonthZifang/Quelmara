@@ -847,6 +847,8 @@ def main():
     case_selfcheck("t132_timer", "tests/t132_timer.qma")
     # vec[T] 下标（v2.13 补实现）：局部 / 形参 / 嵌套 / str / 聚合 / 表达式位置
     case_selfcheck("t141_vecindex", "tests/t141_vecindex.qma")
+    # 分片并行写 + 工作线程读共享 vec（v2.16：qlmc 并行后端的地基）
+    case_selfcheck("t143_parshard", "tests/t143_parshard.qma")
     case_selfcheck("t79_sse", "tests/t79_sse.qma")
     case_selfcheck("t80_md5", "tests/t80_md5.qma")
     case_selfcheck("t81_generic_infer", "tests/t81_generic_infer.qma")

@@ -662,30 +662,66 @@ build/qlm.exe version
 - 命令行里的路径必须转成 `\\`：`system()` 走 cmd.exe，不认 `build/hello.exe`
   （实测报"不是内部或外部命令"并把退出码吞成 1）。
 
-### 1.11 stage-1 编译器 `qlmc`（v2.14 起，子集 S2）
+### 1.11 stage-1 编译器 `qlmc`（v2.16：真 IR + 线性扫描 + 多核）
 
-`bootstrap/qlmc/qlmc.qma`（~1900 行 Quelmara）是一个**能出 exe** 的编译器：
+`bootstrap/qlmc/qlmc.qma`（约 3.3 千行 Quelmara）是一个**能出 exe** 的编译器：
 `.qma` -> PE32+，全程本语言，不经过 Python、不链接 CRT、不依赖第三方。
-它自己先用 stage-0 编出来（`build/qlmc.exe`，330 KB），之后用它编别的程序。
+它自己先用 stage-0 编出来（`build/qlmc.exe`），之后用它编别的程序。
 
 ```bash
 python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe
-build/qlmc.exe build examples/fib.qma -o build/fib.exe    # 产物 1536 字节
-build/qlmc.exe dump  examples/fib.qma                     # 只跑词法+语法，打印统计
+build/qlmc.exe build examples/fib.qma -o build/fib.exe     # -j N 可指定线程数
+build/qlmc.exe dump  examples/fib.qma                      # 只跑词法+语法，打印统计
 build/qlmc.exe version
 ```
 
-**分层**（改哪一层一目了然）：
+**流水线**（改哪一层一目了然）：
 
-| 层 | 位置 | 本版做法 |
+```
+.qma ─lex─▶ 记号 ─parse─▶ 平坦 AST ─lower─▶ 三地址 IR ─alloc─▶ 带位置 IR ─emit─▶ 机器码
+                                                                  │
+                                                       按函数分片并行（每线程一段 arena）
+```
+
+| 层 | 位置 | 做法 |
 |---|---|---|
 | 词法 | `lex` | 只认 S2 的记号集；不认识的字符 fail-fast（不静默跳过） |
-| 语法 | `parse` / `_expr` / `_stmt` / `_block` | 递归下降 + 优先级爬升；**平坦 AST**（节点表 + `nx` 链），块用链不用区间 |
-| 类型 | `_emit_expr` 的返回值 | **最小类型跟踪**（int/bool/str/void）：只为选对指令——`+` 是 `add` 还是 `__str_cat`、`print` 走哪个通道。不做类型检查 |
-| 分配 | `_emit_expr` | **全溢出**：局部与临时都落帧槽，表达式求值用 RAX/RCX 双累加器；没有线性扫描 |
-| 编码 | `_mov_*` / `_alu_*` / `_jcc` / `_call_*` | x86-64 手写编码（REX/ModRM/SIB、rel32 回填） |
+| 语法 | `parse` / `_expr` / `_stmt` | 递归下降 + 优先级爬升；**平坦 AST**（节点表 + `nx` 链），块用链不用区间 |
+| 降级 | `_lower_expr` / `_lower_into` / `_lower_cond` | AST → IR。`_lower_into` 把赋值**直接算进目标变量**，`_lower_cond` 直接发 `cmp+jcc` |
+| IR | `Ir { op, dst, a, b, imm }` | 26 个操作码：常量 / 搬运 / 算术 / 比较 / 标签 / 跳转 / 条件跳 / 实参 / 调用 / 返回 / 打印 / 退出 / 取址 / 取长度 / 入参 |
+| 分配 | `_alloc` | **两段式**：变量固定 callee-saved（RBX/R12-R15，满了落帧槽）；临时值按活跃区间线性扫描（R8-R11），**跨调用**的临时值直接落帧槽 |
+| 发射 | `_emit_ir` / `_emit_fn` | x86-64 手写编码（REX/ModRM/SIB、rel32 回填）；操作数按位置选 reg-reg / reg-mem 形态 |
+| 并行 | `_compile_range` | 每个线程编一段函数，写 arena 里自己那段；主线程按函数序拼装 + 统一回填 |
 | 文件 | `build_rdata` / `build_pe` | **三节**（`.text`/`.rdata`/`.bss`）、导入表（kernel32 + user32）、PE32+ 头；`.bss` 1 MB 当堆（不占文件体积） |
-| 运行库 | `_gen_*` | 6 个手写例程：print_i64（`wsprintfA("%I64d\n")`）/ print_str / memcpy / alloc（bump）/ str_cat / str_eq / die。全走 Win32，不引 CRT |
+| 运行库 | `_gen_*` | 8 个手写例程：print_i64（`wsprintfA("%I64d\n")`）/ print_str / **print_bool** / memcpy / alloc（bump）/ str_cat / str_eq / die。全走 Win32，不引 CRT |
+
+**寄存器分配的两条硬规则**（改分配器前先读）：
+
+1. **变量固定、临时扫描**。变量在函数内固定一个 callee-saved 寄存器——这样跨循环、
+   跨调用都成立，不需要 SSA 与 phi。临时值只在 `[首次定义, 最后使用]` 区间内占寄存器。
+2. **区间跨调用的临时值不许进 caller-saved**。判断用调用前缀和：
+   `cp[end+1] - cp[start+1] > 0` 即区间 `(start, end]` 内有调用 → 直接落帧槽。
+   这条替代了「在调用点插溢出代码」，是并行/正确性都最省的做法。
+
+**发射器保留的暂存**：RAX（除法 / setcc / 打印值）、RCX（实参 0 / 打印 str）、
+RDX（实参 1 / 除余）。这三个**永不被分配**，所以发射序列不会踩到已分配的值。
+
+**并行与确定性**（这是"多核"的全部内容）：
+
+```
+arena（mem_alloc 16 MB）
+  [0 .. 63]        线程表：每线程 8 字（lo, hi, base, cap）
+  [64 .. ]         函数表：每函数 7 字（code_off/len, lab_off/len, fix_off/len, region_base）
+worker w         只写 [base, base+cap) 这一段 → 线程之间零共享可变状态，无需锁
+                 每函数写自己那 7 字 → 无竞争
+main             按 fi 升序拷字节 + 回填 → 线程数不影响产物字节
+```
+
+- `-j N` 强制线程数；省略或 `-j 0` = 自动：**每线程约 50 个函数**才开线程，
+  函数少于 16 个直接单线程（线程创建 ~200 µs/个，小输入上并行是负收益）。
+- `-j 1` 与 `-j N` 走**同一条代码路径**（只是不 spawn），所以产物逐字节相同。
+  这条由 `tests/qlmc_test.py` 的「并行确定性」段钉住。
+- 并行只覆盖**函数体**：词法 / 语法仍是单线程，是当前墙钟的主要部分。
 
 **支持（S2）**：
 
@@ -701,39 +737,43 @@ build/qlmc.exe version
 
 **不支持**：struct/enum/match、数组 `[N]T`、vec/map、f64、泛型、闭包、切片、`defer`、
 `for`、`break`/`continue`、`import`（多文件）、宏/反射、`@ffi`、接口、`rc`、
-错误信息带列号、寄存器分配、常量折叠。
+错误信息带列号、常量折叠 / 强度削减 / CSE。
 
 **口径对齐（差分逼出来的）**：`&&`/`||` 与 **str 比较**产生 bool（打印 `true`/`false`），
 而 int 比较与 `!` 产生 int（打印 `1`/`0`）——这是 stage-0 的实际行为，qlmc 照抄，
 不"统一"。
 
 **怎么验**：`python tests/qlmc_test.py` —— 同一份源码分别用 stage-0 与 qlmc 编，
-比较 stdout 与退出码**逐字节相同**（6 组用例 / 13 条断言）。这是唯一有说服力的判据：
+比较 stdout 与退出码**逐字节相同**（7 组用例 15 条），外加并行确定性 2 条
+（`-j1` 与 `-j4` 产物 `cmp` 相同 + `-j4` 产物运行结果）。这是唯一有说服力的判据：
 "能出 exe"很容易，"和既有编译器行为一致"才是真的对。
 
-**为什么先做"能跑通"再做"覆盖全"**：链路通了之后每一步都是加法（加语法 = 加
-`_stmt` 一个分支，加优化 = 换 `_emit_expr` 的分配策略）；反过来先铺语法再打通链路，
-中间态一个都跑不起来，也没法验证。
+**为什么先做"能跑通 + 后端真"再做"覆盖全"**：后端是承重墙——IR 与分配立起来之后，
+加语法只是加 `_lower_stmt` 一个分支；反过来先把语法铺满再换后端，等于两遍返工。
 
 **几个踩过的坑**（改这个文件前先看）：
 
-1. **`vec` 元素不能当可变单元格**：`ps[0].pos = x` 写进的是临时副本，静默不生效
-   （表现成"fn 之后期望函数名"的死循环）。位置状态要用 `vec[int]` + `.set()`。
+1. **`vec` 元素不能当可变单元格**：`ps[0].pos = x` 写进的是临时副本，静默不生效。
+   位置状态要用 `vec[int]` + `.set()`。
 2. **`vec` 没有下标赋值**（`v[i] = x` 只对定长数组/切片成立），要用 `.set(i, x)`。
 3. **PE 可选头的六个版本 u16 一个都不能少**：少一对会让后面字段整体前移 4 字节，
    加载器直接报"不是有效的 Win32 应用程序"。
-4. **`wsprintfA` 不认 `%lld`**（那是 C 运行库的口径），64 位要用 `%I64d`；
-   写错时它会原样输出 "ld"，看起来像"数字打印坏了"。
-5. **`fn` 是关键字**，不能当变量名（`let fn = ...` 直接语法错）。
+4. **`wsprintfA` 不认 `%lld`**：64 位要用 `%I64d`；写错时它原样输出 "ld"。
+5. **`fn` / `arena` 是关键字**，不能当变量名或形参名（`resolve_fn(arb, …)` 就是这么改的）。
 6. **入口必须落在 `.text` 偏移 0**（`AddressOfEntryPoint` 恒等于 `TEXT_RVA`）：
-   先发入口再发运行库。顺序反了入口就跳到第一个运行库例程——现象是"空 `main`
-   打印一个地址、退出码 1"。
-7. **手写 REX 前缀别漏**：`test r8, r8` 是 `4D 85 C0`，写成 `48 85 C0` 就是
-   `test rax, rax`（现象：str 比较直接访问冲突）。
-8. **运行库的实参寄存器要在调用点摆好**：`+` 的两操作数是 RAX/RCX，而
-   `__str_cat` 要 RCX/RDX——先 `mov rdx, rcx` 再 `mov rcx, rax`，反了会覆盖左操作数。
+   先发入口再发运行库。
+7. **手写 REX 前缀别漏**：`test r8, r8` 是 `4D 85 C0`，写成 `48 85 C0` 就是 `test rax, rax`。
+8. **运行库的实参寄存器要在调用点摆好**：`__str_cat` 要 RCX/RDX，先 `mov rdx, rcx`
+   再 `mov rcx, rax`，反了会覆盖左操作数。
 9. **结构体是按值传的**：`ctx.some_int = x` 写的是副本（静默失效）。可变标量状态
-   要么放 `vec[int]` 单元素 cell（`.set` 写句柄），要么从函数返回。
+   放 `vec[int]` 单元素 cell（`.set` 写句柄），要么从函数返回。
+10. **并行两处基准必须分清**：工作线程写的是**区域相对偏移**，主线程回读要按
+    `region_base` 换算。v2.16 第一版就是这里错位，现象是"任何程序都 vec 越界"。
+11. **常量名会撞**：新 IR 操作码别用 `I_*`——`I_EXIT`/`I_WRITE`/`I_GETSTD`/`I_WSPRINTF`
+    已经是导入表槽位，撞了会让 `iat.set(I_EXIT, …)` 写到下标 21（越界或静默写坏）。
+    新操作码统一 `OP_*`。
+12. **函数基址不是 0**：拼装时函数体接在「入口 + 运行库」之后，`off` 的初值必须是
+    当前 `.text` 长度；写成 0 会生成一个"能出但一跑就崩"的 exe。
 
 ## 2. 配置文件 `Quelmara.toml`
 
