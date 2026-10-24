@@ -1,0 +1,73 @@
+// s17_constexpr.qma —— stage-1 编译器（qlmc）const 常量表达式的差分夹具（v2.30）
+//
+// 覆盖：
+//   1) 字面量 / 一元负号 / 括号
+//   2) 常量之间的算术（+ - * / %），按声明序求值
+//   3) 除法的 C 截断语义（含负数）与取模符号
+//   4) 常量当 vec 容量、当循环上界、当数组长度
+//   5) 负值常量（`const NEG = -7` 以前会被当成"未定义"，这版一起修了）
+// 与 stage-0 做逐字节差分（tests/qlmc_test.py）。
+//
+// 注意：stage-0 的 const 右值只支持 `+ - * / %`（`parse_const_value`），
+// 所以这里**不能**用位运算——qlmc 支持是超集，但夹具必须两边都能编。
+const A = 5
+const B = A * 4 + 1
+const C = (A + B) * 2
+const NEG = -7
+const Z = 0 - A
+const D = 100 / 7
+const M = 100 % 7
+const E = NEG + B
+const NEGD = 0 - 100 / 7
+const NEGM = 0 - 100 % 7
+const NEGQ = -100 / 7
+const NEGR = -100 % 7
+
+fn main() {
+    // 1) 基本折叠
+    print(A)
+    print(B)
+    print(C)
+    print(NEG)
+    print(Z)
+    print(E)
+
+    // 2) 除法 / 取模的符号（C 截断语义）
+    print(D)
+    print(M)
+    print(NEGD)
+    print(NEGM)
+    print(NEGQ)
+    print(NEGR)
+
+    // 3) 常量参与运行期表达式
+    print(A + B + C)
+    print(NEG * 2)
+    print(B - A)
+    print(C / A)
+    print(C % A)
+
+    // 4) 常量当容量 / 上界 / 数组长度
+    let v = vec[int].new(A)
+    v.push(C)
+    v.push(B)
+    print(len(v))
+    print(v[0])
+    print(v[1])
+
+    let mut s = 0
+    for i in 0..B {
+        s = s + i
+    }
+    print(s)
+
+    let arr = [A, B, C, E]
+    print(arr[0] + arr[3])
+
+    // 5) 常量当条件里的比较对象
+    let mut i = 0
+    while i < A {
+        i = i + 1
+    }
+    print(i)
+}

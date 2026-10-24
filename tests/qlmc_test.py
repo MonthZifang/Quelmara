@@ -51,6 +51,7 @@ CASES = [
     ("s14_vecgrow", "tests/selfhost/s14_vecgrow.qma"),
     ("s15_bitops", "tests/selfhost/s15_bitops.qma"),
     ("s16_stackargs", "tests/selfhost/s16_stackargs.qma"),
+    ("s17_constexpr", "tests/selfhost/s17_constexpr.qma"),
 ]
 
 npass = 0

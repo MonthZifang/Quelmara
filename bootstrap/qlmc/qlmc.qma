@@ -709,15 +709,79 @@ fn _name_id(p: P, s: str) -> int {
 }
 
 /// 查 const 表；没有返回 -1
-fn _const_of(p: P, nid: int) -> int {
+/// 查常量在表里的**下标**（-1 = 没定义）。
+/// 不要用"值 == -1"当哨兵——`const A = -1` 是合法的，那样会把 A 当成未定义。
+fn _const_idx(p: P, nid: int) -> int {
     let mut i = 0
     while i < len(p.cname) {
         if p.cname[i] == nid {
-            return p.cval[i]
+            return i
         }
         i = i + 1
     }
     return -1
+}
+
+/// 解析期常量求值（v2.30）：把 const 初值的 AST 折成一个整数。
+///
+/// 认：整型字面量、**已定义**的 const、一元 `-` `~`、二元 `+ - * / % & | ^ << >> >>>`。
+/// 其余一律 fail-fast——绝不"折不动就当 0"，那是静默错编。
+///
+/// 口径对齐 stage-0：它的 const 右值只支持 `+ - * / %`（`parse_const_value`），
+/// 所以位运算这里是**超集**（qlmc 更宽松，只多不少，不影响逐字节差分）；
+/// 除法/取模用 C 截断语义（与语言里的 `/` `%` 一致）。
+fn _fold(p: P, pos: vec[int], nid: int) -> int {
+    let nd = p.nodes.get(nid)
+    if nd.op == E_NUM {
+        return nd.a
+    }
+    if nd.op == E_VAR {
+        let ci = _const_idx(p, nd.a)
+        if ci < 0 {
+            _fail(p, pos, "const 初值只能引用**已定义**的常量（按声明序求值）")
+        }
+        return p.cval.get(ci)
+    }
+    if nd.op == E_UN {
+        let v = _fold(p, pos, nd.b)
+        if nd.a == P_MINUS {
+            return 0 - v
+        }
+        if nd.a == P_TILDE {
+            return 0 - v - 1              // ~v = -v-1（64 位补码）
+        }
+        _fail(p, pos, "const 初值里的一元运算只支持 - 和 ~")
+        return 0
+    }
+    if nd.op == E_BIN {
+        let a = _fold(p, pos, nd.b)
+        let b = _fold(p, pos, nd.c)
+        if nd.a == P_PLUS { return a + b }
+        if nd.a == P_MINUS { return a - b }
+        if nd.a == P_STAR { return a * b }
+        if nd.a == P_SLASH {
+            if b == 0 {
+                _fail(p, pos, "const 初值编译期除零")
+            }
+            return a / b
+        }
+        if nd.a == P_PERCENT {
+            if b == 0 {
+                _fail(p, pos, "const 初值编译期除零")
+            }
+            return a % b
+        }
+        if nd.a == P_AMP { return a & b }
+        if nd.a == P_PIPE { return a | b }
+        if nd.a == P_CARET { return a ^ b }
+        if nd.a == P_SHL { return a << b }
+        if nd.a == P_SHR { return a >> b }
+        if nd.a == P_USHR { return a >>> b }
+        _fail(p, pos, "const 初值里的二元运算只支持 + - * / % & | ^ << >> >>>")
+        return 0
+    }
+    _fail(p, pos, "const 初值必须是编译期可求值的整型表达式")
+    return 0
 }
 
 fn _str_id(p: P, s: str) -> int {
@@ -1190,9 +1254,9 @@ fn _primary(p: P, pos: vec[int]) -> int {
             }
         }
         if !_is_p(p, pos, P_LPAREN) {
-            let cv = _const_of(p, nid)
-            if cv >= 0 {
-                return _postfix(p, pos, _node(p, E_NUM, cv, -1, -1))
+            let ci = _const_idx(p, nid)
+            if ci >= 0 {
+                return _postfix(p, pos, _node(p, E_NUM, p.cval.get(ci), -1, -1))
             }
         }
         if _is_p(p, pos, P_LPAREN) {
@@ -1649,13 +1713,15 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
                 _adv(pos)                    // 类型标注（只允许整型）
             }
             _eat_p(p, pos, P_ASSIGN)
-            let v = _cur(p, pos)
-            if v.k != T_NUM {
-                _fail(p, pos, "const 只支持整型字面量（S2 口径）")
+            // 初值可以是**常量表达式**（v2.30）：先用正常表达式解析（优先级自然
+            // 与语言一致），再用 `_fold` 在解析期折成一个整数；折不动的 fail-fast。
+            let e = _expr(p, pos)
+            let cv = _fold(p, pos, e)
+            if _is_p(p, pos, P_SEMI) {
+                _adv(pos)
             }
-            _adv(pos)
             p.cname.push(_name_id(p, nm.s))
-            p.cval.push(v.n)
+            p.cval.push(cv)
             continue
         }
         _fail(p, pos, "顶层期望 fn / const / struct")
@@ -5820,7 +5886,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S15：int/bool/str + struct/数组/enum/vec（可扩容）/map/切片 + 位运算/移位 + 进制字面量 + defer + import + @ffi + 闭包 + 聚合形参返回 + 形参实参不限个数 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S16：int/bool/str + struct/数组/enum/vec（可扩容）/map/切片 + 位运算/移位 + 进制字面量 + const 常量表达式 + defer + import + @ffi + 闭包 + 聚合形参返回 + 形参实参不限个数 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
