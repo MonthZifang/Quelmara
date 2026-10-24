@@ -21,6 +21,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 DOC = os.path.join(ROOT, "docs", "03-stdlib.md")
 BEGIN = "<!-- api:begin -->"
 END = "<!-- api:end -->"
+# §1 的模块总览表也是生成物（v2.01）：手写那张表曾漏掉 27 个新模块，
+# 而 --check 只比 §3，漏了也查不出来。
+OV_BEGIN = "<!-- overview:begin -->"
+OV_END = "<!-- overview:end -->"
 
 DESC = {
     "std/aes.qma": "AES-128-GCM：分组加密（AES-NI 快路径 + T-table 降级）+ GHASH + CTR",
@@ -122,13 +126,20 @@ def undocumented():
 
 
 def render():
+    """返回 (总览表, API 段, 模块数, 公开函数数, 内部函数数)。
+
+    两个块同一次遍历产出：`--check` 比的是整份文档，任一块与源码不同都算漂移。
+    """
     parts = []
+    rows = ["| 模块 | 一句话 | 公开 / 全部 |", "|---|---|---|"]
     total = internal_total = 0
     for name, path in modules():
         fns = public_fns(path)
-        _pub_n, internal_n = qlm_doc.fn_counts(path)
+        pub_n, internal_n = qlm_doc.fn_counts(path)
         total += len(fns)
         internal_total += internal_n
+        short = name[:-4] if name.endswith(".qma") else name
+        rows.append(f"| `{short}` | {DESC[name]} | {len(fns)} / {pub_n + internal_n} |")
         parts.append(f"\n### `{name}`\n")
         parts.append(DESC[name])
         parts.append("")
@@ -139,10 +150,15 @@ def render():
                 for para in d.doc:
                     parts.extend("/// " + ln if ln else "///" for ln in para)
                 parts.append(d.signature)
+        elif internal_n:
+            # v2.01：std 里有模块的顶层函数一个都没 pub（v1.43 pub 化的漏项）。
+            # 不列进"公开 API"，但要说明为什么空——否则读者以为模块是空的。
+            parts.append("// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会")
+            parts.append("// 编译失败（见 07-gaps.md §7.13）")
         else:
             parts.append("// 无公开函数")
         parts.append("```")
-    return "\n".join(parts), len(modules()), total, internal_total
+    return "\n".join(rows), "\n".join(parts), len(modules()), total, internal_total
 
 
 def main():
@@ -179,11 +195,19 @@ def main():
     if BEGIN not in text or END not in text:
         print(f"FAIL：{DOC} 缺少 {BEGIN} / {END} 标记")
         return 1
+    if OV_BEGIN not in text or OV_END not in text:
+        print(f"FAIL：{DOC} 缺少 {OV_BEGIN} / {OV_END} 标记")
+        return 1
 
-    body, nmod, nfn, ninternal = render()
+    overview, body, nmod, nfn, ninternal = render()
     head, rest = text.split(BEGIN, 1)
     _, tail = rest.split(END, 1)
     new = f"{head}{BEGIN}\n{body}\n{END}{tail}"
+
+    # §1 模块总览表（v2.01 起由源码生成，不再手写）
+    h1, r1 = new.split(OV_BEGIN, 1)
+    _, t1 = r1.split(OV_END, 1)
+    new = f"{h1}{OV_BEGIN}\n{overview}\n{OV_END}{t1}"
 
     # 同步模块数 / 公开函数数 / 内部函数数（§1 的引言句，整句重写）
     new = re.sub(

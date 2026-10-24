@@ -74,10 +74,10 @@ fn main() {
 ├── Quelmara.toml          # 全局配置：核数/网络/内存/构建（见 05-toolchain.md）
 ├── quelmara.cmd           # Windows 命令入口
 ├── docs/                  # 全部文档（本目录）
-├── examples/              # 18 个可直接运行的示例
-├── bench/                 # 10 个基准 + baseline.json + loadgen.py
-├── tests/                 # 88 个 .qma 回归 + 12 个负向夹具 + 对拍/回归脚本
-├── std/                   # 39 个标准库模块（.qma 源码，编译期合并）
+├── examples/              # 可直接运行的示例
+├── bench/                 # 基准 + baseline.json + loadgen.py
+├── tests/                 # .qma 回归 + 负向夹具 + 对拍/回归脚本
+├── std/                   # 标准库模块（.qma 源码，编译期合并）
 │   └── net/               # core.qma（槽位层）/ udp.qma
 ├── bootstrap/             # 自举层：lexer/ + parser/（Quelmara 写的）
 ├── tools/
@@ -90,16 +90,20 @@ fn main() {
 
 ### 关键文件
 
-| 文件 | 作用 | 规模 |
-|---|---|---|
-| `tools/stage0/qlm.py` | 词法/语法/类型推断/常量求值/模块加载/C99 后端 | ~4.5k 行 |
-| `tools/stage0/qlm_native.py` | x86-64 编码器 + ELF64 写出 + 运行时 | ~8.7k 行 |
-| `tools/stage0/qlm_opt.py` | 优化 pass（14 个） | ~1.7k 行 |
-| `tools/stage0/qlm_pe.py` | PE32+ 写出 + 导入表 | ~390 行 |
-| `tools/stage0/qlm_arm64.py` | AArch64 发射器 | ~660 行 |
-| `tools/stage0/qlm_cli.py` | 命令行驱动 | ~510 行 |
-| `bootstrap/lexer/qlm_lex.qma` | 自举词法器 | 已对拍通过 |
-| `bootstrap/parser/qlm_parse.qma` | 自举声明级 parser | 已对拍通过 |
+| 文件 | 作用 |
+|---|---|
+| `tools/stage0/qlm.py` | 词法/语法/类型推断/常量求值/模块加载/C99 后端 |
+| `tools/stage0/qlm_native.py` | x86-64 编码器 + ELF64 写出 + 运行时 |
+| `tools/stage0/qlm_opt.py` | 优化 pass |
+| `tools/stage0/qlm_pe.py` | PE32+ 写出 + 导入表 |
+| `tools/stage0/qlm_arm64.py` | AArch64 发射器 |
+| `tools/stage0/qlm_cli.py` | 命令行驱动 |
+| `bootstrap/lexer/qlm_lex.qma` | 自举词法器（已对拍通过） |
+| `bootstrap/parser/qlm_parse.qma` | 自举声明级 parser（已对拍通过） |
+
+各模块的**行数、职责边界、要改它当什么**见 [`04-compiler.md`](04-compiler.md) §2；
+夹具/示例/基准/模块的**数量**见 [`05-toolchain.md`](05-toolchain.md) §5.1。
+本文不复制这两类数字——复制的那一刻就开始漂移。
 
 编译器内部结构见 [`04-compiler.md`](04-compiler.md)。
 

@@ -160,19 +160,25 @@ import 顺序——所以改 `load_program` 的解析规则不会让缓存失效
 
 | 文件 | 行数 | 职责 | 要改它当…… |
 |---|---|---|---|
-| `tools/stage0/qlm.py` | ~6009 | 词法、语法、类型推断、常量求值、泛型展开（含类型约束校验）、接口校验、模块加载、**doc comment 扫描**（`scan_doc_comments`）、C99 后端 | 加语法、改类型规则、改 import 解析、改 doc comment 规则 |
-| `tools/stage0/qlm_opt.py` | ~1742 | 优化 pass、范围分析、调度、边界消除 | 改优化效果 |
-| `tools/stage0/qlm_native.py` | ~9892 | AST→QuIR、x86-64 编码器、ELF64 写出、运行时、内建函数 | 加内建、改指令编码、改运行时 |
-| `tools/stage0/qlm_pe.py` | ~390 | PE32+ 头、节表、导入表、DIR64 重定位 | 改 Windows 产物 |
-| `tools/stage0/qlm_arm64.py` | ~656 | AArch64 编码与发射 | 补 AArch64 特性 |
-| `tools/stage0/qlm_cli.py` | ~510 | build/run/test/fmt/doc/lex/bench/debug/cov/version | 加命令 |
+| `tools/stage0/qlm.py` | ~8005 | 词法、语法、类型推断、常量求值、泛型展开（含类型约束校验）、接口校验、模块加载与链接期 mangling、**doc comment 扫描**（`scan_doc_comments`）、C99 后端 | 加语法、改类型规则、改 import 解析、改 doc comment 规则 |
+| `tools/stage0/qlm_opt.py` | ~1786 | 优化 pass、范围分析、调度、边界消除 | 改优化效果 |
+| `tools/stage0/qlm_native.py` | ~11563 | AST→QuIR、x86-64 编码器、ELF64 写出、运行时、内建函数 | 加内建、改指令编码、改运行时 |
+| `tools/stage0/qlm_pe.py` | ~530 | PE32+ 头、节表、导入表、DIR64 重定位 | 改 Windows 产物 |
+| `tools/stage0/qlm_arm64.py` | ~798 | AArch64 编码与发射 | 补 AArch64 特性 |
+| `tools/stage0/qlm_cli.py` | ~954 | build/run/test/fmt/doc/lex/bench/debug/cov/fuzz/lsp/version | 加命令 |
+| `tools/stage0/qlm_index.py` | ~1847 | LSP 语义索引：位置感知词法 + 容错结构索引 + 补全/跳转/重命名 | 改补全/跳转语义 |
+| `tools/stage0/qlm_lsp.py` | ~586 | LSP 3.17 子集 stdio 服务（JSON-RPC 层） | 加 LSP 方法 |
+| `tools/stage0/qlm_cache.py` | ~532 | 增量编译缓存（内容寻址 + 精确依赖闭包） | 改缓存键/失效规则 |
 | `tools/stage0/qlm_mem.py` | ~904 | 内存相关运行时（QuIR 片段） | 改分配器 |
 | `tools/stage0/qlm_mt.py` | ~936 | 多线程/任务运行时 | 改 spawn/parfor |
 | `tools/stage0/qlm_store.py` | ~1186 | 存储/持久化运行时 | 改存储层 |
 | `tools/stage0/qlm_uring.py` | ~1195 | io_uring 后端（C 链） | 改 Linux 异步 IO |
 | `tools/stage0/qlm_fmt.py` | ~199 | 格式化器 | 改排版规则 |
-| `tools/stage0/qlm_doc.py` | ~330 | doc comment 生成器（`quelmara doc`）：扫描、Markdown/JSON 渲染、`--check` / `--missing` 门禁 | 改文档版式、加输出目标 |
-| `tools/stage0/qlm_dbg.py` | ~147 | Windows ctypes 调试小工具 | 排查加载/异常码 |
+| `tools/stage0/qlm_doc.py` | ~303 | doc comment 生成器（`quelmara doc`）：扫描、Markdown/JSON 渲染、`--check` / `--missing` 门禁 | 改文档版式、加输出目标 |
+| `tools/stage0/qlm_dbg.py` | ~1254 | **源码级调试器**（`quelmara debug`）：读 `.qlmdbg`，Windows 调试 API 提供断点/单步/变量/栈 | 加调试命令、改断点语义 |
+| `tools/stage0/qlm_dbinfo.py` | ~114 | 编译期调试信息发射钩子（语句行号 / 变量位置） | 改调试元数据 |
+| `tools/stage0/qlm_dwarf.py` | ~432 | DWARF v4 节编码（`.debug_abbrev`/`info`/`line`/`loc`） | 改标准调试信息 |
+| `tools/stage0/qlm_fuzz.py` | ~164 | fuzz 判定器（built/rejected/deep/bug/slow 五分类） | 改崩溃分类口径 |
 
 `bootstrap/` 是自举层（Quelmara 写自己）：`lexer/qlm_lex.qma`、`parser/qlm_parse.qma`。
 stage-1 parser 覆盖**声明层**：`module` / `import` / `struct` / `enum` / `fn` 签名，含
@@ -283,7 +289,7 @@ SHA     cpuid_sha  sha_rnds2  sha_msg1  sha_msg2  sha_nexte
    不截断就会出现"`CloseHandle` 返回真但 `if` 判假"这类只在少数 API 上复现的怪事。
 
 
-### 6.2.1 调试信息发射（`--dbg-info`，v1.79/v1.80）
+### 6.2.1 调试信息发射（`--dbg-info`，v1.75/v1.80）
 
 | 阶段 | 做什么 | 文件 |
 |---|---|---|

@@ -8,43 +8,72 @@
 
 ## 1. 模块总览
 
-60 个模块，**406 个公开函数**（另有 534 个内部函数）
+60 个模块，**406 个公开函数**（另有 535 个内部函数）
 
+<!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
 |---|---|---|
-| `std/core` | `abs` / `max2` / `min2` / `pow2k` | 4 / 4 |
-| `std/mem` | slab 分配、fd 表、缓冲、对象池 | 30 / 30 |
-| `std/str` | 查找/切分/拼接/大小写/补齐 | 26 / 30 |
-| `std/url` | URL 解析、query 取值、编码解码 | 12 / 18 |
-| `std/json` | DOM 解析 + builder | 39 / 84 |
-| `std/gzip` | DEFLATE 编码 + **inflate 解码** + crc32 | 6 / 29 |
-| `std/hex` | 十六进制编解码（v1.19） | 5 / 5 |
-| `std/math` | sqrt/cbrt/取整/powi/gcd（v1.19） | 21 / 21 |
-| `std/sha1` | SHA-1（WS 握手用） | 5 / 5 |
-| `std/sha256` | SHA-256 + HMAC-SHA256 | 11 / 11 |
-| `std/rsa` | RSA PKCS#1 v1.5 / PSS 验签（SHA-256） | 2 / 12 |
-| `std/aes` | AES-128-GCM（T-table 加密 + GHASH 4-bit 表） | 6 / 33 |
-| `std/x25519` | X25519 密钥交换（RFC 7748，TLS ECDHE 地基） | 3 / 21 |
-| `std/tls13` | TLS 1.3 密钥调度 + AEAD 记录层 + 记录/握手解析（v1.21/24） | 29 / 29 |
-| `std/tls_client` | TLS 1.3 客户端握手核心 + 证书链入口（v1.24/26） | 9 / 13 |
-| `std/tls_net` | TLS 1.3 网络层：TCP 建连 + 握手 + 应用数据（v1.25，Windows） | 5 / 5 |
-| `std/p256` | NIST P-256 域运算 + ECDSA 验签（v1.22） | 2 / 45 |
-| `std/x509` | X.509 解析 + P-256/RSA 验签 + 链/有效期/域名校验（v1.23/26/27） | 23 / 34 |
-| `std/b64` | base64 编解码 | 5 / 5 |
-| `std/http` | HTTP/1.1 服务端 | 33 / 40 |
-| `std/ws` | WebSocket 服务端（RFC 6455） | 14 / 24 |
-| `std/sse` | Server-Sent Events | 17 / 20 |
-| `std/net` | 阻塞 TCP 便捷层（服务端 + 客户端 connect） | 7 / 7 |
-| `std/net/core` | 连接槽位层（640 B/连接） | 18 / 18 |
-| `std/net/udp` | UDP 封装 + 地址解析 | 3 / 3 |
-| `std/ds` | RingBuf + MinHeap | 10 / 10 |
-| `std/serialize` | LEB128 varint + 定长 + 帧 | 10 / 10 |
-| `std/sync` | 自旋锁 / Treiber 栈 / WaitGroup | 10 / 10 |
-| `std/rand` | xorshift64* | 4 / 5 |
-| `std/sort` | 快排 + 有序性检查 | 2 / 5 |
-| `std/log` | 分级日志 + 结构化字段 + 级别过滤 | 6 / 7 |
-| `std/time` | `now_ms` / `sleep_ms` 便捷层 | 2 / 2 |
-| `std/timer` | 轮询式定时器 | 4 / 4 |
+| `std/aes` | AES-128-GCM：分组加密（AES-NI 快路径 + T-table 降级）+ GHASH + CTR | 10 / 38 |
+| `std/b64` | base64 编解码 | 5 / 9 |
+| `std/blake2b` | BLAKE2b（RFC 7693）密码学哈希 + keyed / 变长输出 | 4 / 10 |
+| `std/cli` | 命令行 flag 解析（--k=v / --k v / -k v） | 6 / 9 |
+| `std/cookie` | Cookie 头解析与 Set-Cookie 生成（取值 / 百分号编解码 / Max-Age / SameSite / HttpOnly / Secure） | 6 / 9 |
+| `std/core` | 标量小工具 | 0 / 4 |
+| `std/crc64` | CRC-64/XZ（ECMA-182 反射多项式，xz/zlib 容器的 64 位校验） | 2 / 3 |
+| `std/csv` | CSV 解析与生成（RFC 4180：引号包裹 / "" 转义 / 字段内换行 / CRLF 或 LF） | 4 / 6 |
+| `std/deque` | 双端队列（两端 O(1) + 自动扩容） | 13 / 21 |
+| `std/ds` | 环形缓冲与二叉最小堆 | 0 / 10 |
+| `std/f64` | 十进制文本 ↔ f64（严格十进制解析 + Clinger 快路径，非十进制 fail-fast） | 3 / 16 |
+| `std/fs` | 文件读写（open/read/write/seek/size/sync/close/rename；Windows PE，@ffi 直调 kernel32） | 10 / 18 |
+| `std/gen` | 泛型算法库（min/max/clamp/dist/contains/index_of/reverse，调用点推导单态化） | 0 / 9 |
+| `std/gzip` | DEFLATE 编码 + gzip 包装 + CRC-32；v1.19 起含 inflate 解码 | 5 / 33 |
+| `std/hash` | FNV-1a 32/64 非密码学哈希（缓存键 / 分片） | 4 / 4 |
+| `std/hex` | 十六进制编解码 | 4 / 5 |
+| `std/http` | HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商） | 0 / 40 |
+| `std/httpc` | HTTP/1.1 客户端核心：URL 拆分 / 请求构造 / 响应解析（content-length / chunked）/ 重定向判定（纯函数，零 socket 依赖） | 6 / 11 |
+| `std/httpc_net` | HTTP 客户端传输层：httpc_get / httpc_get_tls / httpc_get_follow（Windows；TLS 走 std/tls_net） | 3 / 4 |
+| `std/httpdate` | HTTP 日期（RFC 7231 IMF-fixdate）格式化与解析 + If-Modified-Since 判定 | 3 / 13 |
+| `std/json` | DOM 式 JSON 解析与 builder | 32 / 85 |
+| `std/kv` | 持久化键值存储（追加日志 + 内存索引；重开重放 / 撕裂尾恢复 / 压缩；Windows PE） | 11 / 16 |
+| `std/log` | 分级日志（stdout）+ 结构化字段 + 级别过滤 | 6 / 7 |
+| `std/lru` | LRU 缓存（开放寻址表 + 双向链表，单句柄 O(1)） | 10 / 24 |
+| `std/math` | 浮点与整数数学（exp/log/pow/sin/cos/atan/双曲/hypot + sqrt/cbrt/取整/gcd） | 44 / 51 |
+| `std/md5` | MD5（RFC 1321，仅兼容用途，不要用于密码） | 1 / 5 |
+| `std/mem` | slab 分配 / fd 表 / 缓冲 / 对象池 | 21 / 30 |
+| `std/mime` | 扩展名 ↔ Content-Type（内置 30 项表，大小写不敏感，带 charset 参数反查） | 4 / 5 |
+| `std/multipart` | multipart/form-data 解析（boundary 提取 / 表单字段与文件部分 / 头字段大小写不敏感） | 4 / 6 |
+| `std/net` | 阻塞 TCP 便捷层 | 6 / 7 |
+| `std/net/core` | 连接槽位层（IOCP reactor 的底座） | 0 / 18 |
+| `std/net/udp` | UDP 封装与地址解析 | 1 / 3 |
+| `std/p256` | NIST P-256 域运算 + ECDSA 验签（TLS 证书签名） | 2 / 45 |
+| `std/path` | 路径处理（join / clean / dir / base / ext / stem；'/' 与 '\' 都认） | 7 / 9 |
+| `std/rand` | xorshift64* 伪随机 | 4 / 5 |
+| `std/regex` | 正则引擎（回溯 VM）：字面/./字符类/转义类/量词 *+?{n,m}/交替/分组(?:)/锚点 ^$；compile+match/full/exec/find/replace[_all]，步数上限防病态回溯 | 7 / 24 |
+| `std/router` | 路径模板匹配（/users/:id、尾部 * 通配、query/尾斜杠归一化、方法白名单） | 5 / 5 |
+| `std/rsa` | RSA PKCS#1 v1.5 / PSS 验签（SHA-256，证书链与 TLS 用） | 2 / 12 |
+| `std/serialize` | LEB128 varint / 定长整数 / 长度前缀帧 | 0 / 10 |
+| `std/session` | 内存会话存储（sid 生成 / TTL 惰性过期 / 滑动续期 / 墓碑销毁） | 8 / 9 |
+| `std/set` | 集合 set[int] / set[str]（map 支撑，含交并差） | 14 / 17 |
+| `std/sha1` | SHA-1 | 1 / 5 |
+| `std/sha256` | SHA-256 + HMAC-SHA256 | 4 / 13 |
+| `std/sha512` | SHA-512 / SHA-384（变体 IV 复用压缩函数）+ HMAC-SHA512 | 5 / 11 |
+| `std/sort` | 快速排序与有序性检查 | 2 / 5 |
+| `std/sse` | Server-Sent Events 服务端 | 0 / 20 |
+| `std/staticfile` | 静态文件服务的安全解析层（URL 解码 / 目录穿越防护 / index 补全 / Cache-Control / ETag / Range 解析） | 9 / 14 |
+| `std/str` | 字符串工具集 | 26 / 30 |
+| `std/sync` | 自旋锁 / Treiber 无锁栈 / WaitGroup | 11 / 11 |
+| `std/time` | 时间便捷层 | 0 / 2 |
+| `std/timer` | 轮询式定时器（MinHeap 驱动） | 0 / 4 |
+| `std/tls13` | TLS 1.3 密钥调度（HKDF-Expand-Label）+ AEAD 记录层 | 23 / 29 |
+| `std/tls_client` | TLS 1.3 客户端握手核心 + 证书链入口（RFC 8448 逐字节） | 7 / 13 |
+| `std/tls_net` | TLS 1.3 网络层：TCP 建连 + 握手 + 应用数据（Windows） | 3 / 5 |
+| `std/url` | URL 解析 / query 取值 / 编码解码 | 12 / 18 |
+| `std/utf8` | UTF-8 解码/编码/严格校验（RFC 3629） | 7 / 8 |
+| `std/uuid` | UUID v4 生成 + nil + 校验/版本/变体位（随机源为 std/rand，非密码学） | 5 / 9 |
+| `std/ws` | WebSocket 服务端（RFC 6455） | 0 / 24 |
+| `std/x25519` | Curve25519 上的 X25519 密钥交换（RFC 7748，TLS ECDHE 地基） | 3 / 21 |
+| `std/x509` | X.509 解析 + P-256 验签 + 证书链/有效期/域名校验 | 11 / 34 |
+<!-- overview:end -->
 
 ## 2. 用法约定
 
@@ -54,7 +83,12 @@ import std.http
 ```
 
 - 每个模块一个文件，函数用**模块前缀**防冲突（`http_` / `ws_` / `str_` / `url_` …）——
-  因为 `import` 是扁平合并，没有命名空间。
+  这是历史惯例：`import` 是扁平合并，同名会撞。v1.99 起编译器会给**真重名**的导入方加
+  `<模块>__` 前缀（per-module mangling，见 `02-language.md` §1），前缀不再是唯一手段，
+  但 std 全库仍按它命名（改名的收益抵不上破坏既有调用点）。
+- **跨模块引用要求 `pub`**（v1.43）：非 `pub` 的顶层声明只在本模块内可见。`std` 里有 10 个
+  模块当前**一个 `pub` 都没有**（下表"公开 / 全部"列为 `0 / N`），用户代码引用会编译失败，
+  清单见 `07-gaps.md` §7.13。
 - 所有 `str` 参数都是长度前缀值；**不要**把 `("ga", gid)` 这类全局字符串直接传进 str 函数，
   必须先 `+8` 成数据指针（`read_asset` 踩过这个坑）。
 - 库函数出错多为 fail-fast（退出进程）或返回 `-1`/空串，**没有错误对象**（见 `07-gaps.md`）。
@@ -199,7 +233,8 @@ fn cookie_set(name: str, value: str, path: str, max_age: int, attrs: str) -> str
 标量小工具
 
 ```quelmara
-// 无公开函数
+// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
+// 编译失败（见 07-gaps.md §7.13）
 ```
 
 ### `std/crc64.qma`
@@ -269,7 +304,8 @@ fn dq_free(d: int) -> int
 环形缓冲与二叉最小堆
 
 ```quelmara
-// 无公开函数
+// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
+// 编译失败（见 07-gaps.md §7.13）
 ```
 
 ### `std/f64.qma`
@@ -323,7 +359,8 @@ fn fs_write_all(path: str, data: str) -> int
 泛型算法库（min/max/clamp/dist/contains/index_of/reverse，调用点推导单态化）
 
 ```quelmara
-// 无公开函数
+// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
+// 编译失败（见 07-gaps.md §7.13）
 ```
 
 ### `std/gzip.qma`
@@ -387,7 +424,8 @@ fn hex_decode(s: str) -> str
 HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商）
 
 ```quelmara
-// 无公开函数
+// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
+// 编译失败（见 07-gaps.md §7.13）
 ```
 
 ### `std/httpc.qma`
@@ -530,6 +568,7 @@ fn kv_open(path: str) -> Kv
 /// 句柄是否可用：1 / 0（`kv_open` 失败、或已经 `kv_close`）。
 fn kv_ok(db: Kv) -> int
 /// 写入一个键（覆盖旧值）：0 成功 / -1 失败。空键被拒绝。
+/// 记录先进缓冲，满 `_BATCH` 条才落盘；要立刻可见于磁盘用 `kv_sync`。
 fn kv_put(db: Kv, key: str, val: str) -> int
 /// 读一个键；不存在（或已删除）返回空串。用 `kv_has` 区分"空值"与"没有"。
 fn kv_get(db: Kv, key: str) -> str
@@ -539,7 +578,7 @@ fn kv_has(db: Kv, key: str) -> int
 fn kv_del(db: Kv, key: str) -> int
 /// 当前键数量（不含已删除的）。
 fn kv_len(db: Kv) -> int
-/// 刷盘（FlushFileBuffers）：0 成功 / -1 失败。掉电安全需要它。
+/// 刷盘（先冲刷缓冲，再 FlushFileBuffers）：0 成功 / -1 失败。掉电安全需要它。
 fn kv_sync(db: Kv) -> int
 /// 压缩：把活记录重写进 `<path>.tmp` 后原子改名。
 /// 返回 `[压缩前字节数, 压缩后字节数]`；失败返回空 vec。压缩后句柄仍可用。
@@ -549,6 +588,7 @@ fn kv_compact(db: Kv) -> vec[int]
 /// 的半死状态**（那会让人误以为数据还在库里）。
 fn kv_close(db: Kv) -> int
 /// 文件当前字节数（观察日志膨胀 / 压缩效果），失败 -1。
+/// **含未落盘的缓冲**——报的是"逻辑日志大小"，不是磁盘上已有的字节。
 fn kv_file_size(db: Kv) -> int
 ```
 
@@ -827,7 +867,8 @@ fn serve(port: int, backlog: int, on_connect: int, on_data: int, on_close: int) 
 连接槽位层（IOCP reactor 的底座）
 
 ```quelmara
-// 无公开函数
+// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
+// 编译失败（见 07-gaps.md §7.13）
 ```
 
 ### `std/net/udp.qma`
@@ -946,7 +987,8 @@ fn rsa_verify_pss_sha256(n: str, e: int, sig: str, hash: str, salt_len: int) -> 
 LEB128 varint / 定长整数 / 长度前缀帧
 
 ```quelmara
-// 无公开函数
+// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
+// 编译失败（见 07-gaps.md §7.13）
 ```
 
 ### `std/session.qma`
@@ -1068,7 +1110,8 @@ fn is_sorted(v: vec[int]) -> int
 Server-Sent Events 服务端
 
 ```quelmara
-// 无公开函数
+// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
+// 编译失败（见 07-gaps.md §7.13）
 ```
 
 ### `std/staticfile.qma`
@@ -1217,7 +1260,8 @@ fn wg_wait(w: int)
 时间便捷层
 
 ```quelmara
-// 无公开函数
+// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
+// 编译失败（见 07-gaps.md §7.13）
 ```
 
 ### `std/timer.qma`
@@ -1225,7 +1269,8 @@ fn wg_wait(w: int)
 轮询式定时器（MinHeap 驱动）
 
 ```quelmara
-// 无公开函数
+// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
+// 编译失败（见 07-gaps.md §7.13）
 ```
 
 ### `std/tls13.qma`
@@ -1398,7 +1443,8 @@ fn uuid_variant_ok(s: str) -> bool
 WebSocket 服务端（RFC 6455）
 
 ```quelmara
-// 无公开函数
+// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
+// 编译失败（见 07-gaps.md §7.13）
 ```
 
 ### `std/x25519.qma`

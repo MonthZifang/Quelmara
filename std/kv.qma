@@ -21,7 +21,10 @@
 //   * **追加写**：put/del 只往文件尾追加一条记录，从不原地改。
 //   * **内存索引 + 值驻留**：`map[str]str` 保存全部键值，get 是纯内存操作。
 //     内存占用 ≈ 数据集大小（这是本版的边界，见 `07-gaps.md` §2）。
-//   * **崩溃安全**：`WriteFile` 进内核后进程崩溃不丢；**掉电**要 `kv_sync`。
+//   * **批量提交（v2.01）**：put/del 先攒进内存缓冲，满 64 条合并成一次
+//     `WriteFile`；`kv_sync` / `kv_close` / `kv_compact` 前先冲刷。
+//     代价是**崩溃窗口**：进程被强杀最多丢最后不足 64 条（**掉电**仍要 `kv_sync`）；
+//     `kv_file_size` 把未落盘字节也算进去，报的是"逻辑日志大小"。
 //     重放时遇到半截记录（长度不够 / hash 不符）就停在那儿，下一次追加从最后
 //     一个完好字节处覆盖——撕裂的尾巴不会污染后续记录。
 //   * `kv_compact` 把活记录重写进 `<path>.tmp` 再原子改名，压缩后句柄仍可用。
@@ -35,10 +38,17 @@ import std.str
 
 const _MAGIC = "KV1"
 
+// 攒够这么多条记录就合并成一次 WriteFile（v2.01）。
+// 取值依据见 `06-status.md` §3.16：单条 WriteFile 的固定成本约 16 µs，
+// 64 条约 4 KB；再往上加只省 I/O 固定开销的一小截，却放大崩溃可丢窗口。
+const _BATCH = 64
+
 /// 一个打开中的库。`cell[0]` 是文件句柄（-1 = 已关闭）。
 pub struct Kv {
     cell: vec[int]
     m: map[str]str
+    // 已进内存索引、还没落盘的记录（v2.01 批量提交）
+    pending: vec[str]
     path: str
 }
 
@@ -74,6 +84,25 @@ fn _apply(m: map[str]str, key: str, val: str, tomb: int) {
     } else {
         m.set(key, val)
     }
+}
+
+// 把攒下的记录合并成一次 WriteFile：0 成功 / -1 失败。
+// 失败时**不清空缓冲**——调用方还能重试，且 `kv_close` 会把 -1 报出去，
+// 不会出现"关库成功但数据没写"的静默丢。
+fn _flush(db: Kv) -> int {
+    if len(db.pending) == 0 {
+        return 0
+    }
+    let fd = db.cell.get(0)
+    if fd == -1 {
+        return -1
+    }
+    let payload = str_join(db.pending, "")
+    if fs_write(fd, payload) < 0 {
+        return -1
+    }
+    db.pending.clear()
+    return 0
 }
 
 // 重放整份日志：返回最后一条完好记录的结束偏移（撕裂的尾巴从这里被覆盖）。
@@ -135,10 +164,11 @@ fn _replay(buf: str, m: map[str]str) -> int {
 pub fn kv_open(path: str) -> Kv {
     let cell = vec[int].new(1)
     let m = map[str]str.new(8)
+    let pending = vec[str].new(_BATCH)
     let fd = fs_open(path, "a")
     cell.push(fd)
     if fd == -1 {
-        return Kv { cell: cell, m: m, path: path }
+        return Kv { cell: cell, m: m, pending: pending, path: path }
     }
     let size = fs_size(fd)
     let mut buf = ""
@@ -148,7 +178,7 @@ pub fn kv_open(path: str) -> Kv {
     }
     let good = _replay(buf, m)
     fs_seek(fd, good)
-    return Kv { cell: cell, m: m, path: path }
+    return Kv { cell: cell, m: m, pending: pending, path: path }
 }
 
 /// 句柄是否可用：1 / 0（`kv_open` 失败、或已经 `kv_close`）。
@@ -160,20 +190,25 @@ pub fn kv_ok(db: Kv) -> int {
 }
 
 /// 写入一个键（覆盖旧值）：0 成功 / -1 失败。空键被拒绝。
+/// 记录先进缓冲，满 `_BATCH` 条才落盘；要立刻可见于磁盘用 `kv_sync`。
 pub fn kv_put(db: Kv, key: str, val: str) -> int {
     let fd = db.cell.get(0)
     if fd == -1 || len(key) == 0 {
         return -1
     }
-    if fs_write(fd, _rec(key, val, 0)) < 0 {
-        return -1
-    }
+    db.pending.push(_rec(key, val, 0))
     db.m.set(key, val)
+    if len(db.pending) >= _BATCH {
+        return _flush(db)
+    }
     return 0
 }
 
 /// 读一个键；不存在（或已删除）返回空串。用 `kv_has` 区分"空值"与"没有"。
 pub fn kv_get(db: Kv, key: str) -> str {
+    // 注意：`map.get` 对不存在的键是 **fail-fast**（不是返回空串），
+    // 所以这里必须先 `has` 再 `get`——省掉 has 会让"读一个没写过的键"
+    // 直接把进程打死（v2.02 试过，被主回归逮住）。
     if db.cell.get(0) == -1 || !db.m.has(key) {
         return ""
     }
@@ -200,10 +235,11 @@ pub fn kv_del(db: Kv, key: str) -> int {
     if !db.m.has(key) {
         return 0
     }
-    if fs_write(fd, _rec(key, "", 1)) < 0 {
-        return -1
-    }
+    db.pending.push(_rec(key, "", 1))
     db.m.del(key)
+    if len(db.pending) >= _BATCH {
+        return _flush(db)
+    }
     return 0
 }
 
@@ -212,10 +248,13 @@ pub fn kv_len(db: Kv) -> int {
     return len(db.m)
 }
 
-/// 刷盘（FlushFileBuffers）：0 成功 / -1 失败。掉电安全需要它。
+/// 刷盘（先冲刷缓冲，再 FlushFileBuffers）：0 成功 / -1 失败。掉电安全需要它。
 pub fn kv_sync(db: Kv) -> int {
     let fd = db.cell.get(0)
     if fd == -1 {
+        return -1
+    }
+    if _flush(db) != 0 {
         return -1
     }
     return fs_sync(fd)
@@ -230,6 +269,9 @@ pub fn kv_compact(db: Kv) -> vec[int] {
         return out
     }
     let tmp = db.path + ".tmp"
+    if _flush(db) != 0 {
+        return out
+    }
     let before = fs_size(fd)
     let tf = fs_open(tmp, "w")
     if tf == -1 {
@@ -266,14 +308,27 @@ pub fn kv_close(db: Kv) -> int {
     if fd == -1 {
         return -1
     }
-    let r = fs_sync(fd)
+    let mut r = _flush(db)
+    if r == 0 {
+        r = fs_sync(fd)
+    }
     fs_close(fd)
     db.cell.set(0, -1)
+    db.pending.clear()
     _clear(db.m)
     return r
 }
 
 /// 文件当前字节数（观察日志膨胀 / 压缩效果），失败 -1。
+/// **含未落盘的缓冲**——报的是"逻辑日志大小"，不是磁盘上已有的字节。
 pub fn kv_file_size(db: Kv) -> int {
-    return fs_size(db.cell.get(0))
+    let fd = db.cell.get(0)
+    if fd == -1 {
+        return -1
+    }
+    let mut n = fs_size(fd)
+    for r in db.pending {
+        n = n + len(r)
+    }
+    return n
 }

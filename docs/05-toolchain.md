@@ -711,10 +711,10 @@ alpha = "registry|path:../qreg|1.2.0|<sha256>|<1.2.0>|<tree>|beta@^1.0;gamma@~2.
 
 | 目录 | 内容 |
 |---|---|
-| `tests/*.qma` | 139 个正向夹具，多数用 `assert` 自校验 |
-| `tests/bad/*.qma` | 67 个负向夹具，**必须编译失败** |
+| `tests/*.qma` | 142 个正向夹具，多数用 `assert` 自校验 |
+| `tests/bad/*.qma` | 67 个负向夹具，**必须编译失败**（工作区口径；HEAD 为 70，差 3 个 v1.96 能力翻转后失效、待决定去留的旧夹具） |
 | `examples/*.qma` | 18 个可运行示例 |
-| `bench/*.qma` | 23 个基准 |
+| `bench/*.qma` | 24 个基准 |
 | `fixtures/` | 端到端工程夹具（srcproj / qpm-demo / lspdemo / dbgdemo …） |
 | `fixtures/lspdemo/` | 语言服务器夹具：`main.qma` + 被导入的 `util.qma`（跨文件跳转/重命名），**同时能编译运行** |
 
@@ -753,7 +753,10 @@ alpha = "registry|path:../qreg|1.2.0|<sha256>|<1.2.0>|<tree>|beta@^1.0;gamma@~2.
 | `tests/doc_test.py` | doc comment 链路（语法规则 / 前端挂载 / CLI / fmt 保留 / 产物逐字节相同） | 全平台 |
 | `tests/lsp_test.py` | 语言服务器：全仓库词法对拍 / 容错索引 / 索引语义 / 真 JSON-RPC 协议 / 性能阈值 | 全平台 |
 | `tests/cache_test.py` | 增量缓存：冷/热、改主文件、改依赖、改回原样命中旧条目、开关隔离、产物截断、`--stat/--clear`、串行=并行 | Windows |
+| `tests/kv_test.py` | **KV 进程级恢复**：跨进程重开、撕裂尾（砍半条记录）、垃圾尾（追加 200 B）、Python 独立解析器逐条对拍磁盘格式 + FNV-1a 64 标准向量 | Windows |
 | `tools/dev/incr_bench.py` | 增量/并行编译性能探针（单单元冷/热、多源 `-j`、`test -j`、进程创建基线，手动） | 全平台 |
+| `tools/dev/link_bench.py` | 链接期性能探针（import 合并 + 限定引用 + per-module mangling 三档同规模对照，手动） | 全平台 |
+| `tools/dev/selfhost_status.py` | 自举进度：组件数与行数占比（`06-status.md` §4 的口径来源） | 全平台 |
 | `tools/dev/doc_bench.py` | doc 扫描吞吐与编译期占比探针（手动） | 全平台 |
 | `tools/dev/dbg_bench.py` | 调试链路性能探针（构建开销 / 体积占比 / 每命中 / 每步，手动） | Windows |
 | `tools/dev/cov_bench.py` | 覆盖率与 fuzz 链路性能探针（分支表体积 / 采集开销 / 汇总耗时 / fuzz 吞吐，手动） | Windows |

@@ -1,7 +1,7 @@
 # v1.80 — DWARF v4 + 调试构建语义：`--dbg-info` 补标准调试信息、断点不再静默失效
 
 - 日期：2026-10-23
-- 任务：`07-gaps.md` §3「调试器」行的**第一句缺口**——"无 DWARF/PDB"。v1.79 把
+- 任务：`07-gaps.md` §3「调试器」行的**第一句缺口**——"无 DWARF/PDB"。v1.75 把
   自研 `.qlmdbg` 与调试器做通了，但调试信息只有自研格式，外部工具（IDE /
   objdump / llvm-dwarfdump）读不到；同时实测发现两个**会让调试器静默骗人**的
   缺陷：`--dbg-info` 在 CLI 层直接崩（`_build_win` 不认 `dbg`），以及内联让
@@ -12,7 +12,7 @@
 
 ## 为什么是它
 
-v1.79 交付后按"自己先用一遍"的标准跑了一遍，三个问题都属"看起来能用、实际在骗人"：
+v1.75 交付后按"自己先用一遍"的标准跑了一遍，三个问题都属"看起来能用、实际在骗人"：
 
 1. `quelmara build --dbg-info` 直接抛 `TypeError`——`qlm_cli.build()` 把 `dbg=`
    传给 `_build_win`，而 `_build_win` 的签名里没有这个参数。链路从入口就是断的。
@@ -68,7 +68,7 @@ v1.79 交付后按"自己先用一遍"的标准跑了一遍，三个问题都属
 |---|---|
 | `python tests/dwarf_test.py` | **PASS=20 FAIL=0** |
 | `python tests/dbg_test.py` | **PASS=40 FAIL=0** |
-| `python tests/debugger_test.py` | **PASS**（v1.79 的 18 项 + 调试/非调试输出逐字节相同，改动后仍全绿） |
+| `python tests/debugger_test.py` | **PASS**（v1.75 的 18 项 + 调试/非调试输出逐字节相同，改动后仍全绿） |
 | `python tests/run_win_tests.py` | **PASS=221 FAIL=0 SKIP=1**（SKIP=WSL 交叉验证，本机沙箱拦） |
 | `python tools/dev/check_docs.py` | PASS |
 | `python tools/dev/dbg_bench.py` | 见下方性能 |

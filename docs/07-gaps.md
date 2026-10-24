@@ -38,7 +38,7 @@
 | 压缩 | ✅ v1.32：多 member gzip 拼接流 + **zlib 容器**（RFC 1950，含 adler32 校验）；`adler32` 也可单独用 | 仍无 zlib 预置字典（FDICT）与 raw inflate 的窗口复用 |
 | TLS | **根证书库**（信任锚管理）、**P-384 / SHA-384**；RSA（PKCS#1 + PSS）与链校验 v1.27 已实现 | 无法自动信任公网证书；部分站点链验不过 |
 | HTTP 客户端 | ✅ v1.50：`std/httpc`（URL 拆分 / 请求构造 / 响应解析 content-length+chunked / 重定向判定，纯函数）+ `std/httpc_net`（get / get_tls / get_follow，Windows，loopback E2E 实测） | 仍缺：连接池 / 流水线、自动解压 Content-Encoding、HTTP/2、Linux DNS |
-| 路由 / 中间件 | ✅ v1.67：`std/router`（`/users/:id` 参数段、尾部 `*` 通配、query/尾斜杠归一化、参数捕获、方法白名单）；`std/http` 仍是单回调，无中间件链 | 路径分发不用再手写 if 链；中间件（日志/鉴权/压缩）还没有 |
+| 路由 / 中间件 | 🟡 v1.67：`std/router`（`/users/:id` 参数段、尾部 `*` 通配、query/尾斜杠归一化、参数捕获、方法白名单）**可用**；`std/http` 仍是单回调、无中间件链，**且当前不可导入**（0 个 pub 导出 + 局部变量撞关键字 `rc`，见 §7.13） | 路径分发不用再手写 if 链；HTTP 服务端与中间件（日志/鉴权/压缩）暂时用不了 |
 | 静态文件 / MIME / cookie / session / multipart | **MIME ✅ v1.67**（`std/mime`）；**静态文件 ✅ v1.69**（`std/staticfile`：URL 解码 / 穿越防护 / index / Cache-Control / ETag / Range + `static_serve` 直接产出 200/206/403/404 完整响应）；剩 If-None-Match / Last-Modified / 分块发送 / gzip 协商；**Cookie ✅ v1.70**（`std/cookie`）；**Session ✅ v1.71**（`std/session`：TTL 惰性过期 / 滑动续期 / 墓碑销毁；sid 可预测、无后台 GC、无并发保护）；**multipart ✅ v1.72**（`std/multipart`：boundary / 字段与文件 / CRLF 正文） | 这条 §2 行已全绿 |
 | `chunked` 请求体 | 回 501 | 部分客户端上传 |
 | DNS | Windows 走系统 `getaddrinfo`（v1.25）；Linux 无解析器 | Linux 只能写 IPv4 字面量 |
@@ -49,8 +49,8 @@
 | 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠；**f64 打印已修（v1.51）**：定点/科学计数按 C 后端口径逐位一致（`__f64_to_str` 有限值路径漏长度前缀已补），仍缺最短往返表示（grisu/ryu） |
 | 数学 | ✅ v1.47：`exp`/`log`/`log2`/`log10`/`pow`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`hypot` + 常数助手（Cody–Waite 双字归约；sin/cos 误差随 |x|·1.1e-16 增长，多字 π 归约未做） | 图形、统计、复利 |
 | 哈希 | ✅ v1.35：SHA-1 / SHA-256 / FNV-1a 32/64 / MD5（仅兼容用途）；✅ v1.53：**SHA-512 / SHA-384 + HMAC-SHA512** + **CRC-64/XZ**（FIPS 180-4 / RFC 4231 / ECMA-182 向量全过） | ✅ v1.55：**BLAKE2b**（RFC 7693，含 keyed 与变长输出）；仍无 SHA-512/224、SHA-3 |
-| 数据结构 | ✅ v1.29/30：RingBuf / MinHeap / **set[int]·set[str]** / **deque** / **LRU**（自建开放寻址表 + 双向链表，单句柄） | LRU 的 key 只有 int（字符串先 `fnv1a64`）；无 TTL / 无容量自适应 |
-| 持久化 | ✅ v1.102：**`std/fs`**（open / read / write / seek / size / sync / close / rename，`@ffi` 直调 kernel32）+ **`std/kv`**（追加日志 + 内存索引：put / get / del / has / len / compact / sync，重开重放，**撕裂尾与垃圾尾都能恢复**，压缩把覆盖写后的日志压回一半）。边界：**Windows PE**（ELF 后端无动态链接器，`@ffi` 编译期 fail-fast）；值全量驻留内存（内存 ≈ 数据集大小）；无 SQL / 事务 / 并发写保护；**写路径已批量提交**（v1.103：每 64 条合并一次 `WriteFile`，`kv_sync`/`kv_close`/`kv_compact` 前冲刷；代价是进程被强杀最多丢最后不足 64 条，掉电仍要 `kv_sync`）；**语言内建仍只有元数据操作**（`file_exists`/`file_size`/`fs_mkdir`/`fs_remove`），读写走 `@ffi` 是当前方案，内建 `file_*` 要同时改 x86 与 A64 两个发射层，未做 | 配置 / 会话 / 计数 / 缓存元数据都能落盘；SQL 与大于内存的数据集还要 mmap 视图 + 页缓存 |
+| 数据结构 | 🟡 v1.29/30：**set[int]·set[str]** / **deque** / **LRU**（自建开放寻址表 + 双向链表，单句柄）可用；**RingBuf / MinHeap 在 `std/ds`，该模块 0 个 pub 导出，用户代码引用会编译失败**（§7.13） | LRU 的 key 只有 int（字符串先 `fnv1a64`）；无 TTL / 无容量自适应；环形缓冲/最小堆要等 `std/ds` 补 pub |
+| 持久化 | ✅ v1.102：**`std/fs`**（open / read / write / seek / size / sync / close / rename，`@ffi` 直调 kernel32）+ **`std/kv`**（追加日志 + 内存索引：put / get / del / has / len / compact / sync，重开重放，**撕裂尾与垃圾尾都能恢复**，压缩把覆盖写后的日志压回一半）。边界：**Windows PE**（ELF 后端无动态链接器，`@ffi` 编译期 fail-fast）；值全量驻留内存（内存 ≈ 数据集大小）；无 SQL / 事务 / 并发写保护；**写路径已批量提交**（v2.01：每 64 条合并一次 `WriteFile`，`kv_sync`/`kv_close`/`kv_compact` 前冲刷；代价是进程被强杀最多丢最后不足 64 条，掉电仍要 `kv_sync`）；**语言内建仍只有元数据操作**（`file_exists`/`file_size`/`fs_mkdir`/`fs_remove`），读写走 `@ffi` 是当前方案，内建 `file_*` 要同时改 x86 与 A64 两个发射层，未做 | 配置 / 会话 / 计数 / 缓存元数据都能落盘；SQL 与大于内存的数据集还要 mmap 视图 + 页缓存 |
 | 正则 | ✅ v1.57 | `std/regex`：回溯 VM（字节码 + 显式栈，无 AST），字面字节 / `.` / 字符类（含 `\d \w \s` 及否定式）/ 转义 / 贪婪量词 `* + ? {n} {n,} {n,m}` / 交替 / 分组 `( )`·`(?: )` / 锚点 `^ $`；`regex_compile` / `match` / `match_full` / `exec` / `find` / `replace` / `replace_all`。**不做**：捕获组、反向引用、环视、懒惰量词、多行模式、Unicode 属性；病态模式由 400 万步上限兜底。期望值全部由 Python `re` 现算的差分对拍见 `tests/t99_regex.qma` | 文本清洗 / 表单校验 / 路由匹配不必再手写逐字节扫描 |
 | CLI | ✅ v1.29：`std/cli`（`--k=v` / `--k v` / `-k v` / 布尔 / 位置参数）；无子命令与自动 usage | 子命令要自己 switch |
 | 国际化 | 无 locale、无 Unicode 分类、无大小写折叠 | 多语言输出 |
@@ -94,8 +94,9 @@
 | ~~GHASH 字级化~~ | ✅ v1.32 已做：4-bit 表乘法从逐字节改成 64 位字（一块 1024 次字节操作 → 64 次字操作），GHASH 123 → **34 ms**，GCM 端到端 125 → 36 ms | — |
 | ~~GHASH PCLMULQDQ~~ | ✅ v1.33 已做：4 次 `pclmulqdq` + 显式归约，GHASH 34 → **17 ms**，GCM 端到端 36 → 19 ms（相对 v1.28 的 1369 ms 是 **72×**） | 归约用移位折叠（不是 0xC2 常数版），比教科书实现多几条指令；AAD 与非整块尾仍走软件路径 |
 | ~~URL 解析 / mem_chr 回归~~ | ✅ v1.35 已查证：没有回归（v1.28 逐字节 85 ms → v1.34 mem_chr 81 ms） | 文档里的 69 ms 是环境漂移（VBS 噪声 ±50%），不要再怀疑一遍 |
-| ~~KV 批量提交~~ | ✅ v1.103 已做：put **16.5 → 2.7 µs/条（6.1×）**、覆盖写 **16.2 → 2.1 µs（7.6×）**；磁盘格式与恢复语义不变 | 每 64 条合并一次 `WriteFile`，`kv_sync`/`kv_close`/`kv_compact` 前冲刷。代价是崩溃窗口 ≤64 条；`kv_sync` 384 µs/条 不变（每条都等落盘）。数字见 `06-status.md` §3.16 |
-| **SHA-256 轮展开** | 现在 44 ms/MiB；8 轮展开（状态变量改名轮转，消掉 8 条搬移）预期再快 1.5–2× | 要把 64 轮按 8 组分身写，代码量 ×8；寄存器压力已经很高，展开可能反而溢出，需实测 |
+| ~~URL / JSON / KV 读取路径~~ | ✅ v2.02 已做：`url_port` **1.55×**、`url_query_get` 1.18×、`json_parse` 41→**49 MB/s**（1.19×）、`kv_get` 190→**160 ns**（1.19×） | 全是「去掉多余分配 / 多余扫描」，不是算法改造；JSON 容器共用暂存、SHA-256 展开两个实验测不出收益已回退。数字见 `06-status.md` §3.17 |
+| ~~KV 批量提交~~ | ✅ v2.01 已做：put **16.5 → 2.7 µs/条（6.1×）**、覆盖写 **16.2 → 2.1 µs（7.7×）**；磁盘格式与恢复语义不变 | 每 64 条合并一次 `WriteFile`，`kv_sync`/`kv_close`/`kv_compact` 前冲刷。代价是崩溃窗口 ≤64 条；`kv_sync` 384 µs/条 不变（每条都等落盘）。数字见 `06-status.md` §3.16 |
+| ~~SHA-256 轮展开~~ | ❌ **已验证无收益**（v2.02）：8 轮展开 + 状态变量环移位命名，每轮 8 条搬移全部消失，1 MiB 仍是 41–42 ms | 瓶颈不是搬移而是**指令数**：每块约 3000 条，8450 cycles/块 ≈ 2.8 cycles/条；x86 的 `mov` 在重命名阶段就消掉了，省它不省时间。要更快只有两条路：SHA-NI（本机无该扩展）或 `int` 走 32 位指令（现为恒 64 位，`& 0xFFFFFFFF` 掩码消不掉）。数字见 `06-status.md` §3.17 |
 | **GHASH 4 路并行** | 现在是串行依赖（每块依赖上一块结果）；4 路聚合可再快 2–3× | 需要重排 CTR/GHASH 交织，收益已不大 |
 | **LICM 根修** | 普适（所有循环） | 根因是 x64 分配器布局敏感段错误；修好前 LICM 只能关 |
 | **loop_sum 三件套** | 循环 10.8 → ~4 cycles/iter | ① phi copy 消除（分配器 coalescing）② do-while 变换（CFG 要容错 jcc 回边）③ cssub 形态 |
@@ -105,7 +106,7 @@
 | **int 点积加宽（4 通道 / 32 位元素）** | v1.85 的 int 点积是 2 通道 + 3×`pmuludq`，4 拍/2 元素打满 port 0。32 位元素可走单条 `pmulld`（2 元素/条），AVX2 4 通道可望再快 2× | ① 本机（Haswell-EP）**无 AVX2**，要先写 Python mini-emulator 验语义；② AVX2 也没有 `vpmullq`（64 位乘要 AVX-512DQ），4 通道只对 32 位元素成立；③ 32 位元素要求槽压缩——`[N]i32` 现在也是 8 字节槽，见下一条 |
 | ~~chan 抢锁先自旋~~ | ❌ **已验证无收益**（v1.98）：双线程往返与 4 生产者争用两个场景，自旋版与让出版的中位数差异都落在噪声里（区间大幅重叠） | 自旋只对"持锁者一定在跑"成立；本机核数少于生产者数时这个前提不成立，收益被"抢到锁的概率"抵消。结论：**测不出好处就不留这份复杂度**，保留"抢不到就让出"；想同时要低延迟与低 CPU 只能上 futex/WaitOnAddress（见下条）。数字见 `06-status.md` §3.5c |
 | **futex / WaitOnAddress park** | `wg_wait`/`mutex_lock` 的唤醒延迟从 25 ms 降到 µs 级，CPU 仍然归零 | Linux 要发 `futex(FUTEX_WAIT/WAKE)`（syscall 202，参数 6 个、含超时结构）；Windows 的 `WaitOnAddress`/`WakeByAddressAll` 在 KernelBase 而非 kernel32，PE 导入表要加第二个 DLL；还要处理"唤醒丢失"（park 前重查谓词）。数字见 `06-status.md` §3.5b |
-| **vec 窄元素槽压缩** | `vec[u8]`/`vec[u16]`/`vec[u32]` 的槽从 8 字节压到 1/2/4：小元素容器内存 4–8×（1 MB 字节缓冲 8 MB → 1 MB），缓存命中率随之上升 | 运行时现在按 `ew` 字寻址（`ln*ew*8`），压缩要改成字节寻址 + 有符号扩展加载；push/get/set/pop/foreach/grow 全套 + A64 同步 + C 后端对齐；**改动面大，单开一版做，别和语义修复混** |
+| **vec 窄元素槽压缩**（**已降级**） | 理论收益是 `vec[u8]` 内存 8×，但 v2.02 全库盘点：`std/` 里 `vec[u8]`/`u16`/`u32` 只有 **3 处**，`vec[int]` 339 处、`vec[str]` 42 处——**真实代码吃不到收益** | 运行时按 `ew` 字寻址（`ln*ew*8`），压缩要改成字节寻址 + 符号扩展加载，push/get/set/pop/foreach/grow + A64 + C 后端全动。除非将来出现字节缓冲密集的库（图像 / 编解码），否则不做 |
 
 > 性能实验两条铁律（两次回滚换来的）：
 > 1. 单点核对全对 ≠ 装起来对——必须反汇编对照或单元素 trace。
@@ -382,6 +383,58 @@ fn main() {
   但同一个缺陷在「把 void 函数返回值当值用」的路径上也会露出。
 - 回归：`tests/t128_mainret.qma`（if / while / 被调 void 函数三条早退路径），
   由 `run_win_tests.py` 的 `case_output` 检查**退出码 0**——只测输出测不出来。
+
+### 7.13 待修：10 个标准库模块没有 `pub` 导出，其中 4 个连解析都过不去（v2.01 审计发现）
+
+写文档时为了核对"哪些模块真能用"，逐个 `import` 了一遍（命令见下），结果和
+`03-stdlib.md` 的 ✅ 标记对不上：
+
+```bash
+# 每个模块生成一个只 import 它的空程序，构建一次
+python - <<'EOF'
+import os, subprocess, sys
+for dp, _, fns in os.walk('std'):
+    for fn in sorted(fns):
+        if not fn.endswith('.qma'): continue
+        mod = os.path.join(dp, fn)[:-4].replace('\\', '/').replace('/', '.')
+        p = 'build/_audit.qma'
+        open(p, 'w').write(f"module t\nimport {mod}\nfn main() {{ print(\"x\") }}\n")
+        r = subprocess.run([sys.executable, 'tools/stage0/qlm_cli.py', 'build', p,
+                            '--target', 'win', '-o', 'build/_audit.exe'],
+                           capture_output=True, text=True)
+        if r.returncode: print(mod, (r.stdout + r.stderr).strip().splitlines()[-1])
+EOF
+```
+
+**A. 四个模块解析失败**（`import` 就报错，连符号表都建不起来）
+
+| 文件:行 | 症状 | 原因 |
+|---|---|---|
+| `std/http.qma:180` | `期望 NAME，得到 'rc'` | `let rc = h(fd)`——`rc` 是**关键字**（`rc[T]` 类型构造） |
+| `std/sse.qma:132` | 同上 | 同上 |
+| `std/ws.qma:179`（另 372/400 同） | 同上 | 同上 |
+| `std/timer.qma:21–24` | `顶层期望 fn/struct/test/module/import，得到 'let'` | 四个顶层 `let` 做模块状态；parser 只认顶层 fn/struct/test/module/import |
+
+**B. 十个模块 0 个 `pub` 导出**（能 import，但用户代码一引用就编译失败）
+
+`std/core`（4 个函数）/ `std/ds`（10）/ `std/gen`（9）/ `std/http`（40）/ `std/net/core`（18）/
+`std/serialize`（10）/ `std/sse`（20）/ `std/time`（2）/ `std/timer`（4）/ `std/ws`（24）——
+合计 **141 个顶层函数**。`03-stdlib.md` §1 总览的"公开 / 全部"列里显示 `0 / N` 的就是这批。
+
+- 复现：`import std.core` 后调 `abs(-3)` → `SyntaxError: 引用了非 pub 声明（1 处）：'abs' <- core.qma`。
+- 根因：v1.43 把 std 全库改成 `pub fn` 的那一轮**漏了这 10 个文件**（`gen_stdlib_doc.py` 里
+  v1.47 的注释记的是"把 271 个 pub API 全部漏出"，说明当时只核对了"有 pub 的那部分"）。
+  之后再没人 import 过它们，所以一直没暴露——`run_win_tests.py` 不构建 `examples/`。
+- 连带：`examples/http_demo.qma` / `ws_demo.qma` / `sse_demo.qma` 三个示例当前**都构建不过**
+  （先撞 A 的解析错，修掉再撞 B 的可见性错）；`std/timer` 依赖 `std/ds`+`std/core`，也是 B 的受害者。
+
+**为什么这一版没修**：A 是 5 处变量改名 + 一处状态初始化改造，B 要给 141 个声明补 `pub`
+**并且**补 `///`（doc 门禁要求公开声明必须有文档），是独立一版的工作量；混在"性能 + 文档口径"
+里会把 diff 撑到无法评审。**先如实登记，避免下一个人再按 ✅ 去用。**
+
+**下一版顺序**：① 三个文件的 `rc` → `rcv`（5 处）；② `timer` 的四个顶层 `let` 收进惰性初始化；
+③ 10 个模块 141 个声明补 `pub` + `///`；④ 把 `examples/{http_demo,ws_demo,sse_demo}.qma`
+和 `std/timer` 的冒烟构建纳入 `run_win_tests.py`——**坏了这么久没人发现，就是因为没人编它**。
 
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
