@@ -134,6 +134,16 @@ const P_LBRACK = 26
 const P_RBRACK = 27
 const P_FATARROW = 28
 const P_AT = 29
+// 位运算与移位（v2.28）。优先级照 stage-0（Quelmara 自己的定义，见 SPEC §2.4）：
+//   ||  <  &&  <  |  <  ^  <  &  <  == !=  <  < <= > >=  <  << >> >>>  <  + -  <  * / %
+// 注意这**不是** C 的层次（C 把 & ^ | 放在 == 之下、<< 放在 +- 之上）。
+const P_AMP = 30       // &
+const P_PIPE = 31      // |
+const P_CARET = 32     // ^
+const P_SHL = 33       // <<
+const P_SHR = 34       // >>（算术右移，对应 sar）
+const P_USHR = 35      // >>>（逻辑右移，对应 shr）
+const P_TILDE = 36     // ~（一元按位取反）
 
 struct Tok {
     k: int          // T_*
@@ -247,6 +257,14 @@ fn _is_digit(c: int) -> bool {
     return c >= 48 && c <= 57
 }
 
+/// 字符 → 数字值（0..15），不是数字返回 -1
+fn _digval(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }      // a..f
+    if c >= 65 && c <= 70 { return c - 55 }       // A..F
+    return -1
+}
+
 fn _is_alpha(c: int) -> bool {
     return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
 }
@@ -319,6 +337,41 @@ fn lex(src: str, toks: vec[Tok]) -> int {
             }
             continue
         }
+        // 进制字面量：0x / 0b / 0o（v2.28）。写机器码编码必须要有十六进制——
+        // qlmc 自己的源码里到处是 0xFF / 0x8000 / 0b1010，自举的前提。
+        if c == 48 && i + 1 < n {
+            let b = src[i + 1]
+            let mut base = 0
+            if b == 120 || b == 88 { base = 16 }
+            else if b == 98 || b == 66 { base = 2 }
+            else if b == 111 || b == 79 { base = 8 }
+            if base != 0 {
+                let mut j = i + 2
+                let mut v = 0
+                let mut cnt = 0
+                while j < n {
+                    let d = src[j]
+                    if d == 95 {
+                        j = j + 1
+                        continue
+                    }
+                    let dv = _digval(d)
+                    if dv < 0 || dv >= base {
+                        break
+                    }
+                    v = v * base + dv
+                    cnt = cnt + 1
+                    j = j + 1
+                }
+                if cnt == 0 {
+                    eprint("qlmc: " + substr(src, i, 2) + " 后面缺少数字 @ line " + line.to_str())
+                    exit(2)
+                }
+                _tok(toks, T_NUM, v, "", line)
+                i = j
+                continue
+            }
+        }
         // 数字（支持下划线分隔）
         if _is_digit(c) {
             let mut v = 0
@@ -385,19 +438,29 @@ fn lex(src: str, toks: vec[Tok]) -> int {
             i = j + 1
             continue
         }
-        // 标点：两字符优先
+        // 标点：三字符优先，然后两字符。
+        // **一律直接比字节，不要用 substr**：substr 会分配一个新串，而这段代码
+        // 对**每个字符**都跑一次——v2.28 实测，每字符一次 substr 让 96 KB 的输入
+        // 从 16 ms 涨到 54 ms（3.3×），还白吃掉一堆堆。
+        if c == 62 && i + 2 < n && src[i + 1] == 62 && src[i + 2] == 62 {
+            _tok(toks, T_PUNCT, P_USHR, "", line)
+            i = i + 3
+            continue
+        }
         if i + 1 < n {
-            let two = substr(src, i, 2)
+            let d2 = src[i + 1]
             let mut pid = 0
-            if two == "==" { pid = P_EQ }
-            else if two == "!=" { pid = P_NE }
-            else if two == "<=" { pid = P_LE }
-            else if two == ">=" { pid = P_GE }
-            else if two == "&&" { pid = P_AND }
-            else if two == "||" { pid = P_OR }
-            else if two == "->" { pid = P_ARROW }
-            else if two == ".." { pid = P_DOTDOT }
-            else if two == "=>" { pid = P_FATARROW }
+            if c == 61 && d2 == 61 { pid = P_EQ }
+            else if c == 33 && d2 == 61 { pid = P_NE }
+            else if c == 60 && d2 == 61 { pid = P_LE }
+            else if c == 62 && d2 == 61 { pid = P_GE }
+            else if c == 38 && d2 == 38 { pid = P_AND }
+            else if c == 124 && d2 == 124 { pid = P_OR }
+            else if c == 45 && d2 == 62 { pid = P_ARROW }
+            else if c == 46 && d2 == 46 { pid = P_DOTDOT }
+            else if c == 61 && d2 == 62 { pid = P_FATARROW }
+            else if c == 60 && d2 == 60 { pid = P_SHL }
+            else if c == 62 && d2 == 62 { pid = P_SHR }
             if pid != 0 {
                 _tok(toks, T_PUNCT, pid, "", line)
                 i = i + 2
@@ -421,6 +484,10 @@ fn lex(src: str, toks: vec[Tok]) -> int {
         else if c == 60 { p1 = P_LT }
         else if c == 62 { p1 = P_GT }
         else if c == 33 { p1 = P_NOT }
+        else if c == 38 { p1 = P_AMP }
+        else if c == 124 { p1 = P_PIPE }
+        else if c == 94 { p1 = P_CARET }
+        else if c == 126 { p1 = P_TILDE }
         else if c == 46 { p1 = P_DOT }
         else if c == 64 { p1 = P_AT }
         else if c == 91 { p1 = P_LBRACK }
@@ -847,11 +914,44 @@ fn _or_e(p: P, pos: vec[int]) -> int {
 }
 
 fn _and_e(p: P, pos: vec[int]) -> int {
-    let mut l = _eq_e(p, pos)
+    let mut l = _bor_e(p, pos)
     while _is_p(p, pos, P_AND) {
         _adv(pos)
-        let r = _eq_e(p, pos)
+        let r = _bor_e(p, pos)
         l = _node(p, E_BIN, P_AND, l, r)
+    }
+    return l
+}
+
+// 位运算三层：| 最松，^ 居中，& 最紧（在比较之上）。照 stage-0 的定义，
+// 不是 C 的顺序——`a & b == c` 在 Quelmara 里是 `a & (b == c)` 吗？不是：
+// & 的右操作数是 `_eq_e`，所以 `a & b == c` 解析成 `a & (b == c)`。
+fn _bor_e(p: P, pos: vec[int]) -> int {
+    let mut l = _bxor_e(p, pos)
+    while _is_p(p, pos, P_PIPE) {
+        _adv(pos)
+        let r = _bxor_e(p, pos)
+        l = _node(p, E_BIN, P_PIPE, l, r)
+    }
+    return l
+}
+
+fn _bxor_e(p: P, pos: vec[int]) -> int {
+    let mut l = _band_e(p, pos)
+    while _is_p(p, pos, P_CARET) {
+        _adv(pos)
+        let r = _band_e(p, pos)
+        l = _node(p, E_BIN, P_CARET, l, r)
+    }
+    return l
+}
+
+fn _band_e(p: P, pos: vec[int]) -> int {
+    let mut l = _eq_e(p, pos)
+    while _is_p(p, pos, P_AMP) {
+        _adv(pos)
+        let r = _eq_e(p, pos)
+        l = _node(p, E_BIN, P_AMP, l, r)
     }
     return l
 }
@@ -868,9 +968,21 @@ fn _eq_e(p: P, pos: vec[int]) -> int {
 }
 
 fn _rel_e(p: P, pos: vec[int]) -> int {
-    let mut l = _add_e(p, pos)
+    let mut l = _shift_e(p, pos)
     while _is_p(p, pos, P_LT) || _is_p(p, pos, P_GT) ||
           _is_p(p, pos, P_LE) || _is_p(p, pos, P_GE) {
+        let op = _cur(p, pos).n
+        _adv(pos)
+        let r = _shift_e(p, pos)
+        l = _node(p, E_BIN, op, l, r)
+    }
+    return l
+}
+
+// 移位在比较之下、加减之上（C 也是这个位置）
+fn _shift_e(p: P, pos: vec[int]) -> int {
+    let mut l = _add_e(p, pos)
+    while _is_p(p, pos, P_SHL) || _is_p(p, pos, P_SHR) || _is_p(p, pos, P_USHR) {
         let op = _cur(p, pos).n
         _adv(pos)
         let r = _add_e(p, pos)
@@ -912,6 +1024,11 @@ fn _unary(p: P, pos: vec[int]) -> int {
         _adv(pos)
         let v = _unary(p, pos)
         return _node(p, E_UN, P_NOT, v, -1)
+    }
+    if _is_p(p, pos, P_TILDE) {
+        _adv(pos)
+        let v = _unary(p, pos)
+        return _node(p, E_UN, P_TILDE, v, -1)
     }
     return _primary(p, pos)
 }
@@ -1931,6 +2048,14 @@ const OP_CALLR = 38    // dst = call [a]（a = 闭包值地址，间接调用）
 // memcpy(a, b, dst)：**运行时**字节数版本。Ir 只有 4 个操作数槽，只好把
 // 字节数塞进 dst（dst 这个字段对 memcpy 没有别的含义）。vec 扩容要用。
 const OP_MEMCPYN = 39
+// 位运算与移位（v2.28）
+const OP_AND = 40      // dst = a & b
+const OP_OR = 41       // dst = a | b
+const OP_XOR = 42      // dst = a ^ b
+const OP_SHL = 43      // dst = a << b
+const OP_SAR = 44      // dst = a >> b（算术右移，符号位扩展）
+const OP_SHR = 45      // dst = a >>> b（逻辑右移，高位补 0）
+const OP_BNOT = 46     // dst = ~a
 
 struct Ir {
     op: int
@@ -2525,6 +2650,32 @@ fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
         _ir_emit(fc, OP_MOD, dst, l, r, 0)
         return TY_INT
     }
+    // 位运算与移位（v2.28）：只对 int 成立，结果 int。
+    // `>>` 是**算术**右移（sar），`>>>` 才是逻辑右移（shr）——与 stage-0 一致。
+    if op == P_AMP {
+        _ir_emit(fc, OP_AND, dst, l, r, 0)
+        return TY_INT
+    }
+    if op == P_PIPE {
+        _ir_emit(fc, OP_OR, dst, l, r, 0)
+        return TY_INT
+    }
+    if op == P_CARET {
+        _ir_emit(fc, OP_XOR, dst, l, r, 0)
+        return TY_INT
+    }
+    if op == P_SHL {
+        _ir_emit(fc, OP_SHL, dst, l, r, 0)
+        return TY_INT
+    }
+    if op == P_SHR {
+        _ir_emit(fc, OP_SAR, dst, l, r, 0)
+        return TY_INT
+    }
+    if op == P_USHR {
+        _ir_emit(fc, OP_SHR, dst, l, r, 0)
+        return TY_INT
+    }
     let cc = _cmp_cc(op)
     if cc == 0 {
         eprint("qlmc: 不支持的运算符 " + op.to_str())
@@ -2675,6 +2826,8 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         fc.vty.set(d, TY_INT)
         if nd.a == P_MINUS {
             _ir_emit(fc, OP_NEG, d, a, 0, 0)
+        } else if nd.a == P_TILDE {
+            _ir_emit(fc, OP_BNOT, d, a, 0, 0)
         } else {
             _ir_emit(fc, OP_NOT, d, a, 0, 0)
         }
@@ -3170,6 +3323,8 @@ fn _lower_into(fc: FnCtx, nid: int, dst: int) {
         fc.vty.set(dst, TY_INT)
         if nd.a == P_MINUS {
             _ir_emit(fc, OP_NEG, dst, a, 0, 0)
+        } else if nd.a == P_TILDE {
+            _ir_emit(fc, OP_BNOT, dst, a, 0, 0)
         } else {
             _ir_emit(fc, OP_NOT, dst, a, 0, 0)
         }
@@ -3726,6 +3881,71 @@ fn _emit_ir(fc: FnCtx, i: int) {
             _to_reg(fc, RAX, ins.a)
             _neg(code, RAX)
             _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+        }
+        return
+    }
+    // ---- 位运算（v2.28）：and/or/xor 与 add/sub 同形，只是 ALU 操作码不同 ----
+    if op == OP_AND || op == OP_OR || op == OP_XOR {
+        let mut rr = 0x21            // and
+        let mut rm = 0x23
+        if op == OP_OR {
+            rr = 0x09
+            rm = 0x0B
+        }
+        if op == OP_XOR {
+            rr = 0x31
+            rm = 0x33
+        }
+        let dloc = fc.vloc.get(ins.dst)
+        if dloc > 0 {
+            let d = dloc - 1
+            _to_reg(fc, d, ins.a)
+            _bin_into(fc, d, ins.b, rr, rm)
+        } else {
+            _to_reg(fc, RAX, ins.a)
+            _bin_into(fc, RAX, ins.b, rr, rm)
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+        }
+        return
+    }
+    // 移位：计数必须在 CL（`D3 /ext`）。x86 的 64 位移位会把 CL 自动掩成 6 位，
+    // 所以 `x << 64` 等于 `x << 0`——stage-0 也是这个行为（运行时不做越界检查），
+    // 这里保持一致，不要自作聪明加检查。
+    if op == OP_SHL || op == OP_SAR || op == OP_SHR {
+        let mut ext = 4              // shl
+        if op == OP_SHR {
+            ext = 5                  // shr（逻辑）
+        }
+        if op == OP_SAR {
+            ext = 7                  // sar（算术）
+        }
+        let dloc = fc.vloc.get(ins.dst)
+        let mut d = RAX
+        if dloc > 0 {
+            d = dloc - 1
+        }
+        _to_reg(fc, d, ins.a)
+        _to_reg(fc, RCX, ins.b)
+        _rex2(code, 1, 0, d)
+        _b(code, 0xD3)
+        _modrm(code, 3, ext, d)
+        if dloc <= 0 {
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
+        }
+        return
+    }
+    if op == OP_BNOT {
+        let dloc = fc.vloc.get(ins.dst)
+        let mut d = RAX
+        if dloc > 0 {
+            d = dloc - 1
+        }
+        _to_reg(fc, d, ins.a)
+        _rex2(code, 1, 0, d)         // F7 /2 = not r64
+        _b(code, 0xF7)
+        _modrm(code, 3, 2, d)
+        if dloc <= 0 {
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
         }
         return
     }
@@ -5498,7 +5718,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S13：int/bool/str + struct/数组/enum/vec（可扩容）/map/切片 + defer + import + @ffi + 闭包 + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S14：int/bool/str + struct/数组/enum/vec（可扩容）/map/切片 + 位运算/移位 + 进制字面量 + defer + import + @ffi + 闭包 + 聚合形参返回 + 4 实参 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {

@@ -49,6 +49,7 @@ CASES = [
     ("s12_ffi", "tests/selfhost/s12_ffi.qma"),
     ("s13_closure", "tests/selfhost/s13_closure.qma"),
     ("s14_vecgrow", "tests/selfhost/s14_vecgrow.qma"),
+    ("s15_bitops", "tests/selfhost/s15_bitops.qma"),
 ]
 
 npass = 0

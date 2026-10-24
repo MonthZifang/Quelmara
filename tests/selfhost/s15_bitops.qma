@@ -1,0 +1,94 @@
+// s15_bitops.qma —— stage-1 编译器（qlmc）位运算与移位的差分夹具（v2.28）
+//
+// 覆盖：
+//   1) & | ^ ~ 四种按位运算
+//   2) << >> >>>（>> 是算术右移，>>> 是逻辑右移——Quelmara 自己的定义）
+//   3) 进制字面量 0x / 0b / 0o 与下划线分隔
+//   4) 优先级：| < ^ < & < == != < 关系 < << >> < + - < * / %
+//      （注意这**不是** C 的层次：`6 & 2 == 2` 在 Quelmara 里是 `6 & (2 == 2)`）
+//   5) 运行时移位计数（走 CL 路径）与边界位数
+//   6) 掩码 / 位标志 / 循环里按位累加
+// 与 stage-0 做逐字节差分（tests/qlmc_test.py）。
+fn main() {
+    // 1) 基本按位
+    print(12 & 10)
+    print(12 | 10)
+    print(12 ^ 10)
+    print(~0)
+    print(~5)
+    print(~-1)
+
+    // 2) 移位三兄弟
+    print(1 << 10)
+    print(1024 >> 3)
+    print(-1024 >> 3)          // 算术：-128
+    print(-1024 >>> 3)         // 逻辑：高位补 0，变成一个巨大的正数
+    print(-1 >>> 63)
+    print(1 << 0)
+    // 符号位置 1：结果就是 INT64_MIN。**不能直接 print**——stage-0 的 itoa 在
+    // INT64_MIN 上会输出乱码（`-x` 溢出，取余得负数，字符落到 '0' 以下，
+    // 见 07-gaps §7.19）。这里先右移回可打印范围，覆盖同一条代码路径。
+    print((1 << 63) >> 62)     // -2
+
+    // 3) 进制字面量
+    print(0xFF)
+    print(0XfF)
+    print(0b1010_1010)
+    print(0o777)
+    print(0xDEAD_BEEF)
+    print(0xff & 0x0f)
+
+    // 4) 优先级
+    print(1 | 2 ^ 3 & 4)       // 1 | (2 ^ (3 & 4)) = 3
+    print(1 + 2 << 3)          // (1+2) << 3 = 24
+    print(1 << 2 + 1)          // 1 << (2+1) = 8
+    print(6 & 2 == 2)          // 6 & (2==2) = 0
+    print(2 | 1 == 1)          // 2 | (1==1) = 3
+    print(1 << 2 * 3)          // 1 << 6 = 64
+    print(0xF0 & 0x3C | 0x03)  // (0xF0 & 0x3C) | 0x03 = 0x33
+
+    // 5) 运行时移位计数（计数在变量里 → 必须走 CL）
+    let mut n = 3
+    let mut x = 1
+    x = x << n
+    print(x)
+    x = x >> n
+    print(x)
+    let mut big = -1
+    print(big >>> n)
+    let mut zero = 0
+    print(1 << zero)
+    let mut s63 = 63
+    print((1 << s63) >> 62)    // 同样避开 INT64_MIN 的打印
+
+    // 6) 掩码提取 + 位标志 + 循环里累加
+    let v = 0x1234
+    print((v >> 4) & 0xFF)
+    print(v & 0xF)
+    print((v & 0xF000) >> 12)
+
+    let mut flags = 0
+    flags = flags | 1
+    flags = flags | 4
+    flags = flags | 16
+    print(flags)
+    print(flags & 4)
+    print(flags & 2)
+    flags = flags & ~4
+    print(flags)
+
+    let mut acc = 0
+    for i in 0..8 {
+        acc = acc | (1 << i)
+    }
+    print(acc)
+
+    // 奇偶判断走按位与
+    let mut odds = 0
+    for i in 0..10 {
+        if i & 1 == 1 {
+            odds = odds + 1
+        }
+    }
+    print(odds)
+}
