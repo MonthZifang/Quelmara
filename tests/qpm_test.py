@@ -502,6 +502,11 @@ def http_registry(env):
           "链路：编译器按 .qpm/deps 找到 import",
           f"rc={r.returncode} {(r.stdout + r.stderr).strip()[:300]}")
     if os.path.isfile(out_exe):
+        # v2.54：POSIX 上刚写出来的文件没有执行位（Windows 不需要）。
+        # 不 chmod 就会 PermissionError: [Errno 13] —— Linux CI 从 v2.48 起一直红
+        # 就是这个，不是 qpm 本身的问题。
+        if os.name != "nt":
+            os.chmod(out_exe, 0o755)
         lock = qpm.read_lock(qpm.Project(proj))
         want = "alpha-" + lock["packages"]["alpha"]["version"]
         r = subprocess.run([out_exe], capture_output=True, text=True, timeout=60,

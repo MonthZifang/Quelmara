@@ -9,6 +9,13 @@
 
 name: ci
 
+# v2.54：**runner 默认不是 UTF-8**。仓库里到处是中文输出（门禁/测试/报告），
+# 不设这两个变量会直接 `UnicodeEncodeError: 'charmap' codec can't encode` ——
+# Linux 和 Windows 的 job 都会在第一步就红（v2.48~v2.53 一直如此）。
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+
 on:
   push:
     branches: [master]
