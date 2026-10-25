@@ -65,6 +65,15 @@ fn _WriteFile(h: int, buf: int, n: int, got: int, ov: int) -> bool
 @ffi("kernel32.dll", "CloseHandle")
 fn _CloseHandle(h: int) -> bool
 
+@ffi("kernel32.dll", "GetFileSize")
+fn _GetFileSize(h: int, hi: int) -> int
+
+@ffi("kernel32.dll", "ReadFile")
+fn _ReadFile(h: int, buf: int, n: int, got: int, ov: int) -> bool
+
+const GEN_READ = 2147483648         // 0x80000000
+const OPEN_EXISTING = 3
+
 const GEN_WRITE = 1073741824        // 0x40000000
 const CREATE_ALWAYS = 2
 const ATTR_NORMAL = 128
@@ -222,6 +231,9 @@ const TY_INT = 0
 const TY_BOOL = 1
 const TY_STR = 2
 const TY_VOID = 3
+// 字节（v2.33）：只作 C_ADDRTY 的标记，表示"这个地址指向 1 字节"，
+// 让下标读写走 LOAD8/STORE8 而不是 8 字节。仍是标量（< TY_STRUCT）。
+const TY_BYTE = 4
 // 聚合类型编码（v2.17）：0x1000+si = struct；0x100000+(count<<8)+elem = 数组
 const TY_STRUCT = 0x1000
 const TY_ENUM = 0x2000
@@ -1811,7 +1823,11 @@ const I_WSPRINTF = 3
 const I_CREATE = 4
 const I_WAIT = 5
 const I_CLOSE = 6
-const I_USER = 7        // 用户 @ffi 符号从第 7 个 IAT 槽开始
+// v2.33：file_exists / now_ns 要用的三个
+const I_FILEATTR = 7
+const I_QPC = 8
+const I_QPF = 9
+const I_USER = 10       // 用户 @ffi 符号从第 10 个 IAT 槽开始
 
 // ---------------------------------------------------------------------------
 // 字节发射
@@ -2165,6 +2181,9 @@ const OP_STKFREE = 50  // add rsp, imm
 const OP_ADDRXN = 51
 // dst = &运行库例程 imm（FK_RT）。spawn 要把线程入口地址交给 CreateThread
 const OP_RTADDR = 52
+// 单字节访存（v2.33）：mem_load8 / mem_store8 / chr / mem_str 的收尾要用
+const OP_LOAD8 = 53     // dst = 零扩展的 [a] 低字节
+const OP_STORE8 = 54    // [a] = b 的低字节
 
 struct Ir {
     op: int
@@ -2248,9 +2267,14 @@ const C_DEF = 7         // defer 栈深度
 // 序言是「先 push callee-saved，最后 push rbp」，所以返回地址在
 // [rbp + 8 + 8*nsaved]，而不是 [rbp+8]——这个坑让第一版栈形参全读成垃圾。
 const C_NSAVED = 8
+// 当前正在降级的函数下标（v2.33：帧槽/寄存器耗尽的报错要说是哪个函数）
+const C_CFI = 9
 const FRAME = 4096          // 帧大小（512 个 8 字节槽）
 const MAX_VAR = 64          // 变量最多占 64 个寄存器位（其余落槽）
-const SLOT_TEMP = 256       // 0..255 给变量与聚合区域；256..511 给临时值溢出
+// v2.33：变量/聚合区从 256 提到 384——qlmc 自己的 build_rdata 要 257 格。
+// 帧仍是 4 KB（512 格），临时值溢出区剩 128 格（够用：同时活跃的临时值很少 >8）。
+// **不要再靠加帧来扩**：帧 > 4 KB 必须做栈探测（§7.17），qlmc 还没做。
+const SLOT_TEMP = 384
 const MAX_SLOT = 512
 
 // 运行库例程在 rt 里的槽号
@@ -2265,6 +2289,10 @@ const RT_PBOOL = 7
 const RT_ZERO = 8
 const RT_JOIN = 9
 const RT_SPAWN = 10
+const RT_EPRINT = 11    // 写 stderr + 换行
+const RT_MEMCMP = 12    // mem_cmp：返回首个不同字节的差值
+const RT_I64FMT = 13    // 整数 -> 十进制文本（写进调用方给的缓冲，返回长度）
+const RT_STR2INT = 14   // 十进制文本 -> 整数（非法/溢出 fail-fast）
 
 fn _slot_disp(slot: int) -> int {
     return -8 * (slot + 1)
@@ -2477,10 +2505,10 @@ fn _fc_reset(fc: FnCtx) {
 /// 一个线程建一次，之后每个函数 `_fc_reset` 复用——并行时堆分配是争用点
 fn _new_fc(nodes: vec[Node], names: vec[str], fns: vec[Fn], rt: vec[int],
            stt: vec[int]) -> FnCtx {
-    // 9 个计数器/状态单元：C_ST..C_NSAVED（加新索引时这里和 C_* 常量要一起改）
-    let cells = vec[int].new(9)
+    // 10 个计数器/状态单元：C_ST..C_CFI（加新索引时这里和 C_* 常量要一起改）
+    let cells = vec[int].new(10)
     let mut ci = 0
-    while ci < 9 {
+    while ci < 10 {
         cells.push(0)
         ci = ci + 1
     }
@@ -2596,6 +2624,8 @@ fn _st_units(fc: FnCtx, n: int) -> int {
     let s = fc.cells.get(C_ST)
     if s + n > SLOT_TEMP {
         eprint("qlmc: 局部变量/聚合超出帧（" + (SLOT_TEMP).to_str() + " 个 8 字节槽）")
+        eprint("  当前函数：" + fc.names.get(fc.fns.get(fc.cells.get(C_CFI)).name))
+        eprint("  需要 " + (s + n).to_str() + " 个槽（已用 " + s.to_str() + "，本次要 " + n.to_str() + "）")
         exit(2)
     }
     fc.cells.set(C_ST, s + n)
@@ -2764,14 +2794,21 @@ fn _emit_call_args(fc: FnCtx, vals: vec[int], argbase: int) -> int {
         }
         _ir_emit(fc, OP_STKALLOC, 0, 0, 0, stk)
     }
-    let mut ai = 0
+    // **先写栈实参，再摆寄存器实参**。顺序不能反：栈实参的值可能正躺在
+    // R8/R9 里（那正是临时值寄存器），而 OP_ARG 会写 R8/R9 —— 先摆寄存器
+    // 就会把还没落栈的值冲掉。v2.33 实测：`ReadFile(h, buf, sz, got, 0)`
+    // 的第 5 个实参被写成了 sz，于是 lpOverlapped = 226，进程直接崩。
     let mut k = 0
+    let mut ai = nreg
     while ai < len(vals) {
-        if ai < nreg {
+        _ir_emit(fc, OP_STKARG, 0, vals.get(ai), 0, 32 + 8 * k)
+        k = k + 1
+        ai = ai + 1
+    }
+    ai = 0
+    while ai < nreg {
+        if ai < len(vals) {
             _ir_emit(fc, OP_ARG, 0, vals.get(ai), 0, argbase + ai)
-        } else {
-            _ir_emit(fc, OP_STKARG, 0, vals.get(ai), 0, 32 + 8 * k)
-            k = k + 1
         }
         ai = ai + 1
     }
@@ -2900,7 +2937,16 @@ fn _addr_of(fc: FnCtx, nid: int) -> int {
     if nd.op == E_INDEX {
         return _addr_index(fc, nd.a, nd.b)
     }
-
+    // 其余**聚合值**都能直接当基址：按约定"聚合值 = 区域地址"，
+    // 调用结果（sret 区域）、结构体字面量（临时区域）、枚举构造、match 结果
+    // 返回的都是稳定地址。这是 `nodes.get(i).op` / `mk(...).x` 能编的前提
+    // （v2.33 之前直接报"这个表达式不能取地址"，而 qlmc 自己的源码里到处是它）。
+    let ty = _ty_of_expr(fc, nid)
+    if _ty_is_agg(ty) {
+        let a = _lower_expr(fc, nid)
+        fc.cells.set(C_ADDRTY, ty)
+        return a
+    }
     eprint("qlmc: 这个表达式不能取地址")
     exit(2)
     return 0
@@ -2927,8 +2973,32 @@ fn _addr_field(fc: FnCtx, base_nid: int, fname: int) -> int {
 }
 
 fn _addr_index(fc: FnCtx, base_nid: int, ix_nid: int) -> int {
-    // vec：句柄是头块，数据指针在 [h+0]；数组：区域地址直接当下标基址
     let bty0 = _ty_of_expr(fc, base_nid)
+    // str 下标（v2.33）：值就是数据指针，`s[i]` = 第 i 个字节（0..255）。
+    // 返回的地址标成 TY_BYTE，读/写各走 LOAD8/STORE8。越界 fail-fast（同 vec）。
+    if bty0 == TY_STR {
+        let sv = _lower_expr(fc, base_nid)
+        let iv = _lower_expr(fc, ix_nid)
+        let ln = _vnew(fc)
+        fc.vty.set(ln, TY_INT)
+        _ir_emit(fc, OP_LEN, ln, sv, 0, 0)
+        let lfail = _newlab(fc.labs)
+        let lok = _newlab(fc.labs)
+        _ir_emit(fc, OP_JCMP, 0x83, iv, ln, lfail)   // jae：i >= len 越界
+        _ir_emit(fc, OP_JMP, 0, 0, 0, lok)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
+        let one = _vnew(fc)
+        fc.vty.set(one, TY_INT)
+        _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+        _ir_emit(fc, OP_EXIT, 0, one, 0, 0)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
+        let a = _vnew(fc)
+        fc.vty.set(a, TY_INT)
+        _ir_emit(fc, OP_ADD, a, sv, iv, 0)
+        fc.cells.set(C_ADDRTY, TY_BYTE)
+        return a
+    }
+    // vec：句柄是头块，数据指针在 [h+0]；数组：区域地址直接当下标基址
     if bty0 >= TY_VEC && bty0 < TY_MAP {
         let h = _lower_expr(fc, base_nid)
         let i = _lower_expr(fc, ix_nid)
@@ -3088,6 +3158,13 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
             _ir_emit(fc, OP_ARG, 0, hv, 0, 0)
             _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_JOIN)
             return d
+        }
+        // 内建（v2.33）：内存原语 / 诊断 / 串。用户自定义同名函数优先。
+        if _fn_index(fc, nd.a) < 0 {
+            let bv = _lower_builtin(fc, nd)
+            if bv >= 0 {
+                return bv
+            }
         }
         // 普通调用：实参求值后逐个搬到实参寄存器——实参值不跨调用活
         let fi = _fn_index(fc, nd.a)
@@ -3265,6 +3342,11 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
             return a
         }
         let d = _vnew(fc)
+        if ty == TY_BYTE {
+            fc.vty.set(d, TY_INT)
+            _ir_emit(fc, OP_LOAD8, d, a, 0, 0)
+            return d
+        }
         fc.vty.set(d, ty)
         _ir_emit(fc, OP_LOAD, d, a, 0, 8)
         return d
@@ -3662,6 +3744,8 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
         let v = _lower_expr(fc, nd.c)
         if _ty_is_agg(ety) {
             _ir_emit(fc, OP_COPY, 0, a, v, _ty_size(fc, ety))
+        } else if ety == TY_BYTE {
+            _ir_emit(fc, OP_STORE8, 0, a, v, 0)
         } else {
             _ir_emit(fc, OP_STORE, 0, a, v, 8)
         }
@@ -3806,6 +3890,7 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
 
 fn _lower_fn(fc: FnCtx, fi: int) {
     let f = fc.fns.get(fi)
+    fc.cells.set(C_CFI, fi)
     if f.body < 0 {
         return                  // @ffi 声明：没有函数体，只占一个 IAT 槽
     }
@@ -4388,6 +4473,58 @@ fn _emit_ir(fc: FnCtx, i: int) {
         }
         return
     }
+    if op == OP_LOAD8 {
+        // dst = 零扩展的 [a] 低字节。寄存器基址一律用 mod=2+disp32：
+        // mod=0 且 base 是 RBP/R13 时是 RIP 相对，会读到错误地址。
+        let dloc = fc.vloc.get(ins.dst)
+        let mut d = RAX
+        if dloc > 0 {
+            d = dloc - 1
+        }
+        let aloc = fc.vloc.get(ins.a)
+        if aloc > 0 {
+            _rex2(code, 1, d, aloc - 1)
+            _b(code, 0x0F)
+            _b(code, 0xB6)
+            _modrm_mem(code, 2, d, aloc - 1)
+            _w32(code, 0)
+        } else {
+            _rex2(code, 1, d, RBP)
+            _b(code, 0x0F)
+            _b(code, 0xB6)
+            _modrm_mem(code, 2, d, RBP)
+            _w32(code, _slot_disp(-aloc - 1))
+        }
+        if dloc <= 0 {
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
+        }
+        return
+    }
+    if op == OP_STORE8 {
+        // [a] = b 的低字节。8 位源寄存器编号 4..7 在无 REX 时是 ah/ch/dh/bh，
+        // 但这里的源只会是临时值（R8-R11）或 RAX/RBX 一类，不受影响。
+        let vloc = fc.vloc.get(ins.b)
+        let mut v = RAX
+        if vloc > 0 {
+            v = vloc - 1
+        } else {
+            _mov_load(code, RAX, RBP, _slot_disp(-vloc - 1))
+            v = RAX
+        }
+        let aloc = fc.vloc.get(ins.a)
+        if aloc > 0 {
+            _rex2(code, 0, v, aloc - 1)
+            _b(code, 0x88)
+            _modrm_mem(code, 2, v, aloc - 1)
+            _w32(code, 0)
+        } else {
+            _rex2(code, 0, v, RBP)
+            _b(code, 0x88)
+            _modrm_mem(code, 2, v, RBP)
+            _w32(code, _slot_disp(-aloc - 1))
+        }
+        return
+    }
     if op == OP_RTADDR {
         // dst = &运行库例程（lea rip 相对 + FK_RT 回填）
         let dloc = fc.vloc.get(ins.dst)
@@ -4791,6 +4928,236 @@ fn _gen_spawn(ctx: Ctx) {
     _b(code, 0xEC)
     _b(code, 0x5D)                             // pop rbp
     _b(code, 0x31)                             // xor eax, eax（ThreadProc 返回 0）
+    _b(code, 0xC0)
+    _ret(code)
+}
+
+/// __eprint_str(rcx = str)：写 stderr + 换行（v2.33）。与 __print_str 同形，
+/// 只把 GetStdHandle 的实参从 -11（stdout）换成 -12（stderr）。
+fn _gen_eprint_str(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    ctx.rt_pos.set(RT_EPRINT, len(code))
+    _sub_rsp(code, 0x68)
+    _mov_rsp_store(code, 0x28, RCX)
+    _mov_imm(code, RCX, -12)
+    let c1 = _call_rip(code)
+    _addfix(ctx.fixes, c1, I_GETSTD, 3)
+    _mov_rsp_store(code, 0x30, RAX)
+    _mov_rr(code, RCX, RAX)
+    _mov_rsp_load(code, RDX, 0x28)
+    _mov_rsp_load(code, R8, 0x28)
+    _len_of(code, R8, R8)
+    _lea_rsp(code, R9, 0x50)
+    _mov_rsp_imm32(code, 0x20, 0)
+    let c2 = _call_rip(code)
+    _addfix(ctx.fixes, c2, I_WRITE, 3)
+    _mov_rsp_load(code, RCX, 0x30)
+    let at = len(code) + 3
+    _lea_rip(code, RDX, 0)
+    _addfix(ctx.fixes, at, -3, 2)
+    _mov_imm(code, R8, 1)
+    _lea_rsp(code, R9, 0x50)
+    _mov_rsp_imm32(code, 0x20, 0)
+    let c3 = _call_rip(code)
+    _addfix(ctx.fixes, c3, I_WRITE, 3)
+    _add_rsp(code, 0x68)
+    _ret(code)
+}
+
+/// __str_to_int(rcx = str) -> rax = 值。十进制解析，语义对齐 stage-0：
+/// 可选 '+'/'-' 号、随后必须全是数字、遇 NUL 结束；非法字符或溢出直接 exit(1)。
+/// 溢出用**前置检查**（acc > INT64_MAX/10 就必溢），不去算溢出后的值。
+fn _gen_str_to_int(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_STR2INT, len(code))
+    let lplus = _newlab(labs)
+    let lloop = _newlab(labs)
+    let ldone = _newlab(labs)
+    let lret = _newlab(labs)
+    let lfail = _newlab(labs)
+    _b(code, 0x55)                             // push rbp
+    _b(code, 0x48)
+    _b(code, 0x89)
+    _b(code, 0xE5)
+    _b(code, 0x45)                             // xor r8d, r8d（i）
+    _b(code, 0x31)
+    _b(code, 0xC0)
+    _b(code, 0x45)                             // xor r9d, r9d（neg）
+    _b(code, 0x31)
+    _b(code, 0xC9)
+    _b(code, 0x45)                             // xor r10d, r10d（acc）
+    _b(code, 0x31)
+    _b(code, 0xD2)
+    _b(code, 0x0F)                             // movzx eax, byte [rcx]
+    _b(code, 0xB6)
+    _b(code, 0x01)
+    _b(code, 0x83)                             // cmp eax, 45 ('-')
+    _b(code, 0xF8)
+    _b(code, 0x2D)
+    let p0 = _jcc(code, 0x85)                  // jne .plus
+    _addfix(ctx.fixes, p0, lplus, FK_LAB)
+    _b(code, 0x41)                             // mov r9d, 1
+    _b(code, 0xB9)
+    _w32(code, 1)
+    _b(code, 0x41)                             // mov r8d, 1
+    _b(code, 0xB8)
+    _w32(code, 1)
+    let p1 = _jmp(code)
+    _addfix(ctx.fixes, p1, lloop, FK_LAB)
+    _setlab(labs, code, lplus)
+    _b(code, 0x83)                             // cmp eax, 43 ('+')
+    _b(code, 0xF8)
+    _b(code, 0x2B)
+    let p2 = _jcc(code, 0x85)                  // jne .loop
+    _addfix(ctx.fixes, p2, lloop, FK_LAB)
+    _b(code, 0x41)                             // mov r8d, 1
+    _b(code, 0xB8)
+    _w32(code, 1)
+    _setlab(labs, code, lloop)
+    _b(code, 0x42)                             // movzx eax, byte [rcx + r8]
+    _b(code, 0x0F)
+    _b(code, 0xB6)
+    _b(code, 0x04)
+    _b(code, 0x01)
+    _b(code, 0x85)                             // test eax, eax
+    _b(code, 0xC0)
+    let p3 = _jcc(code, 0x84)                  // jz .done
+    _addfix(ctx.fixes, p3, ldone, FK_LAB)
+    _b(code, 0x83)                             // cmp eax, 48 ('0')
+    _b(code, 0xF8)
+    _b(code, 0x30)
+    let p4 = _jcc(code, 0x8C)                  // jl .fail
+    _addfix(ctx.fixes, p4, lfail, FK_LAB)
+    _b(code, 0x83)                             // cmp eax, 57 ('9')
+    _b(code, 0xF8)
+    _b(code, 0x39)
+    let p5 = _jcc(code, 0x8F)                  // jg .fail
+    _addfix(ctx.fixes, p5, lfail, FK_LAB)
+    _b(code, 0x49)                             // movabs r11, 922337203685477580
+    _b(code, 0xBB)
+    _w64(code, 922337203685477580)
+    _b(code, 0x4D)                             // cmp r10, r11
+    _b(code, 0x39)
+    _b(code, 0xDA)
+    let p6 = _jcc(code, 0x8F)                  // jg .fail（再乘 10 必溢出）
+    _addfix(ctx.fixes, p6, lfail, FK_LAB)
+    _b(code, 0x4D)                             // imul r10, r10, 10
+    _b(code, 0x6B)
+    _b(code, 0xD2)
+    _b(code, 0x0A)
+    _b(code, 0x83)                             // sub eax, 48
+    _b(code, 0xE8)
+    _b(code, 0x30)
+    _b(code, 0x49)                             // add r10, rax
+    _b(code, 0x01)
+    _b(code, 0xC2)
+    _b(code, 0x49)                             // inc r8
+    _b(code, 0xFF)
+    _b(code, 0xC0)
+    let p7 = _jmp(code)
+    _addfix(ctx.fixes, p7, lloop, FK_LAB)
+    _setlab(labs, code, ldone)
+    _b(code, 0x4C)                             // mov rax, r10
+    _b(code, 0x89)
+    _b(code, 0xD0)
+    _b(code, 0x4D)                             // test r9, r9
+    _b(code, 0x85)
+    _b(code, 0xC9)
+    let p8 = _jcc(code, 0x84)                  // jz .ret
+    _addfix(ctx.fixes, p8, lret, FK_LAB)
+    _b(code, 0x48)                             // neg rax
+    _b(code, 0xF7)
+    _b(code, 0xD8)
+    _setlab(labs, code, lret)
+    _b(code, 0x48)                             // mov rsp, rbp
+    _b(code, 0x89)
+    _b(code, 0xEC)
+    _b(code, 0x5D)                             // pop rbp
+    _ret(code)
+    _setlab(labs, code, lfail)
+    _b(code, 0xB9)                             // mov ecx, 1
+    _w32(code, 1)
+    let p9 = _call_rip(code)                   // ExitProcess(1)
+    _addfix(ctx.fixes, p9, I_EXIT, 3)
+    _ret(code)
+}
+
+/// __i64_fmt(rcx = buf, rdx = v) -> rax = 写入的字节数。
+/// 用 wsprintfA("%I64d") 而不是自己写除法循环：INT64_MIN 取绝对值会溢出
+/// （§7.19 那个 bug 的根源），交给 CRT 省心。
+fn _gen_i64_fmt(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    ctx.rt_pos.set(RT_I64FMT, len(code))
+    _b(code, 0x55)                             // push rbp
+    _b(code, 0x48)                             // mov rbp, rsp
+    _b(code, 0x89)
+    _b(code, 0xE5)
+    _sub_rsp(code, 0x30)
+    _b(code, 0x49)                             // mov r8, rdx（值 → 第 3 个实参）
+    _b(code, 0x89)
+    _b(code, 0xD0)
+    let at = len(code) + 3                     // lea rdx, [rip+fmt]
+    _lea_rip(code, RDX, 0)
+    _addfix(ctx.fixes, at, -4, 2)              // id -4 = "%I64d"（无换行）
+    _b(code, 0x31)                             // xor eax, eax（varargs：AL = 0）
+    _b(code, 0xC0)
+    let c1 = _call_rip(code)
+    _addfix(ctx.fixes, c1, I_WSPRINTF, 3)
+    _b(code, 0x48)                             // mov rsp, rbp
+    _b(code, 0x89)
+    _b(code, 0xEC)
+    _b(code, 0x5D)                             // pop rbp
+    _ret(code)
+}
+
+/// __memcmp(rcx = a, rdx = b, r8 = n) -> 首个不同字节的差值（全等返回 0）。
+/// 口径与 stage-0 一致：返回 `a[i] - b[i]`（不是 -1/0/1），全等返回 0。
+/// stage-0 那边是 8 字节字比较 + 差异字逐字节定位（快但等价），这里就用
+/// 朴素字节循环——语义完全相同，自举阶段优先要"对"，性能留给之后。
+fn _gen_memcmp(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_MEMCMP, len(code))
+    let ltop = _newlab(labs)
+    let ldiff = _newlab(labs)
+    let leq = _newlab(labs)
+    _b(code, 0x45)                             // xor r9d, r9d（i = 0）
+    _b(code, 0x31)
+    _b(code, 0xC9)
+    _setlab(labs, code, ltop)
+    _b(code, 0x4D)                             // cmp r9, r8
+    _b(code, 0x39)
+    _b(code, 0xC1)
+    let p0 = _jcc(code, 0x83)                  // jae .eq
+    _addfix(ctx.fixes, p0, leq, FK_LAB)
+    _b(code, 0x42)                             // movzx eax, byte [rcx + r9]
+    _b(code, 0x0F)
+    _b(code, 0xB6)
+    _b(code, 0x04)
+    _b(code, 0x09)                             // SIB: scale=1, index=r9, base=rcx
+    _b(code, 0x46)                             // movzx r10d, byte [rdx + r9]
+    _b(code, 0x0F)
+    _b(code, 0xB6)
+    _b(code, 0x14)
+    _b(code, 0x0A)
+    _b(code, 0x44)                             // cmp eax, r10d
+    _b(code, 0x39)
+    _b(code, 0xD0)
+    let p1 = _jcc(code, 0x85)                  // jne .diff
+    _addfix(ctx.fixes, p1, ldiff, FK_LAB)
+    _b(code, 0x49)                             // inc r9
+    _b(code, 0xFF)
+    _b(code, 0xC1)
+    let p2 = _jmp(code)
+    _addfix(ctx.fixes, p2, ltop, FK_LAB)
+    _setlab(labs, code, ldiff)
+    _b(code, 0x4C)                             // sub rax, r10（64 位：负数才不会被当大正数）
+    _b(code, 0x29)
+    _b(code, 0xD0)
+    _ret(code)
+    _setlab(labs, code, leq)
+    _b(code, 0x31)                             // xor eax, eax
     _b(code, 0xC0)
     _ret(code)
 }
@@ -5447,9 +5814,365 @@ fn _lower_spawn(fc: FnCtx, nd: Node) -> int {
     return d
 }
 
+/// 内建分派（v2.33）：内存原语 + 诊断/串原语。返回 -1 表示不是内建。
+///
+/// 为什么要内建而不是写进 std：这些是"语言层原语"（stage-0 也是内建），
+/// 而 qlmc 自己的源码与 std/mem.qma 都靠它们。语义一律对齐 stage-0：
+///   mem_load8(p,i)  读第 i 个**字节**（零扩展）
+///   mem_load64(p,w) 读第 w 个 **8 字节字**（不是字节！）
+///   mem_free(p,n)   本版分配器是 bump，**不回收**（语义差异，见 §7.20）
+///   cstr(s)         qlmc 的 str 布局本来就是 [len][bytes][NUL]，值即指针 → 恒等
+fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
+    let bn = fc.names.get(nd.a)
+    // ---- 诊断 ----
+    if bn == "eprint" {
+        let a = _lower_expr(fc, nd.b)
+        _ir_emit(fc, OP_ARG, 0, a, 0, 0)
+        _ir_emit(fc, OP_CALLRT, 0, 0, 0, RT_EPRINT)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+        return d
+    }
+    // ---- 内存 ----
+    if bn == "mem_alloc" {
+        let n = _lower_expr(fc, nd.b)
+        _ir_emit(fc, OP_ARG, 0, n, 0, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_ALLOC)
+        return d
+    }
+    if bn == "mem_free" {
+        // bump 分配器：不回收。实参照求值（保持副作用次序），返回 0。
+        _lower_expr(fc, nd.b)
+        if nd.c >= 0 {
+            _lower_expr(fc, nd.c)
+        }
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+        return d
+    }
+    if bn == "mem_load64" {
+        let p = _lower_expr(fc, nd.b)
+        let w = _lower_expr(fc, nd.c)
+        let a = _vnew(fc)
+        fc.vty.set(a, TY_INT)
+        _ir_emit(fc, OP_ADDRX, a, p, w, 8)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_LOAD, d, a, 0, 8)
+        return d
+    }
+    if bn == "mem_store64" {
+        let p = _lower_expr(fc, nd.b)
+        let w = _lower_expr(fc, nd.c)
+        let v = _lower_expr(fc, nd.n)
+        let a = _vnew(fc)
+        fc.vty.set(a, TY_INT)
+        _ir_emit(fc, OP_ADDRX, a, p, w, 8)
+        _ir_emit(fc, OP_STORE, 0, a, v, 8)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+        return d
+    }
+    if bn == "mem_load8" {
+        let p = _lower_expr(fc, nd.b)
+        let i = _lower_expr(fc, nd.c)
+        let a = _vnew(fc)
+        fc.vty.set(a, TY_INT)
+        _ir_emit(fc, OP_ADD, a, p, i, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_LOAD8, d, a, 0, 0)
+        return d
+    }
+    if bn == "mem_store8" {
+        let p = _lower_expr(fc, nd.b)
+        let i = _lower_expr(fc, nd.c)
+        let v = _lower_expr(fc, nd.n)
+        let a = _vnew(fc)
+        fc.vty.set(a, TY_INT)
+        _ir_emit(fc, OP_ADD, a, p, i, 0)
+        _ir_emit(fc, OP_STORE8, 0, a, v, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+        return d
+    }
+    if bn == "mem_copy" {
+        let dp = _lower_expr(fc, nd.b)
+        let sp = _lower_expr(fc, nd.c)
+        let n = _lower_expr(fc, nd.n)
+        _ir_emit(fc, OP_MEMCPYN, n, dp, sp, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+        return d
+    }
+    if bn == "mem_zero" {
+        let p = _lower_expr(fc, nd.b)
+        let n = _lower_expr(fc, nd.c)
+        _ir_emit(fc, OP_ZERON, 0, p, n, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+        return d
+    }
+    if bn == "mem_cmp" {
+        let a = _lower_expr(fc, nd.b)
+        let b = _lower_expr(fc, nd.c)
+        let n = _lower_expr(fc, nd.n)
+        _ir_emit(fc, OP_ARG, 0, a, 0, 0)
+        _ir_emit(fc, OP_ARG, 0, b, 0, 1)
+        _ir_emit(fc, OP_ARG, 0, n, 0, 2)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_MEMCMP)
+        return d
+    }
+    // ---- 串 ----
+    if bn == "cstr" {
+        // qlmc 的 str = [len][bytes][NUL]，值就是数据指针 → 恒等。
+        // （stage-0 那边会新分配一份，语义等价：调用方只读。）
+        let a = _lower_expr(fc, nd.b)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_MOV, d, a, 0, 0)
+        return d
+    }
+    if bn == "chr" {
+        // chr(n) -> 1 字节的 str
+        let n = _lower_expr(fc, nd.b)
+        let sz = _vnew(fc)
+        fc.vty.set(sz, TY_INT)
+        _ir_emit(fc, OP_CONST, sz, 0, 0, 10)
+        _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+        let q = _vnew(fc)
+        fc.vty.set(q, TY_INT)
+        _ir_emit(fc, OP_CALLRT, q, 0, 0, RT_ALLOC)
+        let a0 = _vnew(fc)
+        fc.vty.set(a0, TY_INT)
+        _ir_emit(fc, OP_ADDRF, a0, q, 0, 0)
+        let one = _vnew(fc)
+        fc.vty.set(one, TY_INT)
+        _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+        _ir_emit(fc, OP_STORE, 0, a0, one, 8)
+        let a1 = _vnew(fc)
+        fc.vty.set(a1, TY_INT)
+        _ir_emit(fc, OP_ADDRF, a1, q, 0, 8)
+        _ir_emit(fc, OP_STORE8, 0, a1, n, 0)
+        let a2 = _vnew(fc)
+        fc.vty.set(a2, TY_INT)
+        _ir_emit(fc, OP_ADDRF, a2, a1, 0, 1)
+        let z = _vnew(fc)
+        fc.vty.set(z, TY_INT)
+        _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+        _ir_emit(fc, OP_STORE8, 0, a2, z, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_STR)
+        _ir_emit(fc, OP_MOV, d, a1, 0, 0)
+        return d
+    }
+    if bn == "substr" {
+        // substr(s, lo, n) -> 新串（第三个数是**长度**，与 stage-0 一致）
+        let sv = _lower_expr(fc, nd.b)
+        let lo = _lower_expr(fc, nd.c)
+        let n = _lower_expr(fc, nd.n)
+        let sz = _vnew(fc)
+        fc.vty.set(sz, TY_INT)
+        let nine = _vnew(fc)
+        fc.vty.set(nine, TY_INT)
+        _ir_emit(fc, OP_CONST, nine, 0, 0, 9)
+        _ir_emit(fc, OP_ADD, sz, n, nine, 0)
+        _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+        let q = _vnew(fc)
+        fc.vty.set(q, TY_INT)
+        _ir_emit(fc, OP_CALLRT, q, 0, 0, RT_ALLOC)
+        let a0 = _vnew(fc)
+        fc.vty.set(a0, TY_INT)
+        _ir_emit(fc, OP_ADDRF, a0, q, 0, 0)
+        _ir_emit(fc, OP_STORE, 0, a0, n, 8)
+        let dstp = _vnew(fc)
+        fc.vty.set(dstp, TY_INT)
+        _ir_emit(fc, OP_ADDRF, dstp, q, 0, 8)
+        let srcp = _vnew(fc)
+        fc.vty.set(srcp, TY_INT)
+        _ir_emit(fc, OP_ADD, srcp, sv, lo, 0)
+        _ir_emit(fc, OP_MEMCPYN, n, dstp, srcp, 0)
+        let endp = _vnew(fc)
+        fc.vty.set(endp, TY_INT)
+        _ir_emit(fc, OP_ADD, endp, dstp, n, 0)
+        let z = _vnew(fc)
+        fc.vty.set(z, TY_INT)
+        _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+        _ir_emit(fc, OP_STORE8, 0, endp, z, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_STR)
+        _ir_emit(fc, OP_MOV, d, dstp, 0, 0)
+        return d
+    }
+    // ---- 文件 / 时钟 ----
+    if bn == "file_exists" {
+        // GetFileAttributesA 返回 DWORD，INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF。
+        // 64 位比较前先掩到 32 位，免得高 32 位的"未定义"把判断带偏。
+        let pv = _lower_expr(fc, nd.b)
+        _ir_emit(fc, OP_ARG, 0, pv, 0, 0)
+        let r = _vnew(fc)
+        fc.vty.set(r, TY_INT)
+        _ir_emit(fc, OP_CALLIAT, r, 0, 0, I_FILEATTR)
+        let mask = _vnew(fc)
+        fc.vty.set(mask, TY_INT)
+        _ir_emit(fc, OP_CONST, mask, 0, 0, 4294967295)
+        let m = _vnew(fc)
+        fc.vty.set(m, TY_INT)
+        _ir_emit(fc, OP_AND, m, r, mask, 0)
+        let bad = _vnew(fc)
+        fc.vty.set(bad, TY_INT)
+        _ir_emit(fc, OP_CONST, bad, 0, 0, 4294967295)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CMP, d, m, bad, 0x95)      // setne
+        return d
+    }
+    if bn == "now_ns" {
+        // QPC 纳秒：ns = (c/f)*1e9 + ((c%f)*1e9)/f
+        // 先除后乘再补余数——直接 c*1e9 在开机几小时后就会溢出 int64。
+        let sz = _vnew(fc)
+        fc.vty.set(sz, TY_INT)
+        _ir_emit(fc, OP_CONST, sz, 0, 0, 16)
+        _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+        let buf = _vnew(fc)
+        fc.vty.set(buf, TY_INT)
+        _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
+        _ir_emit(fc, OP_ARG, 0, buf, 0, 0)
+        let r1 = _vnew(fc)
+        fc.vty.set(r1, TY_INT)
+        _ir_emit(fc, OP_CALLIAT, r1, 0, 0, I_QPC)
+        let fp = _vnew(fc)
+        fc.vty.set(fp, TY_INT)
+        _ir_emit(fc, OP_ADDRF, fp, buf, 0, 8)
+        _ir_emit(fc, OP_ARG, 0, fp, 0, 0)
+        let r2 = _vnew(fc)
+        fc.vty.set(r2, TY_INT)
+        _ir_emit(fc, OP_CALLIAT, r2, 0, 0, I_QPF)
+        let ap = _vnew(fc)
+        fc.vty.set(ap, TY_INT)
+        _ir_emit(fc, OP_ADDRF, ap, buf, 0, 0)
+        let c = _vnew(fc)
+        fc.vty.set(c, TY_INT)
+        _ir_emit(fc, OP_LOAD, c, ap, 0, 8)
+        let f = _vnew(fc)
+        fc.vty.set(f, TY_INT)
+        _ir_emit(fc, OP_LOAD, f, fp, 0, 8)
+        let big = _vnew(fc)
+        fc.vty.set(big, TY_INT)
+        _ir_emit(fc, OP_CONST, big, 0, 0, 1000000000)
+        let secs = _vnew(fc)
+        fc.vty.set(secs, TY_INT)
+        _ir_emit(fc, OP_DIV, secs, c, f, 0)
+        let whole = _vnew(fc)
+        fc.vty.set(whole, TY_INT)
+        _ir_emit(fc, OP_MUL, whole, secs, big, 0)
+        let rem = _vnew(fc)
+        fc.vty.set(rem, TY_INT)
+        _ir_emit(fc, OP_MOD, rem, c, f, 0)
+        let remns = _vnew(fc)
+        fc.vty.set(remns, TY_INT)
+        _ir_emit(fc, OP_MUL, remns, rem, big, 0)
+        let frac = _vnew(fc)
+        fc.vty.set(frac, TY_INT)
+        _ir_emit(fc, OP_DIV, frac, remns, f, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_ADD, d, whole, frac, 0)
+        return d
+    }
+    if bn == "mem_str" {
+        // mem_str(p, n) -> 拷 n 字节并补 NUL 的 str
+        let p = _lower_expr(fc, nd.b)
+        let n = _lower_expr(fc, nd.c)
+        return _bi_mem_str(fc, p, n)
+    }
+    return -1
+}
+
+/// 把 (指针, 长度) 包成一个 Quelmara 串：alloc(n+9) + [len] + 拷贝 + NUL。
+/// mem_str 内建与 int.to_str 共用。
+fn _bi_mem_str(fc: FnCtx, p: int, n: int) -> int {
+    let sz = _vnew(fc)
+        fc.vty.set(sz, TY_INT)
+        let nine = _vnew(fc)
+        fc.vty.set(nine, TY_INT)
+        _ir_emit(fc, OP_CONST, nine, 0, 0, 9)
+        _ir_emit(fc, OP_ADD, sz, n, nine, 0)
+        _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+        let q = _vnew(fc)
+        fc.vty.set(q, TY_INT)
+        _ir_emit(fc, OP_CALLRT, q, 0, 0, RT_ALLOC)
+        let a0 = _vnew(fc)
+        fc.vty.set(a0, TY_INT)
+        _ir_emit(fc, OP_ADDRF, a0, q, 0, 0)
+        _ir_emit(fc, OP_STORE, 0, a0, n, 8)
+        let dstp = _vnew(fc)
+        fc.vty.set(dstp, TY_INT)
+        _ir_emit(fc, OP_ADDRF, dstp, q, 0, 8)
+        _ir_emit(fc, OP_MEMCPYN, n, dstp, p, 0)
+        let endp = _vnew(fc)
+        fc.vty.set(endp, TY_INT)
+        _ir_emit(fc, OP_ADD, endp, dstp, n, 0)
+        let z = _vnew(fc)
+        fc.vty.set(z, TY_INT)
+        _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+        _ir_emit(fc, OP_STORE8, 0, endp, z, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_STR)
+    _ir_emit(fc, OP_MOV, d, dstp, 0, 0)
+    return d
+}
+
 fn _lower_method(fc: FnCtx, nd: Node) -> int {
     let h = _lower_expr(fc, nd.a)
     let hty = fc.vty.get(h)
+    // int/bool 的 .to_str()（v2.33）：诊断消息里到处用。
+    // 走 __i64_fmt（wsprintfA "%I64d"）再包成 str —— 自己写除法循环会在
+    // INT64_MIN 上取绝对值溢出（§7.19 的坑），交给 CRT 省心。
+    if fc.names.get(nd.b) == "to_int" {
+        if hty != TY_STR {
+            eprint("qlmc: to_int() 只用于 str")
+            exit(2)
+        }
+        if nd.c >= 0 {
+            eprint("qlmc: to_int() 不接受实参")
+            exit(2)
+        }
+        _ir_emit(fc, OP_ARG, 0, h, 0, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_STR2INT)
+        return d
+    }
+    if fc.names.get(nd.b) == "to_str" {
+        if nd.c >= 0 {
+            eprint("qlmc: to_str() 不接受实参")
+            exit(2)
+        }
+        let sz = _vnew(fc)
+        fc.vty.set(sz, TY_INT)
+        _ir_emit(fc, OP_CONST, sz, 0, 0, 32)
+        _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+        let buf = _vnew(fc)
+        fc.vty.set(buf, TY_INT)
+        _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
+        _ir_emit(fc, OP_ARG, 0, buf, 0, 0)
+        _ir_emit(fc, OP_ARG, 0, h, 0, 1)
+        let n = _vnew(fc)
+        fc.vty.set(n, TY_INT)
+        _ir_emit(fc, OP_CALLRT, n, 0, 0, RT_I64FMT)
+        return _bi_mem_str(fc, buf, n)
+    }
     if hty >= TY_MAP && hty < TY_ARRAY {
         let hp = _pin(fc, h)      // 句柄要跨循环存活
         let m = fc.names.get(nd.b)
@@ -5545,6 +6268,20 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
         }
         return d
     }
+    if m == "clear" {
+        // 长度归零，数据块与容量保留（与 stage-0 的 __vec_clear 一致：h[1] = 0）
+        let lp = _vnew(fc)
+        fc.vty.set(lp, TY_INT)
+        _ir_emit(fc, OP_ADDRF, lp, h, 0, 8)
+        let z = _vnew(fc)
+        fc.vty.set(z, TY_INT)
+        _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+        _ir_emit(fc, OP_STORE, 0, lp, z, 8)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+        return d
+    }
     if m == "set" {
         if nd.n < 0 {
             eprint("qlmc: set 需要两个实参")
@@ -5565,7 +6302,7 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
         _ir_emit(fc, OP_CONST, d, 0, 0, 0)
         return d
     }
-    eprint("qlmc: vec 只支持 .push(x) / .get(i) / .set(i,x) / .len()")
+    eprint("qlmc: vec 只支持 .push(x) / .get(i) / .set(i,x) / .len() / .clear()")
     exit(2)
     return 0
 }
@@ -5901,6 +6638,13 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     ddll.push(0)
     dsym.push("CloseHandle")
     ddll.push(0)
+    // v2.33：file_exists / now_ns
+    dsym.push("GetFileAttributesA")
+    ddll.push(0)
+    dsym.push("QueryPerformanceCounter")
+    ddll.push(0)
+    dsym.push("QueryPerformanceFrequency")
+    ddll.push(0)
     dsym.push("wsprintfA")
     ddll.push(1)
     let mut k = 0
@@ -6026,6 +6770,9 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     iat.set(I_CREATE, rdata_rva + iatb.get(0) + 24)
     iat.set(I_WAIT, rdata_rva + iatb.get(0) + 32)
     iat.set(I_CLOSE, rdata_rva + iatb.get(0) + 40)
+    iat.set(I_FILEATTR, rdata_rva + iatb.get(0) + 48)
+    iat.set(I_QPC, rdata_rva + iatb.get(0) + 56)
+    iat.set(I_QPF, rdata_rva + iatb.get(0) + 64)
     iat.set(I_WSPRINTF, rdata_rva + iatb.get(1))
     k = 0
     while k < len(ctx.fsym) {
@@ -6057,6 +6804,12 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     // 换行字节（print 的语义是"输出 + 换行"，str 通道要单独写一个字节）
     ctx.nl.set(0, len(rd))
     _b(rd, 10)
+    // 不带换行的整数格式串（v2.33：int.to_str 用）。偏移存 nl[1]，
+    // 用 FK_STR 的 -4 哨兵引用——这样不用给 Ctx 加字段。
+    _pad_to(rd, _align_up(len(rd), 2))
+    ctx.nl.push(len(rd))
+    _bytes(rd, "%I64d")
+    _b(rd, 0)
     // 格式串（普通 C 字符串，给 wsprintfA）
     _pad_to(rd, _align_up(len(rd), 2))
     ctx.strpos.set(len(ctx.strpos) - 1, len(rd))
@@ -6109,6 +6862,9 @@ fn _target_of(ctx: Ctx, id: int, kind: int, rdata_rva: int, bss_rva: int,
         }
         if id == -3 {
             return rdata_rva + ctx.nl.get(0) - TEXT_RVA
+        }
+        if id == -4 {
+            return rdata_rva + ctx.nl.get(1) - TEXT_RVA   // "%I64d"（无换行）
         }
         return rdata_rva + ctx.strpos.get(id) - TEXT_RVA
     }
@@ -6283,6 +7039,29 @@ fn build_pe(code: vec[int], rdata: vec[int], blob: vec[int]) -> int {
     return bss_rva
 }
 
+/// read_text(path) -> str：整文件读成串。
+/// 做成源码函数而不是内建：qlmc 已经声明了 CreateFileA/ReadFile 的 @ffi，
+/// 十几行 Quelmara 就够；做成内建要另写机器码，没必要。
+/// 名字带下划线是为了**不撞 stage-0 的同名内建**（那边有 read_text 内建，
+/// 用户定义虽然优先，但同名容易让人误读）。
+fn _read_text(path: str) -> str {
+    let h = _CreateFileA(cstr(path), GEN_READ, 1, 0, OPEN_EXISTING, ATTR_NORMAL, 0)
+    if h == -1 {
+        eprint("qlmc: 打不开源文件 " + path)
+        exit(2)
+    }
+    let sz = _GetFileSize(h, 0)
+    let buf = mem_alloc(sz + 1)
+    let got = mem_alloc(8)
+    if !_ReadFile(h, buf, sz, got, 0) {
+        eprint("qlmc: 读文件失败 " + path)
+        exit(2)
+    }
+    _CloseHandle(h)
+    mem_store8(buf, sz, 0)
+    return mem_str(buf, sz)
+}
+
 fn write_file(path: str, buf: vec[int]) -> int {
     let h = _CreateFileA(cstr(path), GEN_WRITE, 0, 0, CREATE_ALWAYS,
                          ATTR_NORMAL, 0)
@@ -6311,6 +7090,59 @@ fn write_file(path: str, buf: vec[int]) -> int {
 // ---------------------------------------------------------------------------
 
 /// 取路径的目录部分（含结尾分隔符）
+/// 去掉路径末尾一级（`a/b/` → `a/`）；没有上一级时返回空串
+fn _dir_up(d: str) -> str {
+    let n = len(d)
+    if n == 0 {
+        return ""
+    }
+    let mut i = n - 1
+    // 先跳过末尾的分隔符
+    while i >= 0 {
+        let c = d[i]
+        if c == 47 || c == 92 {
+            i = i - 1
+        } else {
+            break
+        }
+    }
+    // 再退到上一个分隔符
+    while i >= 0 {
+        let c = d[i]
+        if c == 47 || c == 92 {
+            return substr(d, 0, i + 1)
+        }
+        i = i - 1
+    }
+    return ""
+}
+
+/// 找模块文件：从源文件目录**逐级向上**试 `<d>/<mod>.qma`（v2.33）。
+/// 为什么向上：stage-0 的 import 解析除了源目录，还会去**仓库根**的 `std/` 找
+/// （`_import_candidates` 把 `std.*` 剥掉首段映射到 `<repo>/std/`）。qlmc 只看
+/// 源文件同目录，于是编自己的源码时 `import std.core` 直接找不到——而 `std/`
+/// 恰好在仓库根（不在 `src/lib`，Quelmara.toml 里连 `[src]` 段都没有）。
+/// 逐级向上找 `<d>/std/core.qma` 正好命中，且不需要读配置文件。
+fn _find_module(dir: str, mod: str) -> str {
+    let rel = mod + ".qma"
+    let mut d = dir
+    let mut guard = 0
+    while guard < 32 {
+        let cand = d + rel
+        if file_exists(cand) {
+            return cand
+        }
+        // 空目录也要试一次（`std/core.qma` 相对 cwd —— 源码用相对路径传进来时
+        // 就靠这一下命中仓库根），试完再收工
+        if len(d) == 0 {
+            return ""
+        }
+        d = _dir_up(d)
+        guard = guard + 1
+    }
+    return ""
+}
+
 fn _dir_of(path: str) -> str {
     let mut i = len(path) - 1
     while i >= 0 {
@@ -6328,8 +7160,13 @@ fn _usage() {
 }
 
 /// 线程数：函数太少时并行只付线程创建成本。`want` = 0 表示自动。
+///
+/// 这里**不读 Quelmara.toml**（qlmc 没有配置解析器，`net_config` 是 stage-0 的
+/// 编译期内建）。用固定的 4 条上限，`-j N` 仍然能覆盖。差异只出现在
+/// "没显式给 -j 且配置里改了 io_threads" 这一种情况，而**线程数不影响产物字节**
+/// （`-j1 == -jN` 由 tests/qlmc_test.py 钉住），所以只影响构建耗时、不影响正确性。
 fn _pick_threads(nfunc: int, want: int) -> int {
-    let mut cores = net_config(2)
+    let mut cores = 4
     if cores < 1 {
         cores = 1
     }
@@ -6362,15 +7199,85 @@ fn _pick_threads(nfunc: int, want: int) -> int {
     return nt
 }
 
+@ffi("kernel32.dll", "GetCommandLineA")
+fn _cmdline() -> int
+
+fn _is_blank(c: int) -> bool {
+    if c == 32 { return true }
+    if c == 9 { return true }
+    return false
+}
+
+/// C 串长度（GetCommandLineA 的返回值没有长度前缀）
+fn _strlen_c(p: int) -> int {
+    let mut i = 0
+    while mem_load8(p, i) != 0 {
+        i = i + 1
+    }
+    return i
+}
+
+/// args() -> vec[str]：把命令行切成参数表，**跳过 argv[0]**（程序名）。
+/// 规则：空格/Tab 分隔；双引号内的空白不分隔，引号本身不保留。
+///
+/// 为什么写在源码里而不是做成内建：需要按字符扫描 + 建 vec[str]，用 Quelmara
+/// 写三十行就够，用机器码写要上百条指令，还得自己调 __alloc/__vec_push。
+/// 这正是"自举目标要落在自己支持的子集里"该有的样子。
+fn _args() -> vec[str] {
+    let p = _cmdline()
+    let n = _strlen_c(p)
+    let out = vec[str].new(8)
+    let buf = mem_alloc(n + 1)
+    let mut i = 0
+    // 跳过 argv[0]：走到第一个空白
+    while i < n {
+        if _is_blank(mem_load8(p, i)) {
+            break
+        }
+        i = i + 1
+    }
+    while i < n {
+        // 跳过分隔符
+        while i < n {
+            if !_is_blank(mem_load8(p, i)) {
+                break
+            }
+            i = i + 1
+        }
+        if i >= n {
+            break
+        }
+        // 收一个参数（引号内的空白不算分隔，引号本身丢掉）
+        let mut blen = 0
+        let mut q = 0
+        while i < n {
+            let c = mem_load8(p, i)
+            if c == 34 {
+                q = 1 - q
+                i = i + 1
+                continue
+            }
+            if q == 0 && _is_blank(c) {
+                break
+            }
+            mem_store8(buf, blen, c)
+            blen = blen + 1
+            i = i + 1
+        }
+        out.push(mem_str(buf, blen))
+    }
+    return out
+}
+
 fn main() {
     let t0 = now_ns()
-    let a = args()
+    let a = _args()
     if len(a) < 1 {
         _usage()
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S18：int/bool/str + struct/数组/enum/vec（可扩容、元素可为聚合）/map/切片 + 位运算/移位 + 进制字面量 + const 常量表达式 + else if + spawn/join + defer + import + @ffi + 闭包 + 聚合形参返回 + 形参实参不限个数 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S19：int/bool/str + struct/数组/enum/vec（可扩容、元素可为聚合）/map/切片 + 位运算/移位 + 进制字面量 + const 常量表达式 + else if + spawn/join + 内存/串/诊断内建 + str 下标 + defer + import + @ffi + 闭包 + 聚合形参返回 + 形参实参不限个数 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
@@ -6395,7 +7302,7 @@ fn main() {
         eprint("qlmc: 找不到 " + src)
         exit(2)
     }
-    let text = read_text(src)
+    let text = _read_text(src)
 
     let toks = vec[Tok].new(256)
     lex(text, toks)
@@ -6432,12 +7339,12 @@ fn main() {
         }
         if seen == 0 {
             loaded.push(mod)
-            let mpath = dir + mod + ".qma"
-            if !file_exists(mpath) {
-                eprint("qlmc: 找不到模块 " + mpath)
+            let mpath = _find_module(dir, mod)
+            if len(mpath) == 0 {
+                eprint("qlmc: 找不到模块 " + dir + mod + ".qma")
                 exit(2)
             }
-            let mt = read_text(mpath)
+            let mt = _read_text(mpath)
             let mtk = vec[Tok].new(256)
             lex(mt, mtk)
             parse(mtk, nodes, names, strs, fns, cname, cval, stt, imports, fdll, fsym)
@@ -6486,10 +7393,10 @@ fn main() {
     }
     let nl = vec[int].new(1)
     nl.push(0)
-    // 运行库例程位置表：RT_PINT..RT_SPAWN 共 11 个（加例程时这里要一起改）
-    let rt_pos = vec[int].new(11)
+    // 运行库例程位置表：RT_PINT..RT_STR2INT 共 15 个（加例程时这里要一起改）
+    let rt_pos = vec[int].new(15)
     si = 0
-    while si < 11 {
+    while si < 15 {
         rt_pos.push(0)
         si = si + 1
     }
@@ -6519,6 +7426,10 @@ fn main() {
     _gen_zero(ctx)
     _gen_join(ctx)
     _gen_spawn(ctx)
+    _gen_eprint_str(ctx)
+    _gen_memcmp(ctx)
+    _gen_i64_fmt(ctx)
+    _gen_str_to_int(ctx)
     let rt_end = now_ns()
 
     // ---- 并行编译函数体 -------------------------------------------------

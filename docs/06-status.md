@@ -956,7 +956,7 @@ p50 从 1,904 → 473 µs 是 **4.0×**，与 worker 数同阶——多核确实
 降到 4–13 ms；冷路径不变（委托 stage-0，2136 ms）。失效正确性实测：`exit(7)` 改成
 `exit(8)` 后 `qlm run` 的退出码从 7 变 8，产物被重新生成。
 
-### 3.25 stage-1 编译器 `qlmc`（v2.32：子集 S18）
+### 3.25 stage-1 编译器 `qlmc`（v2.33：子集 S19，**已能编出自己**）
 
 口径：本机 20 逻辑核（VBS 开着，噪声见 §3.26，只做纵向比较）；`qlmc` 的耗时是
 **它自己报的**（`now_ns()` 差，排除进程创建税），每个数字取 5 次的最小值。
@@ -982,11 +982,19 @@ p50 从 1,904 → 473 µs 是 **4.0×**，与 worker 数同阶——多核确实
 | `tests/selfhost/s17_constexpr.qma`（const 常量表达式） | 2.0 KB | 4608 B | **5.6 ms** |
 | `tests/selfhost/s18_vecagg.qma`（vec[Struct] + else if） | 2.3 KB | 9728 B | **7.4 ms** |
 | `tests/selfhost/s19_spawn.qma`（spawn/join，0/1/2/5/8 实参） | 1.5 KB | 6656 B | **6.2 ms** |
-| `tests/selfhost/s3_manyfns.qma`（200 函数，`-j1`） | 96 KB | 44 544 B | **17.3–18.5 ms** |
+| `tests/selfhost/s20_mem.qma`（内存/串/诊断内建） | 2.4 KB | 6656 B | **7.6 ms** |
+| **`bootstrap/qlmc/qlmc.qma`（自己编自己）** | 218 KB | **417 792 B** | **143–192 ms**（`-j4`） |
+| `tests/selfhost/s3_manyfns.qma`（200 函数，`-j1`） | 96 KB | 44 544 B | **17.5–18.5 ms** |
 | └ 其中后端阶段 | — | — | **2.5–3.4 ms（-j1）/ 1.6–2.5 ms（-j4）** |
 
-`build/qlmc.exe` 自身 **1468 KB**（v2.31 1368 KB，+7.3%：线程例程 + spawn 降级），
+`build/qlmc.exe` 自身 **1686 KB**（v2.32 1468 KB，+14.8%：16 个内建 + 5 个新运行库例程 + 字符串下标），
 由 stage-0 编出来。
+
+**自举状态（v2.33）**：`qlmc` 已经能编译**自己的源码**并产出 **417 792 字节的 stage-2 exe**。
+但 stage-2 还不能正确工作：`version` 正常、参数解析正常、文件打不开时能正确报错，
+一旦真读到文件内容就变成垃圾（`dump`/`build` 都失败）。同一个 `_read_text` 函数体
+**单独**交给 qlmc 编出来是对的，所以是「qlmc 编自己」才暴露的误编译——**待查**。
+`-j1`/`-j4` 产物逐字节相同这条对自编译还没验。
 
 **`push` 的机器码代价**（v2.27 实测，用 `tools/dev/dumpasm.py` 数指令，不受噪声影响）：
 

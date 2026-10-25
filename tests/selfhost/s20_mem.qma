@@ -1,0 +1,111 @@
+// s20_mem.qma —— stage-1 编译器（qlmc）内存/串/诊断内建的差分夹具（v2.33）
+//
+// 覆盖 v2.33 新加的内建（这些是自举的前提：std/mem.qma 与 qlmc 自己的源码都靠它们）：
+//   mem_alloc / mem_free / mem_load8 / mem_store8 / mem_load64 / mem_store64
+//   mem_copy / mem_zero / mem_cmp / mem_str
+//   chr / substr / cstr / eprint / int.to_str / str.to_int / file_exists / now_ns
+// 与 stage-0 做逐字节差分（tests/qlmc_test.py）。
+fn main() {
+    // ---- 字节级读写 ----
+    // ⚠ 已知 stage-0 缺陷（07-gaps §7.21）：循环里 `mem_store8(p, i, <变量>)`
+    // 会写成 0（同一个变量既当下标又当值时尤其明显）；qlmc 是对的。
+    // 为了能做差分，这里循环里只存**常量**，变量值的写入放到循环外。
+    let p = mem_alloc(32)
+    let mut i = 0
+    while i < 8 {
+        mem_store8(p, i, 7)
+        i = i + 1
+    }
+    let mut j = 0
+    let mut acc = 0
+    while j < 8 {
+        acc = acc + mem_load8(p, j) * (j + 1)
+        j = j + 1
+    }
+    print(acc)                       // 7*(1+2+…+8) = 252
+
+    // 变量下标 + 变量值（循环外，stage-0 这条路径是对的）
+    mem_store8(p, 0, 11)
+    mem_store8(p, 1, 22)
+    mem_store8(p, 2, 33)
+    print(mem_load8(p, 0))
+    print(mem_load8(p, 1))
+    print(mem_load8(p, 2))
+    print(mem_load8(p, 7))
+
+    // ---- 字级读写（下标按 8 字节字，不是字节！）----
+    let q = mem_alloc(64)
+    mem_store64(q, 0, 111)
+    mem_store64(q, 1, 222)
+    mem_store64(q, 7, -333)
+    print(mem_load64(q, 0))
+    print(mem_load64(q, 1))
+    print(mem_load64(q, 7))
+
+    // ---- 清零 / 拷贝 / 比较 ----
+    mem_zero(q, 16)
+    print(mem_load64(q, 0))
+    print(mem_load64(q, 1))
+    mem_store64(q, 0, 12345)
+    let r = mem_alloc(64)
+    mem_copy(r, q, 8)
+    print(mem_load64(r, 0))
+    print(mem_cmp(q, r, 8))          // 相同 -> 0
+    mem_store8(r, 0, 0)
+    print(mem_cmp(q, r, 8))          // 不同 -> 非 0（符号看首字节差）
+
+    // ---- mem_free 是空操作（bump 分配器），但要能调 ----
+    mem_free(r, 64)
+    print(1)
+
+    // ---- 串：mem_str / chr / substr / cstr ----
+    let s = mem_str(p, 8)
+    print(len(s))
+    print(s[0])
+    print(s[7])
+    let c = chr(65)
+    print(c)
+    print(len(c))
+    let t = substr("hello world", 6, 5)
+    print(t)
+    print(len(t))
+    if cstr("abc") != 0 {
+        print(1)                     // cstr 返回指针，值不确定，只验非空
+    }
+
+    // ---- int.to_str / str.to_int ----
+    print(12345.to_str())
+    print((0 - 42).to_str())
+    print("6789".to_int())
+    print((0 - 7).to_str().to_int())
+    print("+99".to_int())
+
+    // ---- file_exists ----
+    if file_exists("tests/selfhost/s20_mem.qma") {
+        print(1)
+    } else {
+        print(0)
+    }
+    if file_exists("no_such_file_qqq.xyz") {
+        print(1)
+    } else {
+        print(0)
+    }
+
+    // ---- now_ns：只验单调性（值本身不确定，不能进差分）----
+    let t1 = now_ns()
+    let mut k = 0
+    while k < 10000 {
+        k = k + 1
+    }
+    let t2 = now_ns()
+    if t2 > t1 {
+        print(7)
+    } else {
+        print(8)
+    }
+
+    // ---- eprint（写 stderr，不进 stdout 差分；这里只验不崩）----
+    eprint("s20: eprint ok")
+    print(9)
+}
