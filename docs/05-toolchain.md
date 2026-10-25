@@ -728,6 +728,9 @@ build/qlmc.exe version
   落到 `_lower_expr` 物化成 0/1 再 `JZ`（那样每个比较要多 6 条"规范化"指令），
   而是递归发跳转。`jws` 里 `c==32||c==9||c==10||c==13` 从 **93 条降到 37 条**，
   代码体积合计 −8.9%。**短路顺序与求值序必须和 `_lower_expr` 那版一致（左先右后）。**
+- **越界检查融合**（v2.53）：`vec.get(i)` / `s[p]` 的"取长度 + 比较"合成一条
+  `cmp r64, [base±8]`（`OP_JCMPVLEN` / `OP_JCMPSTR`）。**`cmp` 的 opcode 是 `0x3B`
+  不是 `0x39`** —— `0x39` 算 `rm - reg`，会把条件整个反过来（表现是界内走 die）。
 - **地址计算与访存融合**（`_opt_fuse`）：`ADDRF/ADDRX` + `LOAD/STORE/LOAD8/STORE8`
   压成一条带 `disp32` 或 SIB `[base+idx*8]` 的访存（8 个新操作码）。条件是地址
   临时值**单定义、单使用**。`vec.get(i)` 从 13 条指令降到 4 条。v2.49 又加了

@@ -2322,6 +2322,11 @@ const OP_DIVC = 70     // dst = a <div|mod> imm
 // 四条，现在一条 `movzx r10, [str + p]`。
 const OP_LOAD8I = 71   // dst = 零扩展 [a + b]
 const OP_STORE8I = 72  // [a + b] = dst 的低字节
+// v2.53：越界检查里的"取长度 + 比较"合成一条 `cmp r64, [base±8]`。
+// 以前是 `mov d, [h+8]` + `cmp a, d` 两条；现在一条。`dst` = jcc 码、
+// `a` = 左操作数、`b` = 句柄/字符串、`imm` = 目标标签。
+const OP_JCMPVLEN = 73 // cmp a, [b+8]; jcc → imm（vec 头块的长度在 +8）
+const OP_JCMPSTR = 74  // cmp a, [b-8]; jcc → imm（str 的长度在 -8）
 
 struct Ir {
     op: int
@@ -3405,14 +3410,11 @@ fn _addr_index(fc: FnCtx, base_nid: int, ix_nid: int) -> int {
     if bty0 == TY_STR {
         let sv = _lower_expr(fc, base_nid)
         let iv = _lower_expr(fc, ix_nid)
-        let ln = _vnew(fc)
-        fc.vty.set(ln, TY_INT)
-        _ir_emit(fc, OP_LEN, ln, sv, 0, 0)
         let lfail = _newlab(fc.labs)
         let lok = _newlab(fc.labs)
         // **条件反过来写**（v2.46）：`jb lok` 让"不越界"直接跳过死路，
         // 比"jae lfail + jmp lok"少一条跳转 —— 数组/字符串下标的热路径上省一条。
-        _ir_emit(fc, OP_JCMP, 0x82, iv, ln, lok)     // jb：i < len → 跳过
+        _ir_emit(fc, OP_JCMPSTR, 0x82, iv, sv, lok)  // cmp i, [s-8]; jb → 跳过
         _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
         let one = _vnew(fc)
         fc.vty.set(one, TY_INT)
@@ -4677,6 +4679,7 @@ fn _fold_un(op: int, x: int, out: vec[int]) -> int {
 /// `OP_RET`/`OP_PRINT`/`OP_EXIT`/`OP_ARG`/`OP_STKARG`/`OP_JZ`/`OP_JNZ`）。
 fn _opt_writes(op: int) -> int {
     if op == OP_LAB || op == OP_JMP || op == OP_JCMP { return 0 }
+    if op == OP_JCMPVLEN || op == OP_JCMPSTR { return 0 }
     if op == OP_MEMCPYN || op == OP_STKALLOC || op == OP_STKFREE { return 0 }
     if op == OP_STORE || op == OP_COPY || op == OP_ZERO || op == OP_ZERON { return 0 }
     if op == OP_RETAGG || op == OP_RETSRET || op == OP_RET { return 0 }
@@ -4916,6 +4919,7 @@ fn _opt_fuse(fc: FnCtx, ir: vec[Ir], use: vec[int], ndef: vec[int]) {
                         go = 0
                     } else {
                         if nx.op == OP_LAB || nx.op == OP_JMP || nx.op == OP_JCMP ||
+                           nx.op == OP_JCMPVLEN || nx.op == OP_JCMPSTR ||
                            nx.op == OP_JZ || nx.op == OP_JNZ {
                             go = 0
                         }
@@ -6026,6 +6030,30 @@ fn _emit_ir(fc: FnCtx, i: int) {
     }
     if op == OP_JMP {
         let p = _jmp(code)
+        _addfix(fc.fixes, p, ins.imm, FK_LAB)
+        return
+    }
+    if op == OP_JCMPVLEN || op == OP_JCMPSTR {
+        // v2.53：`cmp r64, [base±8]` —— 省掉"先把长度装进寄存器"那一条。
+        if ins.dst < 0x80 || ins.dst > 0x8F {
+            eprint("qlmc: 内部错误：OP_JCMPV/STR 的条件码必须是 jcc（0x80..0x8F）")
+            exit(2)
+        }
+        _to_reg(fc, RAX, ins.a)
+        _to_reg(fc, RCX, ins.b)
+        let mut disp = 8
+        if op == OP_JCMPSTR {
+            disp = -8
+        }
+        _rex2(code, 1, RAX, RCX)
+        // **opcode 是 0x3B**（`cmp r64, r/m64`，算 reg - rm），不是 0x39
+        // （`cmp r/m64, r64`，算 rm - reg）。写成 0x39 就是 `cmp [rcx+8], rax`
+        // = 长度 - 下标，条件整个反过来 —— v2.53 第一版就是这样，表现是
+        // **在界内反而走 die 路径**（进程 exit 1）。
+        _b(code, 0x3B)                         // cmp rax, [rcx+disp8]
+        _modrm(code, 1, RAX, RCX)
+        _b(code, disp & 0xFF)
+        let p = _jcc(code, ins.dst)
         _addfix(fc.fixes, p, ins.imm, FK_LAB)
         return
     }
@@ -8240,11 +8268,11 @@ fn _vec_field(fc: FnCtx, h: int, off: int) -> int {
 
 /// 越界就 exit(1)：`jb` 是**无符号**比较，负数下标也会被拦下
 fn _vec_check(fc: FnCtx, h: int, i: int) {
-    let n = _vec_field(fc, h, 8)
     let lfail = _newlab(fc.labs)
     let lok = _newlab(fc.labs)
     // 条件反过来写：`jb lok` 直接跳过死路（同 _addr_index，v2.46）
-    _ir_emit(fc, OP_JCMP, 0x82, i, n, lok)     // jb：i < len → 跳过
+    // v2.53：长度装载与比较合成一条 `cmp i, [h+8]`（以前是 mov + cmp 两条）
+    _ir_emit(fc, OP_JCMPVLEN, 0x82, i, h, lok)  // cmp i, [h+8]; jb → 跳过
     _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
     let one = _vnew(fc)
     fc.vty.set(one, TY_INT)
