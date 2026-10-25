@@ -103,6 +103,20 @@ def main():
         if bad:
             fails.append(f"等价性（{len(bad)} 组不同）")
 
+        # ---- 2.5) stage-2 的错误路径：必须干净退 2，不能崩 ----
+        # 这条是 v2.37 加的：stage-1（stage-0 的产物）在"解析错误"这条路上会
+        # 段错误（07-gaps §7.25），而 stage-2（qlmc 自己的产物）是对的。
+        # 钉住它，防止哪天 qlmc 的 codegen 也退化成 stage-0 那样。
+        bad = os.path.join(OUT, "bad_syntax.qma")
+        with open(bad, "w", encoding="utf-8") as f:
+            f.write("fn main() {\n    let x = \n}\n")
+        r = run([stage2, "build", bad, "-o", os.path.join(OUT, "bad.exe")])
+        ok_err = r.returncode == 2 and "期望表达式" in (r.stdout + r.stderr)
+        print(f"[2.5] stage-2 错误路径干净退 2：{'PASS' if ok_err else 'FAIL'}"
+              f"（rc={r.returncode}）")
+        if not ok_err:
+            fails.append("stage-2 错误路径")
+
         # ---- 3) 不动点：stage-2 编自己 → stage-3 ----
         # 用 -j1：多线程版编自己还会崩（07-gaps §7.24），单线程已经稳定。
         # 注意 -j1/-jN 的产物一致性由 tests/qlmc_test.py 对夹具钉住，这里只管不动点。

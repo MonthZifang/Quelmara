@@ -664,33 +664,34 @@ print(1 < 2)          // stage-0: 1       qlmc: 1     ← 这个两边一样
 - 影响面：只影响"用 stage-2 以多线程编自己"这一种用法；`tests/qlmc_test.py` 里
   `-j1 == -jN` 的产物一致性对夹具仍然成立。
 
-### 7.25 待查：qlmc 报语法错误后崩在 exit（rc=139 而非 2）——**既有缺陷，v2.36 确认**
+### 7.25 已定性（v2.37）：**stage-0 的 codegen 缺陷** —— stage-1 报解析错误后崩在 exit
 
 ```bash
-$ printf 'fn main() {\n    let x = \n}\n' > bad.qma
-$ ./qlmc.exe build bad.qma -o bad.exe
+$ ./qlmc.exe build bad.qma -o bad.exe        # qlmc.exe 是 stage-0 的产物
 qlmc: line 3: 期望表达式
-Segmentation fault          # 期望 rc=2
+Segmentation fault                            # 期望 rc=2
 ```
 
-- **不是 v2.36 引入的**：`git show HEAD:bootstrap/qlmc/qlmc.qma` 编出来的 qlmc 同样崩。
-- 消息**打印成功**（stderr，含换行），崩在随后的 `exit(2)` / 进程退出路径上。
-- `fault_probe`：读 `0xFFFF…FFFF`、RIP 固定在一个 DLL 地址、`Rax=Rcx=4`、`R12=-1`、
-  返回地址不在我们的 `.text` 内。
-- **强烈的布局敏感性**（同一份源码、只改一处无关代码，行为就变）：
-  | 变体 | 结果 |
-  |---|---|
-  | 原样 `eprint("…" + _cur(p,pos).line.to_str() + "…")` | rc=139 |
-  | 消息先落变量 `let m = …; eprint(m)` | 有时 rc=2、有时 139 |
-  | 把 `eprint` 换成 `print`（stdout） | rc=2 |
-  | `__eprint_str` 去掉第二次写换行 | 有时 rc=2、有时 139 |
-- 已排除：`assert` 失败走 `__die`（也写 stderr）**正常**；`exit(2)` 从 main /
-  嵌套函数 / 带 struct 形参的函数里都正常；`eprint(单段拼接)` 正常。
-- 触发条件缩小到：**`eprint(<含 sret 聚合调用的多段拼接>)`**。
-- 下一步建议：用 `dumpasm` 逐条对照 `_fail` 的产物（对比 `print` 版与 `eprint` 版），
-  重点看 `OP_ARG`（写 RCX）与 sret 调用（也用 RCX 传隐藏指针）之间的寄存器分配；
-  怀疑是"同一表达式里 sret 隐藏指针与实参摆放抢 RCX"。
-- **影响**：所有语法/解析错误的报告路径。用户看到的是 segfault 而不是错误消息之后的正常退出。
+- **关键定性（v2.37）**：`qlmc.exe`（stage-1）是 **stage-0 编出来的**，所以这条崩溃
+  在 **stage-0 生成的代码**里，不在 qlmc 自己的后端里。证据：
+
+  | 输入 | stage-1（stage-0 的产物） | stage-2（qlmc 的产物） |
+  |---|---|---|
+  | 未定义函数 | rc=2 ✓ | rc=2 ✓ |
+  | import 找不到模块 | rc=2 ✓ | rc=2 ✓ |
+  | **解析错误（`let x =`）** | **rc=139 ✗** | **rc=2 ✓** |
+  | 未知类型 | **rc=139 ✗** | **rc=2 ✓** |
+
+  也就是说 **qlmc 自己的后端在这条路上是对的**，退化的只有 stage-0 的产物。
+- 触发条件（在 stage-0 的 lowering 里）：`eprint(<含 sret 聚合调用的多段拼接>)`。
+  把表达式提到变量、换成 `print`、或去掉 `eprint` 的换行写入，都能让 stage-1 不崩
+  —— 但都是**布局运气**（改一处无关代码就复发），所以 qlmc 侧一个 workaround 都没留。
+- 已排除：`assert` 失败走 `__die` 正常；`exit(2)` 从 main / 嵌套函数 / 带 struct
+  形参的函数里都正常；`eprint(单段拼接)` 正常。
+- **归属**：stage-0 那条线（`tools/stage0/`）。建议从"`eprint` 的实参里含 sret 调用时
+  的寄存器分配"入手，对照 `print` 版与 `eprint` 版的产物。
+- **影响面已收窄**：只有"用 stage-1 编一个解析错误的源文件"这一种情况。日常用 stage-2
+  就没有这个问题；`tests/bootstrap_test.py` 的第 2.5 级把 stage-2 的行为钉住了。
 
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
