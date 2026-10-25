@@ -4832,6 +4832,13 @@ fn _gen_spawn(ctx: Ctx) {
     let ltop = _newlab(labs)
     let ldone = _newlab(labs)
     _b(code, 0x55)                             // push rbp
+    // **必须保存 rbx / r12**：线程回调也是一个"函数"，BaseThreadInitThunk
+    // 会依赖非易失寄存器。v2.36 实测：这里直接用 rbx 存块指针、r12 存栈大小
+    // 而不保存，线程返回后崩在 thunk 的清理里（fault_probe 报「读 0xFFFF…FFFF」、
+    // RIP 在 DLL、R12=-1）—— 只在"编 qlmc 自己"这种重活上暴露，编小文件看不出来。
+    _b(code, 0x53)                             // push rbx
+    _b(code, 0x41)                             // push r12
+    _b(code, 0x54)
     _b(code, 0x48)                             // mov rbp, rsp
     _b(code, 0x89)
     _b(code, 0xE5)
@@ -4931,6 +4938,9 @@ fn _gen_spawn(ctx: Ctx) {
     _b(code, 0x48)                             // mov rsp, rbp
     _b(code, 0x89)
     _b(code, 0xEC)
+    _b(code, 0x41)                             // pop r12
+    _b(code, 0x5C)
+    _b(code, 0x5B)                             // pop rbx
     _b(code, 0x5D)                             // pop rbp
     _b(code, 0x31)                             // xor eax, eax（ThreadProc 返回 0）
     _b(code, 0xC0)

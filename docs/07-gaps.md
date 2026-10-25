@@ -664,6 +664,34 @@ print(1 < 2)          // stage-0: 1       qlmc: 1     ← 这个两边一样
 - 影响面：只影响"用 stage-2 以多线程编自己"这一种用法；`tests/qlmc_test.py` 里
   `-j1 == -jN` 的产物一致性对夹具仍然成立。
 
+### 7.25 待查：qlmc 报语法错误后崩在 exit（rc=139 而非 2）——**既有缺陷，v2.36 确认**
+
+```bash
+$ printf 'fn main() {\n    let x = \n}\n' > bad.qma
+$ ./qlmc.exe build bad.qma -o bad.exe
+qlmc: line 3: 期望表达式
+Segmentation fault          # 期望 rc=2
+```
+
+- **不是 v2.36 引入的**：`git show HEAD:bootstrap/qlmc/qlmc.qma` 编出来的 qlmc 同样崩。
+- 消息**打印成功**（stderr，含换行），崩在随后的 `exit(2)` / 进程退出路径上。
+- `fault_probe`：读 `0xFFFF…FFFF`、RIP 固定在一个 DLL 地址、`Rax=Rcx=4`、`R12=-1`、
+  返回地址不在我们的 `.text` 内。
+- **强烈的布局敏感性**（同一份源码、只改一处无关代码，行为就变）：
+  | 变体 | 结果 |
+  |---|---|
+  | 原样 `eprint("…" + _cur(p,pos).line.to_str() + "…")` | rc=139 |
+  | 消息先落变量 `let m = …; eprint(m)` | 有时 rc=2、有时 139 |
+  | 把 `eprint` 换成 `print`（stdout） | rc=2 |
+  | `__eprint_str` 去掉第二次写换行 | 有时 rc=2、有时 139 |
+- 已排除：`assert` 失败走 `__die`（也写 stderr）**正常**；`exit(2)` 从 main /
+  嵌套函数 / 带 struct 形参的函数里都正常；`eprint(单段拼接)` 正常。
+- 触发条件缩小到：**`eprint(<含 sret 聚合调用的多段拼接>)`**。
+- 下一步建议：用 `dumpasm` 逐条对照 `_fail` 的产物（对比 `print` 版与 `eprint` 版），
+  重点看 `OP_ARG`（写 RCX）与 sret 调用（也用 RCX 传隐藏指针）之间的寄存器分配；
+  怀疑是"同一表达式里 sret 隐藏指针与实参摆放抢 RCX"。
+- **影响**：所有语法/解析错误的报告路径。用户看到的是 segfault 而不是错误消息之后的正常退出。
+
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
 当前顺序：
