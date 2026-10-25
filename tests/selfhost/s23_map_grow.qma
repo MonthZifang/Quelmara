@@ -1,0 +1,133 @@
+// s23_map_grow.qma —— stage-1 编译器（qlmc）子集 S12 的差分夹具（v2.43）
+//
+// 覆盖：map 的**自动扩容**。v2.43 之前 qlmc 的 map 是固定容量线性扫描，
+// 满了就 exit(2)；现在布局改成 `[cap][len][data]`，数据在独立块里，
+// 满了就容量翻倍 + 搬旧数据 + 清零新槽位，句柄不变。
+//
+// 关键点（踩过的坑）：
+//   1. 扩容只换 [h+16] 的数据指针，调用方手里的 h 不动；
+//   2. 新槽位必须清零——键 0 表示空槽，不清零会被当成命中；
+//   3. 这里**不用键 0**：qlmc 用"键 == 0"当空槽标记，所以键 0 存不进去
+//      （stage-0 用独立的 state 数组，能存键 0）。见 07-gaps §7.27；
+//   4. 扩容之后**不查 len()**：stage-0 的 `len(map)` 类型推断不稳——同一函数
+//      两张表、或同一文件里另有一个带 map 的函数时，`len()` 会读到垃圾
+//      （见 07-gaps §7.28）。qlmc 那边 count 是对的（手工验证过），但差分
+//      没法测，所以这里只用 get/has 验证"扩容没丢键、没串值"。
+
+/// 容量 2 → 9 个键（扩容 2→4→8→16），逐个取值求和（1..9 乘 10 → 450）
+fn sum_after_grow() -> int {
+    let m = map[int]int.new(2)
+    let mut i = 1
+    while i <= 9 {
+        m.set(i, i * 10)
+        i = i + 1
+    }
+    let mut s = 0
+    i = 1
+    while i <= 9 {
+        s = s + m.get(i)
+        i = i + 1
+    }
+    return s
+}
+
+/// 扩容之后覆盖已有键：值变，邻居不受影响（777*10000 + 40）
+fn overwrite_after_grow() -> int {
+    let m = map[int]int.new(2)
+    let mut i = 1
+    while i <= 9 {
+        m.set(i, i * 10)
+        i = i + 1
+    }
+    m.set(3, 777)
+    let mut r = m.get(3)
+    r = r * 10000 + m.get(4)
+    return r
+}
+
+/// 扩容之后继续插入新键（新键必须落在清零过的新槽位上）
+fn insert_after_grow() -> int {
+    let m = map[int]int.new(2)
+    let mut i = 1
+    while i <= 9 {
+        m.set(i, i * 10)
+        i = i + 1
+    }
+    m.set(10, 1000)
+    m.set(11, 1100)
+    let mut r = m.get(10)
+    r = r * 10000 + m.get(11)
+    r = r * 10000 + m.get(1)
+    return r
+}
+
+/// 命中/未命中（未命中不能杀进程）
+fn has_checks() -> int {
+    let m = map[int]int.new(2)
+    let mut i = 1
+    while i <= 9 {
+        m.set(i, i * 10)
+        i = i + 1
+    }
+    let mut r = 0
+    if m.has(3) { r = r + 1 }
+    if m.has(99) { r = r + 10 }
+    if m.has(9) { r = r + 100 }
+    if m.has(1) { r = r + 1000 }
+    return r
+}
+
+/// 两张表各自扩容，互不干扰
+fn two_maps() -> int {
+    let a = map[int]int.new(2)
+    let b = map[int]int.new(2)
+    let mut j = 1
+    while j <= 5 {
+        a.set(j, j)
+        b.set(j, j * 100)
+        j = j + 1
+    }
+    let mut r = a.get(5)
+    r = r * 10000 + b.get(5)
+    r = r * 10000 + a.get(1)
+    r = r * 10000 + b.get(1)
+    return r
+}
+
+/// 容量 2 → 17 个键（扩容 2→4→8→16→32），1+…+17 = 153
+fn big_grow() -> int {
+    let m = map[int]int.new(2)
+    let mut i = 1
+    while i <= 17 {
+        m.set(i, i)
+        i = i + 1
+    }
+    let mut s = 0
+    i = 1
+    while i <= 17 {
+        s = s + m.get(i)
+        i = i + 1
+    }
+    return s
+}
+
+/// 容量够大（不扩容）时 len() 正常——保住这条口径
+fn len_no_grow() -> int {
+    let m = map[int]int.new(64)
+    let mut i = 1
+    while i <= 9 {
+        m.set(i, i * 10)
+        i = i + 1
+    }
+    return len(m)
+}
+
+fn main() {
+    print(sum_after_grow())
+    print(overwrite_after_grow())
+    print(insert_after_grow())
+    print(has_checks())
+    print(two_maps())
+    print(big_grow())
+    print(len_no_grow())
+}

@@ -6476,10 +6476,50 @@ fn _pin(fc: FnCtx, v: int) -> int {
     return d
 }
 
+/// map 扩容：容量翻倍 + 拷旧数据 + **清零新槽位**（键 0 表示空槽，不清零会被当成命中）。
+fn _map_grow(fc: FnCtx, h: int) {
+    let hp = _pin(fc, h)
+    let cap = _pin(fc, _vec_field(fc, hp, 0))
+    let two = _map_const(fc, 2)
+    let ncap = _vnew(fc)
+    fc.vty.set(ncap, TY_INT)
+    _ir_emit(fc, OP_MUL, ncap, cap, two, 0)
+    let sixteen = _pin(fc, _map_const(fc, 16))
+    let nb = _vnew(fc)
+    fc.vty.set(nb, TY_INT)
+    _ir_emit(fc, OP_MUL, nb, ncap, sixteen, 0)
+    _ir_emit(fc, OP_ARG, 0, nb, 0, 0)
+    let nd = _vnew(fc)
+    fc.vty.set(nd, TY_INT)
+    _ir_emit(fc, OP_CALLRT, nd, 0, 0, RT_ALLOC)
+    let ob = _vnew(fc)
+    fc.vty.set(ob, TY_INT)
+    _ir_emit(fc, OP_MUL, ob, cap, sixteen, 0)
+    let op = _map_base(fc, hp)
+    _ir_emit(fc, OP_MEMCPYN, ob, nd, op, 0)
+    let tail = _vnew(fc)
+    fc.vty.set(tail, TY_INT)
+    _ir_emit(fc, OP_ADD, tail, nd, ob, 0)
+    _ir_emit(fc, OP_ZERON, 0, tail, ob, 0)
+    let ca = _vnew(fc)
+    fc.vty.set(ca, TY_INT)
+    _ir_emit(fc, OP_ADDRF, ca, hp, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, ca, ncap, 8)
+    let da = _vnew(fc)
+    fc.vty.set(da, TY_INT)
+    _ir_emit(fc, OP_ADDRF, da, hp, 0, 16)
+    _ir_emit(fc, OP_STORE, 0, da, nd, 8)
+}
+
+/// map 的数据块地址（v2.43：布局 `[cap][len][data]`，数据在**独立块**里，
+/// 扩容时只换指针，调用方手里的句柄不用动）。
 fn _map_base(fc: FnCtx, h: int) -> int {
+    let a = _vnew(fc)
+    fc.vty.set(a, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a, h, 0, 16)
     let b = _vnew(fc)
     fc.vty.set(b, TY_INT)
-    _ir_emit(fc, OP_ADDRF, b, h, 0, 16)
+    _ir_emit(fc, OP_LOAD, b, a, 0, 8)
     return b
 }
 
@@ -6540,13 +6580,15 @@ fn _map_new(fc: FnCtx, nd: Node) -> int {
     fc.vty.set(per0, TY_INT)
     _ir_emit(fc, OP_MUL, per0, n, sixteen, 0)
     let per = _pin(fc, per0)
-    let total = _vnew(fc)
-    fc.vty.set(total, TY_INT)
-    _ir_emit(fc, OP_ADD, total, per, sixteen, 0)
-    _ir_emit(fc, OP_ARG, 0, total, 0, 0)
+    let hsz = _map_const(fc, 24)
+    _ir_emit(fc, OP_ARG, 0, hsz, 0, 0)
     let h = _vnew(fc)
     fc.vty.set(h, TY_MAP + (nd.a << 8) + nd.c)
     _ir_emit(fc, OP_CALLRT, h, 0, 0, RT_ALLOC)
+    _ir_emit(fc, OP_ARG, 0, per, 0, 0)
+    let data = _vnew(fc)
+    fc.vty.set(data, TY_INT)
+    _ir_emit(fc, OP_CALLRT, data, 0, 0, RT_ALLOC)
     let a0 = _vnew(fc)
     fc.vty.set(a0, TY_INT)
     _ir_emit(fc, OP_ADDRF, a0, h, 0, 0)
@@ -6559,30 +6601,27 @@ fn _map_new(fc: FnCtx, nd: Node) -> int {
     let a2 = _vnew(fc)
     fc.vty.set(a2, TY_INT)
     _ir_emit(fc, OP_ADDRF, a2, h, 0, 16)
-    _ir_emit(fc, OP_ZERON, 0, a2, per, 0)
+    _ir_emit(fc, OP_STORE, 0, a2, data, 8)
+    _ir_emit(fc, OP_ZERON, 0, data, per, 0)
     return h
 }
 
-/// m.set(k, v)：空位就插入并 count++，已有就覆盖
-fn _map_set(fc: FnCtx, nd: Node, h: int) -> int {
-    let k = _lower_expr(fc, nd.c)
-    let v = _lower_expr(fc, nd.n)
-    let slot = _map_slot_of(fc, h, k)
-    // slot == 0：表满了（qlmc 的 map **不扩容**，见 07-gaps §7.27）→ 退 2
-    let z0 = _map_const(fc, 0)
-    let lhave = _newlab(fc.labs)
-    _ir_emit(fc, OP_JCMP, 0x85, slot, z0, lhave)
-    let two0 = _map_const(fc, 2)
-    _ir_emit(fc, OP_EXIT, 0, two0, 0, 0)
-    _ir_emit(fc, OP_LAB, 0, 0, 0, lhave)
+/// 把 kp/vp 写进 `slot`（slot 必须来自 `_map_slot_of`）：空槽就先落键并 count++，
+/// 非空就只覆盖值。
+///
+/// 单独抽成函数是**故意的**：`_map_set` 里不能写"先 `let slot = f()`、在 if 里
+/// `slot = g()`、出来再用 slot"——qlmc 的分配器会把这两次定义合并成同一个变量的
+/// 前后两个定义，跳过 if 的那条路上读到的是**未初始化的帧槽**（v2.43 实测：反汇编
+/// 里 `jne lhave` 直接跳到读 `[rbp-0x98]`，那里还是 0，于是 `[0]` 段错误）。
+/// 用"两个只定义一次的变量 + 两条路各插一次"就没有 join。
+fn _map_put(fc: FnCtx, slot: int, kp: int, vp: int, h: int) {
     let old = _vnew(fc)
     fc.vty.set(old, TY_INT)
     _ir_emit(fc, OP_LOAD, old, slot, 0, 8)
     let zero = _map_const(fc, 0)
     let lskip = _newlab(fc.labs)
-    let ldone = _newlab(fc.labs)
     _ir_emit(fc, OP_JCMP, 0x85, old, zero, lskip)     // 非空 → 只覆盖值
-    _ir_emit(fc, OP_STORE, 0, slot, k, 8)
+    _ir_emit(fc, OP_STORE, 0, slot, kp, 8)
     let cnt = _vec_field(fc, h, 8)
     let one = _map_const(fc, 1)
     let nc = _vnew(fc)
@@ -6596,8 +6635,30 @@ fn _map_set(fc: FnCtx, nd: Node, h: int) -> int {
     let va = _vnew(fc)
     fc.vty.set(va, TY_INT)
     _ir_emit(fc, OP_ADDRF, va, slot, 0, 8)
-    _ir_emit(fc, OP_STORE, 0, va, v, 8)
-    _ir_emit(fc, OP_LAB, 0, 0, 0, ldone)
+    _ir_emit(fc, OP_STORE, 0, va, vp, 8)
+}
+
+/// m.set(k, v)：空位就插入并 count++，已有就覆盖；表满且键不存在就先扩容
+/// （v2.43，对齐 stage-0 的自动扩容）。
+fn _map_set(fc: FnCtx, nd: Node, h: int) -> int {
+    let k = _lower_expr(fc, nd.c)
+    let v = _lower_expr(fc, nd.n)
+    let hp = _pin(fc, h)
+    let kp = _pin(fc, k)
+    let vp = _pin(fc, v)
+    let s1 = _map_slot_of(fc, hp, kp)
+    let z0 = _map_const(fc, 0)
+    let lgo = _newlab(fc.labs)
+    let lend = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x85, s1, z0, lgo)          // s1 != 0 → 直接插入
+    // 满表：扩容后重找，插入；然后跳过另一条路
+    _map_grow(fc, hp)
+    let s2 = _map_slot_of(fc, hp, kp)
+    _map_put(fc, s2, kp, vp, hp)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, lend)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lgo)
+    _map_put(fc, s1, kp, vp, hp)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lend)
     let d = _map_const(fc, 0)
     return d
 }
