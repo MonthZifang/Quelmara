@@ -2317,6 +2317,11 @@ const OP_FTOI = 69     // dst = (int)[a]          a 是 f64 槽地址，向零�
 // **除数限制 2..2^31-1**（再大 `2^s*r64` 会溢出 int64，那种情况退回 idiv）。
 // 算法：无符号魔数 + 显式符号分离（见 _gen_divc 的注释，可证明正确）。
 const OP_DIVC = 70     // dst = a <div|mod> imm
+// v2.49：字符串下标 `s[p]` 的地址计算（`OP_ADD str,int`）与字节访存融合。
+// SIB 的 scale 用 0（×1）。以前是 `mov r9,str; add r9,p; mov rax,r9; movzx r10,[rax]`
+// 四条，现在一条 `movzx r10, [str + p]`。
+const OP_LOAD8I = 71   // dst = 零扩展 [a + b]
+const OP_STORE8I = 72  // [a + b] = dst 的低字节
 
 struct Ir {
     op: int
@@ -4125,6 +4130,39 @@ fn _lower_into(fc: FnCtx, nid: int, dst: int) {
 fn _lower_cond(fc: FnCtx, nid: int, lab: int, if_false: int) {
     let nd = fc.nodes.get(nid)
     if nd.op == E_BIN {
+        // v2.49：短路 `&&` / `||` **直接发跳转**，不要先算成 0/1 再 JZ/JNZ。
+        //
+        // 以前条件落到 `_lower_expr`，每个比较都要
+        // `sete al; movzx rax,al; mov r9,rax; mov rax,r9; cmp rax,0; setne al; movzx rax,al`
+        // —— **六条"规范化"**。实测 `jws` 里
+        // `if c == 32 || c == 9 || c == 10 || c == 13 { p = p + 1 }`
+        // 编成了 **93 条指令**（一个字节的空白判断！），这是 b9_json 6.6 倍的主因。
+        // 短路顺序与求值序和 `_lower_expr` 那版完全一致（左先右后），只是不再
+        // 把布尔值物化出来。
+        if nd.a == P_AND {
+            if if_false == 1 {
+                _lower_cond(fc, nd.b, lab, 1)
+                _lower_cond(fc, nd.c, lab, 1)
+            } else {
+                let lend = _newlab(fc.labs)
+                _lower_cond(fc, nd.b, lend, 1)
+                _lower_cond(fc, nd.c, lab, 0)
+                _ir_emit(fc, OP_LAB, 0, 0, 0, lend)
+            }
+            return
+        }
+        if nd.a == P_OR {
+            if if_false == 0 {
+                _lower_cond(fc, nd.b, lab, 0)
+                _lower_cond(fc, nd.c, lab, 0)
+            } else {
+                let lend = _newlab(fc.labs)
+                _lower_cond(fc, nd.b, lend, 0)
+                _lower_cond(fc, nd.c, lab, 1)
+                _ir_emit(fc, OP_LAB, 0, 0, 0, lend)
+            }
+            return
+        }
         let cc0 = _cmp_cc(nd.a)
         // f64 比较**不能**走 JCMP：那比的是两个槽的地址。走 ucomisd（OP_FCMP）
         // 再按结果 JZ/JNZ。求值序仍是"先右后左"（与差分口径一致）。
@@ -4636,7 +4674,7 @@ fn _opt_writes(op: int) -> int {
     if op == OP_JZ || op == OP_JNZ || op == OP_NOP { return 0 }
     // STORE* 系列不写寄存器，dst 槽里放的是"要存的值"
     if op == OP_STORED || op == OP_STOREX { return 0 }
-    if op == OP_STORE8D || op == OP_STORE8X { return 0 }
+    if op == OP_STORE8D || op == OP_STORE8X || op == OP_STORE8I { return 0 }
     if op == OP_FBIN || op == OP_ITOF { return 0 }   // dst 槽是"要写入的地址"，被读
     return 1
 }
@@ -4697,7 +4735,7 @@ fn _opt_mark(ins: Ir, use: vec[int]) {
     }
     // STORE* 系列把"值"放在 dst 槽 —— 那是被读的
     if ins.op == OP_STORED || ins.op == OP_STOREX ||
-       ins.op == OP_STORE8D || ins.op == OP_STORE8X ||
+       ins.op == OP_STORE8D || ins.op == OP_STORE8X || ins.op == OP_STORE8I ||
        ins.op == OP_FBIN || ins.op == OP_ITOF {
         if ins.dst > 0 && ins.dst < len(use) {
             use.set(ins.dst, use.get(ins.dst) + 1)
@@ -4813,6 +4851,12 @@ fn _opt_strength(fc: FnCtx, ir: vec[Ir], i: int, op: int, ins: Ir,
 
 /// 地址计算 + 访存能不能融合？返回融合后的操作码，0 = 不能。
 fn _fuse_op(addr_op: int, mem_op: int, imm: int) -> int {
+    // `OP_ADD str, int` + 字节访存 → 带 SIB 的 [a + b*1]（字符串下标）
+    if addr_op == OP_ADD {
+        if mem_op == OP_LOAD8 { return OP_LOAD8I }
+        if mem_op == OP_STORE8 { return OP_STORE8I }
+        return 0
+    }
     if addr_op == OP_ADDRF {
         if mem_op == OP_LOAD { return OP_LOADD }
         if mem_op == OP_STORE { return OP_STORED }
@@ -4842,7 +4886,11 @@ fn _opt_fuse(fc: FnCtx, ir: vec[Ir], use: vec[int], ndef: vec[int]) {
     let mut i = 0
     while i < n {
         let ins = ir.get(i)
-        let isaddr = ins.op == OP_ADDRF || ins.op == OP_ADDRX || ins.op == OP_ADDRXN
+        let mut isaddr = ins.op == OP_ADDRF || ins.op == OP_ADDRX || ins.op == OP_ADDRXN
+        // `OP_ADD` 只在**整数**相加时才当地址用（str 拼接也是 OP_ADD）
+        if ins.op == OP_ADD && ins.dst > 0 && fc.vty.get(ins.dst) == TY_INT {
+            isaddr = 1
+        }
         if isaddr {
             let t = ins.dst
             if t > 0 && t < len(use) && fc.vpin.get(t) == 0 &&
@@ -4884,6 +4932,10 @@ fn _opt_fuse(fc: FnCtx, ir: vec[Ir], use: vec[int], ndef: vec[int]) {
                             ir.set(hit, Ir { op: OP_STORE8D, dst: u.b, a: ins.a, b: 0, imm: ins.imm })
                         } else if fop == OP_STORE8X {
                             ir.set(hit, Ir { op: OP_STORE8X, dst: u.b, a: ins.a, b: ins.b, imm: 0 })
+                        } else if fop == OP_LOAD8I {
+                            ir.set(hit, Ir { op: OP_LOAD8I, dst: u.dst, a: ins.a, b: ins.b, imm: 0 })
+                        } else if fop == OP_STORE8I {
+                            ir.set(hit, Ir { op: OP_STORE8I, dst: u.b, a: ins.a, b: ins.b, imm: 0 })
                         }
                         if fop > 0 {
                             ir.set(i, Ir { op: OP_NOP, dst: 0, a: 0, b: 0, imm: 0 })
@@ -5383,6 +5435,48 @@ fn _emit_ir(fc: FnCtx, i: int) {
         if dloc <= 0 {
             _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
         }
+        return
+    }
+    if op == OP_LOAD8I {
+        // dst = 零扩展 [a + b]（SIB scale=0 即 ×1）
+        let dloc = fc.vloc.get(ins.dst)
+        let mut d = RAX
+        if dloc > 0 {
+            d = dloc - 1
+        }
+        let aloc = fc.vloc.get(ins.a)
+        let mut base = RAX
+        if aloc > 0 {
+            base = aloc - 1
+        } else {
+            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
+        }
+        let idx = _idx_reg(fc, ins.b)
+        _rex_full(code, 1, d, idx, base)
+        _b(code, 0x0F)
+        _b(code, 0xB6)
+        _modrm_sibidx(code, 2, d, base, idx, 0)
+        _w32(code, 0)
+        if dloc <= 0 {
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
+        }
+        return
+    }
+    if op == OP_STORE8I {
+        // [a + b] = dst 的低字节
+        let idx = _idx_reg(fc, ins.b)
+        let aloc = fc.vloc.get(ins.a)
+        let mut base = RAX
+        if aloc > 0 {
+            base = aloc - 1
+        } else {
+            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
+        }
+        _to_reg(fc, RCX, ins.dst)
+        _rex_full(code, 0, RCX, idx, base)
+        _b(code, 0x88)
+        _modrm_sibidx(code, 2, RCX, base, idx, 0)
+        _w32(code, 0)
         return
     }
     if op == OP_STORED || op == OP_STOREX || op == OP_STORE8D || op == OP_STORE8X {
