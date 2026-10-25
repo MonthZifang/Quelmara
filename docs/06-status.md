@@ -956,7 +956,7 @@ p50 从 1,904 → 473 µs 是 **4.0×**，与 worker 数同阶——多核确实
 降到 4–13 ms；冷路径不变（委托 stage-0，2136 ms）。失效正确性实测：`exit(7)` 改成
 `exit(8)` 后 `qlm run` 的退出码从 7 变 8，产物被重新生成。
 
-### 3.25 stage-1 编译器 `qlmc`（v2.35：子集 S19，**自举不动点达成**）
+### 3.25 stage-1 编译器 `qlmc`（v2.38：子集 S20，**自举不动点达成 + f64 数值部分**）
 
 口径：本机 20 逻辑核（VBS 开着，噪声见 §3.26，只做纵向比较）；`qlmc` 的耗时是
 **它自己报的**（`now_ns()` 差，排除进程创建税），每个数字取 5 次的最小值。
@@ -983,18 +983,19 @@ p50 从 1,904 → 473 µs 是 **4.0×**，与 worker 数同阶——多核确实
 | `tests/selfhost/s18_vecagg.qma`（vec[Struct] + else if） | 2.3 KB | 9728 B | **7.4 ms** |
 | `tests/selfhost/s19_spawn.qma`（spawn/join，0/1/2/5/8 实参） | 1.5 KB | 6656 B | **6.2 ms** |
 | `tests/selfhost/s20_mem.qma`（内存/串/诊断内建） | 2.4 KB | 6656 B | **7.6 ms** |
-| **`bootstrap/qlmc/qlmc.qma`（自己编自己 → stage-2）** | 218 KB | **444 416 B** | **142–152 ms**（`-j4`） |
-| **stage-2 编自己 → stage-3（不动点）** | 218 KB | **444 416 B**（与 stage-2 逐字节相同） | **318 ms**（`-j1`） |
+| **`bootstrap/qlmc/qlmc.qma`（自己编自己 → stage-2）** | 231 KB | **467 968 B** | **150–160 ms**（`-j4`） |
+| **stage-2 编自己 → stage-3（不动点）** | 231 KB | **467 968 B**（与 stage-2 逐字节相同） | **333 ms**（`-j1`） |
+| `tests/selfhost/s21_f64.qma`（f64 数值） | 2.4 KB | 6656 B | **9.6 ms** |
 | `tests/selfhost/s3_manyfns.qma`（200 函数，`-j1`） | 96 KB | 44 544 B | **17.5–18.5 ms** |
 | └ 其中后端阶段 | — | — | **2.5–3.4 ms（-j1）/ 1.6–2.5 ms（-j4）** |
 
-`build/qlmc.exe` 自身 **1743 KB**（v2.34 1733 KB，+0.6%：arena 缩小 + 堆越界检查修正），
+`build/qlmc.exe` 自身 **1834 KB**（v2.37 1743 KB，+5.2%：f64 的 7 个运行库例程 + 词法/类型/降级），
 由 stage-0 编出来。
 
-**自举状态（v2.35）**：**不动点达成**。`qlmc`（stage-1）编自己 → stage-2（444 416 字节），
-stage-2 再编自己 → stage-3，**两者逐字节相同**（`-j1`，318 ms）。同时 stage-2 编
-`tests/selfhost/` 全部 22 组独立程序与 stage-1 逐字节相同。
-`python tests/bootstrap_test.py --strict` 三级全 PASS。
+**自举状态（v2.38）**：**不动点仍成立**。`qlmc` 编自己 → stage-2（467 968 字节），
+stage-2 再编自己 → stage-3，**两者逐字节相同**（`-j1`，333 ms）。stage-2 编
+`tests/selfhost/` 全部 23 组独立程序与 stage-1 逐字节相同。
+`python tests/bootstrap_test.py --strict` **五级全 PASS**。
 
 **仍缺**：`-jN` 编自己（`-j2`/`-j4` 仍段错误，夹具的 `-j4` 正常，见 07-gaps §7.24）。
 上一版把"崩点随源码改动而移动"误判成布局敏感，真因是**堆耗尽**（arena 一项占 16 MB，

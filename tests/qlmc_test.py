@@ -55,6 +55,7 @@ CASES = [
     ("s18_vecagg", "tests/selfhost/s18_vecagg.qma"),
     ("s19_spawn", "tests/selfhost/s19_spawn.qma"),
     ("s20_mem", "tests/selfhost/s20_mem.qma"),
+    ("s21_f64", "tests/selfhost/s21_f64.qma"),
 ]
 
 npass = 0

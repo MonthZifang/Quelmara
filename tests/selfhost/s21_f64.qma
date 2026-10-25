@@ -1,0 +1,63 @@
+// s21_f64.qma —— stage-1 编译器（qlmc）的 f64 差分夹具（v2.38）
+//
+// qlmc 的 f64 这一版只做"数值部分"：字面量 / + - * / / 比较 / to_float / to_int。
+// **print(f64) 还没做**（十进制格式化要移植 std/f64 的 f64_repr，那是另一件事），
+// 所以下面所有输出都先 to_int()，比较结果按 int 打印。
+//
+// 字面量的 IEEE 位由**运行时 strtod** 解析（qlmc 没有浮点运算能力），
+// 正确舍入与 stage-0 的 Python 解析一致，差分才对得上。
+struct V { x: f64, y: f64, tag: int }
+
+fn half(v: f64) -> f64 {
+    return v / 2.0
+}
+
+fn main() {
+    // ---- 字面量形态 ----
+    print(to_int(1.5))
+    print(to_int(2.25))
+    print(to_int(0.5))
+    print(to_int(100.0))
+    print(to_int(1e3))
+    print(to_int(2.5e2))
+    print(to_int(-1.5))
+    print(to_int(-0.5))
+
+    // ---- 四则 ----
+    let a = 1.5
+    let b = 2.25
+    print(to_int(a + b))
+    print(to_int(b - a))
+    print(to_int(a * 4.0))
+    print(to_int(b / 3.0))
+
+    // ---- 混合 int / f64（int 一侧自动提升）----
+    print(to_int(a + 10))
+    print(to_int(10 - a))
+    print(to_int(3 * a))
+
+    // ---- 比较（走 ucomisd，不是比地址）----
+    if a < b { print(1) } else { print(0) }
+    if a > b { print(1) } else { print(0) }
+    if a <= 1.5 { print(1) } else { print(0) }
+    if b >= 2.25 { print(1) } else { print(0) }
+    if a == 1.5 { print(1) } else { print(0) }
+    if a != b { print(1) } else { print(0) }
+    if a == b { print(1) } else { print(0) }
+
+    // ---- 转换 ----
+    print(to_int(to_float(7)))
+    print(to_int(to_float(-3)))
+    print(to_int(half(5.0)))
+
+    // ---- struct 里的 f64 字段 + 函数传参/返回 ----
+    let v = V { x: 1.5, y: 2.5, tag: 9 }
+    print(to_int(v.x + v.y))
+    print(v.tag)
+    print(to_int(half(v.y)))
+
+    // ---- 0 与负零 ----
+    print(to_int(0.0))
+    print(to_int(-0.0))
+    if 0.0 == -0.0 { print(1) } else { print(0) }
+}
