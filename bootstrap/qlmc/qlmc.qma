@@ -2798,6 +2798,20 @@ fn _emit_call_args(fc: FnCtx, vals: vec[int], argbase: int) -> int {
     // R8/R9 里（那正是临时值寄存器），而 OP_ARG 会写 R8/R9 —— 先摆寄存器
     // 就会把还没落栈的值冲掉。v2.33 实测：`ReadFile(h, buf, sz, got, 0)`
     // 的第 5 个实参被写成了 sz，于是 lpOverlapped = 226，进程直接崩。
+    // 寄存器实参里下标 2/3 的目标是 R8/R9，而临时值**正好住在 R8-R11**：
+    // 把实参 2 搬进 R8 会冲掉还没搬的实参 3（反之亦然）。所以先把这两个位置的
+    // 临时值钉进变量（变量在 RBX/R12-R15 或帧槽，不会被 OP_ARG 碰到）。
+    // 实测形态：`f(a, b, c, 4)` 的第 4 个实参传成了 c（v2.34，坑表 #33）。
+    // 下标 0/1 的目标是 RCX/RDX，临时值不会住那儿，不用管。
+    let mut pi = 2
+    while pi < 4 {
+        if pi < len(vals) {
+            if fc.vpin.get(vals.get(pi)) == 0 {
+                vals.set(pi, _pin(fc, vals.get(pi)))
+            }
+        }
+        pi = pi + 1
+    }
     let mut k = 0
     let mut ai = nreg
     while ai < len(vals) {
@@ -2896,6 +2910,11 @@ fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
         eprint("qlmc: 不支持的运算符 " + op.to_str())
         exit(2)
     }
+    // 比较结果按 **int** 收（保持 v2.33 之前的口径）。为什么不是 bool：
+    // stage-0 会把编译期可折叠的比较（`print(1 < 2)`）折成 int 打 1，而运行期的
+    // 比较（`print(i + 1 < n)`）打 true —— 它自己就不一致。qlmc 没有常量折叠，
+    // 只能对一头，选 int 这头（夹具 s1_basics 的 `print((1<2) && (3>2))` 依赖它）。
+    // 已知差异：运行期比较被直接 print 时 stage-0 打 true、qlmc 打 1（见 07-gaps §7.22）。
     _ir_emit(fc, OP_CMP, dst, l, r, cc + 0x10)
     return TY_INT
 }
@@ -3981,9 +4000,15 @@ fn _alloc(fc: FnCtx) {
         cp.push(c)
         if i < n {
             let ins = fc.ir.get(i)
+            // **凡是内部真的发 `call` 的指令都要算进来**（坑表 #20 的同类）。
+            // 漏一个的后果：跨它存活的临时值不会被溢出到帧槽，留在 R8-R11
+            // 里被 __memcpy/__memset 清掉。v2.34 实测：_bi_mem_str 的 dstp
+            // 跨 OP_MEMCPYN，于是 mem_str 返回的指针是垃圾 —— 而这个问题
+            // 只在"qlmc 编自己"（寄存器压力大）时才暴露。
             if ins.op == OP_CALL || ins.op == OP_CALLRT || ins.op == OP_CALLIAT ||
-               ins.op == OP_CALLR {
-                c = c + 1          // 三类调用都会清 caller-saved
+               ins.op == OP_CALLR || ins.op == OP_MEMCPYN || ins.op == OP_ZERON ||
+               ins.op == OP_COPY || ins.op == OP_RETAGG {
+                c = c + 1          // 都会清 caller-saved
             }
         }
         i = i + 1
@@ -4474,55 +4499,35 @@ fn _emit_ir(fc: FnCtx, i: int) {
         return
     }
     if op == OP_LOAD8 {
-        // dst = 零扩展的 [a] 低字节。寄存器基址一律用 mod=2+disp32：
-        // mod=0 且 base 是 RBP/R13 时是 RIP 相对，会读到错误地址。
+        // 与 OP_LOAD 同构：**先把地址搬进寄存器**，再解引用。
+        // 早期版本当地址在帧槽时直接发 `movzx d, byte [rbp+disp]` —— 那读的是
+        // 槽本身而不是槽里存的那个地址所指的字节（v2.34 踩：str 下标取到的是
+        // 栈地址的首字节，于是 `s[i] == 47` 恒为假，三连 && 的注释跳过失效，
+        // 整个词法器在 stage-2 里读不了文件）。
+        _to_reg(fc, RAX, ins.a)
         let dloc = fc.vloc.get(ins.dst)
         let mut d = RAX
         if dloc > 0 {
             d = dloc - 1
         }
-        let aloc = fc.vloc.get(ins.a)
-        if aloc > 0 {
-            _rex2(code, 1, d, aloc - 1)
-            _b(code, 0x0F)
-            _b(code, 0xB6)
-            _modrm_mem(code, 2, d, aloc - 1)
-            _w32(code, 0)
-        } else {
-            _rex2(code, 1, d, RBP)
-            _b(code, 0x0F)
-            _b(code, 0xB6)
-            _modrm_mem(code, 2, d, RBP)
-            _w32(code, _slot_disp(-aloc - 1))
-        }
+        _rex2(code, 1, d, RAX)
+        _b(code, 0x0F)
+        _b(code, 0xB6)
+        _modrm_mem(code, 2, d, RAX)
+        _w32(code, 0)
         if dloc <= 0 {
             _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
         }
         return
     }
     if op == OP_STORE8 {
-        // [a] = b 的低字节。8 位源寄存器编号 4..7 在无 REX 时是 ah/ch/dh/bh，
-        // 但这里的源只会是临时值（R8-R11）或 RAX/RBX 一类，不受影响。
-        let vloc = fc.vloc.get(ins.b)
-        let mut v = RAX
-        if vloc > 0 {
-            v = vloc - 1
-        } else {
-            _mov_load(code, RAX, RBP, _slot_disp(-vloc - 1))
-            v = RAX
-        }
-        let aloc = fc.vloc.get(ins.a)
-        if aloc > 0 {
-            _rex2(code, 0, v, aloc - 1)
-            _b(code, 0x88)
-            _modrm_mem(code, 2, v, aloc - 1)
-            _w32(code, 0)
-        } else {
-            _rex2(code, 0, v, RBP)
-            _b(code, 0x88)
-            _modrm_mem(code, 2, v, RBP)
-            _w32(code, _slot_disp(-aloc - 1))
-        }
+        // 同上：地址进 RAX、值进 RCX（CL 是最稳的 8 位寄存器，不受 ah/ch/dh/bh 影响）
+        _to_reg(fc, RAX, ins.a)
+        _to_reg(fc, RCX, ins.b)
+        _rex2(code, 0, RCX, RAX)
+        _b(code, 0x88)
+        _modrm_mem(code, 2, RCX, RAX)
+        _w32(code, 0)
         return
     }
     if op == OP_RTADDR {
@@ -5177,6 +5182,10 @@ const HDR_BASE = 64
 const FN_HDR = 7
 const MAX_THREADS = 8
 const ARENA_CAP = 16 * 1024 * 1024
+// 堆大小：**必须大于 ARENA_CAP（16 MB）**，否则 `mem_alloc(ARENA_CAP)` 会静默
+// 越过 .bss 末尾，之后所有分配都落在未映射页上（v2.34 实测：stage-2 崩在
+// 基址 +17.3 MB 处）。.bss 不占文件体积、按需提交，给足没有代价。
+const BSS_SIZE = 0x2000000       // 32 MB
 
 fn _compile_range(hdr: int, wid: int, nodes: vec[Node], names: vec[str],
                   strs: vec[str], fns: vec[Fn], rt: vec[int], stt: vec[int]) -> int {
@@ -6538,6 +6547,28 @@ fn _gen_alloc(ctx: Ctx) {
     let labs: vec[int] = ctx.labs
     ctx.rt_pos.set(RT_ALLOC, len(code))
     let lhave = _newlab(labs)
+    let llock = _newlab(labs)
+    // **自旋锁**（bss 偏移 8）：bump 游标是全局的，而函数体是**多线程并行编译**的，
+    // 每个线程开头都要 `_new_fc`（十几个 vec）。不加锁就是"读游标 → 加长度 → 写回"
+    // 的丢更新，两个线程拿到同一块内存。v2.34 实测：-j4 编自己时报
+    // `未定义变量 pos` / `不支持的表达式节点 60`（两种错随机出现 = 竞态指纹）。
+    // xchg 带内存操作数时隐含 lock，够用。
+    _setlab(labs, code, llock)
+    _b(code, 0x4C)                         // mov r8, 1
+    _b(code, 0xC7)
+    _b(code, 0xC0)
+    _w32(code, 1)
+    _b(code, 0x4C)                         // xchg [rip+bss+8], r8
+    _b(code, 0x87)
+    _b(code, 0x05)
+    let f0 = len(code)
+    _w32(code, 0)
+    _addfix(ctx.fixes, f0, 8, 4)
+    _b(code, 0x4D)                         // test r8, r8
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let pz = _jcc(code, 0x85)              // jnz .lock（没抢到就自旋）
+    _addfix(ctx.fixes, pz, llock, 1)
     _b(code, 0x48)                         // mov rax, [rip+HEAP]
     _b(code, 0x8B)
     _b(code, 0x05)
@@ -6565,12 +6596,49 @@ fn _gen_alloc(ctx: Ctx) {
     _b(code, 0x83)
     _b(code, 0xE0)
     _b(code, 0xF8)
+    // 越界 fail-fast：新游标 > 堆起点 + 上限就退 3，绝不静默写到未映射页。
+    // **只能用 rcx 当临时**：原来的 __alloc 只破坏 rax/r8/rcx，而手写的运行库
+    // 例程（__str_cat 等）都是按这个假设写的 —— 早先用 r9/r10 直接把它们搞崩了。
+    // rcx 是入参（字节数），算完 r8 就没用了，正好拿来当草稿。
+    let lok = _newlab(labs)
+    _b(code, 0x48)                         // lea rcx, [rip+bss+16]（堆起点）
+    _b(code, 0x8D)
+    _b(code, 0x0D)
+    let f4 = len(code)
+    _w32(code, 0)
+    _addfix(ctx.fixes, f4, 16, 4)
+    _b(code, 0x48)                         // add rcx, HEAP_LIMIT（imm32 够用：32 MB）
+    _b(code, 0x81)
+    _b(code, 0xC1)
+    _w32(code, BSS_SIZE - 64)
+    _b(code, 0x49)                         // cmp r8, rcx
+    _b(code, 0x39)
+    _b(code, 0xC8)
+    let p9 = _jcc(code, 0x86)              // jbe .ok
+    _addfix(ctx.fixes, p9, lok, 1)
+    _b(code, 0xB9)                         // mov ecx, 3
+    _w32(code, 3)
+    let c9 = _call_rip(code)               // ExitProcess(3)
+    _addfix(ctx.fixes, c9, I_EXIT, 3)
+    _setlab(labs, code, lok)
     _b(code, 0x4C)                         // mov [rip+HEAP], r8
     _b(code, 0x89)
     _b(code, 0x05)
     let f3 = len(code)
     _w32(code, 0)
     _addfix(ctx.fixes, f3, 0, 4)
+    // 释放锁：**必须用 `mov ecx,0; mov [rip+disp], rcx`，不能用 `mov [rip+disp],imm32`**
+    // —— RIP 相对位移是相对**整条指令末尾**算的，而后者在 disp32 后面还跟 4 字节
+    // imm32，`_addfix` 按 `pos+4` 算就会偏 4 字节（v2.34 踩：释放写到 bss+12，
+    // 锁永不释放，第二次分配直接自旋死锁）。
+    _b(code, 0xB9)                         // mov ecx, 0
+    _w32(code, 0)
+    _b(code, 0x48)                         // mov [rip+bss+8], rcx
+    _b(code, 0x89)
+    _b(code, 0x0D)
+    let f5 = len(code)
+    _w32(code, 0)
+    _addfix(ctx.fixes, f5, 8, 4)
     _ret(code)
 }
 
@@ -6919,7 +6987,6 @@ fn resolve_fn(ctx: Ctx, arb: int, fi: int, base: int, rdata_rva: int,
 // PE32+ 写出（三节：.text / .rdata / .bss）
 // ---------------------------------------------------------------------------
 
-const BSS_SIZE = 0x100000        // 1 MB 堆（.bss：不占文件体积，加载器零填）
 
 fn build_pe(code: vec[int], rdata: vec[int], blob: vec[int]) -> int {
     let text_len = len(code)

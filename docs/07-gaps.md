@@ -69,7 +69,7 @@
 | 性能回归门禁 | ✅ v1.88 | **`tools/dev/bench_gate.py`**：`bench/gate_bench.qma`（**Quelmara 写**，输出 `QLMBENCH`/`QLMCAL`/`QLMDIGEST`）+ 校准归一化（换机器仍可比）+ 噪声闸 + 双模式（本机基线 `--check` / CI 同机交错 A/B `--ab REV`）+ 校验和与体积硬判；CI 独立 `perf` job。边界：基线按 CPU 型号分 key（换机器 SKIP，不误判）；不做统计显著性检验（min-of-N + 离散度）；不是微架构计数器（无 cycles / 分支失败率）；`quelmara bench` 的进程墙钟口径保留，两者分工见 `05-toolchain.md` §1.3 |
 | 覆盖率 / fuzz | ✅ v1.83 | **行 + 分支覆盖**：`quelmara cov` = 调试器逐行/逐 `jcc` 断点采集 + `tools/qlm_cov.qma`（**用 Quelmara 写**，自己读 PE 节表 + `.qlmdbg` JSON）汇总；行/分支/函数/文件四级，`--min`/`--min-branch` 双门禁，`--append` 多次运行累加。分支判定用 EFLAGS 不单步；只收"目标为语句入口"的源码级分支（`assert` 失败块/越界 panic 块/`args()` 展开不计入）。**fuzz ✅**：`quelmara fuzz` = `tools/qlm_fuzz.qma`（Quelmara 写的变异器，确定性 LCG）+ `qlm_fuzz.py` 判定（built/rejected/deep/bug/slow 五分类，`bug` 退出码 1）。边界：不采条件级 MC/DC（`&&` 子条件按各自 `jcc` 自然计数）；采集靠断点，大文件线性慢；fuzz 默认只跑前端；非 UTF-8 源文件抛 `UnicodeDecodeError`（§7.11） |
 | 服务端运行时自举 | ✅ v2.12 | **IOCP reactor 从 stage-0 搬到 `std/net/reactor.qma`**（Quelmara 源码）：v1.4 起手搓的 400 行 IR（`__net_serve` / `__net_worker` / rec 池 / accept 循环）全部删除，stage-0 只留 `thread_start`（Win64 线程入口 ABI）与 `net_config`（编译期读 `[net]`）。worker 数 = `[net] io_threads`（默认物理核数），完成端口共用一个（per-reactor 实测更差，见 `06-status.md` §3.23）。分层：`std/net/reactor.qma` 仅 Windows PE（`@ffi`）/ `std/net.qma` 不含 `@ffi`（但 `tcp_*` 内建目前也只在 Windows 实现）/ `std/net/core.qma` 槽位层。边界：**仍只有 Windows**（Linux epoll/io_uring reactor 未做）；accept 在**主线程单点**（未做多 acceptor + `SO_REUSEPORT`，`[net] reuse_port` 目前是声明未用）；`max_conns` 用 `atomic_add` 计数、拒绝发生在 accept 之后（连接已被内核接受一次）。回归：主回归 + `tests/http_router_test.py`（20 项 E2E） | 服务端链路（http/ws/sse/router/reactor）100% 本语言实现；改事件循环不用再碰编译器 |
-| stage-1 编译器 | 🚧 v2.33（**已能编出自己**，产物待修） | **`bootstrap/qlmc/qlmc.qma`**（约 5.7 千行 Quelmara）：`.qma` -> PE32+ **全链路**，后端为三地址 IR + 两段式寄存器分配 + `cmp/jcc` 融合 + **按函数多核并行**（`-j N`，产物与线程数无关）。**子集 S19**：int/bool/str、struct、定长数组 `[N]T`、enum/match、vec[T]（**容量可变，满了翻倍**）、map[K]V、切片 []T、defer、import、@ffi、**闭包（无捕获）**、聚合作形参/返回值、**形参与实参不限个数（第 5 个起走栈）**、`for`/`break`/`continue`、`while`、`let`/`mut`、`const`（**整型常量表达式，解析期求值**）、`print`、`len`、`assert`、递归、算术/比较/短路逻辑、**位运算与移位（`& | ^ ~ << >> >>>`）**、**进制字面量（`0x`/`0b`/`0o` + 下划线）**、**`vec[Struct]`（元素步长按 `_ty_size`）**、**`else if`**、**`spawn`/`join`（真线程）**、**内存原语与串/诊断内建**（`mem_alloc`/`mem_free`/`mem_load8`/`mem_store8`/`mem_load64`/`mem_store64`/`mem_copy`/`mem_zero`/`mem_cmp`/`mem_str`/`chr`/`substr`/`cstr`/`eprint`/`int.to_str`/`str.to_int`/`file_exists`/`now_ns`）、**`s[i]` 字符串下标**、**import 逐级向上查找**、str 拼接与内容比较。与 stage-0 **逐字节差分**通过（`tests/qlmc_test.py`：24 组用例 + 并行确定性 2 条）。**自举状态**：`qlmc` **已经能编译自己的源码并产出 417 KB 的 stage-2 exe**（v2.33），但 stage-2 的 `dump`/`build` 读到的源文件内容是垃圾——**待查**（同一个 `_read_text` 函数体单独交给 qlmc 编是对的，说明是「qlmc 编自己」才暴露的误编译）。**缺**：f64、泛型、宏/反射、接口、`rc`/`Drop`、闭包的**捕获**与作形参类型、`pub` 可见性与限定调用、ffi 的 f64/结构体/变参实参、嵌套聚合类型与字段（`vec[vec[T]]` 见 §7.18）、聚合作容器元素、map 扩容、match 穷尽性检查、常量折叠 / 强度削减 / CSE、前端并行。实测数字见 `06-status.md` §3.25 |
+| stage-1 编译器 | ✅ v2.34（**stage-2 与 stage-1 逐字节等价**；不动点待达成） | **`bootstrap/qlmc/qlmc.qma`**（约 5.7 千行 Quelmara）：`.qma` -> PE32+ **全链路**，后端为三地址 IR + 两段式寄存器分配 + `cmp/jcc` 融合 + **按函数多核并行**（`-j N`，产物与线程数无关）。**子集 S19**：int/bool/str、struct、定长数组 `[N]T`、enum/match、vec[T]（**容量可变，满了翻倍**）、map[K]V、切片 []T、defer、import、@ffi、**闭包（无捕获）**、聚合作形参/返回值、**形参与实参不限个数（第 5 个起走栈）**、`for`/`break`/`continue`、`while`、`let`/`mut`、`const`（**整型常量表达式，解析期求值**）、`print`、`len`、`assert`、递归、算术/比较/短路逻辑、**位运算与移位（`& | ^ ~ << >> >>>`）**、**进制字面量（`0x`/`0b`/`0o` + 下划线）**、**`vec[Struct]`（元素步长按 `_ty_size`）**、**`else if`**、**`spawn`/`join`（真线程）**、**内存原语与串/诊断内建**（`mem_alloc`/`mem_free`/`mem_load8`/`mem_store8`/`mem_load64`/`mem_store64`/`mem_copy`/`mem_zero`/`mem_cmp`/`mem_str`/`chr`/`substr`/`cstr`/`eprint`/`int.to_str`/`str.to_int`/`file_exists`/`now_ns`）、**`s[i]` 字符串下标**、**import 逐级向上查找**、str 拼接与内容比较。与 stage-0 **逐字节差分**通过（`tests/qlmc_test.py`：24 组用例 + 并行确定性 2 条）。**自举状态（v2.34）**：`qlmc` 编自己 → **stage-2**；stage-2 编 `tests/selfhost/` 全部 **22 组独立程序，产物与 stage-1 逐字节相同**（`tests/bootstrap_test.py` 的第 2 级）。**不动点还没达成**：stage-2 编 qlmc 自己时崩在代码生成（见 §7.23）。**缺**：f64、泛型、宏/反射、接口、`rc`/`Drop`、闭包的**捕获**与作形参类型、`pub` 可见性与限定调用、ffi 的 f64/结构体/变参实参、嵌套聚合类型与字段（`vec[vec[T]]` 见 §7.18）、聚合作容器元素、map 扩容、match 穷尽性检查、常量折叠 / 强度削减 / CSE、前端并行。实测数字见 `06-status.md` §3.25 |
 | 对拍脚本耗时 | ✅ | `irdiff` 并行后 60 s（原 5 min 41 s）；`emitdiff` 10 s 内 |
 | `version` 口径 | ✅ | `tools/stage0/qlm_cli.py` 的 `VERSION` 与最新 `docs/versions/vX.Y/` 一致（v1.24 起 1.24.0，由 `check_docs.py` 校验） |
 
@@ -623,6 +623,32 @@ fn main() {
   「循环 + 变量下标 + 变量值」。看起来像循环里那条路径的 scratch 寄存器被复用掉了。
 - 影响：任何「用循环按下标填缓冲区」的代码在 stage-0 下都会静默写出 0。**归 stage-0 那条线修**
   （本线只碰 qlmc）。差分夹具 `s20_mem.qma` 为此把循环里改成只存常量，并在注释里记了这条。
+
+### 7.22 已知差异：直接 print 一个**运行期**比较，stage-0 打 true、qlmc 打 1
+
+```quelmara
+let n = 3
+let i = 0
+print(i + 1 < n)      // stage-0: true    qlmc: 1
+print(1 < 2)          // stage-0: 1       qlmc: 1     ← 这个两边一样
+```
+
+原因：stage-0 会把**编译期可折叠**的比较折成 int（打 1），运行期的比较才是 bool
+（打 true）——它自己就不一致。qlmc 没有常量折叠，只能选一头，选了 int
+（`_emit_bin` 的 cmp 分支返回 `TY_INT`），因为夹具 `s1_basics` 的
+`print((1 < 2) && (3 > 2))` 依赖 int 口径。
+影响面很小（真实代码几乎不会直接 print 比较结果，都是放进条件），但**写夹具时要避开**。
+
+### 7.23 待查：stage-2 编 qlmc 自己时崩在代码生成（v2.34）
+
+- **能做**：stage-2 `dump bootstrap/qlmc/qlmc.qma` 完整解析成功
+  （49705 tokens / 28911 nodes / 260 fns / 989 names / 227 strs / 8 structs）。
+- **能做**：stage-2 编 `tests/selfhost/` 全部 22 组独立程序，产物与 stage-1 逐字节相同。
+- **崩**：stage-2 `build` qlmc 自己（`-j1` 也崩）——`fault_probe` 报「读 0xFFFFFFFFFFFFFFFF」，
+  RIP 落在 DLL 里，像是把 `-1` 当指针传给了 Win32 API。
+- 下一步方向：用 `dbg` 版（在 `_compile_range` 里打函数名）二分到具体函数；
+  怀疑仍是"寄存器压力大时才暴露"的分配类误编译（v2.34 已修的两个都是这一类）。
+- 达成后 `tests/bootstrap_test.py --strict` 应转绿（不动点：stage-2 == stage-3）。
 
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
