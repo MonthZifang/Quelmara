@@ -1,0 +1,46 @@
+// b7_sort —— 排序：20 万伪随机 int 快排（手写）
+fn qsort(a: vec[int], lo: int, hi: int) {
+    if lo >= hi { return }
+    let p = a.get(hi)
+    let mut i = lo
+    let mut j = lo
+    while j < hi {
+        if a.get(j) < p {
+            let t = a.get(i)
+            a.set(i, a.get(j))
+            a.set(j, t)
+            i = i + 1
+        }
+        j = j + 1
+    }
+    let t2 = a.get(i)
+    a.set(i, a.get(hi))
+    a.set(hi, t2)
+    qsort(a, lo, i - 1)
+    qsort(a, i + 1, hi)
+}
+fn main() {
+    let n = 200000
+    let v = vec[int].new(n)
+    let mut x = 12345
+    let mut i = 0
+    while i < n {
+        x = (x * 1103515245 + 12345) & 2147483647
+        v.push(x)
+        i = i + 1
+    }
+    let t0 = now_ns()
+    qsort(v, 0, n - 1)
+    let t1 = now_ns()
+    let mut s = 0
+    i = 0
+    while i < n {
+        s = s + v.get(i) % 1000
+        i = i + 1
+    }
+    print(v.get(0))
+    print(v.get(n - 1))
+    print(s)
+    print("T")
+    print(t1 - t0)
+}

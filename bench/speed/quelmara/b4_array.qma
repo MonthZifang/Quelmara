@@ -1,0 +1,28 @@
+// b4_array —— 数组：200 万元素写入 + 顺序 + 跨步遍历
+fn main() {
+    let n = 2000000
+    let v = vec[int].new(n)
+    let t0 = now_ns()
+    let mut i = 0
+    while i < n {
+        v.push(i * 3 + 1)
+        i = i + 1
+    }
+    let mut s = 0
+    i = 0
+    while i < n {
+        s = s + v.get(i)
+        i = i + 1
+    }
+    let mut t = 0
+    i = 0
+    while i < n {
+        t = t + v.get(i)
+        i = i + 7
+    }
+    let t1 = now_ns()
+    print(s)
+    print(t)
+    print("T")
+    print(t1 - t0)
+}

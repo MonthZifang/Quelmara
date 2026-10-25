@@ -1,0 +1,13 @@
+// b3_recursion —— 递归：朴素 fib(30)（约 270 万次调用）
+fn fib(n: int) -> int {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+fn main() {
+    let t0 = now_ns()
+    let r = fib(30)
+    let t1 = now_ns()
+    print(r)
+    print("T")
+    print(t1 - t0)
+}

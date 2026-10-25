@@ -1,0 +1,17 @@
+// b5_string —— 字符串：50 万次 int→str→int
+fn main() {
+    let n = 500000
+    let mut acc = 0
+    let mut i = 0
+    let t0 = now_ns()
+    while i < n {
+        let s = i.to_str()
+        acc = acc + len(s)
+        acc = acc + s.to_int()
+        i = i + 1
+    }
+    let t1 = now_ns()
+    print(acc)
+    print("T")
+    print(t1 - t0)
+}

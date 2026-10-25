@@ -1,0 +1,16 @@
+// b1_int —— 整数运算热循环：2000 万次 (i*7)%13
+// 末行打印 "T" + 负载耗时（纳秒），进程创建成本不计入。
+fn main() {
+    let n = 20000000
+    let mut acc = 0
+    let mut i = 0
+    let t0 = now_ns()
+    while i < n {
+        acc = acc + (i * 7) % 13
+        i = i + 1
+    }
+    let t1 = now_ns()
+    print(acc)
+    print("T")
+    print(t1 - t0)
+}

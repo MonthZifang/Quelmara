@@ -1,0 +1,18 @@
+// b8_threads1 —— 并发基线：单线程 4000 万次整数运算
+fn work(n: int) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + (i * 7) % 13
+        i = i + 1
+    }
+    return acc
+}
+fn main() {
+    let t0 = now_ns()
+    let r = work(40000000)
+    let t1 = now_ns()
+    print(r)
+    print("T")
+    print(t1 - t0)
+}

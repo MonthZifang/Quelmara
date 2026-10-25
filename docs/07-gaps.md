@@ -853,6 +853,38 @@ stage-0 拿不到返回值的类型，同样落到 `str_len`。qlmc 正确。
 **残留**：临时槽池仍是 128 个，所以深嵌套表达式到 **66 项**就 fail-fast
 （`qlmc: 活跃临时值超过 128 个`）。放开它得先给 qlmc 自己做栈探测，是独立一步。
 
+### 7.30 已修（v2.45）：`join()` 缺 Win64 影子空间 → 静默改掉调用方 `rbx`
+
+写并发基准时发现计时结果荒唐（`t1 - t0` 算出 6.4e13 ns ≈ 17 小时），顺着查下去：
+
+```quelmara
+fn main() {
+    let pad = 11
+    let t0 = now_ns()
+    let a = spawn work(1000)
+    print(pad)          // 11   ✓
+    let r = join(a)
+    print(pad)          // 5368721480  ✗ 变成一个代码地址
+}
+```
+
+**根因**：`__join` 的实现是 `push rbx` 之后**直接** `call WaitForSingleObject` /
+`CloseHandle`，没有留 Win64 要求的 32 字节影子空间。被调方的 home area 恰好是
+`[rsp, rsp+0x20)`（rsp = 被调方入口的 rsp）—— 正是 `push rbx` 保存调用方 rbx 的
+位置。Win32 一进来就把保存的 rbx 覆盖成自己的 spill，返回后 `pop rbx` 弹回垃圾。
+
+**影响面**：任何用 `spawn`/`join` 的程序，只要调用方有变量落在 rbx 上，`join` 之后
+那个变量就被静默改掉。既有夹具 `s19_spawn` 没抓到，是因为它 join 完之后不再用
+之前定义的变量 —— 这类"静默改值"比崩溃更难发现。
+
+**修法**：`sub rsp, 0x20` / `add rsp, 0x20` 包住两次 Win32 调用（0x20 是 16 的倍数，
+对齐不变）。坑表 #48。
+
+**顺带确认**：`__join` 是**唯一**一个漏影子空间的运行库例程 —— 其余
+（`__print_i64` / `__print_str` / `__die` / `__str_cat` / `__f64_fmt` / `__i64_fmt` /
+`__fparse` / `__eprint_str` / 入口）都有 `_sub_rsp(0x30~0x70)`。`__spawn_entry`
+在 ≤4 实参时不留影子空间，但它调的是 qlmc 自己的函数（不用 home area），所以没问题。
+
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
 当前顺序：

@@ -1,0 +1,22 @@
+// b8_threads4 —— 同样 4000 万次总量，拆成 4 个线程各 1000 万次
+fn work(n: int) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + (i * 7) % 13
+        i = i + 1
+    }
+    return acc
+}
+fn main() {
+    let t0 = now_ns()
+    let a = spawn work(10000000)
+    let b = spawn work(10000000)
+    let c = spawn work(10000000)
+    let d = spawn work(10000000)
+    let r = join(a) + join(b) + join(c) + join(d)
+    let t1 = now_ns()
+    print(r)
+    print("T")
+    print(t1 - t0)
+}

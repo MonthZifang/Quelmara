@@ -1,0 +1,15 @@
+// b2_float —— 浮点运算：调和级数前 500 万项
+fn main() {
+    let n = 5000000
+    let mut acc = 0.0
+    let mut i = 1
+    let t0 = now_ns()
+    while i <= n {
+        acc = acc + 1.0 / to_float(i)
+        i = i + 1
+    }
+    let t1 = now_ns()
+    print(acc)
+    print("T")
+    print(t1 - t0)
+}

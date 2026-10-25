@@ -5514,6 +5514,13 @@ fn _gen_join(ctx: Ctx) {
     let p0 = _jcc(code, 0x84)                  // jz .zero
     _addfix(ctx.fixes, p0, lzero, FK_LAB)
     _b(code, 0x53)                             // push rbx（入口 rsp≡8，压完 ≡0）
+    // **必须再留 32 字节影子空间**（v2.45 修）：Win64 的 home area 是
+    // `[rsp, rsp+0x20)`（rsp = 被调方入口的 rsp），而 `push rbx` 刚好把调用方的
+    // rbx 存在那个位置 —— WaitForSingleObject / CloseHandle 一进来就把保存的 rbx
+    // 覆盖成自己的 spill，返回后 `pop rbx` 弹回垃圾。现象：**join 之后调用方
+    // rbx 里的变量被静默改掉**（实测 `let pad = 11` 变成 0x140003048，
+    // 用它做计时起点会算出 6.4e13 ns）。sub/add 0x20 都是 16 的倍数，对齐不变。
+    _sub_rsp(code, 0x20)
     _b(code, 0x48)                             // mov rbx, rcx
     _b(code, 0x89)
     _b(code, 0xCB)
@@ -5538,6 +5545,7 @@ fn _gen_join(ctx: Ctx) {
     _b(code, 0x48)                             // mov rax, [rax]（返回值）
     _b(code, 0x8B)
     _b(code, 0x00)
+    _add_rsp(code, 0x20)                       // 还掉影子空间（见上面 push rbx 处）
     _b(code, 0x5B)                             // pop rbx
     _ret(code)
     _setlab(labs, code, lzero)

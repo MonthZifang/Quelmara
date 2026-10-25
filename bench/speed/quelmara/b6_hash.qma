@@ -1,0 +1,36 @@
+// b6_hash —— 哈希表：30 万插入 + 30 万查找（手写开放寻址，cap=2^20）
+// 不用内建 map：qlmc 的 map 是线性扫描，量它会变成量算法差异。
+fn main() {
+    let cap = 1048576
+    let mask = cap - 1
+    let n = 300000
+    let kt = mem_alloc(cap * 8)
+    let vt = mem_alloc(cap * 8)
+    let t0 = now_ns()
+    let mut i = 1
+    while i <= n {
+        let k = i * 3 + 1
+        let mut h = (k * 2654435761) & mask
+        while mem_load64(kt, h) != 0 {
+            h = (h + 1) & mask
+        }
+        mem_store64(kt, h, k)
+        mem_store64(vt, h, k * 2)
+        i = i + 1
+    }
+    let mut s = 0
+    i = 1
+    while i <= n {
+        let k = i * 3 + 1
+        let mut h = (k * 2654435761) & mask
+        while mem_load64(kt, h) != k {
+            h = (h + 1) & mask
+        }
+        s = s + mem_load64(vt, h)
+        i = i + 1
+    }
+    let t1 = now_ns()
+    print(s)
+    print("T")
+    print(t1 - t0)
+}
