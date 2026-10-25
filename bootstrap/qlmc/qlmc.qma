@@ -5876,8 +5876,11 @@ fn _map_slot_of(fc: FnCtx, h: int, k0: int) -> int {
     _ir_emit(fc, OP_MOV, off, nx, 0, 0)
     _ir_emit(fc, OP_JMP, 0, 0, 0, ltop)
     _ir_emit(fc, OP_LAB, 0, 0, 0, lfull)
-    let one = _map_const(fc, 1)
-    _ir_emit(fc, OP_EXIT, 0, one, 0, 0)
+    // 满了且没有这个键 → 返回 0，由调用方决定怎么办（v2.41）。
+    // **不能在这里 exit**：`has` / `get` 在满表上查不存在的键也会走到这儿，
+    // 一次读操作把进程干掉是不合理的。
+    let zz = _map_const(fc, 0)
+    _ir_emit(fc, OP_MOV, slot, zz, 0, 0)
     _ir_emit(fc, OP_LAB, 0, 0, 0, ldone)
     return slot
 }
@@ -5917,6 +5920,13 @@ fn _map_set(fc: FnCtx, nd: Node, h: int) -> int {
     let k = _lower_expr(fc, nd.c)
     let v = _lower_expr(fc, nd.n)
     let slot = _map_slot_of(fc, h, k)
+    // slot == 0：表满了（qlmc 的 map **不扩容**，见 07-gaps §7.27）→ 退 2
+    let z0 = _map_const(fc, 0)
+    let lhave = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x85, slot, z0, lhave)
+    let two0 = _map_const(fc, 2)
+    _ir_emit(fc, OP_EXIT, 0, two0, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lhave)
     let old = _vnew(fc)
     fc.vty.set(old, TY_INT)
     _ir_emit(fc, OP_LOAD, old, slot, 0, 8)
@@ -5948,6 +5958,15 @@ fn _map_set(fc: FnCtx, nd: Node, h: int) -> int {
 fn _map_get(fc: FnCtx, nd: Node, vty: int, h: int) -> int {
     let k = _lower_expr(fc, nd.c)
     let slot = _map_slot_of(fc, h, k)
+    // slot == 0：满表 + 键不存在 → 退 1（stage-0 那边是 fail-fast 退 1，口径一致）
+    let z1 = _map_const(fc, 0)
+    let lhit = _newlab(fc.labs)
+    let lout = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x85, slot, z1, lhit)
+    let one1 = _map_const(fc, 1)
+    _ir_emit(fc, OP_EXIT, 0, one1, 0, 0)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, lout)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lhit)
     let old = _vnew(fc)
     fc.vty.set(old, TY_INT)
     _ir_emit(fc, OP_LOAD, old, slot, 0, 8)
@@ -5962,6 +5981,7 @@ fn _map_get(fc: FnCtx, nd: Node, vty: int, h: int) -> int {
     _ir_emit(fc, OP_ADDRF, va, slot, 0, 8)
     _ir_emit(fc, OP_LOAD, d, va, 0, 8)
     _ir_emit(fc, OP_LAB, 0, 0, 0, lmiss)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lout)
     return d
 }
 
@@ -5969,6 +5989,14 @@ fn _map_get(fc: FnCtx, nd: Node, vty: int, h: int) -> int {
 fn _map_has(fc: FnCtx, nd: Node, h: int) -> int {
     let k = _lower_expr(fc, nd.c)
     let slot = _map_slot_of(fc, h, k)
+    let d0 = _map_const(fc, 0)
+    fc.vty.set(d0, TY_BOOL)
+    let z2 = _map_const(fc, 0)
+    let lhit2 = _newlab(fc.labs)
+    let lout2 = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x85, slot, z2, lhit2)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, lout2)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lhit2)
     let old = _vnew(fc)
     fc.vty.set(old, TY_INT)
     _ir_emit(fc, OP_LOAD, old, slot, 0, 8)
@@ -5980,7 +6008,9 @@ fn _map_has(fc: FnCtx, nd: Node, h: int) -> int {
     let one = _map_const(fc, 1)
     _ir_emit(fc, OP_MOV, d, one, 0, 0)
     _ir_emit(fc, OP_LAB, 0, 0, 0, lmiss)
-    return d
+    _ir_emit(fc, OP_MOV, d0, d, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lout2)
+    return d0
 }
 
 // ---- vec 运行时辅助（v2.19；放在文件末尾，避免扰动既有函数的代码布局）----
