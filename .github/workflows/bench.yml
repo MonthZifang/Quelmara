@@ -10,7 +10,7 @@
 #   windows —— 四语言全量（qlmc 只有 Windows PE 后端）+ 编译器轴（qlmc vs stage-0）
 #   posix   —— ubuntu / macos 上的 C/Go/Python 参照值（这三个是可移植的）
 #
-# 结果去处：① job summary（人看）② artifact（机器读，保留 90 天）
+# 结果去处：① job summary（人看，带机器信息）② artifact（机器读，保留 90 天）
 #
 # 注意：qlmc 目前**只有 win 后端**，所以 posix 那两行没有 quelmara 列 ——
 # 这不是"跑不过"，是"还没有产物"。等 ELF 后端落地，删掉这段注释即可。
@@ -58,6 +58,20 @@ jobs:
           go-version: stable
           cache: false
 
+      # 数字必须带机器信息，否则跨平台没法比（同一份 C 代码在 ubuntu 与
+      # macOS runner 上的 b1_int 能差 2 倍，那是 CPU 差异不是语言差异）。
+      - name: 机器信息
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor
+          $os  = Get-CimInstance Win32_OperatingSystem
+          $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
+          $line = "CPU: $($cpu.Name.Trim()) / 逻辑核 $($cpu.NumberOfLogicalProcessors) / 内存 $ram GB / $($os.Caption)"
+          Write-Output $line
+          Add-Content $env:GITHUB_STEP_SUMMARY "> $line"
+
+      # C 编译器：runner 上只有 MSVC，没有 gcc/clang。zig 是单文件、免安装，
+      # `zig cc -O2` 就是 clang，用它最省事。
       - name: 装 zig（当 C 编译器）
         shell: pwsh
         run: |
@@ -118,6 +132,16 @@ jobs:
         with:
           go-version: stable
           cache: false
+
+      - name: 机器信息
+        run: |
+          if command -v lscpu >/dev/null 2>&1; then
+            LINE="CPU: $(lscpu | awk -F': +' '/Model name/{print $2; exit}') / 逻辑核 $(nproc)"
+          else
+            LINE="CPU: $(sysctl -n machdep.cpu.brand_string) / 逻辑核 $(sysctl -n hw.ncpu)"
+          fi
+          echo "$LINE"
+          echo "> $LINE" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 语言基准（C / Go / Python 参照值）
         run: |
