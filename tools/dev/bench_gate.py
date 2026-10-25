@@ -384,7 +384,14 @@ def main(argv=None):
     if args.update:
         entries[key] = entry_of(now, qlm_version())
         save_baseline(args.baseline, entries)
-        print(f"[gate] 基线已更新：{os.path.relpath(args.baseline, ROOT)}  [{key}]")
+        # v2.54：`os.path.relpath` 在**跨盘符**时抛 ValueError
+        # （GitHub 的 windows runner 把 workspace 放在 D:，临时目录在 C:）。
+        # 只是一个提示字符串，跨盘符就退回绝对路径。
+        try:
+            shown = os.path.relpath(args.baseline, ROOT)
+        except ValueError:
+            shown = args.baseline
+        print(f"[gate] 基线已更新：{shown}  [{key}]")
         print(f"  size={now['size']}B  digest={now['digest']}  "
               f"cal={now['cal'][1] / now['cal'][0]:.2f} ns/iter")
         for name, (iters, ns) in now["metrics"].items():

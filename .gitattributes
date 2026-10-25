@@ -1,0 +1,9 @@
+# 夹具资产按**原样字节**检出（v2.54）
+#
+# t60_srclayout 断言的是 read_asset 读到的**字节长度**：
+#   fixtures/srcproj/src/asset/greeting.txt 是 "hello from asset\n" = 17 字节
+# GitHub Actions 的 windows runner 上 core.autocrlf 会把 LF 转成 CRLF → 18 字节，
+# 超出 `len(a) >= 15 && len(a) <= 17` 的断言。本机（autocrlf=false）不复现。
+#
+# 用 `-text` 关掉转换 —— 这个文件测的就是字节布局，任何 EOL 规范化都是错的。
+fixtures/srcproj/src/asset/** -text
