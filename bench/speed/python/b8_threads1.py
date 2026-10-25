@@ -8,7 +8,7 @@ def work(n):
         i += 1
     return acc
 t0 = time.perf_counter_ns()
-r = work(40000000)
+r = work(160000000)
 t1 = time.perf_counter_ns()
 print(r)
 print("T")

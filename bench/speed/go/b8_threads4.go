@@ -23,7 +23,7 @@ func main() {
 		wg.Add(1)
 		go func(k int) {
 			defer wg.Done()
-			res[k] = work(10000000)
+			res[k] = work(40000000)
 		}(k)
 	}
 	wg.Wait()

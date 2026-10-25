@@ -16,7 +16,7 @@ func work(n int64) int64 {
 
 func main() {
 	t0 := time.Now()
-	r := work(40000000)
+	r := work(160000000)
 	el := time.Since(t0).Nanoseconds()
 	fmt.Println(r)
 	fmt.Println("T")

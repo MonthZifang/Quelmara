@@ -17,7 +17,7 @@ static int64_t work(int64_t n) {
 
 int main(void) {
     T0();
-    printf("%lld\n", (long long)work(40000000));
+    printf("%lld\n", (long long)work(160000000));
     T1();
     TPRINT();
     return 0;

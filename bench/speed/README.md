@@ -60,8 +60,8 @@ python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o bui
 | `b5_string` | int→str→int | 20 万次 |
 | `b6_hash` | 哈希表插入 + 查找 | 10 万 + 10 万 |
 | `b7_sort` | 手写快排 | 20 万个伪随机 int |
-| `b8_threads1` | 并发基线（单线程） | 4000 万次 |
-| `b8_threads4` | 并发（4 线程，总量相同） | 4 × 1000 万次 |
+| `b8_threads1` | 并发基线（单线程） | 1.6 亿次 |
+| `b8_threads4` | 并发（4 线程，总量相同） | 4 × 4000 万次 |
 | `b9_json` | JSON 解析 | 2590 字节文档 × 2000 遍 |
 
 ## 三条口径（不看会误读数字）

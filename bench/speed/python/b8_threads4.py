@@ -11,7 +11,7 @@ def work(n):
     return acc
 res = [0] * 4
 def run(k):
-    res[k] = work(10000000)
+    res[k] = work(40000000)
 t0 = time.perf_counter_ns()
 ts = [threading.Thread(target=run, args=(k,)) for k in range(4)]
 for t in ts: t.start()

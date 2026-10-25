@@ -2313,6 +2313,10 @@ const OP_FBIN = 67     // [dst] = [a] <op> [b]
 // v2.47：f64 <-> int 转换内联（cvtsi2sd / cvttsd2si），去掉运行库调用。
 const OP_ITOF = 68     // [dst] = (f64)a          dst 是 f64 槽地址
 const OP_FTOI = 69     // dst = (int)[a]          a 是 f64 槽地址，向零截断
+// v2.48：常数除法魔数乘法。`a` = 被除数，`b` = 子操作（OP_DIV / OP_MOD），`imm` = 除数。
+// **除数限制 2..2^31-1**（再大 `2^s*r64` 会溢出 int64，那种情况退回 idiv）。
+// 算法：无符号魔数 + 显式符号分离（见 _gen_divc 的注释，可证明正确）。
+const OP_DIVC = 70     // dst = a <div|mod> imm
 
 struct Ir {
     op: int
@@ -4668,6 +4672,7 @@ fn _opt_pure(op: int) -> int {
     if op == OP_SHL || op == OP_SAR || op == OP_SHR { return 1 }
     if op == OP_NEG || op == OP_NOT || op == OP_NZ || op == OP_BNOT { return 1 }
     if op == OP_CMP || op == OP_FCMP { return 1 }
+    if op == OP_DIVC { return 1 }
     return 0
 }
 
@@ -4682,7 +4687,7 @@ fn _opt_mark(ins: Ir, use: vec[int]) {
         use.set(ins.a, use.get(ins.a) + 1)
     }
     // OP_BINI / OP_CMPI 的 `b` 槽放的是子操作码 / setcc 机器码，不是 vreg
-    if ins.op != OP_BINI && ins.op != OP_CMPI {
+    if ins.op != OP_BINI && ins.op != OP_CMPI && ins.op != OP_DIVC {
         if ins.b > 0 && ins.b < len(use) {
             use.set(ins.b, use.get(ins.b) + 1)
         }
@@ -4777,6 +4782,15 @@ fn _opt_strength(fc: FnCtx, ir: vec[Ir], i: int, op: int, ins: Ir,
             ir.set(i, Ir { op: OP_BINI, dst: ins.dst, a: ins.a, b: OP_SHL, imm: k })
             return
         }
+    }
+    // ---- 常数除法 → 魔数乘法（v2.48）----
+    // 只处理 2 <= d <= 2^31-1：再大 `2^s*r64` 会溢出 int64。
+    // d 是 1 的情况上面已经化成 MOV/CONST；d <= 0 保持 idiv（符号要另外处理）。
+    if op == OP_DIV || op == OP_MOD {
+        if cv >= 2 && cv <= 2147483647 {
+            ir.set(i, Ir { op: OP_DIVC, dst: ins.dst, a: ins.a, b: op, imm: cv })
+        }
+        return
     }
     // ---- 其余能装进 imm32 的 → 带立即数的二元运算 ----
     if op == OP_SHL || op == OP_SAR || op == OP_SHR {
@@ -5200,6 +5214,99 @@ fn _store_rax(fc: FnCtx, dloc: int) {
     }
 }
 
+/// 常数除法：**无符号魔数 + 显式符号分离**（v2.48）。
+///
+/// 记 d >= 2、l = ceil(log2 d)、s = l-1、m = ceil(2^(64+s)/d)、e = m - 2^(64+s)/d。
+/// 对 0 <= u <= 2^63：`floor(u*m / 2^(64+s)) = floor(u/d + u*e/2^(64+s))`，而
+/// `u*e/2^(64+s) <= 2^63*e/2^(64+s) = e/2^l < 1/2^l <= 1/d`
+/// —— 小数部分的扰动**永远跨不过整数边界**，所以 floor 严格等于 `u/d`。
+/// （`e < 1` 严格成立：d 是 2 的幂时 e = 0，否则 e 是分数。）
+/// 这一步是**可证明**的，不像有符号魔数那样要靠推导。
+///
+/// 于是 `x/d`（向零截断）= `sign(x) * floor(|x|/d)`，`x%d = x - (x/d)*d`。
+///
+/// `m` 在编译期算：`2^64` 装不进 int64，用
+///   `floor(2^63/d) = -(INT64_MIN/d)`（有符号除法对负数向零截断，正好等于 -floor）
+///   `r63 = INT64_MIN - q63*d`（**利用 int64 回绕**得到正确的正余数）
+///   `q64 = 2*q63 + (2*r63)/d`、`r64 = -(q64*d)`
+///   `m = (q64<<s) + ((r64<<s) + d - 1)/d`
+/// 全程允许回绕（我们要的就是模 2^64 的值）。
+fn _emit_divc(fc: FnCtx, code: vec[int], ins: Ir) {
+    let d = ins.imm
+    let mut l = 0
+    let mut pw = 1
+    while pw < d {
+        pw = pw << 1
+        l = l + 1
+    }
+    let s = l - 1
+    let imin = 0 - 9223372036854775807 - 1
+    let q63 = 0 - (imin / d)
+    let r63 = imin - q63 * d
+    let q64 = 2 * q63 + (2 * r63) / d
+    let r64 = 0 - q64 * d
+    let m = (q64 << s) + ((r64 << s) + d - 1) / d
+    _to_reg(fc, RCX, ins.a)                    // rcx = x（一直保留，取模要用）
+    _b(code, 0x48)                             // mov rax, rcx
+    _b(code, 0x89)
+    _b(code, 0xC8)
+    _b(code, 0x48)                             // sar rax, 63      → sign
+    _b(code, 0xC1)
+    _b(code, 0xF8)
+    _b(code, 63)
+    _b(code, 0x48)                             // mov rdx, rcx
+    _b(code, 0x89)
+    _b(code, 0xCA)
+    _b(code, 0x48)                             // xor rdx, rax
+    _b(code, 0x31)
+    _b(code, 0xC2)
+    _b(code, 0x48)                             // sub rdx, rax     → rdx = |x|
+    _b(code, 0x29)
+    _b(code, 0xC2)
+    _b(code, 0x48)                             // mov rax, rdx
+    _b(code, 0x89)
+    _b(code, 0xD0)
+    _b(code, 0x48)                             // movabs rdx, m
+    _b(code, 0xBA)
+    _w64(code, m)
+    _b(code, 0x48)                             // mul rdx（F7 /4，无符号，rdx:rax）
+    _b(code, 0xF7)
+    _b(code, 0xE2)
+    _b(code, 0x48)                             // mov rax, rdx（取高 64 位）
+    _b(code, 0x89)
+    _b(code, 0xD0)
+    _b(code, 0x48)                             // shr rax, s
+    _b(code, 0xC1)
+    _b(code, 0xE8)
+    _b(code, s)
+    _b(code, 0x48)                             // mov rdx, rcx（重算 sign，x 还在 rcx）
+    _b(code, 0x89)
+    _b(code, 0xCA)
+    _b(code, 0x48)                             // sar rdx, 63
+    _b(code, 0xC1)
+    _b(code, 0xFA)
+    _b(code, 63)
+    _b(code, 0x48)                             // xor rax, rdx
+    _b(code, 0x31)
+    _b(code, 0xD0)
+    _b(code, 0x48)                             // sub rax, rdx     → rax = q
+    _b(code, 0x29)
+    _b(code, 0xD0)
+    if ins.b == OP_MOD {
+        _b(code, 0x48)                         // imul rax, rax, d
+        _b(code, 0x69)
+        _b(code, 0xC0)
+        _w32(code, d)
+        _b(code, 0x48)                         // sub rcx, rax     → r = x - q*d
+        _b(code, 0x29)
+        _b(code, 0xC1)
+        _b(code, 0x48)                         // mov rax, rcx
+        _b(code, 0x89)
+        _b(code, 0xC8)
+    }
+    _store_rax(fc, fc.vloc.get(ins.dst))
+}
+
 fn _emit_ir(fc: FnCtx, i: int) {
     let ins = fc.ir.get(i)
     let code = fc.code
@@ -5322,6 +5429,10 @@ fn _emit_ir(fc: FnCtx, i: int) {
                 _w32(code, 0)
             }
         }
+        return
+    }
+    if op == OP_DIVC {
+        _emit_divc(fc, code, ins)
         return
     }
     if op == OP_ITOF {

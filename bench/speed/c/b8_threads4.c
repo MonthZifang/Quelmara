@@ -24,7 +24,7 @@ int main(void) {
     Job jobs[4];
     HANDLE th[4];
     for (int k = 0; k < 4; k++) {
-        jobs[k].n = 10000000;
+        jobs[k].n = 40000000;
         jobs[k].r = 0;
         th[k] = CreateThread(NULL, 0, run, &jobs[k], 0, NULL);
     }

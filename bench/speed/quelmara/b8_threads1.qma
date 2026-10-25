@@ -10,7 +10,7 @@ fn work(n: int) -> int {
 }
 fn main() {
     let t0 = now_ns()
-    let r = work(40000000)
+    let r = work(160000000)
     let t1 = now_ns()
     print(r)
     print("T")
