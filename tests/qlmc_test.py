@@ -59,6 +59,7 @@ CASES = [
     ("s22_f64print", "tests/selfhost/s22_f64print.qma"),
     ("s23_map_grow", "tests/selfhost/s23_map_grow.qma"),
     ("s24_varreg", "tests/selfhost/s24_varreg.qma"),
+    ("s25_divmod", "tests/selfhost/s25_divmod.qma"),
 ]
 
 npass = 0

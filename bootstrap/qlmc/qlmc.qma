@@ -5375,6 +5375,23 @@ fn _store_rax(fc: FnCtx, dloc: int) {
     }
 }
 
+/// 寄存器 `r` 在 IR 下标 `i` 处是否被某个值占着（`vstart <= i <= vend`）。
+///
+/// 常数除法想借 `R11` 存符号位 —— 它是 caller-saved 的临时寄存器，只有**没人用时**
+/// 才敢借。变量永远落在 cs 寄存器上，所以这个检查对变量恒为 0，天然安全。
+fn _reg_busy_at(fc: FnCtx, r: int, i: int) -> int {
+    let mut v = 1
+    while v < len(fc.vloc) {
+        if fc.vloc.get(v) == r + 1 {
+            if fc.vstart.get(v) <= i && fc.vend.get(v) >= i {
+                return 1
+            }
+        }
+        v = v + 1
+    }
+    return 0
+}
+
 /// 常数除法：**无符号魔数 + 显式符号分离**（v2.48）。
 ///
 /// 记 d >= 2、l = ceil(log2 d)、s = l-1、m = ceil(2^(64+s)/d)、e = m - 2^(64+s)/d。
@@ -5392,7 +5409,7 @@ fn _store_rax(fc: FnCtx, dloc: int) {
 ///   `q64 = 2*q63 + (2*r63)/d`、`r64 = -(q64*d)`
 ///   `m = (q64<<s) + ((r64<<s) + d - 1)/d`
 /// 全程允许回绕（我们要的就是模 2^64 的值）。
-fn _emit_divc(fc: FnCtx, code: vec[int], ins: Ir) {
+fn _emit_divc(fc: FnCtx, code: vec[int], ins: Ir, i: int) {
     let d = ins.imm
     let mut l = 0
     let mut pw = 1
@@ -5407,52 +5424,100 @@ fn _emit_divc(fc: FnCtx, code: vec[int], ins: Ir) {
     let q64 = 2 * q63 + (2 * r63) / d
     let r64 = 0 - q64 * d
     let m = (q64 << s) + ((r64 << s) + d - 1) / d
+    // v2.52：符号位**只算一次**。`mul` 会毁掉 rax/rdx，所以 v2.48 那版在算完 qa
+    // 之后又重算了一遍 sign（`mov rdx,rcx; sar rdx,63`）。现在如果 `R11` 在这一点
+    // 没被占，就把 sign 存在 R11 里 —— 省两条指令（`%` 18 → 15、`/` 15 → 12）。
     _to_reg(fc, RCX, ins.a)                    // rcx = x（一直保留，取模要用）
-    _b(code, 0x48)                             // mov rax, rcx
-    _b(code, 0x89)
-    _b(code, 0xC8)
-    _b(code, 0x48)                             // sar rax, 63      → sign
-    _b(code, 0xC1)
-    _b(code, 0xF8)
-    _b(code, 63)
-    _b(code, 0x48)                             // mov rdx, rcx
-    _b(code, 0x89)
-    _b(code, 0xCA)
-    _b(code, 0x48)                             // xor rdx, rax
-    _b(code, 0x31)
-    _b(code, 0xC2)
-    _b(code, 0x48)                             // sub rdx, rax     → rdx = |x|
-    _b(code, 0x29)
-    _b(code, 0xC2)
-    _b(code, 0x48)                             // mov rax, rdx
-    _b(code, 0x89)
-    _b(code, 0xD0)
-    _b(code, 0x48)                             // movabs rdx, m
-    _b(code, 0xBA)
-    _w64(code, m)
-    _b(code, 0x48)                             // mul rdx（F7 /4，无符号，rdx:rax）
-    _b(code, 0xF7)
-    _b(code, 0xE2)
-    _b(code, 0x48)                             // mov rax, rdx（取高 64 位）
-    _b(code, 0x89)
-    _b(code, 0xD0)
-    _b(code, 0x48)                             // shr rax, s
-    _b(code, 0xC1)
-    _b(code, 0xE8)
-    _b(code, s)
-    _b(code, 0x48)                             // mov rdx, rcx（重算 sign，x 还在 rcx）
-    _b(code, 0x89)
-    _b(code, 0xCA)
-    _b(code, 0x48)                             // sar rdx, 63
-    _b(code, 0xC1)
-    _b(code, 0xFA)
-    _b(code, 63)
-    _b(code, 0x48)                             // xor rax, rdx
-    _b(code, 0x31)
-    _b(code, 0xD0)
-    _b(code, 0x48)                             // sub rax, rdx     → rax = q
-    _b(code, 0x29)
-    _b(code, 0xD0)
+    let useR11 = 0
+    if _reg_busy_at(fc, R11, i) == 0 {
+        useR11 = 1
+    }
+    if useR11 == 1 {
+        // REX 是 **0x49**（W|B），不是 0x4D —— 0x4D 会多置 R 位，把 `mov r11,rcx`
+        // 变成 `mov r11,r9`、把 `sar r11,63` 的 ext 从 7 变成 15（非法组）。
+        // v2.52 第一版就是这么错的，表现是负数除法的 |x| 算成 0xFFFF…（无符号除）。
+        _b(code, 0x49)                         // mov r11, rcx
+        _b(code, 0x89)
+        _b(code, 0xCB)
+        _b(code, 0x49)                         // sar r11, 63      → sign（保留）
+        _b(code, 0xC1)
+        _b(code, 0xFB)
+        _b(code, 63)
+        _b(code, 0x48)                         // mov rax, rcx
+        _b(code, 0x89)
+        _b(code, 0xC8)
+        _b(code, 0x4C)                         // xor rax, r11
+        _b(code, 0x31)
+        _b(code, 0xD8)
+        _b(code, 0x4C)                         // sub rax, r11     → rax = |x|
+        _b(code, 0x29)
+        _b(code, 0xD8)
+        _b(code, 0x48)                         // movabs rdx, m
+        _b(code, 0xBA)
+        _w64(code, m)
+        _b(code, 0x48)                         // mul rdx
+        _b(code, 0xF7)
+        _b(code, 0xE2)
+        _b(code, 0x48)                         // mov rax, rdx
+        _b(code, 0x89)
+        _b(code, 0xD0)
+        _b(code, 0x48)                         // shr rax, s
+        _b(code, 0xC1)
+        _b(code, 0xE8)
+        _b(code, s)
+        _b(code, 0x4C)                         // xor rax, r11
+        _b(code, 0x31)
+        _b(code, 0xD8)
+        _b(code, 0x4C)                         // sub rax, r11     → rax = q
+        _b(code, 0x29)
+        _b(code, 0xD8)
+    } else {
+        _b(code, 0x48)                         // mov rax, rcx
+        _b(code, 0x89)
+        _b(code, 0xC8)
+        _b(code, 0x48)                         // sar rax, 63      → sign
+        _b(code, 0xC1)
+        _b(code, 0xF8)
+        _b(code, 63)
+        _b(code, 0x48)                         // mov rdx, rcx
+        _b(code, 0x89)
+        _b(code, 0xCA)
+        _b(code, 0x48)                         // xor rdx, rax
+        _b(code, 0x31)
+        _b(code, 0xC2)
+        _b(code, 0x48)                         // sub rdx, rax     → rdx = |x|
+        _b(code, 0x29)
+        _b(code, 0xC2)
+        _b(code, 0x48)                         // mov rax, rdx
+        _b(code, 0x89)
+        _b(code, 0xD0)
+        _b(code, 0x48)                         // movabs rdx, m
+        _b(code, 0xBA)
+        _w64(code, m)
+        _b(code, 0x48)                         // mul rdx
+        _b(code, 0xF7)
+        _b(code, 0xE2)
+        _b(code, 0x48)                         // mov rax, rdx
+        _b(code, 0x89)
+        _b(code, 0xD0)
+        _b(code, 0x48)                         // shr rax, s
+        _b(code, 0xC1)
+        _b(code, 0xE8)
+        _b(code, s)
+        _b(code, 0x48)                         // mov rdx, rcx（重算 sign）
+        _b(code, 0x89)
+        _b(code, 0xCA)
+        _b(code, 0x48)                         // sar rdx, 63
+        _b(code, 0xC1)
+        _b(code, 0xFA)
+        _b(code, 63)
+        _b(code, 0x48)                         // xor rax, rdx
+        _b(code, 0x31)
+        _b(code, 0xD0)
+        _b(code, 0x48)                         // sub rax, rdx     → rax = q
+        _b(code, 0x29)
+        _b(code, 0xD0)
+    }
     if ins.b == OP_MOD {
         _b(code, 0x48)                         // imul rax, rax, d
         _b(code, 0x69)
@@ -5635,7 +5700,7 @@ fn _emit_ir(fc: FnCtx, i: int) {
         return
     }
     if op == OP_DIVC {
-        _emit_divc(fc, code, ins)
+        _emit_divc(fc, code, ins, i)
         return
     }
     if op == OP_ITOF {

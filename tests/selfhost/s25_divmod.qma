@@ -1,0 +1,37 @@
+// s25_divmod.qma —— 常数除法魔数乘法的**符号回归**（v2.52）
+//
+// `OP_DIVC` 走"无符号魔数 + 显式符号分离"，符号位要么重算、要么借 R11 存一次。
+// 两条路径都必须对**负数**给出向零截断的结果。v2.52 第一版把 REX 写成 0x4D
+// （多了 R 位），`mov r11,rcx` 变成 `mov r11,r9`，于是 -1 的 |x| 算成 0xFFFF…
+// 走了无符号除法 —— 正是这个夹具能抓到的形状。
+fn show(x: int) -> int {
+    print(x / 2)
+    print(x % 2)
+    print(x / 3)
+    print(x % 3)
+    print(x / 7)
+    print(x % 7)
+    print(x / 13)
+    print(x % 13)
+    print(x / 1000)
+    print(x % 1000)
+    print(x / 2147483647)
+    print(x % 2147483647)
+    return 0
+}
+
+fn main() {
+    show(0)
+    show(1)
+    show(-1)
+    show(12)
+    show(-12)
+    show(13)
+    show(-13)
+    show(1000000)
+    show(-1000000)
+    show(9223372036854775807)
+    show(-9223372036854775807)
+    show(2147483647)
+    show(-2147483648)
+}
