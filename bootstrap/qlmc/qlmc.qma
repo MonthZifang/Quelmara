@@ -2303,6 +2303,16 @@ const OP_LOAD8D = 63   // dst = 零扩展 [a + imm] 的低字节
 const OP_LOAD8X = 64   // dst = 零扩展 [a + b*8] 的低字节
 const OP_STORE8D = 65  // [a + imm] = dst 的低字节
 const OP_STORE8X = 66  // [a + b*8] = dst 的低字节
+// v2.47：f64 二元运算内联。`dst`/`a`/`b` 都是 f64 槽的**地址**，`imm` 选子操作
+// （0=add 1=sub 2=mul 3=div）。以前是 `ADDRV + 3×ARG + CALLRT(__fadd)` ——
+// 一次调用 + 运行库里 6 条指令；现在是 3 条 SSE 指令。f64 仍然住在帧槽里
+// （设计没变），只是去掉了调用开销。
+// **注意 `dst` 是被读的**（它是要写入的地址），所以 `_opt_writes` 要返回 0、
+// `_opt_mark` 要把 dst 记成"被读"—— 否则 DCE 会把算地址的那条删掉。
+const OP_FBIN = 67     // [dst] = [a] <op> [b]
+// v2.47：f64 <-> int 转换内联（cvtsi2sd / cvttsd2si），去掉运行库调用。
+const OP_ITOF = 68     // [dst] = (f64)a          dst 是 f64 槽地址
+const OP_FTOI = 69     // dst = (int)[a]          a 是 f64 槽地址，向零截断
 
 struct Ir {
     op: int
@@ -2388,6 +2398,15 @@ const C_DEF = 7         // defer 栈深度
 const C_NSAVED = 8
 // 当前正在降级的函数下标（v2.33：帧槽/寄存器耗尽的报错要说是哪个函数）
 const C_CFI = 9
+// v2.47：f64 字面量的"只解析一次"缓存与标志槽。`cells` 是普通 vec，可以往后长。
+//   [10]                = 标志槽个数 nf，标志槽号放在 [11 .. 11+nf)
+//   [50]                = 缓存条数 nc，每条占两格（串 id, 地址 vreg）在 [51 .. 51+2*nc)
+// 上限 32 条：一个函数里超过 32 个不同的 f64 字面量就 fail-fast。
+const C_FNUM_NF = 10
+const C_FNUM_FLAG0 = 11
+const C_FNUM_NC = 50
+const C_FNUM_CACHE0 = 51
+const FNUM_MAX = 32
 const FRAME = 4096          // 帧大小（512 个 8 字节槽）
 const MAX_VAR = 64          // 变量最多占 64 个寄存器位（其余落槽）
 // v2.33：变量/聚合区从 256 提到 384——qlmc 自己的 build_rdata 要 257 格。
@@ -2685,6 +2704,8 @@ fn _fc_reset(fc: FnCtx) {
     fc.vend.push(0)
     fc.vpin.push(0)
     fc.cells.set(C_ST, 0)
+    _cell_set(fc, C_FNUM_NF, 0)
+    _cell_set(fc, C_FNUM_NC, 0)
     fc.cells.set(C_NV, 0)
     fc.cells.set(C_EP, 0)
     fc.cells.set(C_LD, 0)
@@ -3094,11 +3115,65 @@ fn _to_f64(fc: FnCtx, v: int) -> int {
     let ad = _vnew(fc)
     fc.vty.set(ad, TY_INT)
     _ir_emit(fc, OP_ADDRV, ad, 0, 0, -fc.vloc.get(sv) - 1)
-    _ir_emit(fc, OP_ARG, 0, ad, 0, 0)
-    _ir_emit(fc, OP_ARG, 0, v, 0, 1)
-    _ir_emit(fc, OP_CALLRT, 0, 0, 0, RT_ITOF)
+    _ir_emit(fc, OP_ITOF, ad, v, 0, 0)         // v2.47：内联 cvtsi2sd
     fc.vty.set(ad, TY_F64)
     return ad
+}
+
+/// 把 `cells` 撑到至少 n 格（它是普通 vec，可以往后长）
+fn _cell_ensure(fc: FnCtx, n: int) {
+    while len(fc.cells) < n {
+        fc.cells.push(0)
+    }
+}
+
+fn _cell_set(fc: FnCtx, idx: int, v: int) {
+    _cell_ensure(fc, idx + 1)
+    fc.cells.set(idx, v)
+}
+
+/// f64 字面量缓存查表：串 id → 已解析好的 f64 槽地址。没查到返回 -1。
+fn _fnum_get(fc: FnCtx, sid: int) -> int {
+    if len(fc.cells) <= C_FNUM_NC {
+        return -1
+    }
+    let nc = fc.cells.get(C_FNUM_NC)
+    let mut i = 0
+    while i < nc {
+        if fc.cells.get(C_FNUM_CACHE0 + 2 * i) == sid {
+            return fc.cells.get(C_FNUM_CACHE0 + 2 * i + 1)
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn _fnum_put(fc: FnCtx, sid: int, ad: int) {
+    if len(fc.cells) <= C_FNUM_NC {
+        return
+    }
+    let nc = fc.cells.get(C_FNUM_NC)
+    if nc >= FNUM_MAX {
+        eprint("qlmc: 一个函数里超过 " + (FNUM_MAX).to_str() + " 个不同的 f64 字面量")
+        exit(2)
+    }
+    _cell_set(fc, C_FNUM_CACHE0 + 2 * nc, sid)
+    _cell_set(fc, C_FNUM_CACHE0 + 2 * nc + 1, ad)
+    _cell_set(fc, C_FNUM_NC, nc + 1)
+}
+
+/// 登记一个"已解析"标志槽（函数序言里要清零）
+fn _fnum_flag(fc: FnCtx, slot: int) {
+    if len(fc.cells) <= C_FNUM_NF {
+        return
+    }
+    let nf = fc.cells.get(C_FNUM_NF)
+    if nf >= FNUM_MAX {
+        eprint("qlmc: 一个函数里超过 " + (FNUM_MAX).to_str() + " 个不同的 f64 字面量")
+        exit(2)
+    }
+    _cell_set(fc, C_FNUM_FLAG0 + nf, slot)
+    _cell_set(fc, C_FNUM_NF, nf + 1)
 }
 
 /// 开一块 f64 槽，返回它的地址（结果类型标成 TY_F64）
@@ -3130,20 +3205,18 @@ fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
             // 现象是 `let c = a + b` 之后 c 里是别人的地址）。
             let sv = _new_var(fc, -1, TY_F64)
             _ir_emit(fc, OP_ADDRV, dst, 0, 0, -fc.vloc.get(sv) - 1)
-            _ir_emit(fc, OP_ARG, 0, dst, 0, 0)
-            _ir_emit(fc, OP_ARG, 0, lv, 0, 1)
-            _ir_emit(fc, OP_ARG, 0, rv, 0, 2)
-            let mut rid = RT_FADD
+            // v2.47：内联成 3 条 SSE 指令（以前是 3×ARG + CALLRT 运行库调用）
+            let mut sub = 0                    // 0=add 1=sub 2=mul 3=div
             if op == P_MINUS {
-                rid = RT_FSUB
+                sub = 1
             }
             if op == P_STAR {
-                rid = RT_FMUL
+                sub = 2
             }
             if op == P_SLASH {
-                rid = RT_FDIV
+                sub = 3
             }
-            _ir_emit(fc, OP_CALLRT, 0, 0, 0, rid)
+            _ir_emit(fc, OP_FBIN, dst, lv, rv, sub)
             return TY_F64
         }
         let cc = _fcmp_cc(op)
@@ -3387,13 +3460,46 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
     }
     if nd.op == E_FNUM {
         // f64 字面量：开槽 -> OP_LEA 取原文 -> 运行时 strtod 解析进槽（见 _gen_fparse）
+        //
+        // **v2.47：同一个字面量在一个函数里只解析一次**。以前每次求值都
+        // `LEA + 2×ARG + CALLRT(__fparse)`，而 `__fparse` 里是 `strtod` ——
+        // 字面量落在循环体里就是**每轮一次 strtod**。实测 b2_float（500 万轮）
+        // 有 90% 的时间花在这上面：把 `1.0` 提到循环外，752 ms → 69.8 ms（10.8×）。
+        // 现在第一个出现点做一次带标志的解析，之后直接复用那个槽。
+        // 标志槽在函数序言里清零（见 `_emit_fn`），所以每次函数调用只解析一次。
+        let cached = _fnum_get(fc, nd.a)
+        if cached >= 0 {
+            return cached
+        }
         let ad = _new_f64(fc)
+        let fslot = _st_slot(fc)
+        _fnum_put(fc, nd.a, ad)
+        _fnum_flag(fc, fslot)
+        let lskip = _newlab(fc.labs)
+        let fa = _vnew(fc)
+        fc.vty.set(fa, TY_INT)
+        _ir_emit(fc, OP_ADDRV, fa, 0, 0, fslot)
+        let fv = _vnew(fc)
+        fc.vty.set(fv, TY_INT)
+        _ir_emit(fc, OP_LOAD, fv, fa, 0, 8)
+        let zero = _vnew(fc)
+        fc.vty.set(zero, TY_INT)
+        _ir_emit(fc, OP_CONST, zero, 0, 0, 0)
+        _ir_emit(fc, OP_JCMP, 0x85, fv, zero, lskip)     // jne：已解析过 → 跳过
         let sp = _vnew(fc)
         fc.vty.set(sp, TY_STR)
         _ir_emit(fc, OP_LEA, sp, 0, 0, nd.a)
         _ir_emit(fc, OP_ARG, 0, sp, 0, 0)
         _ir_emit(fc, OP_ARG, 0, ad, 0, 1)
         _ir_emit(fc, OP_CALLRT, 0, 0, 0, RT_FPARSE)
+        let fa2 = _vnew(fc)
+        fc.vty.set(fa2, TY_INT)
+        _ir_emit(fc, OP_ADDRV, fa2, 0, 0, fslot)
+        let one = _vnew(fc)
+        fc.vty.set(one, TY_INT)
+        _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+        _ir_emit(fc, OP_STORE, 0, fa2, one, 8)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, lskip)
         return ad
     }
     if nd.op == E_VAR {
@@ -4527,6 +4633,7 @@ fn _opt_writes(op: int) -> int {
     // STORE* 系列不写寄存器，dst 槽里放的是"要存的值"
     if op == OP_STORED || op == OP_STOREX { return 0 }
     if op == OP_STORE8D || op == OP_STORE8X { return 0 }
+    if op == OP_FBIN || op == OP_ITOF { return 0 }   // dst 槽是"要写入的地址"，被读
     return 1
 }
 
@@ -4585,7 +4692,8 @@ fn _opt_mark(ins: Ir, use: vec[int]) {
     }
     // STORE* 系列把"值"放在 dst 槽 —— 那是被读的
     if ins.op == OP_STORED || ins.op == OP_STOREX ||
-       ins.op == OP_STORE8D || ins.op == OP_STORE8X {
+       ins.op == OP_STORE8D || ins.op == OP_STORE8X ||
+       ins.op == OP_FBIN || ins.op == OP_ITOF {
         if ins.dst > 0 && ins.dst < len(use) {
             use.set(ins.dst, use.get(ins.dst) + 1)
         }
@@ -5214,6 +5322,67 @@ fn _emit_ir(fc: FnCtx, i: int) {
                 _w32(code, 0)
             }
         }
+        return
+    }
+    if op == OP_ITOF {
+        // [dst] = (f64)a —— cvtsi2sd xmm0, 值; movsd [地址], xmm0
+        _to_reg(fc, RAX, ins.dst)
+        _to_reg(fc, RCX, ins.a)
+        _b(code, 0xF2)                         // cvtsi2sd xmm0, rcx
+        _b(code, 0x48)
+        _b(code, 0x0F)
+        _b(code, 0x2A)
+        _b(code, 0xC1)
+        _b(code, 0xF2)                         // movsd [rax], xmm0
+        _b(code, 0x0F)
+        _b(code, 0x11)
+        _b(code, 0x00)
+        return
+    }
+    if op == OP_FTOI {
+        // dst = (int)[a] —— movsd xmm0, [地址]; cvttsd2si rax, xmm0
+        _to_reg(fc, RCX, ins.a)
+        _b(code, 0xF2)                         // movsd xmm0, [rcx]
+        _b(code, 0x0F)
+        _b(code, 0x10)
+        _b(code, 0x01)
+        _b(code, 0xF2)                         // cvttsd2si rax, xmm0
+        _b(code, 0x48)
+        _b(code, 0x0F)
+        _b(code, 0x2C)
+        _b(code, 0xC0)
+        _store_rax(fc, fc.vloc.get(ins.dst))
+        return
+    }
+    if op == OP_FBIN {
+        // [dst] = [a] <op> [b]，三个操作数都是 f64 槽的地址。
+        // 地址只会落在 R8-R11 / 帧槽（RAX/RCX/RDX 是发射器保留），所以按
+        // RCX → RDX → RAX 的顺序搬不会互相踩。
+        _to_reg(fc, RCX, ins.a)
+        _to_reg(fc, RDX, ins.b)
+        _to_reg(fc, RAX, ins.dst)
+        _b(code, 0xF2)                         // movsd xmm0, [rcx]
+        _b(code, 0x0F)
+        _b(code, 0x10)
+        _b(code, 0x01)
+        let mut opc = 0x58                     // addsd
+        if ins.imm == 1 {
+            opc = 0x5C                         // subsd
+        }
+        if ins.imm == 2 {
+            opc = 0x59                         // mulsd
+        }
+        if ins.imm == 3 {
+            opc = 0x5E                         // divsd
+        }
+        _b(code, 0xF2)                         // <op>sd xmm0, [rdx]
+        _b(code, 0x0F)
+        _b(code, opc)
+        _b(code, 0x02)
+        _b(code, 0xF2)                         // movsd [rax], xmm0
+        _b(code, 0x0F)
+        _b(code, 0x11)
+        _b(code, 0x00)
         return
     }
     if op == OP_BINI {
@@ -5953,6 +6122,13 @@ fn _emit_fn(fc: FnCtx) {
     // 栈形参的偏移要加 8*nsaved（见 C_NSAVED 的注释）
     fc.cells.set(C_NSAVED, nsaved)
     _sub_rsp(code, frame)
+    // f64 字面量的"已解析"标志槽：函数入口清零，否则第一次判断读的是上一帧的垃圾。
+    // **不能走 IR** —— 分配已经跑完了，新开 vreg 会拿到 vloc = 0 而 fail-fast。
+    let mut fz = 0
+    while fz < fc.cells.get(C_FNUM_NF) {
+        _mov_imm_mem(code, RBP, _slot_disp(fc.cells.get(C_FNUM_FLAG0 + fz)), 0)
+        fz = fz + 1
+    }
     i = 0
     while i < len(fc.ir) {
         _emit_ir(fc, i)
@@ -8147,10 +8323,9 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         let v = _lower_expr(fc, nd.b)
         let vt = fc.vty.get(v)
         if vt == TY_F64 {
-            _ir_emit(fc, OP_ARG, 0, v, 0, 0)
             let d = _vnew(fc)
             fc.vty.set(d, TY_INT)
-            _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_FTOI)
+            _ir_emit(fc, OP_FTOI, d, v, 0, 0)  // v2.47：内联 cvttsd2si
             return d
         }
         if vt == TY_STR {
@@ -8324,10 +8499,9 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
                 eprint("qlmc: to_int() 不接受实参")
                 exit(2)
             }
-            _ir_emit(fc, OP_ARG, 0, h, 0, 0)
             let d = _vnew(fc)
             fc.vty.set(d, TY_INT)
-            _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_FTOI)
+            _ir_emit(fc, OP_FTOI, d, h, 0, 0)  // v2.47：内联 cvttsd2si
             return d
         }
         if hty != TY_STR {
