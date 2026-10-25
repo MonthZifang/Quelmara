@@ -779,9 +779,14 @@ RVA）里看得很清楚：`cmp rax,0 / jne 0x1de6` 之后直接 `mov rax,[rbp-0
 另外 qlmc 的 `map.len()` / `len(m)` 在**扩容之后**仍然正确，但差分测不到 —— 见 §7.28。
 夹具是 `tests/selfhost/s23_map_grow.qma`。
 
-### 7.28 待修：stage-0 的 `len(map)` 类型推断不稳（v2.43 发现，stage-0 侧）
+### 7.28 待修：stage-0 的类型推断在几个场景下丢失（v2.43 发现，stage-0 侧）
 
-`len(m)` 对 map 走的是 `__map_len(m)`（读控制块 `[1]` = count），但 stage-0 得先判断
+同一类毛病的三个表现：**容器/返回值把元素类型弄丢**，然后按 int 或 str 硬解释。
+qlmc 在这三种场景下都是对的，所以归 stage-0 那条线。
+
+**(a) `len(map)` 落到 `str_len`**
+
+`len(m)` 对 map 走 `__map_len(m)`（读控制块 `[1]` = count），但 stage-0 得先判断
 `m` 是 map。这个判断在两个场景下会失败，然后落到 `_is_str` 分支按 `str_len` 读
 `[m-8]`，于是打出一个垃圾数（实测都是 12 / 20 这种"看着像数"的值，很容易被当成
 业务结果）：
@@ -791,9 +796,33 @@ RVA）里看得很清楚：`cmp rax,0 / jne 0x1de6` 之后直接 `mov rax,[rbp-0
    `tests/selfhost/s23_map_grow.qma` 里加回 `count_after_grow()` 这种函数——
    单独成文件跑 `return len(m)` 是对的（9），塞进那个文件就变 12。
 
-qlmc 侧两种场景都返回正确的 count，所以这是 **stage-0 的缺陷**，归 stage-0 那条线。
 `tests/selfhost/s23_map_grow.qma` 里因此**不在扩容之后查 `len()`**（只用 `get`/`has`
 验证"扩容没丢键、没串值"），`len()` 只在"容量够大不扩容"的场景里保留（`len_no_grow`）。
+
+**(b) `vec[f64]` / `map[K]f64` 的元素被当成 int**
+
+```quelmara
+let v = vec[f64].new(4)
+v.push(1.5)
+let x = v.get(0)
+print(x + 1.0)          // qlmc: 2.5        stage-0: 4.609434e+18
+```
+
+stage-0 把 `v.get(0)` 当成 int（f64 的位模式 `4609434218613702656`），`+ 1.0` 再把这个
+整数转成 double。`map[K]f64` 一样（`m.get(1) * 2.0` → `9.230127e+18`）。
+qlmc 侧 `print(v.get(0))` 就是 `1.5`、`print(x + 1.0)` 就是 `2.5`。
+
+**(c) `len(map)` 对"函数返回的 map"**
+
+```quelmara
+fn fill() -> map[int]int { ... }      // 返回 9 个键的表
+print(len(fill()))
+```
+
+stage-0 拿不到返回值的类型，同样落到 `str_len`。qlmc 正确。
+
+这三条都**没有差分夹具**（stage-0 编得出但跑错，比编不过更麻烦 —— 夹具会把错的
+输出钉成"标准答案"）。要修先修 stage-0 的类型传播。
 
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
