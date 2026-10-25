@@ -99,3 +99,41 @@ python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o bui
 
 峰值内存用 `GetProcessMemoryInfo` 每 2 ms 采一次峰值工作集。stage-0 是 Python
 进程，数字里含解释器本身（20 MB 起步），这也要算进去看。
+
+## 在 CI 里跑（**数字的权威来源**）
+
+```bash
+gh workflow run bench.yml            # 手动触发
+gh run watch                         # 看进度
+gh run download <run-id> -n bench-windows   # 取结果
+```
+
+`.github/workflows/bench.yml` 三个触发口：手动、推到 master 且动了
+`bench/**` / `bootstrap/qlmc/**` / `tools/stage0/**`、每周一 02:00（UTC+8）。
+结果同时写到 **job summary**（人看）和 **artifact**（机器读，留 90 天）。
+
+**为什么本机的数字不能当准**：本机开着 VBS，实测
+
+| 现象 | 数字 |
+|---|---|
+| 进程创建（四个语言的空程序都一样） | **447 ms** |
+| `b1_int` 单次跑 / min-of-5 | **59.3 / 42.4 ms**（差 40%） |
+| 4 线程加速比，同一份代码 | **3.06× / 3.22× / 3.85×**（三轮） |
+
+所以本地只做"改完有没有变慢"的粗判，**对外引用一律用 CI 的数字**。
+
+### 平台矩阵与"适配度"
+
+| runner | 跑什么 | 能回答什么 |
+|---|---|---|
+| `windows-latest` | 四语言全量 + 编译器轴 | **qlmc 对 C/Go 的真实比值**（qlmc 只有 PE 后端） |
+| `ubuntu-latest` | C / Go / Python | 同一道题在 Linux 上的样子 —— 与 Windows 列对比就是"平台适配度" |
+| `macos-latest` | C / Go / Python | 同上（clang + Apple Silicon/Intel） |
+
+**qlmc 在 posix 两行没有数字，不是跑不过，是还没有 ELF 后端。**
+等 `--target elf` 落地，把 `run.py` 里那句"qlmc 只有 Windows PE 后端"的跳过
+去掉即可 —— 那才是"跨平台适配度"这一列真正有意义的时刻。
+
+为了让 C 能在三个平台都跑，`c/bench.h` 把计时抽象掉了（Windows 用 QPC、
+POSIX 用 `CLOCK_MONOTONIC`），`b8_threads4.c` 用 `CreateThread`/`pthread`
+两条路径 —— **同一道题、同一种线程模型**（4 个可 join 的 OS 线程，无池无复用）。

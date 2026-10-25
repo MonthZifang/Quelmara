@@ -1057,6 +1057,13 @@ stage-2 **395 776 → 390 656 字节**，并发加速比 **3.30× → 3.85×**�
 （`OP_JCMPVLEN`/`OP_JCMPSTR`）。`b7_sort` **−5%**、`b1_int` −3%、`b8_threads1` −5%，
 `b6_hash` 42.9 ms（快于 C 的 45.9）。
 
+**v2.54**：**基准搬到 GitHub Actions**（`.github/workflows/bench.yml`）——
+本机 VBS 噪声已经大到单次测量没有意义（进程创建 447 ms、`b1_int` 单次 59.3 /
+min-of-5 42.4、4 线程加速比三轮 3.06/3.22/3.85）。CI 上 windows 跑四语言全量 +
+编译器轴，ubuntu/macos 跑 C/Go/Python 参照值（qlmc 只有 PE 后端）。为此把 C 侧
+计时抽成 `c/bench.h`（QPC / `CLOCK_MONOTONIC`）、`b8_threads4.c` 加 pthread 路径、
+`run.py` 加平台判定。**对外引用的数字一律用 CI 的。**
+
 **`push` 的机器码代价**（v2.27 实测，用 `tools/dev/dumpasm.py` 数指令，不受噪声影响）：
 
 | 版本 | push 常见路径 | 说明 |

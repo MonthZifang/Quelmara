@@ -22,12 +22,19 @@
 """
 import argparse
 import ctypes
-import ctypes.wintypes as wt
 import os
 import shutil
 import subprocess
 import sys
 import time
+
+# v2.54：跨平台。Windows 上跑四语言全量（qlmc 只有 win 后端）；
+# Linux/macOS 只跑 C/Go/Python —— 那三个是可移植的，用来给"同一道题在不同
+# 机器上是什么样"做参照（也就是"适配度"那一列）。
+IS_WIN = os.name == "nt"
+EXE = ".exe" if IS_WIN else ""
+if IS_WIN:
+    import ctypes.wintypes as wt
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -49,22 +56,26 @@ BENCHES = [
 
 
 # ---------------------------------------------------------------- 峰值内存采样
-class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
-    _fields_ = [
-        ("cb", wt.DWORD),
-        ("PageFaultCount", wt.DWORD),
-        ("PeakWorkingSetSize", ctypes.c_size_t),
-        ("WorkingSetSize", ctypes.c_size_t),
-        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-        ("QuotaPagedPoolUsage", ctypes.c_size_t),
-        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-        ("PagefileUsage", ctypes.c_size_t),
-        ("PeakPagefileUsage", ctypes.c_size_t),
-    ]
+# 只在 Windows 上可用（psapi）。非 Windows 时 `--mem` 会退化成 0 —— 别假装有数。
+if IS_WIN:
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("cb", wt.DWORD),
+            ("PageFaultCount", wt.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
 
 
 def _peak_ws(handle):
+    if not IS_WIN:
+        return 0
     pmc = PROCESS_MEMORY_COUNTERS()
     pmc.cb = ctypes.sizeof(pmc)
     if ctypes.windll.psapi.GetProcessMemoryInfo(
@@ -84,8 +95,10 @@ def run_once(exe, args=None, sample_mem=False):
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          text=True)
     peak = 0
+    # `p._handle` 是 Windows 专属；非 Windows 上 `--mem` 直接给 0（别假装有数）
     while p.poll() is None:
-        peak = max(peak, _peak_ws(int(p._handle)))
+        if IS_WIN:
+            peak = max(peak, _peak_ws(int(p._handle)))
         time.sleep(0.002)
     out, _ = p.communicate()
     return time.perf_counter() - t0, peak, out
@@ -160,15 +173,18 @@ def build_all(langs, only):
     if "quelmara" in langs:
         q = qlmc_exe()
         if not q:
-            notes["quelmara"] = ("跳过：build/qlmc.exe 不存在（先自举："
-                                 "python tools/stage0/qlm_cli.py build "
-                                 "bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe）")
+            if IS_WIN:
+                notes["quelmara"] = ("跳过：build/qlmc.exe 不存在（先自举："
+                                     "python tools/stage0/qlm_cli.py build "
+                                     "bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe）")
+            else:
+                notes["quelmara"] = "跳过：qlmc 只有 Windows PE 后端（非 Windows 平台无产物）"
         else:
             for b, _ in BENCHES:
                 if only and b not in only:
                     continue
                 src = os.path.join(HERE, "quelmara", b + ".qma")
-                exe = os.path.join(OUT, "qlm_" + b + ".exe")
+                exe = os.path.join(OUT, "qlm_" + b + EXE)
                 r = subprocess.run([q, "build", src, "-o", exe],
                                    capture_output=True, text=True)
                 if r.returncode != 0:
@@ -186,7 +202,7 @@ def build_all(langs, only):
                 if only and b not in only:
                     continue
                 src = os.path.join(HERE, "c", b + ".c")
-                exe = os.path.join(OUT, "c_" + b + ".exe")
+                exe = os.path.join(OUT, "c_" + b + EXE)
                 r = subprocess.run(cc + ["-o", exe, src],
                                    capture_output=True, text=True)
                 if r.returncode != 0:
@@ -203,7 +219,7 @@ def build_all(langs, only):
                 if only and b not in only:
                     continue
                 src = os.path.join(HERE, "go", b + ".go")
-                exe = os.path.join(OUT, "go_" + b + ".exe")
+                exe = os.path.join(OUT, "go_" + b + EXE)
                 r = subprocess.run([go_exe(), "build", "-o", exe, src],
                                    capture_output=True, text=True,
                                    cwd=os.path.join(HERE, "go"))

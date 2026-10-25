@@ -1,0 +1,141 @@
+# bench —— 四语言基准（Quelmara / C / Go / Python），**基准数字的唯一权威来源**
+#
+# 为什么不在本机跑：本机开着 VBS（虚拟化安全），实测
+#   · 进程创建 447 ms（四个语言的空程序都一样）
+#   · 同一份代码 min-of-3 的抖动可达 ±40%（b1_int 单次 59 ms / min-of-5 42 ms）
+# 放到干净的 runner 上噪声低一个量级，而且能拿到**多个平台**的数字 ——
+# 那才是"适配度"的真实依据。
+#
+# 两个 job：
+#   windows —— 四语言全量（qlmc 只有 Windows PE 后端）+ 编译器轴（qlmc vs stage-0）
+#   posix   —— ubuntu / macos 上的 C/Go/Python 参照值（这三个是可移植的）
+#
+# 结果去处：① job summary（人看）② artifact（机器读，保留 90 天）
+#
+# 注意：qlmc 目前**只有 win 后端**，所以 posix 那两行没有 quelmara 列 ——
+# 这不是"跑不过"，是"还没有产物"。等 ELF 后端落地，删掉这段注释即可。
+
+name: bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      reps:
+        description: "每项重复次数（取最小值，默认 5）"
+        default: "5"
+  push:
+    branches: [master]
+    paths:
+      - "bench/**"
+      - "bootstrap/qlmc/**"
+      - "tools/stage0/**"
+      - ".github/workflows/bench.yml"
+  schedule:
+    - cron: "0 18 * * 0"
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REPS: ${{ github.event.inputs.reps || '5' }}
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: 装 zig（当 C 编译器）
+        shell: pwsh
+        run: |
+          $v = "0.13.0"
+          Invoke-WebRequest "https://ziglang.org/download/$v/zig-windows-x86_64-$v.zip" -OutFile zig.zip
+          Expand-Archive zig.zip -DestinationPath $env:RUNNER_TEMP
+          "$env:RUNNER_TEMP\zig-windows-x86_64-$v" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: 自举 qlmc
+        run: python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe
+
+      - name: 语言基准（四语言）
+        shell: pwsh
+        run: python bench/speed/run.py --reps $env:REPS --markdown 2>&1 | Tee-Object -FilePath bench.md
+
+      - name: 编译器轴（qlmc vs stage-0）
+        continue-on-error: true
+        shell: pwsh
+        run: python bench/speed/compiler.py --reps 3 2>&1 | Tee-Object -FilePath compiler.md
+
+      - name: 写 job summary
+        if: always()
+        shell: pwsh
+        run: |
+          Add-Content $env:GITHUB_STEP_SUMMARY "## 语言基准 · Windows"
+          Add-Content $env:GITHUB_STEP_SUMMARY '```'
+          Get-Content bench.md -ErrorAction SilentlyContinue | Add-Content $env:GITHUB_STEP_SUMMARY
+          Add-Content $env:GITHUB_STEP_SUMMARY '```'
+          Add-Content $env:GITHUB_STEP_SUMMARY "## 编译器轴（qlmc vs stage-0）"
+          Add-Content $env:GITHUB_STEP_SUMMARY '```'
+          Get-Content compiler.md -ErrorAction SilentlyContinue | Add-Content $env:GITHUB_STEP_SUMMARY
+          Add-Content $env:GITHUB_STEP_SUMMARY '```'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-windows
+          path: |
+            bench.md
+            compiler.md
+          retention-days: 90
+
+  posix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: 语言基准（C / Go / Python 参照值）
+        run: |
+          python bench/speed/run.py --langs c go python --reps "$REPS" --markdown 2>&1 | tee bench.md
+
+      - name: 写 job summary
+        if: always()
+        run: |
+          {
+            echo "## 语言基准 · ${{ matrix.os }}（qlmc 无该平台后端）"
+            echo '```'
+            cat bench.md 2>/dev/null || echo "(没跑出来)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.os }}
+          path: bench.md
+          retention-days: 90

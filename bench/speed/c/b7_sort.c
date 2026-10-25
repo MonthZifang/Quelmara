@@ -2,12 +2,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <windows.h>
-
-static LARGE_INTEGER _f, _a, _b;
-#define T0() do { QueryPerformanceFrequency(&_f); QueryPerformanceCounter(&_a); } while (0)
-#define T1() do { QueryPerformanceCounter(&_b); } while (0)
-#define TPRINT() do { printf("T\n%lld\n", (long long)((_b.QuadPart - _a.QuadPart) * 1000000000LL / _f.QuadPart)); } while (0)
+#include "bench.h"
 
 
 static void qsort_i64(int64_t *a, int64_t lo, int64_t hi) {

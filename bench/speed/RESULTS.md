@@ -1,5 +1,12 @@
 # 实测结果 —— Quelmara vs C / Go / Python
 
+> **⚠️ 权威来源是 CI**：`.github/workflows/bench.yml`。下面这张表是**本机**测的
+> （开着 VBS，进程创建 447 ms、单次抖动可达 ±40%），只用来做"改完有没有变慢"的
+> 粗判。**对外引用请用 CI 的 job summary / artifact** —— 那边是干净 runner，
+> 而且有 Linux / macOS 的 C/Go/Python 参照值（qlmc 目前只有 PE 后端，posix 没有
+> 它的数字）。口径说明见 `README.md` 的「在 CI 里跑」一节。
+
+
 机器：Intel Xeon E5-2666 v3 @ 2.90 GHz（20 逻辑核 / 31.8 GB / Windows 11 Pro），
 **VBS（虚拟化安全）开着**，噪声大 —— 所有数字都是「N 次里的最小值」，只做同表横向比较。
 
