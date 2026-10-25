@@ -5181,7 +5181,11 @@ fn _gen_memcmp(ctx: Ctx) {
 const HDR_BASE = 64
 const FN_HDR = 7
 const MAX_THREADS = 8
-const ARENA_CAP = 16 * 1024 * 1024
+// 并行编译的工作区大小（每个线程 per = (ARENA_CAP - 头)/nt 字节）。
+// **别开太大**：它是从堆里 mem_alloc 的，而堆是 BSS_SIZE。v2.35 实测：
+// 16 MB 的 arena 让 stage-2 编自己时堆游标冲到 31.7 MB / 32 MB（耗尽 → AV）。
+// qlmc 自己产物的 .text 只有 440 KB，fixup/label 加起来约 1 MB，4 MB 足够。
+const ARENA_CAP = 4 * 1024 * 1024
 // 堆大小：**必须大于 ARENA_CAP（16 MB）**，否则 `mem_alloc(ARENA_CAP)` 会静默
 // 越过 .bss 末尾，之后所有分配都落在未映射页上（v2.34 实测：stage-2 崩在
 // 基址 +17.3 MB 处）。.bss 不占文件体积、按需提交，给足没有代价。
@@ -6111,6 +6115,28 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
 /// 把 (指针, 长度) 包成一个 Quelmara 串：alloc(n+9) + [len] + 拷贝 + NUL。
 /// mem_str 内建与 int.to_str 共用。
 fn _bi_mem_str(fc: FnCtx, p: int, n: int) -> int {
+    // 长度必须是"看起来合理"的非负数：上游 wsprintfA / GetFileSize 失败时会返回
+    // -1 / 0xFFFFFFFF，直接拿去 alloc(n+9) + memcpy 会变成一次巨大的拷贝（AV）。
+    // 这里 fail-fast，把静默崩溃换成能定位的报错（v2.35）。
+    let lneg = _newlab(fc.labs)
+    let lok = _newlab(fc.labs)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    _ir_emit(fc, OP_JCMP, 0x8C, n, z, lneg)      // jl：n < 0
+    let lim = _vnew(fc)
+    fc.vty.set(lim, TY_INT)
+    _ir_emit(fc, OP_CONST, lim, 0, 0, 67108864)  // 64 MB 上限
+    _ir_emit(fc, OP_JCMP, 0x8F, n, lim, lneg)    // jg
+    _ir_emit(fc, OP_JMP, 0, 0, 0, lok)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lneg)
+    // 退 7 是这条检查的指纹（降级期拿不到字符串常量：`_str_id` 要解析期的 P，
+    // 而且会改共享的 strs 表——并行编译下不安全）
+    let seven = _vnew(fc)
+    fc.vty.set(seven, TY_INT)
+    _ir_emit(fc, OP_CONST, seven, 0, 0, 7)
+    _ir_emit(fc, OP_EXIT, 0, seven, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
     let sz = _vnew(fc)
         fc.vty.set(sz, TY_INT)
         let nine = _vnew(fc)
@@ -6607,10 +6633,13 @@ fn _gen_alloc(ctx: Ctx) {
     let f4 = len(code)
     _w32(code, 0)
     _addfix(ctx.fixes, f4, 16, 4)
-    _b(code, 0x48)                         // add rcx, HEAP_LIMIT（imm32 够用：32 MB）
+    _b(code, 0x48)                         // add rcx, HEAP_LIMIT
     _b(code, 0x81)
     _b(code, 0xC1)
-    _w32(code, BSS_SIZE - 64)
+    // 堆起点是 **bss+16**，所以上限要留出这 16 字节再扣一页余量。
+    // 早先写 `BSS_SIZE-64`（按 bss+0 算）→ 上限比 .bss 末尾还高 184 KB，
+    // 越界检查形同虚设，越界后照样 AV（v2.35 踩）。
+    _w32(code, BSS_SIZE - 4096)
     _b(code, 0x49)                         // cmp r8, rcx
     _b(code, 0x39)
     _b(code, 0xC8)

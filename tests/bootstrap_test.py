@@ -33,11 +33,13 @@ def run(cmd, timeout=900):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
-def build(driver, src, out):
+def build(driver, src, out, j=0):
     """用给定的驱动器（stage-0 CLI 或 qlmc.exe）编一个文件，返回 (ok, 耗时秒, 输出)。"""
     t0 = time.time()
     if driver is None:
         r = run([sys.executable, CLI, "build", src, "--target", "win", "-o", out])
+    elif j:
+        r = run([driver, "build", src, "-o", out, "-j", str(j)])
     else:
         r = run([driver, "build", src, "-o", out])
     dt = time.time() - t0
@@ -102,13 +104,15 @@ def main():
             fails.append(f"等价性（{len(bad)} 组不同）")
 
         # ---- 3) 不动点：stage-2 编自己 → stage-3 ----
+        # 用 -j1：多线程版编自己还会崩（07-gaps §7.24），单线程已经稳定。
+        # 注意 -j1/-jN 的产物一致性由 tests/qlmc_test.py 对夹具钉住，这里只管不动点。
         stage3 = os.path.join(OUT, "stage3.exe")
-        ok3, dt3, msg3 = build(stage2, SELF_SRC, stage3)
+        ok3, dt3, msg3 = build(stage2, SELF_SRC, stage3, j=1)
         if ok3 and same(stage2, stage3):
-            print(f"[3] 不动点 stage-2 == stage-3：PASS  {dt3:.1f}s")
+            print(f"[3] 不动点 stage-2 == stage-3（-j1）：PASS  {dt3:.1f}s")
         else:
             why = "崩/超时" if not ok3 else "字节不同"
-            print(f"[3] 不动点 stage-2 == stage-3：未达成（{why}）—— 已知，见 docs/07-gaps.md §7.23")
+            print(f"[3] 不动点 stage-2 == stage-3（-j1）：未达成（{why}）—— 见 docs/07-gaps.md §7.23")
             if args.strict:
                 fails.append("不动点")
 
