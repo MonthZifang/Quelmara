@@ -2364,6 +2364,7 @@ const RT_FDIV = 19
 const RT_ITOF = 20      // int -> f64
 const RT_FTOI = 21      // f64 -> int（向零截断）
 const RT_FNEG = 22      // f64 取负（翻符号位，不是对地址取负）
+const RT_F64FMT = 23    // f64 -> 十进制文本（写进调用方给的缓冲，返回长度）
 
 fn _slot_disp(slot: int) -> int {
     return -8 * (slot + 1)
@@ -4154,12 +4155,22 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
     if nd.op == S_PRINT {
         let v = _lower_expr(fc, nd.a)
         if fc.vty.get(v) == TY_F64 {
-            // print(f64) 还没做（v2.39 试过两条路都不通，见 07-gaps §7.26）：
-            //   ① wsprintfA（user32）不支持 `%f` —— 只认 %d/%u/%x/%s/%c
-            //   ② msvcrt 的 sprintf 在无 CRT 上下文里写不出东西（管道本身用 stub 验证过是通的）
-            // 所以只能像 stage-0 那样手写整数路径格式化（x*1e6 取整 → 拆整数/小数 → 补零 → 去尾零）。
-            eprint("qlmc: print 还不支持 f64（用 x.to_int()，或等手写格式化）")
-            exit(2)
+            // f64：手写格式化（__f64_fmt）再按 str 打印（v2.42）
+            let sz = _vnew(fc)
+            fc.vty.set(sz, TY_INT)
+            _ir_emit(fc, OP_CONST, sz, 0, 0, 96)
+            _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+            let buf = _vnew(fc)
+            fc.vty.set(buf, TY_INT)
+            _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
+            _ir_emit(fc, OP_ARG, 0, buf, 0, 0)
+            _ir_emit(fc, OP_ARG, 0, v, 0, 1)
+            let n = _vnew(fc)
+            fc.vty.set(n, TY_INT)
+            _ir_emit(fc, OP_CALLRT, n, 0, 0, RT_F64FMT)
+            let sv = _bi_mem_str(fc, buf, n)
+            _ir_emit(fc, OP_PRINT, 0, sv, 0, TY_STR)
+            return
         }
         if _ty_is_agg(fc.vty.get(v)) {
             eprint("qlmc: print 只支持 int / bool / str")
@@ -5314,6 +5325,643 @@ fn _gen_fneg(ctx: Ctx) {
     _b(code, 0x01)
     _b(code, 0x31)                             // xor eax, eax
     _b(code, 0xC0)
+    _ret(code)
+}
+
+/// __f64_fmt(rcx = 缓冲, rdx = f64 源槽) -> rax = 文本长度（不含 NUL）
+///
+/// **为什么手写**：`wsprintfA`（user32）不支持浮点，msvcrt 的 `sprintf` 在无 CRT
+/// 上下文里写不出东西（两条路 v2.39 实测过，见 07-gaps §7.26）。口径对齐 stage-0
+/// 的 `__f64_to_str`：
+///   `|x| == 0` → `0`；NaN → `nan`；±inf → `inf` / `-inf`
+///   `1e-6 <= |x| < 1e12` → 定点：`u=(i64)(|x|*1e6+0.5)`、`ip=u/1e6`、`fp=u%1e6`，
+///                          打印 ip，`fp != 0` 时 `.` + 6 位零填充 + 去尾零
+///   其余 → 科学计数
+///
+/// 状态全放栈槽（调 `__i64_fmt` 时所有易失寄存器都不保）：
+///   [rsp+0x40]=缓冲  [rsp+0x48]=pos  [rsp+0x50]=fp/rest  [rsp+0x58]=exp
+///
+/// 小数那 6 位用**只碰低寄存器**的除法循环（rcx/rdx/rax 都是低编号，不需要
+/// REX.R/X）—— v2.40 用 r9/r10 做下标，REX 前缀连错三处，白折腾一轮。
+fn _gen_f64_fmt(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_F64FMT, len(code))
+    let lzero = _newlab(labs)
+    let lnan = _newlab(labs)
+    let linf = _newlab(labs)
+    let linfp = _newlab(labs)
+    let lsign = _newlab(labs)
+    let lsci = _newlab(labs)
+    let lemit = _newlab(labs)
+    let lhi = _newlab(labs)
+    let llo = _newlab(labs)
+    let llo2 = _newlab(labs)
+    let lnorm = _newlab(labs)
+    let lmn = _newlab(labs)
+    let lnofrac = _newlab(labs)
+    let lepos = _newlab(labs)
+    let leout = _newlab(labs)
+    let ldl = _newlab(labs)
+    let ltr = _newlab(labs)
+    let ltrp = _newlab(labs)
+    let ltrd = _newlab(labs)
+    let lfin = _newlab(labs)
+    let ldone = _newlab(labs)
+    _b(code, 0x55)                             // push rbp
+    _b(code, 0x48)
+    _b(code, 0x89)
+    _b(code, 0xE5)
+    _sub_rsp(code, 0x70)
+    _b(code, 0x48)                             // mov [rsp+0x40], rcx（缓冲）
+    _b(code, 0x89)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0x48)                             // mov qword [rsp+0x48], 0（pos）
+    _b(code, 0xC7)
+    _b(code, 0x44)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _w32(code, 0)
+    _b(code, 0xF2)                             // movsd xmm0, [rdx]
+    _b(code, 0x0F)
+    _b(code, 0x10)
+    _b(code, 0x02)
+    _b(code, 0x66)                             // movq rax, xmm0
+    _b(code, 0x48)
+    _b(code, 0x0F)
+    _b(code, 0x7E)
+    _b(code, 0xC0)
+    _b(code, 0x49)                             // mov r8, 0x7fff…
+    _b(code, 0xB8)
+    _w64(code, 0x7FFFFFFFFFFFFFFF)
+    _b(code, 0x4C)                             // and rax, r8
+    _b(code, 0x21)
+    _b(code, 0xC0)
+    _b(code, 0x48)                             // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let jz0 = _jcc(code, 0x84)                 // jz .zero
+    _addfix(ctx.fixes, jz0, lzero, FK_LAB)
+    _b(code, 0x66)                             // ucomisd xmm0, xmm0
+    _b(code, 0x0F)
+    _b(code, 0x2E)
+    _b(code, 0xC0)
+    let jp1 = _jcc(code, 0x8A)                 // jp .nan
+    _addfix(ctx.fixes, jp1, lnan, FK_LAB)
+    _b(code, 0x49)                             // mov r9, DBL_MAX
+    _b(code, 0xB9)
+    _w64(code, 0x7FEFFFFFFFFFFFFF)
+    _b(code, 0x4C)                             // cmp rax, r9
+    _b(code, 0x39)
+    _b(code, 0xC8)
+    let ja1 = _jcc(code, 0x87)                 // ja .inf
+    _addfix(ctx.fixes, ja1, linf, FK_LAB)
+    _b(code, 0x66)                             // movq xmm1, rax（|x|）
+    _b(code, 0x48)
+    _b(code, 0x0F)
+    _b(code, 0x6E)
+    _b(code, 0xC8)
+    _b(code, 0x66)                             // movq rax, xmm0（看符号位）
+    _b(code, 0x48)
+    _b(code, 0x0F)
+    _b(code, 0x7E)
+    _b(code, 0xC0)
+    _b(code, 0x48)                             // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let jns1 = _jcc(code, 0x89)                // jns .signok
+    _addfix(ctx.fixes, jns1, lsign, FK_LAB)
+    _b(code, 0x48)                             // mov rcx, [rsp+0x40]
+    _b(code, 0x8B)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0xC6)                             // mov byte [rcx], 45 ('-')
+    _b(code, 0x01)
+    _b(code, 45)
+    _b(code, 0x48)                             // mov qword [rsp+0x48], 1
+    _b(code, 0xC7)
+    _b(code, 0x44)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _w32(code, 1)
+    _setlab(labs, code, lsign)
+    // 范围：1e-6 <= |x| < 1e12 → 定点；否则科学计数。两条分支都算出 (ip, fp, exp)
+    // 之后走**同一段输出代码**（exp = -9999 表示"定点，没有指数"）。
+    _b(code, 0x49)                             // mov r9, 1e-6
+    _b(code, 0xB9)
+    _w64(code, 0x3EB0C6F7A0B5ED8D)
+    _b(code, 0x66)                             // movq xmm2, r9
+    _b(code, 0x49)
+    _b(code, 0x0F)
+    _b(code, 0x6E)
+    _b(code, 0xD1)
+    _b(code, 0x66)                             // ucomisd xmm1, xmm2
+    _b(code, 0x0F)
+    _b(code, 0x2E)
+    _b(code, 0xCA)
+    let jb1 = _jcc(code, 0x82)                 // jb .sci
+    _addfix(ctx.fixes, jb1, lsci, FK_LAB)
+    _b(code, 0x49)                             // mov r9, 1e12
+    _b(code, 0xB9)
+    _w64(code, 0x426D1A94A2000000)
+    _b(code, 0x66)                             // movq xmm2, r9
+    _b(code, 0x49)
+    _b(code, 0x0F)
+    _b(code, 0x6E)
+    _b(code, 0xD1)
+    _b(code, 0x66)                             // ucomisd xmm1, xmm2
+    _b(code, 0x0F)
+    _b(code, 0x2E)
+    _b(code, 0xCA)
+    let jae1 = _jcc(code, 0x83)                // jae .sci
+    _addfix(ctx.fixes, jae1, lsci, FK_LAB)
+    // ---- 定点：rax = (i64)(|x|*1e6 + 0.5)，exp 打定点标记 ----
+    _b(code, 0x49)                             // mov r9, 1e6
+    _b(code, 0xB9)
+    _w64(code, 0x412E848000000000)
+    _b(code, 0x66)                             // movq xmm2, r9
+    _b(code, 0x49)
+    _b(code, 0x0F)
+    _b(code, 0x6E)
+    _b(code, 0xD1)
+    _b(code, 0xF2)                             // mulsd xmm1, xmm2
+    _b(code, 0x0F)
+    _b(code, 0x59)
+    _b(code, 0xCA)
+    _b(code, 0x49)                             // mov r9, 0.5
+    _b(code, 0xB9)
+    _w64(code, 0x3FE0000000000000)
+    _b(code, 0x66)                             // movq xmm2, r9
+    _b(code, 0x49)
+    _b(code, 0x0F)
+    _b(code, 0x6E)
+    _b(code, 0xD1)
+    _b(code, 0xF2)                             // addsd xmm1, xmm2
+    _b(code, 0x0F)
+    _b(code, 0x58)
+    _b(code, 0xCA)
+    _b(code, 0xF2)                             // cvttsd2si rax, xmm1
+    _b(code, 0x48)
+    _b(code, 0x0F)
+    _b(code, 0x2C)
+    _b(code, 0xC1)
+    _b(code, 0x48)                             // mov qword [rsp+0x58], -9999
+    _b(code, 0xC7)
+    _b(code, 0x44)
+    _b(code, 0x24)
+    _b(code, 0x58)
+    _w32(code, -9999)
+    let jmpf = _jmp(code)
+    _addfix(ctx.fixes, jmpf, lemit, FK_LAB)
+    // ---- 科学计数：把 |x| 归一到 [1,10)，同时数指数 ----
+    _setlab(labs, code, lsci)
+    _b(code, 0x45)                             // xor r11d, r11d（exp = 0）
+    _b(code, 0x31)
+    _b(code, 0xDB)
+    _b(code, 0x49)                             // mov r9, 10.0
+    _b(code, 0xB9)
+    _w64(code, 0x4024000000000000)
+    _b(code, 0x66)                             // movq xmm2, r9
+    _b(code, 0x49)
+    _b(code, 0x0F)
+    _b(code, 0x6E)
+    _b(code, 0xD1)
+    _setlab(labs, code, lhi)
+    _b(code, 0x66)                             // ucomisd xmm1, xmm2
+    _b(code, 0x0F)
+    _b(code, 0x2E)
+    _b(code, 0xCA)
+    let jb2 = _jcc(code, 0x82)                 // jb .lo
+    _addfix(ctx.fixes, jb2, llo, FK_LAB)
+    _b(code, 0xF2)                             // divsd xmm1, xmm2
+    _b(code, 0x0F)
+    _b(code, 0x5E)
+    _b(code, 0xCA)
+    _b(code, 0x49)                             // inc r11
+    _b(code, 0xFF)
+    _b(code, 0xC3)
+    let jmp3 = _jmp(code)
+    _addfix(ctx.fixes, jmp3, lhi, FK_LAB)
+    _setlab(labs, code, llo)
+    _b(code, 0x49)                             // mov r9, 1.0
+    _b(code, 0xB9)
+    _w64(code, 0x3FF0000000000000)
+    _b(code, 0x66)                             // movq xmm3, r9
+    _b(code, 0x49)
+    _b(code, 0x0F)
+    _b(code, 0x6E)
+    _b(code, 0xD9)
+    _setlab(labs, code, llo2)
+    _b(code, 0x66)                             // ucomisd xmm1, xmm3
+    _b(code, 0x0F)
+    _b(code, 0x2E)
+    _b(code, 0xCB)
+    let jae2 = _jcc(code, 0x83)                // jae .norm
+    _addfix(ctx.fixes, jae2, lnorm, FK_LAB)
+    _b(code, 0xF2)                             // mulsd xmm1, xmm2
+    _b(code, 0x0F)
+    _b(code, 0x59)
+    _b(code, 0xCA)
+    _b(code, 0x49)                             // dec r11
+    _b(code, 0xFF)
+    _b(code, 0xCB)
+    let jmp4 = _jmp(code)
+    _addfix(ctx.fixes, jmp4, llo2, FK_LAB)
+    _setlab(labs, code, lnorm)
+    _b(code, 0x49)                             // mov r9, 1e6
+    _b(code, 0xB9)
+    _w64(code, 0x412E848000000000)
+    _b(code, 0x66)                             // movq xmm2, r9
+    _b(code, 0x49)
+    _b(code, 0x0F)
+    _b(code, 0x6E)
+    _b(code, 0xD1)
+    _b(code, 0xF2)                             // mulsd xmm1, xmm2
+    _b(code, 0x0F)
+    _b(code, 0x59)
+    _b(code, 0xCA)
+    _b(code, 0x49)                             // mov r9, 0.5
+    _b(code, 0xB9)
+    _w64(code, 0x3FE0000000000000)
+    _b(code, 0x66)                             // movq xmm2, r9
+    _b(code, 0x49)
+    _b(code, 0x0F)
+    _b(code, 0x6E)
+    _b(code, 0xD1)
+    _b(code, 0xF2)                             // addsd xmm1, xmm2
+    _b(code, 0x0F)
+    _b(code, 0x58)
+    _b(code, 0xCA)
+    _b(code, 0xF2)                             // cvttsd2si rax, xmm1
+    _b(code, 0x48)
+    _b(code, 0x0F)
+    _b(code, 0x2C)
+    _b(code, 0xC1)
+    _b(code, 0x48)                             // cmp rax, 10000000
+    _b(code, 0x3D)
+    _w32(code, 10000000)
+    let jne3 = _jcc(code, 0x85)                // jne .mn
+    _addfix(ctx.fixes, jne3, lmn, FK_LAB)
+    _b(code, 0x48)                             // mov rax, 1000000（进位到 1e7 时回退一位）
+    _b(code, 0xC7)
+    _b(code, 0xC0)
+    _w32(code, 1000000)
+    _b(code, 0x49)                             // inc r11
+    _b(code, 0xFF)
+    _b(code, 0xC3)
+    _setlab(labs, code, lmn)
+    _b(code, 0x4C)                             // mov [rsp+0x58], r11（指数）
+    _b(code, 0x89)
+    _b(code, 0x5C)
+    _b(code, 0x24)
+    _b(code, 0x58)
+    // ---- 两条分支汇合：rax = 缩放后的整数，拆 ip / fp ----
+    _setlab(labs, code, lemit)
+    _b(code, 0x48)                             // xor edx, edx
+    _b(code, 0x31)
+    _b(code, 0xD2)
+    _b(code, 0x49)                             // mov r9, 1000000
+    _b(code, 0xB9)
+    _w64(code, 1000000)
+    _b(code, 0x49)                             // div r9 → rax=ip, rdx=fp
+    _b(code, 0xF7)
+    _b(code, 0xF1)
+    _b(code, 0x48)                             // mov [rsp+0x50], rdx（fp）
+    _b(code, 0x89)
+    _b(code, 0x54)
+    _b(code, 0x24)
+    _b(code, 0x50)
+    _b(code, 0x48)                             // mov rcx, [rsp+0x40]
+    _b(code, 0x8B)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0x48)                             // add rcx, [rsp+0x48]
+    _b(code, 0x03)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 0x48)                             // mov rdx, rax
+    _b(code, 0x89)
+    _b(code, 0xC2)
+    let c1 = _call_rel(code)
+    _addfix(ctx.fixes, c1, RT_I64FMT, FK_RT)
+    _b(code, 0x48)                             // add [rsp+0x48], rax
+    _b(code, 0x01)
+    _b(code, 0x44)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 0x4C)                             // mov r8, [rsp+0x50]（fp）
+    _b(code, 0x8B)
+    _b(code, 0x44)
+    _b(code, 0x24)
+    _b(code, 0x50)
+    _b(code, 0x4D)                             // test r8, r8
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let jz1 = _jcc(code, 0x84)                 // jz .nofrac
+    _addfix(ctx.fixes, jz1, lnofrac, FK_LAB)
+    _b(code, 0x48)                             // mov rcx, [rsp+0x40]
+    _b(code, 0x8B)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0x48)                             // add rcx, [rsp+0x48]
+    _b(code, 0x03)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 0xC6)                             // mov byte [rcx], 46 ('.')
+    _b(code, 0x01)
+    _b(code, 46)
+    _b(code, 0x48)                             // add qword [rsp+0x48], 1
+    _b(code, 0x83)
+    _b(code, 0x44)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 1)
+    _b(code, 0x48)                             // mov rcx, [rsp+0x40]
+    _b(code, 0x8B)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0x48)                             // add rcx, [rsp+0x48]
+    _b(code, 0x03)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 0x48)                             // add rcx, 6
+    _b(code, 0x83)
+    _b(code, 0xC1)
+    _b(code, 6)
+    _b(code, 0x49)                             // mov r11, 6
+    _b(code, 0xC7)
+    _b(code, 0xC3)
+    _w32(code, 6)
+    _setlab(labs, code, ldl)
+    _b(code, 0x4C)                             // mov rax, r8
+    _b(code, 0x89)
+    _b(code, 0xC0)
+    _b(code, 0x31)                             // xor edx, edx
+    _b(code, 0xD2)
+    _b(code, 0x49)                             // mov r9, 10
+    _b(code, 0xC7)
+    _b(code, 0xC1)
+    _w32(code, 10)
+    _b(code, 0x49)                             // div r9
+    _b(code, 0xF7)
+    _b(code, 0xF1)
+    _b(code, 0x49)                             // mov r8, rax
+    _b(code, 0x89)
+    _b(code, 0xC0)
+    _b(code, 0x80)                             // add dl, 48
+    _b(code, 0xC2)
+    _b(code, 48)
+    _b(code, 0x48)                             // dec rcx
+    _b(code, 0xFF)
+    _b(code, 0xC9)
+    _b(code, 0x88)                             // mov [rcx], dl
+    _b(code, 0x11)
+    _b(code, 0x49)                             // dec r11
+    _b(code, 0xFF)
+    _b(code, 0xCB)
+    let jnz1 = _jcc(code, 0x85)                // jnz .dl
+    _addfix(ctx.fixes, jnz1, ldl, FK_LAB)
+    _b(code, 0x48)                             // add qword [rsp+0x48], 6
+    _b(code, 0x83)
+    _b(code, 0x44)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 6)
+    _b(code, 0x4C)                             // mov r10, [rsp+0x48]
+    _b(code, 0x8B)
+    _b(code, 0x54)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _setlab(labs, code, ltr)
+    _b(code, 0x48)                             // mov rcx, [rsp+0x40]
+    _b(code, 0x8B)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0x4E)                             // lea r9, [rcx+r10-1]（W|R|X）
+    _b(code, 0x8D)
+    _b(code, 0x4C)
+    _b(code, 0x11)
+    _b(code, 0xFF)
+    _b(code, 0x41)                             // movzx eax, byte [r9]
+    _b(code, 0x0F)
+    _b(code, 0xB6)
+    _b(code, 0x01)
+    _b(code, 0x83)                             // cmp eax, 48
+    _b(code, 0xF8)
+    _b(code, 48)
+    let jne1 = _jcc(code, 0x85)                // jne .trp
+    _addfix(ctx.fixes, jne1, ltrp, FK_LAB)
+    _b(code, 0x49)                             // dec r10
+    _b(code, 0xFF)
+    _b(code, 0xCA)
+    let jmp5 = _jmp(code)
+    _addfix(ctx.fixes, jmp5, ltr, FK_LAB)
+    _setlab(labs, code, ltrp)
+    _b(code, 0x41)                             // movzx eax, byte [r9]
+    _b(code, 0x0F)
+    _b(code, 0xB6)
+    _b(code, 0x01)
+    _b(code, 0x83)                             // cmp eax, 46
+    _b(code, 0xF8)
+    _b(code, 46)
+    let jne2 = _jcc(code, 0x85)                // jne .trd
+    _addfix(ctx.fixes, jne2, ltrd, FK_LAB)
+    _b(code, 0x49)                             // dec r10
+    _b(code, 0xFF)
+    _b(code, 0xCA)
+    _setlab(labs, code, ltrd)
+    _b(code, 0x4C)                             // mov [rsp+0x48], r10
+    _b(code, 0x89)
+    _b(code, 0x54)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    // ---- 指数（定点分支的 exp = -9999，直接跳过）----
+    _setlab(labs, code, lnofrac)
+    _b(code, 0x4C)                             // mov r11, [rsp+0x58]
+    _b(code, 0x8B)
+    _b(code, 0x5C)
+    _b(code, 0x24)
+    _b(code, 0x58)
+    _b(code, 0x49)                             // mov r9, -9999
+    _b(code, 0xB9)
+    _w64(code, -9999)
+    _b(code, 0x4D)                             // cmp r11, r9
+    _b(code, 0x39)
+    _b(code, 0xCB)
+    let je1 = _jcc(code, 0x84)                 // je .fin
+    _addfix(ctx.fixes, je1, lfin, FK_LAB)
+    _b(code, 0x48)                             // mov rcx, [rsp+0x40]
+    _b(code, 0x8B)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0x48)                             // add rcx, [rsp+0x48]
+    _b(code, 0x03)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 0xC6)                             // mov byte [rcx], 101 ('e')
+    _b(code, 0x01)
+    _b(code, 101)
+    _b(code, 0x48)                             // add qword [rsp+0x48], 1
+    _b(code, 0x83)
+    _b(code, 0x44)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 1)
+    _b(code, 0x4D)                             // test r11, r11
+    _b(code, 0x85)
+    _b(code, 0xDB)
+    let jns3 = _jcc(code, 0x89)                // jns .epos
+    _addfix(ctx.fixes, jns3, lepos, FK_LAB)
+    _b(code, 0x48)                             // mov rcx, [rsp+0x40]
+    _b(code, 0x8B)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0x48)                             // add rcx, [rsp+0x48]
+    _b(code, 0x03)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 0xC6)                             // mov byte [rcx], 45 ('-')
+    _b(code, 0x01)
+    _b(code, 45)
+    _b(code, 0x48)                             // add qword [rsp+0x48], 1
+    _b(code, 0x83)
+    _b(code, 0x44)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 1)
+    _b(code, 0x49)                             // neg r11
+    _b(code, 0xF7)
+    _b(code, 0xDB)
+    let jmp6 = _jmp(code)
+    _addfix(ctx.fixes, jmp6, leout, FK_LAB)
+    _setlab(labs, code, lepos)
+    _b(code, 0x48)                             // mov rcx, [rsp+0x40]
+    _b(code, 0x8B)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0x48)                             // add rcx, [rsp+0x48]
+    _b(code, 0x03)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 0xC6)                             // mov byte [rcx], 43 ('+')
+    _b(code, 0x01)
+    _b(code, 43)
+    _b(code, 0x48)                             // add qword [rsp+0x48], 1
+    _b(code, 0x83)
+    _b(code, 0x44)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 1)
+    _setlab(labs, code, leout)
+    _b(code, 0x48)                             // mov rcx, [rsp+0x40]
+    _b(code, 0x8B)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0x48)                             // add rcx, [rsp+0x48]
+    _b(code, 0x03)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _b(code, 0x4C)                             // mov rdx, r11
+    _b(code, 0x89)
+    _b(code, 0xDA)
+    let c2 = _call_rel(code)
+    _addfix(ctx.fixes, c2, RT_I64FMT, FK_RT)
+    _b(code, 0x48)                             // add [rsp+0x48], rax
+    _b(code, 0x01)
+    _b(code, 0x44)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    _setlab(labs, code, lfin)
+    _b(code, 0x48)                             // mov rax, [rsp+0x48]
+    _b(code, 0x8B)
+    _b(code, 0x44)
+    _b(code, 0x24)
+    _b(code, 0x48)
+    let jmp7 = _jmp(code)
+    _addfix(ctx.fixes, jmp7, ldone, FK_LAB)
+    // ---- 特殊值 ----
+    _setlab(labs, code, lzero)
+    _b(code, 0x48)                             // mov rcx, [rsp+0x40]
+    _b(code, 0x8B)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0xC6)                             // mov byte [rcx], 48 ('0')
+    _b(code, 0x01)
+    _b(code, 48)
+    _b(code, 0xB8)                             // mov eax, 1
+    _w32(code, 1)
+    let jmp8 = _jmp(code)
+    _addfix(ctx.fixes, jmp8, ldone, FK_LAB)
+    _setlab(labs, code, lnan)
+    _b(code, 0x48)                             // mov rcx, [rsp+0x40]
+    _b(code, 0x8B)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0xC7)                             // mov dword [rcx], "nan"
+    _b(code, 0x01)
+    _w32(code, 0x006E616E)
+    _b(code, 0xB8)                             // mov eax, 3
+    _w32(code, 3)
+    let jmp9 = _jmp(code)
+    _addfix(ctx.fixes, jmp9, ldone, FK_LAB)
+    _setlab(labs, code, linf)
+    _b(code, 0x48)                             // mov rcx, [rsp+0x40]
+    _b(code, 0x8B)
+    _b(code, 0x4C)
+    _b(code, 0x24)
+    _b(code, 0x40)
+    _b(code, 0x66)                             // movq rax, xmm0
+    _b(code, 0x48)
+    _b(code, 0x0F)
+    _b(code, 0x7E)
+    _b(code, 0xC0)
+    _b(code, 0x48)                             // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let jns4 = _jcc(code, 0x89)                // jns .infp
+    _addfix(ctx.fixes, jns4, linfp, FK_LAB)
+    _b(code, 0xC6)                             // mov byte [rcx], 45 ('-')
+    _b(code, 0x01)
+    _b(code, 45)
+    _b(code, 0xC7)                             // mov dword [rcx+1], "inf"
+    _b(code, 0x41)
+    _b(code, 0x01)
+    _w32(code, 0x00666E69)
+    _b(code, 0xB8)                             // mov eax, 4
+    _w32(code, 4)
+    let jmpA = _jmp(code)
+    _addfix(ctx.fixes, jmpA, ldone, FK_LAB)
+    _setlab(labs, code, linfp)
+    _b(code, 0xC7)                             // mov dword [rcx], "inf"
+    _b(code, 0x01)
+    _w32(code, 0x00666E69)
+    _b(code, 0xB8)                             // mov eax, 3
+    _w32(code, 3)
+    _setlab(labs, code, ldone)
+    _b(code, 0x48)                             // mov rsp, rbp
+    _b(code, 0x89)
+    _b(code, 0xEC)
+    _b(code, 0x5D)                             // pop rbp
     _ret(code)
 }
 
@@ -8020,10 +8668,10 @@ fn main() {
     }
     let nl = vec[int].new(1)
     nl.push(0)
-    // 运行库例程位置表：RT_PINT..RT_FNEG 共 23 个（加例程时这里要一起改）
-    let rt_pos = vec[int].new(23)
+    // 运行库例程位置表：RT_PINT..RT_F64FMT 共 24 个（加例程时这里要一起改）
+    let rt_pos = vec[int].new(24)
     si = 0
-    while si < 23 {
+    while si < 24 {
         rt_pos.push(0)
         si = si + 1
     }
@@ -8065,6 +8713,7 @@ fn main() {
     _gen_itof(ctx)
     _gen_ftoi(ctx)
     _gen_fneg(ctx)
+    _gen_f64_fmt(ctx)
     let rt_end = now_ns()
 
     // ---- 并行编译函数体 -------------------------------------------------

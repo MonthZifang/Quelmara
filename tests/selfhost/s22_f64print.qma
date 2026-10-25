@@ -1,0 +1,42 @@
+// s22_f64print.qma —— f64 打印（十进制格式化）的差分夹具（v2.42）
+//
+// 口径对齐 stage-0 的 `__f64_to_str`：
+//   * `|x| == 0` → `0`；NaN → `nan`；±inf → `inf` / `-inf`
+//   * `1e-6 <= |x| < 1e12` → 定点：6 位小数 + 去尾零
+//   * 其余 → 科学计数：尾数去尾零 + `e` + 符号 + 指数
+//
+// qlmc 这边是**手写机器码**（`__f64_fmt`）：`wsprintfA` 不支持浮点，
+// msvcrt 的 `sprintf` 在无 CRT 上下文里写不出东西（见 07-gaps §7.26）。
+fn main() {
+    // 定点区间的常见值
+    print(1.5)
+    print(2.25)
+    print(100.0)
+    print(0.1)
+    print(3.0)
+    print(250.0)
+    print(-1.5)
+    print(0.0)
+    print(-0.0)
+
+    // 6 位小数的舍入与去尾零
+    print(1.0 / 3.0)
+    print(0.000001)
+    print(123456789.123456789)
+    print(0.5)
+    print(0.25)
+    print(1.000001)
+
+    // 边界：刚好进/出定点区间
+    print(0.0000009)
+    print(999999999999.0)
+
+    // 科学计数
+    print(1e20)
+    print(1e-20)
+    print(1e300)
+    print(-1e20)
+    print(1.5e10)
+    print(9.99e11)
+    print(1.23456789e-7)
+}
