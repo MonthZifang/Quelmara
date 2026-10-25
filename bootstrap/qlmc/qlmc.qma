@@ -103,6 +103,7 @@ const K_STRUCT = 19
 const K_ENUM = 20
 const K_MATCH = 21
 const K_DEFER = 22
+const K_SPAWN = 23
 
 // 标点 id（多字符的按"最长匹配"先行）
 const P_LPAREN = 1
@@ -182,6 +183,8 @@ const E_CLOSURE = 59   // a = 合成函数的序号
 // 形参记录（v2.29）：只出现在 nodes 的"形参表"区段里，不是真正的表达式。
 // a = 名字 id，b = 类型 TY_*。Fn.pbase 指向这一段的起点。
 const E_FPARAM = 60
+// spawn f(args)（v2.32）：a = 函数名字 id，b/c/n/slot + nx 链 = 实参（同 E_CALL）
+const E_SPAWN = 61
 const E_ARM = 54       // a = 变体序号（-1 = 通配），b = 绑定名 id（-1 = 不绑定），c = 体      // a = 字符串表 id
 
 // 语句
@@ -301,6 +304,7 @@ fn _kw_id(w: str) -> int {
     if w == "enum" { return K_ENUM }
     if w == "match" { return K_MATCH }
     if w == "defer" { return K_DEFER }
+    if w == "spawn" { return K_SPAWN }
     return 0
 }
 
@@ -1096,6 +1100,48 @@ fn _unary(p: P, pos: vec[int]) -> int {
     return _primary(p, pos)
 }
 
+/// 解析 `(实参列表)` 并造一个调用形状的节点（E_CALL / E_SPAWN 共用）。
+/// 实参：前 4 个放 b/c/n/slot，第 5 个起挂 nx 链（v2.29 放开个数）。
+fn _call_node(p: P, pos: vec[int], op: int, nid: int) -> int {
+    _eat_p(p, pos, P_LPAREN)
+    let args = vec[int].new(4)
+    while !_is_p(p, pos, P_RPAREN) {
+        args.push(_expr(p, pos))
+        if _is_p(p, pos, P_COMMA) {
+            _adv(pos)
+        }
+    }
+    _eat_p(p, pos, P_RPAREN)
+    let mut a0 = -1
+    let mut a1 = -1
+    let mut a2 = -1
+    let mut a3 = -1
+    if len(args) > 0 { a0 = args.get(0) }
+    if len(args) > 1 { a1 = args.get(1) }
+    if len(args) > 2 { a2 = args.get(2) }
+    if len(args) > 3 { a3 = args.get(3) }
+    let cid = _node(p, op, nid, a0, a1)
+    p.nodes.set(cid, Node { op: op, a: nid, b: a0, c: a1, n: a2,
+                            slot: a3, ty: 0, nx: -1 })
+    if len(args) > 4 {
+        let mut first = -1
+        let mut last = -1
+        let mut i = 4
+        while i < len(args) {
+            let id = _node(p, E_AINIT, args.get(i), -1, -1)
+            if first < 0 {
+                first = id
+            } else {
+                _set_nx(p, last, id)
+            }
+            last = id
+            i = i + 1
+        }
+        _set_nx(p, cid, first)
+    }
+    return cid
+}
+
 fn _primary(p: P, pos: vec[int]) -> int {
     let t = _cur(p, pos)
     if t.k == T_NUM {
@@ -1113,6 +1159,21 @@ fn _primary(p: P, pos: vec[int]) -> int {
             v = 1
         }
         return _postfix(p, pos, _node(p, E_NUM, v, -1, -1))
+    }
+    if t.k == T_KW && t.n == K_SPAWN {
+        // spawn f(args) -> 任务句柄（v2.32）。只认"函数名 + 实参列表"，
+        // 不做 stage-0 那个 `spawn f(x).join()` 脱糖（用 join(spawn f(x)) 即可）。
+        _adv(pos)
+        let nm = _cur(p, pos)
+        if nm.k != T_NAME {
+            _fail(p, pos, "spawn 后面必须是函数调用")
+        }
+        _adv(pos)
+        if !_is_p(p, pos, P_LPAREN) {
+            _fail(p, pos, "spawn 后面必须是函数调用")
+        }
+        let sid = _call_node(p, pos, E_SPAWN, _name_id(p, nm.s))
+        return _postfix(p, pos, sid)
     }
     if t.k == T_KW && t.n == K_FN {
         // 闭包字面量：合成一个顶层函数，表达式值 = {code, 0}
@@ -1263,44 +1324,7 @@ fn _primary(p: P, pos: vec[int]) -> int {
             }
         }
         if _is_p(p, pos, P_LPAREN) {
-            _adv(pos)
-            // 实参：前 4 个放 b/c/n/slot，第 5 个起挂 nx 链（v2.29 放开个数）
-            let args = vec[int].new(4)
-            while !_is_p(p, pos, P_RPAREN) {
-                args.push(_expr(p, pos))
-                if _is_p(p, pos, P_COMMA) {
-                    _adv(pos)
-                }
-            }
-            _eat_p(p, pos, P_RPAREN)
-            let mut a0 = -1
-            let mut a1 = -1
-            let mut a2 = -1
-            let mut a3 = -1
-            if len(args) > 0 { a0 = args.get(0) }
-            if len(args) > 1 { a1 = args.get(1) }
-            if len(args) > 2 { a2 = args.get(2) }
-            if len(args) > 3 { a3 = args.get(3) }
-            let cid = _node(p, E_CALL, nid, a0, a1)
-            p.nodes.set(cid, Node { op: E_CALL, a: nid, b: a0, c: a1, n: a2,
-                                   slot: a3, ty: 0, nx: -1 })
-            if len(args) > 4 {
-                let mut first = -1
-                let mut last = -1
-                let mut i = 4
-                while i < len(args) {
-                    let id = _node(p, E_AINIT, args.get(i), -1, -1)
-                    if first < 0 {
-                        first = id
-                    } else {
-                        _set_nx(p, last, id)
-                    }
-                    last = id
-                    i = i + 1
-                }
-                _set_nx(p, cid, first)
-            }
-            return _postfix(p, pos, cid)
+            return _postfix(p, pos, _call_node(p, pos, E_CALL, nid))
         }
         return _postfix(p, pos, _node(p, E_VAR, nid, -1, -1))
     }
@@ -1780,10 +1804,14 @@ const SCN_RDATA = 0xC0000040
 
 // 导入符号（顺序 = IAT 槽顺序，别乱动）
 const I_GETSTD = 0
-const I_USER = 4        // 用户 @ffi 符号从第 4 个 IAT 槽开始
 const I_WRITE = 1
 const I_EXIT = 2
 const I_WSPRINTF = 3
+// v2.32 spawn/join 要用的三个 kernel32 符号（线程）
+const I_CREATE = 4
+const I_WAIT = 5
+const I_CLOSE = 6
+const I_USER = 7        // 用户 @ffi 符号从第 7 个 IAT 槽开始
 
 // ---------------------------------------------------------------------------
 // 字节发射
@@ -1844,7 +1872,7 @@ fn _mov_rr(code: vec[int], dst: int, src: int) {
 fn _mov_load(code: vec[int], dst: int, base: int, disp: int) {
     _rex2(code, 1, dst, base)
     _b(code, 0x8B)
-    _modrm(code, 2, dst, base)
+    _modrm_mem(code, 2, dst, base)
     _w32(code, disp)
 }
 
@@ -1852,7 +1880,7 @@ fn _mov_load(code: vec[int], dst: int, base: int, disp: int) {
 fn _mov_store(code: vec[int], base: int, disp: int, src: int) {
     _rex2(code, 1, src, base)
     _b(code, 0x89)
-    _modrm(code, 2, src, base)
+    _modrm_mem(code, 2, src, base)
     _w32(code, disp)
 }
 
@@ -2135,6 +2163,8 @@ const OP_STKFREE = 50  // add rsp, imm
 // dst = a + b*imm（imm = 元素字节步长）。vec 元素是聚合时步长不是 8，
 // OP_ADDRX 的 `shl 3` 就不够用了（v2.31）。
 const OP_ADDRXN = 51
+// dst = &运行库例程 imm（FK_RT）。spawn 要把线程入口地址交给 CreateThread
+const OP_RTADDR = 52
 
 struct Ir {
     op: int
@@ -2233,6 +2263,8 @@ const RT_EQ = 5
 const RT_DIE = 6
 const RT_PBOOL = 7
 const RT_ZERO = 8
+const RT_JOIN = 9
+const RT_SPAWN = 10
 
 fn _slot_disp(slot: int) -> int {
     return -8 * (slot + 1)
@@ -2372,10 +2404,22 @@ fn _lea_rbp(code: vec[int], dst: int, disp: int) {
 }
 
 /// lea dst, [base + disp32]
+/// `[base + disp]` 的 ModRM。**base 是 RSP/R12 时必须带 SIB 字节**——
+/// rm=100 是"SIB 跟在后面"的标记，不发 SIB 的话 disp32 的第一个字节会被
+/// 当成 SIB 解析，整条指令连同后面全部错位（v2.32 踩：4 个 pin 让某个基址
+/// 落到 R12，编出来的 lea 直接是垃圾）。
+fn _modrm_mem(code: vec[int], mod: int, reg: int, base: int) {
+    if (base & 7) == 4 {
+        _modrm_sib(code, mod, reg)
+    } else {
+        _modrm(code, mod, reg, base)
+    }
+}
+
 fn _lea_rm(code: vec[int], dst: int, base: int, disp: int) {
     _rex2(code, 1, dst, base)
     _b(code, 0x8D)
-    _modrm(code, 2, dst, base)
+    _modrm_mem(code, 2, dst, base)
     _w32(code, disp)
 }
 
@@ -3031,6 +3075,20 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
             _ir_emit(fc, OP_LEN, d, a, 0, 0)
             return d
         }
+        // 内建 join(handle)（v2.32）：等线程结束并取返回值。
+        // 用户自己定义了 join 就以用户函数为准（与 stage-0 一致）。
+        if fc.names.get(nd.a) == "join" && _fn_index(fc, nd.a) < 0 {
+            if nd.b < 0 || nd.c >= 0 {
+                eprint("qlmc: join(handle) 需要且只需要一个实参")
+                exit(2)
+            }
+            let hv = _lower_expr(fc, nd.b)
+            let d = _vnew(fc)
+            fc.vty.set(d, TY_INT)
+            _ir_emit(fc, OP_ARG, 0, hv, 0, 0)
+            _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_JOIN)
+            return d
+        }
         // 普通调用：实参求值后逐个搬到实参寄存器——实参值不跨调用活
         let fi = _fn_index(fc, nd.a)
         if fi < 0 {
@@ -3102,6 +3160,9 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
             return sret
         }
         return d
+    }
+    if nd.op == E_SPAWN {
+        return _lower_spawn(fc, nd)
     }
     if nd.op == E_BIN {
         if nd.a == P_AND || nd.a == P_OR {
@@ -4327,6 +4388,21 @@ fn _emit_ir(fc: FnCtx, i: int) {
         }
         return
     }
+    if op == OP_RTADDR {
+        // dst = &运行库例程（lea rip 相对 + FK_RT 回填）
+        let dloc = fc.vloc.get(ins.dst)
+        if dloc > 0 {
+            let at = len(code) + 3
+            _lea_rip(code, dloc - 1, 0)
+            _addfix(fc.fixes, at, ins.imm, FK_RT)
+        } else {
+            let at = len(code) + 3
+            _lea_rip(code, RAX, 0)
+            _addfix(fc.fixes, at, ins.imm, FK_RT)
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+        }
+        return
+    }
     if op == OP_CALLR {
         _to_reg(fc, RAX, ins.a)
         _mov_load(code, R11, RAX, 0)       // r11 = [闭包] = code
@@ -4547,6 +4623,175 @@ fn _gen_zero(ctx: Ctx) {
     let p1 = _jcc(code, 0x85)
     _addfix(ctx.fixes, p1, ltop, FK_LAB)
     _setlab(labs, code, ldone)
+    _ret(code)
+}
+
+/// __join(h)：等线程结束并取返回值（v2.32）。h = 0 直接返回 0。
+///   rcx = 句柄记录：[0]=线程句柄 [1]=参数块；参数块 [0]=返回值
+fn _gen_join(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_JOIN, len(code))
+    let lzero = _newlab(labs)
+    _b(code, 0x48)                             // test rcx, rcx
+    _b(code, 0x85)
+    _b(code, 0xC9)
+    let p0 = _jcc(code, 0x84)                  // jz .zero
+    _addfix(ctx.fixes, p0, lzero, FK_LAB)
+    _b(code, 0x53)                             // push rbx（入口 rsp≡8，压完 ≡0）
+    _b(code, 0x48)                             // mov rbx, rcx
+    _b(code, 0x89)
+    _b(code, 0xCB)
+    _b(code, 0x48)                             // mov rcx, [rbx]（线程句柄）
+    _b(code, 0x8B)
+    _b(code, 0x0B)
+    _b(code, 0x48)                             // mov rdx, -1（INFINITE）
+    _b(code, 0xC7)
+    _b(code, 0xC2)
+    _w32(code, -1)
+    let p1 = _call_rip(code)                   // WaitForSingleObject
+    _addfix(ctx.fixes, p1, I_WAIT, FK_IAT)
+    _b(code, 0x48)                             // mov rcx, [rbx]
+    _b(code, 0x8B)
+    _b(code, 0x0B)
+    let p2 = _call_rip(code)                   // CloseHandle
+    _addfix(ctx.fixes, p2, I_CLOSE, FK_IAT)
+    _b(code, 0x48)                             // mov rax, [rbx+8]（参数块）
+    _b(code, 0x8B)
+    _b(code, 0x43)
+    _b(code, 0x08)
+    _b(code, 0x48)                             // mov rax, [rax]（返回值）
+    _b(code, 0x8B)
+    _b(code, 0x00)
+    _b(code, 0x5B)                             // pop rbx
+    _ret(code)
+    _setlab(labs, code, lzero)
+    _b(code, 0x31)                             // xor eax, eax
+    _b(code, 0xC0)
+    _ret(code)
+}
+
+/// __spawn_entry(rcx = 参数块)：线程入口（ThreadProc）。
+/// 块布局：[0]=返回值 [1]=目标函数地址 [2]=实参个数 [3+i]=第 i 个实参。
+/// 一个入口吃所有形状——理由见 _lower_spawn 的注释（站点在发射期才知道）。
+///
+/// 要点：
+///   ① 入口没有序言，rsp 进来是 ≡8(mod 16)；先 push rbp 把它抬成 ≡0，
+///      后面 `sub rsp, stk`（stk 是 16 的倍数）才能保持对齐。
+///   ② 栈实参放 `[rsp + 8*i]`：调用方约定是 `[rsp+32+8*(i-4)]`，两者相等。
+///   ③ 用 rbx 存块指针（callee-saved，跨 `call [rbx+8]` 安全），
+///      r12 只用来记 stk，收尾直接 `mov rsp, rbp` 更省事。
+fn _gen_spawn(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_SPAWN, len(code))
+    let lreg = _newlab(labs)
+    let lal = _newlab(labs)
+    let ltop = _newlab(labs)
+    let ldone = _newlab(labs)
+    _b(code, 0x55)                             // push rbp
+    _b(code, 0x48)                             // mov rbp, rsp
+    _b(code, 0x89)
+    _b(code, 0xE5)
+    _b(code, 0x48)                             // mov rbx, rcx
+    _b(code, 0x89)
+    _b(code, 0xCB)
+    _b(code, 0x4C)                             // mov r10, [rbx+16]（实参个数）
+    _b(code, 0x8B)
+    _b(code, 0x53)
+    _b(code, 0x10)
+    _b(code, 0x45)                             // xor r12d, r12d
+    _b(code, 0x31)
+    _b(code, 0xE4)
+    _b(code, 0x49)                             // cmp r10, 4
+    _b(code, 0x83)
+    _b(code, 0xFA)
+    _b(code, 0x04)
+    let p0 = _jcc(code, 0x86)                  // jbe .noreg
+    _addfix(ctx.fixes, p0, lreg, FK_LAB)
+    _b(code, 0x4D)                             // mov r12, r10
+    _b(code, 0x89)
+    _b(code, 0xD4)
+    _b(code, 0x49)                             // sub r12, 4
+    _b(code, 0x83)
+    _b(code, 0xEC)
+    _b(code, 0x04)
+    _b(code, 0x49)                             // shl r12, 3
+    _b(code, 0xC1)
+    _b(code, 0xE4)
+    _b(code, 0x03)
+    _b(code, 0x49)                             // add r12, 32（shadow space）
+    _b(code, 0x83)
+    _b(code, 0xC4)
+    _b(code, 0x20)
+    _b(code, 0x41)                             // test r12b, 8
+    _b(code, 0xF6)
+    _b(code, 0xC4)
+    _b(code, 0x08)
+    let p1 = _jcc(code, 0x84)                  // jz .aligned
+    _addfix(ctx.fixes, p1, lal, FK_LAB)
+    _b(code, 0x49)                             // add r12, 8
+    _b(code, 0x83)
+    _b(code, 0xC4)
+    _b(code, 0x08)
+    _setlab(labs, code, lal)
+    _b(code, 0x4C)                             // sub rsp, r12
+    _b(code, 0x29)
+    _b(code, 0xE4)
+    _b(code, 0x48)                             // mov rcx, 4（从第 5 个实参开始拷）
+    _b(code, 0xC7)
+    _b(code, 0xC1)
+    _w32(code, 4)
+    _setlab(labs, code, ltop)
+    _b(code, 0x4C)                             // cmp rcx, r10
+    _b(code, 0x39)
+    _b(code, 0xD1)
+    let p2 = _jcc(code, 0x83)                  // jae .done
+    _addfix(ctx.fixes, p2, ldone, FK_LAB)
+    _b(code, 0x48)                             // mov rax, [rbx+rcx*8+24]
+    _b(code, 0x8B)
+    _b(code, 0x44)
+    _b(code, 0xCB)
+    _b(code, 24)
+    _b(code, 0x48)                             // mov [rsp+rcx*8], rax
+    _b(code, 0x89)
+    _b(code, 0x04)
+    _b(code, 0xCC)
+    _b(code, 0x48)                             // inc rcx
+    _b(code, 0xFF)
+    _b(code, 0xC1)
+    let p3 = _jmp(code)
+    _addfix(ctx.fixes, p3, ltop, FK_LAB)
+    _setlab(labs, code, ldone)
+    _setlab(labs, code, lreg)
+    _b(code, 0x48)                             // mov rcx, [rbx+24]
+    _b(code, 0x8B)
+    _b(code, 0x4B)
+    _b(code, 24)
+    _b(code, 0x48)                             // mov rdx, [rbx+32]
+    _b(code, 0x8B)
+    _b(code, 0x53)
+    _b(code, 32)
+    _b(code, 0x4C)                             // mov r8, [rbx+40]
+    _b(code, 0x8B)
+    _b(code, 0x43)
+    _b(code, 40)
+    _b(code, 0x4C)                             // mov r9, [rbx+48]
+    _b(code, 0x8B)
+    _b(code, 0x4B)
+    _b(code, 48)
+    _b(code, 0xFF)                             // call [rbx+8]
+    _b(code, 0x53)
+    _b(code, 0x08)
+    _b(code, 0x48)                             // mov [rbx], rax（写回返回值）
+    _b(code, 0x89)
+    _b(code, 0x03)
+    _b(code, 0x48)                             // mov rsp, rbp
+    _b(code, 0x89)
+    _b(code, 0xEC)
+    _b(code, 0x5D)                             // pop rbp
+    _b(code, 0x31)                             // xor eax, eax（ThreadProc 返回 0）
+    _b(code, 0xC0)
     _ret(code)
 }
 
@@ -5063,6 +5308,145 @@ fn _lower_vecnew(fc: FnCtx, nd: Node) -> int {
 }
 
 /// 方法分发：vec 与 map 共用（按接收者类型分派）
+/// spawn f(args) -> 任务句柄（v2.32）。
+///
+/// 参数块布局（24 + 8n 字节，多给 8 字节余量给入口读 4 个寄存器实参）：
+///   [0]  返回值（worker 写回）
+///   [1]  目标函数地址
+///   [2]  实参个数
+///   [3+i] 第 i 个实参
+/// 为什么把"函数地址 + 实参个数"塞进块里：函数体是**并行编译**的，spawn 站点
+/// 在发射期才知道，没法往顺序段里追加"每个站点一个入口例程"。所以做成一个
+/// 通用入口 `__spawn_entry`（见 _gen_spawn），所有形状共用一个。
+fn _lower_spawn(fc: FnCtx, nd: Node) -> int {
+    let fi = _fn_index(fc, nd.a)
+    if fi < 0 {
+        // 注意：这里**故意**不拼字符串。v2.32 实测，只要 _lower_spawn 里出现
+        // `eprint("..." + expr)` 这种拼接，s3_manyfns 的编译就从 19 ms 涨到 33 ms
+        // （这段代码从不执行，纯 stage-0 代码生成的敏感性，见坑表 #35）。
+        eprint("qlmc: spawn 的目标必须是用户函数")
+        exit(2)
+    }
+    let f = fc.fns.get(fi)
+    if f.body < 0 {
+        eprint("qlmc: spawn 的目标不能是 @ffi 声明")
+        exit(2)
+    }
+    if _ty_is_agg(f.ret_t) {
+        eprint("qlmc: spawn 暂不支持聚合返回值")
+        exit(2)
+    }
+    if f.ret_t == TY_STR {
+        eprint("qlmc: spawn 暂不支持 str 返回值")
+        exit(2)
+    }
+    let av = _call_args(fc, nd)
+    if len(av) != f.np {
+        eprint("qlmc: spawn 的实参个数与目标函数形参不符")
+        exit(2)
+    }
+    let vals = vec[int].new(4)
+    let mut ai = 0
+    while ai < len(av) {
+        let v = _lower_expr(fc, av.get(ai))
+        if _ty_is_agg(fc.vty.get(v)) {
+            eprint("qlmc: spawn 的实参暂不支持聚合")
+            exit(2)
+        }
+        vals.push(v)
+        ai = ai + 1
+    }
+    let n = len(vals)
+    let sz = _vnew(fc)
+    fc.vty.set(sz, TY_INT)
+    _ir_emit(fc, OP_CONST, sz, 0, 0, 32 + 8 * n)
+    _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+    let blk = _vnew(fc)
+    fc.vty.set(blk, TY_INT)
+    _ir_emit(fc, OP_CALLRT, blk, 0, 0, RT_ALLOC)
+    let bp = _pin(fc, blk)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    let a0 = _vnew(fc)
+    fc.vty.set(a0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a0, bp, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, a0, z, 8)
+    let fa = _vnew(fc)
+    fc.vty.set(fa, TY_INT)
+    _ir_emit(fc, OP_LEAFN, fa, 0, 0, fi)
+    let a1 = _vnew(fc)
+    fc.vty.set(a1, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a1, bp, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, a1, fa, 8)
+    let nn = _vnew(fc)
+    fc.vty.set(nn, TY_INT)
+    _ir_emit(fc, OP_CONST, nn, 0, 0, n)
+    let a2 = _vnew(fc)
+    fc.vty.set(a2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a2, bp, 0, 16)
+    _ir_emit(fc, OP_STORE, 0, a2, nn, 8)
+    let mut i = 0
+    while i < n {
+        let ax = _vnew(fc)
+        fc.vty.set(ax, TY_INT)
+        _ir_emit(fc, OP_ADDRF, ax, bp, 0, 24 + 8 * i)
+        _ir_emit(fc, OP_STORE, 0, ax, vals.get(i), 8)
+        i = i + 1
+    }
+    // CreateThread(0, 0, &__spawn_entry, blk, 0, 0)：6 个实参，后两个走栈
+    let entry = _vnew(fc)
+    fc.vty.set(entry, TY_INT)
+    _ir_emit(fc, OP_RTADDR, entry, 0, 0, RT_SPAWN)
+    let ep = _pin(fc, entry)
+    let cargs = vec[int].new(6)
+    let z1 = _vnew(fc)
+    fc.vty.set(z1, TY_INT)
+    _ir_emit(fc, OP_CONST, z1, 0, 0, 0)
+    let z2 = _vnew(fc)
+    fc.vty.set(z2, TY_INT)
+    _ir_emit(fc, OP_CONST, z2, 0, 0, 0)
+    let z3 = _vnew(fc)
+    fc.vty.set(z3, TY_INT)
+    _ir_emit(fc, OP_CONST, z3, 0, 0, 0)
+    let z4 = _vnew(fc)
+    fc.vty.set(z4, TY_INT)
+    _ir_emit(fc, OP_CONST, z4, 0, 0, 0)
+    cargs.push(z1)
+    cargs.push(z2)
+    cargs.push(ep)
+    cargs.push(bp)
+    cargs.push(z3)
+    cargs.push(z4)
+    let stk = _emit_call_args(fc, cargs, 0)
+    let h = _vnew(fc)
+    fc.vty.set(h, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, h, 0, 0, I_CREATE)
+    _emit_call_free(fc, stk)
+    // 句柄记录：[0]=线程句柄 [1]=参数块（join 用它取返回值）
+    let hp = _pin(fc, h)
+    let r16 = _vnew(fc)
+    fc.vty.set(r16, TY_INT)
+    _ir_emit(fc, OP_CONST, r16, 0, 0, 16)
+    _ir_emit(fc, OP_ARG, 0, r16, 0, 0)
+    let rec = _vnew(fc)
+    fc.vty.set(rec, TY_INT)
+    _ir_emit(fc, OP_CALLRT, rec, 0, 0, RT_ALLOC)
+    let rp = _pin(fc, rec)
+    let b0 = _vnew(fc)
+    fc.vty.set(b0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, b0, rp, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, b0, hp, 8)
+    let b1 = _vnew(fc)
+    fc.vty.set(b1, TY_INT)
+    _ir_emit(fc, OP_ADDRF, b1, rp, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, b1, bp, 8)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_MOV, d, rp, 0, 0)
+    return d
+}
+
 fn _lower_method(fc: FnCtx, nd: Node) -> int {
     let h = _lower_expr(fc, nd.a)
     let hty = fc.vty.get(h)
@@ -5510,6 +5894,13 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     ddll.push(0)
     dsym.push("ExitProcess")
     ddll.push(0)
+    // v2.32：线程三件套（spawn / join）
+    dsym.push("CreateThread")
+    ddll.push(0)
+    dsym.push("WaitForSingleObject")
+    ddll.push(0)
+    dsym.push("CloseHandle")
+    ddll.push(0)
     dsym.push("wsprintfA")
     ddll.push(1)
     let mut k = 0
@@ -5632,6 +6023,9 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     iat.set(I_GETSTD, rdata_rva + iatb.get(0))
     iat.set(I_WRITE, rdata_rva + iatb.get(0) + 8)
     iat.set(I_EXIT, rdata_rva + iatb.get(0) + 16)
+    iat.set(I_CREATE, rdata_rva + iatb.get(0) + 24)
+    iat.set(I_WAIT, rdata_rva + iatb.get(0) + 32)
+    iat.set(I_CLOSE, rdata_rva + iatb.get(0) + 40)
     iat.set(I_WSPRINTF, rdata_rva + iatb.get(1))
     k = 0
     while k < len(ctx.fsym) {
@@ -5976,7 +6370,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S17：int/bool/str + struct/数组/enum/vec（可扩容、元素可为聚合）/map/切片 + 位运算/移位 + 进制字面量 + const 常量表达式 + else if + defer + import + @ffi + 闭包 + 聚合形参返回 + 形参实参不限个数 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S18：int/bool/str + struct/数组/enum/vec（可扩容、元素可为聚合）/map/切片 + 位运算/移位 + 进制字面量 + const 常量表达式 + else if + spawn/join + defer + import + @ffi + 闭包 + 聚合形参返回 + 形参实参不限个数 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {
@@ -6082,17 +6476,20 @@ fn main() {
         strpos.push(-1)
         si = si + 1
     }
-    let iat = vec[int].new(4)
+    // IAT 槽表：内置 I_USER 个 + 用户 @ffi 符号。**用 I_USER 推，别再写死 4**——
+    // 加内置符号时忘了改这里，表现是编译期 "vec index out of bounds"。
+    let iat = vec[int].new(I_USER)
     si = 0
-    while si < 4 + len(fsym) {
+    while si < I_USER + len(fsym) {
         iat.push(0)
         si = si + 1
     }
     let nl = vec[int].new(1)
     nl.push(0)
-    let rt_pos = vec[int].new(9)
+    // 运行库例程位置表：RT_PINT..RT_SPAWN 共 11 个（加例程时这里要一起改）
+    let rt_pos = vec[int].new(11)
     si = 0
-    while si < 9 {
+    while si < 11 {
         rt_pos.push(0)
         si = si + 1
     }
@@ -6120,6 +6517,8 @@ fn main() {
     _gen_str_eq(ctx)
     _gen_die(ctx)
     _gen_zero(ctx)
+    _gen_join(ctx)
+    _gen_spawn(ctx)
     let rt_end = now_ns()
 
     // ---- 并行编译函数体 -------------------------------------------------

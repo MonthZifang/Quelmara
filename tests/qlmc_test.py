@@ -53,6 +53,7 @@ CASES = [
     ("s16_stackargs", "tests/selfhost/s16_stackargs.qma"),
     ("s17_constexpr", "tests/selfhost/s17_constexpr.qma"),
     ("s18_vecagg", "tests/selfhost/s18_vecagg.qma"),
+    ("s19_spawn", "tests/selfhost/s19_spawn.qma"),
 ]
 
 npass = 0

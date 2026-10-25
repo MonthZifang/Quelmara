@@ -1,0 +1,60 @@
+// s19_spawn.qma —— stage-1 编译器（qlmc）spawn/join 的差分夹具（v2.32）
+//
+// 覆盖：
+//   1) 0 / 1 / 2 / 5 / 8 个实参的 spawn（第 5 个起走栈，线程入口要把它挪到栈上）
+//   2) join 取返回值；先 spawn 多个再按序 join（输出必须确定）
+//   3) 线程里跑真实计算（循环累加），与主线程结果对照
+// 与 stage-0 做逐字节差分（tests/qlmc_test.py）。
+//
+// 注意：stage-0 在 Quelmara.toml 的 multicore=false 时会把 spawn 降级成同步调用。
+// 差分跑的是默认配置（multicore=true），两边都是真线程。
+fn work(n: int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        s = s + i * i
+        i = i + 1
+    }
+    return s
+}
+
+fn nothing() -> int {
+    return 7
+}
+
+fn add2(a: int, b: int) -> int {
+    return a + b
+}
+
+fn add5(a: int, b: int, c: int, d: int, e: int) -> int {
+    return a + b + c + d + e
+}
+
+fn pack8(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int) -> int {
+    return a * 10000000 + b * 1000000 + c * 100000 + d * 10000 +
+           e * 1000 + f * 100 + g * 10 + h
+}
+
+fn main() {
+    // 0 实参
+    print(join(spawn nothing()))
+
+    // 1 / 2 实参
+    print(join(spawn work(10)))
+    print(join(spawn add2(20, 22)))
+
+    // 5 个实参（第 5 个走栈）
+    print(join(spawn add5(1, 2, 3, 4, 5)))
+
+    // 8 个实参
+    print(join(spawn pack8(1, 2, 3, 4, 5, 6, 7, 8)))
+
+    // 并发：先 spawn 两个，再按序 join（顺序固定 → 输出确定）
+    let a = spawn work(100)
+    let b = spawn work(200)
+    print(join(a))
+    print(join(b))
+
+    // 主线程自己也算一遍，和线程里的结果对照
+    print(work(100))
+}
