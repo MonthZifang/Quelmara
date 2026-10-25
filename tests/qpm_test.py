@@ -484,11 +484,16 @@ def http_registry(env):
                        "fn main() {\n    print(alpha_tag())\n}\n")
     r = env.run(proj, "install")
     check(r.returncode == 0, "链路：install", (r.stdout + r.stderr)[:300])
-    out_exe = os.path.join(WORK, "chain.exe")
+    # v2.54：原来这里硬编码 `--target win` + `chain.exe`。在 Linux 上会编出
+    # **Windows PE** 然后试图执行它 —— `OSError: [Errno 8] Exec format error`，
+    # Linux CI 从 qpm 进套件起就一直红。按宿主平台选后端：
+    # Windows 用 PE，其他平台用自研 ELF（`--target native`）。
+    host_win = os.name == "nt"
+    out_exe = os.path.join(WORK, "chain.exe" if host_win else "chain")
     try:
         r = subprocess.run([PY, os.path.join(ROOT, "tools", "stage0", "qlm_cli.py"),
                             "build", os.path.join(proj, "main.qma"),
-                            "--target", "win", "-o", out_exe],
+                            "--target", "win" if host_win else "native", "-o", out_exe],
                            cwd=proj, env=env.env, capture_output=True, text=True,
                            timeout=45, stdin=subprocess.DEVNULL,
                            encoding="utf-8", errors="replace")
