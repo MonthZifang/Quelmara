@@ -2285,6 +2285,24 @@ const OP_LOAD8 = 53     // dst = 零扩展的 [a] 低字节
 const OP_STORE8 = 54    // [a] = b 的低字节
 // f64 比较（v2.38）：dst(int) = (a <cc> b)，a/b 都是 f64 槽的地址，imm = setcc 操作码
 const OP_FCMP = 55
+// v2.46 强度削减与立即数：优化层把「二元运算 + 常量临时值」压成一条带立即数的指令。
+// `b` 槽放**子操作码**（OP_ADD/OP_SUB/OP_MUL/OP_AND/OP_OR/OP_XOR/OP_SHL/OP_SAR/OP_SHR），
+// `imm` 放常量值。注意 `b` 因此**不是 vreg** —— `_opt_mark` 里要跳过它。
+const OP_BINI = 57     // dst = a <sub> imm
+const OP_CMPI = 58     // dst = (a <cc>) ? 1 : 0；b = cc，imm = 常量
+// v2.46 地址计算与访存融合：`ADDRF/ADDRX` + `LOAD/STORE` 压成一条带位移/SIB 的访存。
+// `vec.get(i)` / `s[i]` 原来要 6 条指令算地址，融合后 0 条 —— 这是 b4/b7/b9 那
+// 3~7 倍差距的主因。
+// **注意 STORE* 系列把"值"放在 dst 槽**（它们不写寄存器），所以 `_opt_writes`
+// 对这四个返回 0、`_opt_mark` 要把 dst 记成"被读"。
+const OP_LOADD = 59    // dst = [a + imm]
+const OP_LOADX = 60    // dst = [a + b*8]
+const OP_STORED = 61   // [a + imm] = dst
+const OP_STOREX = 62   // [a + b*8] = dst
+const OP_LOAD8D = 63   // dst = 零扩展 [a + imm] 的低字节
+const OP_LOAD8X = 64   // dst = 零扩展 [a + b*8] 的低字节
+const OP_STORE8D = 65  // [a + imm] = dst 的低字节
+const OP_STORE8X = 66  // [a + b*8] = dst 的低字节
 
 struct Ir {
     op: int
@@ -2498,6 +2516,71 @@ fn _alu_rm(code: vec[int], op: int, dst: int, base: int, disp: int) {
     _b(code, op)
     _modrm(code, 2, dst, base)
     _w32(code, disp)
+}
+
+/// REX 前缀（含 X 位）。参数是**寄存器编号**（0-15），不是位标志 ——
+/// v2.46 第一版把编号直接左移进了 REX 字节（`(r << 2)` 里 r=9），
+/// 发出来是 0x7E 而不是 0x4E，CPU 当非法指令跑飞（RIP 到 image 外面）。
+fn _rex_full(code: vec[int], w: int, r: int, x: int, b: int) {
+    let mut rb = 0
+    if r >= 8 {
+        rb = 1
+    }
+    let mut xb = 0
+    if x >= 8 {
+        xb = 1
+    }
+    let mut bb = 0
+    if b >= 8 {
+        bb = 1
+    }
+    let v = 0x40 | (w << 3) | (rb << 2) | (xb << 1) | bb
+    if v != 0x40 {
+        _b(code, v)
+    }
+}
+
+/// `[base + index*scale + disp32]` 的 modrm+SIB。scale 用 0/1/2/3 表示 1/2/4/8。
+/// **index 的低 3 位不能是 4**（那是"无 index"的编码），调用方要保证。
+fn _modrm_sibidx(code: vec[int], mod: int, reg: int, base: int, index: int, scale: int) {
+    _modrm(code, mod, reg, 4)
+    _b(code, (scale << 6) | ((index & 7) << 3) | (base & 7))
+}
+
+/// `add/sub/and/or/xor r64, imm`。`ext`：add=0 / or=1 / and=4 / sub=5 / xor=6。
+/// imm8 装得下就用 `0x83` 形态（3 字节），否则 `0x81` + imm32（7 字节）。
+fn _alu_imm(code: vec[int], ext: int, d: int, v: int) {
+    _rex2(code, 1, 0, d)
+    if v >= -128 && v <= 127 {
+        _b(code, 0x83)
+        _modrm(code, 3, ext, d)
+        _b(code, v)
+    } else {
+        _b(code, 0x81)
+        _modrm(code, 3, ext, d)
+        _w32(code, v)
+    }
+}
+
+/// `cmp r64, imm`（/7）。只用于比较，不写寄存器。
+fn _cmp_imm(code: vec[int], d: int, v: int) {
+    _alu_imm(code, 7, d, v)
+}
+
+/// `shl/sar/shr r64, imm8`。`ext`：shl=4 / shr=5 / sar=7。
+fn _shift_imm(code: vec[int], ext: int, d: int, v: int) {
+    _rex2(code, 1, 0, d)
+    _b(code, 0xC1)
+    _modrm(code, 3, ext, d)
+    _b(code, v & 63)
+}
+
+/// `imul dst, src, imm32`（三操作数形态：reg=dst，rm=src）。
+fn _imul_imm(code: vec[int], dst: int, src: int, v: int) {
+    _rex2(code, 1, dst, src)
+    _b(code, 0x69)
+    _modrm(code, 3, dst, src)
+    _w32(code, v)
 }
 
 /// imul dst, [base+disp32]
@@ -3235,8 +3318,9 @@ fn _addr_index(fc: FnCtx, base_nid: int, ix_nid: int) -> int {
         _ir_emit(fc, OP_LEN, ln, sv, 0, 0)
         let lfail = _newlab(fc.labs)
         let lok = _newlab(fc.labs)
-        _ir_emit(fc, OP_JCMP, 0x83, iv, ln, lfail)   // jae：i >= len 越界
-        _ir_emit(fc, OP_JMP, 0, 0, 0, lok)
+        // **条件反过来写**（v2.46）：`jb lok` 让"不越界"直接跳过死路，
+        // 比"jae lfail + jmp lok"少一条跳转 —— 数组/字符串下标的热路径上省一条。
+        _ir_emit(fc, OP_JCMP, 0x82, iv, ln, lok)     // jb：i < len → 跳过
         _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
         let one = _vnew(fc)
         fc.vty.set(one, TY_INT)
@@ -4440,6 +4524,9 @@ fn _opt_writes(op: int) -> int {
     if op == OP_RETAGG || op == OP_RETSRET || op == OP_RET { return 0 }
     if op == OP_PRINT || op == OP_EXIT || op == OP_ARG || op == OP_STKARG { return 0 }
     if op == OP_JZ || op == OP_JNZ || op == OP_NOP { return 0 }
+    // STORE* 系列不写寄存器，dst 槽里放的是"要存的值"
+    if op == OP_STORED || op == OP_STOREX { return 0 }
+    if op == OP_STORE8D || op == OP_STORE8X { return 0 }
     return 1
 }
 
@@ -4487,11 +4574,219 @@ fn _opt_mark(ins: Ir, use: vec[int]) {
     if ins.a > 0 && ins.a < len(use) {
         use.set(ins.a, use.get(ins.a) + 1)
     }
-    if ins.b > 0 && ins.b < len(use) {
-        use.set(ins.b, use.get(ins.b) + 1)
+    // OP_BINI / OP_CMPI 的 `b` 槽放的是子操作码 / setcc 机器码，不是 vreg
+    if ins.op != OP_BINI && ins.op != OP_CMPI {
+        if ins.b > 0 && ins.b < len(use) {
+            use.set(ins.b, use.get(ins.b) + 1)
+        }
     }
     if ins.op == OP_MEMCPYN && ins.dst > 0 && ins.dst < len(use) {
         use.set(ins.dst, use.get(ins.dst) + 1)
+    }
+    // STORE* 系列把"值"放在 dst 槽 —— 那是被读的
+    if ins.op == OP_STORED || ins.op == OP_STOREX ||
+       ins.op == OP_STORE8D || ins.op == OP_STORE8X {
+        if ins.dst > 0 && ins.dst < len(use) {
+            use.set(ins.dst, use.get(ins.dst) + 1)
+        }
+    }
+}
+
+/// 强度削减 / 立即数压平：把 `dst = a <op> C`（C 是编译期已知常量）换成更省的形状。
+///
+/// 三条原则：
+///   ① **只在数学上等价时才改**。`x * 2^k` 与 `x << k` 对负数、对溢出都逐位一致
+///      （64 位补码），所以安全；`x / 2^k` 与 `x >> k` **不等价**（负数时一个向零
+///      截断、一个向负无穷取整），那个要走下面单独的有符号序列，这里不动。
+///   ② 常量装不进 imm32 就原样留着（`x & 0xFFFF000000000000` 这种）。
+///   ③ 每个分支自己 `ir.set` 然后 `return` —— 不做"先算标志位、跨 join 再判断"，
+///      那是坑表 #45 的形状。
+fn _opt_strength(fc: FnCtx, ir: vec[Ir], i: int, op: int, ins: Ir,
+                 cv: int, cok: vec[int], cval: vec[int], ndef: vec[int]) {
+    // ---- 化成空操作（MOV）----
+    if op == OP_ADD || op == OP_SUB || op == OP_OR || op == OP_XOR {
+        if cv == 0 {
+            ir.set(i, Ir { op: OP_MOV, dst: ins.dst, a: ins.a, b: 0, imm: 0 })
+            return
+        }
+    }
+    if op == OP_MUL {
+        if cv == 1 {
+            ir.set(i, Ir { op: OP_MOV, dst: ins.dst, a: ins.a, b: 0, imm: 0 })
+            return
+        }
+        if cv == -1 {
+            ir.set(i, Ir { op: OP_NEG, dst: ins.dst, a: ins.a, b: 0, imm: 0 })
+            return
+        }
+    }
+    if op == OP_AND {
+        if cv == -1 {
+            ir.set(i, Ir { op: OP_MOV, dst: ins.dst, a: ins.a, b: 0, imm: 0 })
+            return
+        }
+    }
+    if op == OP_SHL || op == OP_SAR || op == OP_SHR {
+        if cv == 0 {
+            ir.set(i, Ir { op: OP_MOV, dst: ins.dst, a: ins.a, b: 0, imm: 0 })
+            return
+        }
+    }
+    // ---- 化成常数 ----
+    if op == OP_MUL && cv == 0 {
+        ir.set(i, Ir { op: OP_CONST, dst: ins.dst, a: 0, b: 0, imm: 0 })
+        if fc.vpin.get(ins.dst) == 0 && ndef.get(ins.dst) == 1 {
+            cok.set(ins.dst, 1)
+            cval.set(ins.dst, 0)
+        }
+        return
+    }
+    if op == OP_AND && cv == 0 {
+        ir.set(i, Ir { op: OP_CONST, dst: ins.dst, a: 0, b: 0, imm: 0 })
+        if fc.vpin.get(ins.dst) == 0 && ndef.get(ins.dst) == 1 {
+            cok.set(ins.dst, 1)
+            cval.set(ins.dst, 0)
+        }
+        return
+    }
+    if op == OP_OR && cv == -1 {
+        ir.set(i, Ir { op: OP_CONST, dst: ins.dst, a: 0, b: 0, imm: -1 })
+        if fc.vpin.get(ins.dst) == 0 && ndef.get(ins.dst) == 1 {
+            cok.set(ins.dst, 1)
+            cval.set(ins.dst, -1)
+        }
+        return
+    }
+    // ---- 乘 2 的幂 → 左移 ----
+    if op == OP_MUL && cv > 0 && cv <= 4611686018427387904 {
+        if (cv & (cv - 1)) == 0 {
+            let mut k = 0
+            let mut t = cv
+            while t > 1 {
+                t = t >> 1
+                k = k + 1
+            }
+            ir.set(i, Ir { op: OP_BINI, dst: ins.dst, a: ins.a, b: OP_SHL, imm: k })
+            return
+        }
+    }
+    // ---- 其余能装进 imm32 的 → 带立即数的二元运算 ----
+    if op == OP_SHL || op == OP_SAR || op == OP_SHR {
+        if cv > 0 && cv < 64 {
+            ir.set(i, Ir { op: OP_BINI, dst: ins.dst, a: ins.a, b: op, imm: cv })
+        }
+        return
+    }
+    // **只放行发射器真支持的子操作**。`OP_DIV` / `OP_MOD` 不在这里 —— 有符号除法
+    // 不能压成一条 ALU 立即数指令（要向零截断），它们走 _opt_divmod 的魔数序列。
+    // v2.46 踩过：兜底把 OP_MOD 也收进来，发射器的 ext 链默认落到 add，
+    // `(i*7) % 13` 静默变成 `(i*7) + 13`，校验和从 119999988 变成 1400000190000000。
+    if op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_AND ||
+       op == OP_OR || op == OP_XOR {
+        if cv >= -2147483648 && cv <= 2147483647 {
+            ir.set(i, Ir { op: OP_BINI, dst: ins.dst, a: ins.a, b: op, imm: cv })
+        }
+    }
+}
+
+/// 地址计算 + 访存能不能融合？返回融合后的操作码，0 = 不能。
+fn _fuse_op(addr_op: int, mem_op: int, imm: int) -> int {
+    if addr_op == OP_ADDRF {
+        if mem_op == OP_LOAD { return OP_LOADD }
+        if mem_op == OP_STORE { return OP_STORED }
+        if mem_op == OP_LOAD8 { return OP_LOAD8D }
+        if mem_op == OP_STORE8 { return OP_STORE8D }
+        return 0
+    }
+    // ADDRX / ADDRXN：只融合步长 8 的（SIB 的 scale 编码里 3 就是 ×8）
+    if imm != 8 {
+        return 0
+    }
+    if mem_op == OP_LOAD { return OP_LOADX }
+    if mem_op == OP_STORE { return OP_STOREX }
+    if mem_op == OP_LOAD8 { return OP_LOAD8X }
+    if mem_op == OP_STORE8 { return OP_STORE8X }
+    return 0
+}
+
+/// 地址计算与访存融合（v2.46）。这是 `vec.get(i)` / `v[i]` / `s[i]` 热路径上
+/// 最大的一块 —— 原来每条访问都要 `lea` + 两条 `mov` 算地址。
+///
+/// 条件：地址临时值 `t` **单定义、单使用**，且它的唯一使用者就是那条访存。
+/// 这样把地址指令换成 `OP_NOP` 不会影响别的使用者。
+/// 维护 `use[]`：`t` 少读一次（其余操作数的读数在融合前后一一对应，净不变）。
+fn _opt_fuse(fc: FnCtx, ir: vec[Ir], use: vec[int], ndef: vec[int]) {
+    let n = len(ir)
+    let mut i = 0
+    while i < n {
+        let ins = ir.get(i)
+        let isaddr = ins.op == OP_ADDRF || ins.op == OP_ADDRX || ins.op == OP_ADDRXN
+        if isaddr {
+            let t = ins.dst
+            if t > 0 && t < len(use) && fc.vpin.get(t) == 0 &&
+               use.get(t) == 1 && ndef.get(t) == 1 {
+                // 往后找唯一的使用者；遇到控制流就放弃（临时值不会跨分支）
+                let mut j = i + 1
+                let mut hit = -1
+                let mut go = 1
+                while go == 1 && j < n && j < i + 8 {
+                    let nx = ir.get(j)
+                    if nx.a == t || nx.b == t || nx.dst == t {
+                        hit = j
+                        go = 0
+                    } else {
+                        if nx.op == OP_LAB || nx.op == OP_JMP || nx.op == OP_JCMP ||
+                           nx.op == OP_JZ || nx.op == OP_JNZ {
+                            go = 0
+                        }
+                        j = j + 1
+                    }
+                }
+                if hit >= 0 {
+                    let u = ir.get(hit)
+                    if u.a == t {
+                        let fop = _fuse_op(ins.op, u.op, ins.imm)
+                        if fop == OP_LOADD {
+                            ir.set(hit, Ir { op: OP_LOADD, dst: u.dst, a: ins.a, b: 0, imm: ins.imm })
+                        } else if fop == OP_LOADX {
+                            ir.set(hit, Ir { op: OP_LOADX, dst: u.dst, a: ins.a, b: ins.b, imm: 0 })
+                        } else if fop == OP_LOAD8D {
+                            ir.set(hit, Ir { op: OP_LOAD8D, dst: u.dst, a: ins.a, b: 0, imm: ins.imm })
+                        } else if fop == OP_LOAD8X {
+                            ir.set(hit, Ir { op: OP_LOAD8X, dst: u.dst, a: ins.a, b: ins.b, imm: 0 })
+                        } else if fop == OP_STORED {
+                            ir.set(hit, Ir { op: OP_STORED, dst: u.b, a: ins.a, b: 0, imm: ins.imm })
+                        } else if fop == OP_STOREX {
+                            ir.set(hit, Ir { op: OP_STOREX, dst: u.b, a: ins.a, b: ins.b, imm: 0 })
+                        } else if fop == OP_STORE8D {
+                            ir.set(hit, Ir { op: OP_STORE8D, dst: u.b, a: ins.a, b: 0, imm: ins.imm })
+                        } else if fop == OP_STORE8X {
+                            ir.set(hit, Ir { op: OP_STORE8X, dst: u.b, a: ins.a, b: ins.b, imm: 0 })
+                        }
+                        if fop > 0 {
+                            ir.set(i, Ir { op: OP_NOP, dst: 0, a: 0, b: 0, imm: 0 })
+                            use.set(t, use.get(t) - 1)
+                            // **必须把基址/索引的活跃区间延到 hit**（v2.46 踩过）：
+                            // 它们的最后一次使用从第 i 条搬到了第 hit 条，而
+                            // `vend` 还是 `_ir_emit` 当初记的 i。不延的话分配器
+                            // 会认为它们在第 i 条就死了，把那个寄存器中途复用掉
+                            // —— 现象是数组/切片用例**间歇** AV（取决于周围代码）。
+                            if ins.a > 0 && ins.a < len(fc.vend) {
+                                if fc.vend.get(ins.a) < hit {
+                                    fc.vend.set(ins.a, hit)
+                                }
+                            }
+                            if ins.b > 0 && ins.b < len(fc.vend) {
+                                if fc.vend.get(ins.b) < hit {
+                                    fc.vend.set(ins.b, hit)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
     }
 }
 
@@ -4580,6 +4875,21 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
                     }
                 }
             }
+            // 没被折掉、右操作数是常量 → 强度削减 / 压成立即数
+            if ir.get(i).op == op && ins.a > 0 && ins.b > 0 {
+                if fc.vpin.get(ins.b) == 0 && cok.get(ins.b) == 1 {
+                    _opt_strength(fc, ir, i, op, ins, cval.get(ins.b), cok, cval, ndef)
+                }
+            }
+        } else if op == OP_CMP {
+            // 右操作数是常量 → `cmp r64, imm32`（省掉一次常量装载）
+            if ins.a > 0 && ins.b > 0 && fc.vpin.get(ins.b) == 0 && cok.get(ins.b) == 1 {
+                let cv = cval.get(ins.b)
+                if cv >= -2147483648 && cv <= 2147483647 {
+                    ir.set(i, Ir { op: OP_CMPI, dst: ins.dst, a: ins.a,
+                                   b: ins.imm, imm: cv })
+                }
+            }
         } else if op == OP_NEG || op == OP_BNOT || op == OP_NOT || op == OP_NZ {
             if ins.a > 0 && fc.vpin.get(ins.a) == 0 && cok.get(ins.a) == 1 {
                 if _fold_un(op, cval.get(ins.a), out) == 1 {
@@ -4597,6 +4907,8 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
         _opt_mark(ir.get(i), use)
         i = i + 1
     }
+    // 融合要用到完整的 use[]，所以放在标记之后、DCE 之前
+    _opt_fuse(fc, ir, use, ndef)
     _opt_dce(fc, use)
     // ---- 空跳：`jmp L` 后面（跳过连续的 LAB）就是 L 本身 → 删掉 ----
     i = 0
@@ -4720,6 +5032,20 @@ fn _alloc(fc: FnCtx) {
 // 发射：IR → 机器码
 // ---------------------------------------------------------------------------
 
+/// 取一个能当 SIB index 用的寄存器。低 3 位不能是 4（那是"无 index"的编码，
+/// R12 会撞上），所以 R12 / 帧槽里的值都先搬进 RDX。
+fn _idx_reg(fc: FnCtx, v: int) -> int {
+    let loc = fc.vloc.get(v)
+    if loc > 0 {
+        let r = loc - 1
+        if r != RAX && r != RCX && (r & 7) != 4 {
+            return r
+        }
+    }
+    _to_reg(fc, RDX, v)
+    return RDX
+}
+
 /// 把 v 搬进寄存器 r（r 不能是 v 自己已经待着的寄存器之外的分配结果）
 fn _to_reg(fc: FnCtx, r: int, v: int) {
     let loc = fc.vloc.get(v)
@@ -4794,6 +5120,177 @@ fn _emit_ir(fc: FnCtx, i: int) {
             _to_reg(fc, RAX, ins.a)
             _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
         }
+        return
+    }
+    if op == OP_LOADD || op == OP_LOADX || op == OP_LOAD8D || op == OP_LOAD8X {
+        // 一条搞定：`mov d, [base+disp]` / `mov d, [base+idx*8]`
+        // （LOAD8* 是 `movzx d, byte [...]`）。原来要 lea+mov+mov 三条算地址。
+        let dloc = fc.vloc.get(ins.dst)
+        let mut d = RAX
+        if dloc > 0 {
+            d = dloc - 1
+        }
+        let mut isbyte = 0
+        if op == OP_LOAD8D || op == OP_LOAD8X {
+            isbyte = 1
+        }
+        // 基址已经在寄存器里就直接寻址（省掉一条 `mov rax, rXX`）；
+        // 在帧槽里才搬进 RAX。`_modrm_mem` 会处理 RSP/R12 需要的 SIB。
+        let aloc = fc.vloc.get(ins.a)
+        let mut base = RAX
+        if aloc > 0 {
+            base = aloc - 1
+        } else {
+            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
+        }
+        if op == OP_LOADD || op == OP_LOAD8D {
+            _rex2(code, 1, d, base)
+            if isbyte == 1 {
+                _b(code, 0x0F)
+                _b(code, 0xB6)
+            } else {
+                _b(code, 0x8B)
+            }
+            _modrm_mem(code, 2, d, base)
+            _w32(code, ins.imm)
+        } else {
+            let idx = _idx_reg(fc, ins.b)
+            _rex_full(code, 1, d, idx, base)
+            if isbyte == 1 {
+                _b(code, 0x0F)
+                _b(code, 0xB6)
+            } else {
+                _b(code, 0x8B)
+            }
+            _modrm_sibidx(code, 2, d, base, idx, 3)
+            _w32(code, 0)
+        }
+        if dloc <= 0 {
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
+        }
+        return
+    }
+    if op == OP_STORED || op == OP_STOREX || op == OP_STORE8D || op == OP_STORE8X {
+        // 值是 ins.dst（STORE* 不写寄存器，dst 槽空着）；CL 是最稳的 8 位寄存器。
+        let mut isbyte = 0
+        if op == OP_STORE8D || op == OP_STORE8X {
+            isbyte = 1
+        }
+        let mut idx = 0
+        if op == OP_STOREX || op == OP_STORE8X {
+            idx = _idx_reg(fc, ins.b)
+        }
+        // 基址已在寄存器里就直接寻址（同 LOAD*）
+        let aloc = fc.vloc.get(ins.a)
+        let mut base = RAX
+        if aloc > 0 {
+            base = aloc - 1
+        } else {
+            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
+        }
+        _to_reg(fc, RCX, ins.dst)
+        if op == OP_STORED || op == OP_STORE8D {
+            if isbyte == 1 {
+                _rex_full(code, 0, RCX, 0, base)
+                _b(code, 0x88)
+                _modrm_mem(code, 2, RCX, base)
+                _w32(code, ins.imm)
+            } else {
+                _rex_full(code, 1, RCX, 0, base)
+                _b(code, 0x89)
+                _modrm_mem(code, 2, RCX, base)
+                _w32(code, ins.imm)
+            }
+        } else {
+            if isbyte == 1 {
+                _rex_full(code, 0, RCX, idx, base)
+                _b(code, 0x88)
+                _modrm_sibidx(code, 2, RCX, base, idx, 3)
+                _w32(code, 0)
+            } else {
+                _rex_full(code, 1, RCX, idx, base)
+                _b(code, 0x89)
+                _modrm_sibidx(code, 2, RCX, base, idx, 3)
+                _w32(code, 0)
+            }
+        }
+        return
+    }
+    if op == OP_BINI {
+        // dst = a <sub> imm。子操作码在 ins.b，常量在 ins.imm（由优化层压出来的）
+        let sub = ins.b
+        let dloc = fc.vloc.get(ins.dst)
+        let mut d = RAX
+        if dloc > 0 {
+            d = dloc - 1
+        }
+        if sub == OP_MUL {
+            // 三操作数 imul：reg=dst、rm=源，源在寄存器时一条搞定
+            let aloc = fc.vloc.get(ins.a)
+            if aloc > 0 {
+                _imul_imm(code, d, aloc - 1, ins.imm)
+            } else {
+                _to_reg(fc, d, ins.a)
+                _imul_imm(code, d, d, ins.imm)
+            }
+        } else if sub == OP_SHL || sub == OP_SAR || sub == OP_SHR {
+            _to_reg(fc, d, ins.a)
+            let mut ext = 4                       // shl
+            if sub == OP_SHR {
+                ext = 5                           // shr（逻辑）
+            }
+            if sub == OP_SAR {
+                ext = 7                           // sar（算术）
+            }
+            _shift_imm(code, ext, d, ins.imm)
+        } else {
+            // **别用"默认 0 = add"的写法**：不认识的子操作会被静默当成加法。
+            // v2.46 就是这样把 `% 13` 变成 `+ 13` 的。这里逐个显式判。
+            let mut ext = -1
+            if sub == OP_ADD {
+                ext = 0
+            }
+            if sub == OP_OR {
+                ext = 1
+            }
+            if sub == OP_AND {
+                ext = 4
+            }
+            if sub == OP_SUB {
+                ext = 5
+            }
+            if sub == OP_XOR {
+                ext = 6
+            }
+            if ext < 0 {
+                eprint("qlmc: 内部错误：OP_BINI 的子操作码 " + sub.to_str() + " 不支持")
+                exit(2)
+            }
+            _to_reg(fc, d, ins.a)
+            _alu_imm(code, ext, d, ins.imm)
+        }
+        if dloc <= 0 {
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
+        }
+        return
+    }
+    if op == OP_CMPI {
+        // dst = (a <cc> imm) ? 1 : 0。cc 在 ins.b（setcc 码），常量在 ins.imm
+        if ins.b < 0x90 || ins.b > 0x9F {
+            eprint("qlmc: 内部错误：OP_CMPI 的条件码必须是 setcc（0x90..0x9F）")
+            exit(2)
+        }
+        let aloc = fc.vloc.get(ins.a)
+        let mut ar = RAX
+        if aloc > 0 {
+            ar = aloc - 1
+        } else {
+            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
+        }
+        _cmp_imm(code, ar, ins.imm)
+        _setcc_al(code, ins.b)
+        _movzx_rax_al(code)
+        _store_rax(fc, fc.vloc.get(ins.dst))
         return
     }
     if op == OP_ADD || op == OP_SUB || op == OP_MUL {
@@ -6808,8 +7305,8 @@ fn _gen_print_bool(ctx: Ctx) {
 fn _slice_check(fc: FnCtx, i: int, n: int) {
     let lfail = _newlab(fc.labs)
     let lok = _newlab(fc.labs)
-    _ir_emit(fc, OP_JCMP, 0x83, i, n, lfail)
-    _ir_emit(fc, OP_JMP, 0, 0, 0, lok)
+    // 条件反过来写：`jb lok` 直接跳过死路（v2.46）
+    _ir_emit(fc, OP_JCMP, 0x82, i, n, lok)
     _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
     let one = _map_const(fc, 1)
     _ir_emit(fc, OP_EXIT, 0, one, 0, 0)
@@ -7169,8 +7666,8 @@ fn _vec_check(fc: FnCtx, h: int, i: int) {
     let n = _vec_field(fc, h, 8)
     let lfail = _newlab(fc.labs)
     let lok = _newlab(fc.labs)
-    _ir_emit(fc, OP_JCMP, 0x83, i, n, lfail)   // jae：i >= len 就越界
-    _ir_emit(fc, OP_JMP, 0, 0, 0, lok)
+    // 条件反过来写：`jb lok` 直接跳过死路（同 _addr_index，v2.46）
+    _ir_emit(fc, OP_JCMP, 0x82, i, n, lok)     // jb：i < len → 跳过
     _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
     let one = _vnew(fc)
     fc.vty.set(one, TY_INT)
