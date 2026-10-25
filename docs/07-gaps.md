@@ -325,8 +325,12 @@ print(g.to_str())        // 实测 1.407002e+14（不是 2.25）
 
 - 现状：`to_float` 在自研后端只接受数值实参；传 `str` 时把**指针**当位模式转，
   得到的是地址量级的值，不报错、不崩——典型静默错。
-- 影响面：`@derive(Json)` 因此对 `f64`/`f32` 字段显式 fail-fast
-  （`tests/bad/derive_f64.qma`），JSON 里的浮点目前只能取 `json_num_raw` 原文本。
+- 影响面（**修复前**）：`@derive(Json)` 对 `f64`/`f32` 字段显式 fail-fast，
+  JSON 里的浮点只能取 `json_num_raw` 原文本。当时为此留了负向用例
+  `tests/bad/derive_f64.qma`；**该用例已随 v1.96 删除**——现在
+  `@derive(Json) struct M { x: f64 }` 能正常编出 `{"x":1.5}`，留着它就变成
+  "该失败的却编过了"。同批删掉的还有 `tests/bad/derive_enum.qma` 与
+  `tests/bad/refl_dynidx.qma`（enum 派生、运行时反射下标也在 v1.96 落地）。
 - **v1.96 已修**（两步都做了）：
   1. **止血**：`to_float(str)` / `to_f32(str)` 在编译期直接拒绝（自研后端与 C 后端
      各一处），报错信息指向替代方案，不再静默把指针当数值转；

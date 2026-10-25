@@ -1173,6 +1173,7 @@ alpha = "registry|path:../qreg|1.2.0|<sha256>|<1.2.0>|<tree>|beta@^1.0;gamma@~2.
 | `tools/dev/check_names.py` | 旧项目名残留、`.ros` 扩展名残留、C 运行时符号自洽 |  <!-- legacy-ok -->
 | `tools/dev/check_origin.py` | 只用标准库、无异语言运行时特征、无第三方目录 |
 | `tools/dev/check_docs.py` | 过期断言黑名单、文档索引完整性、版本目录完整性、数字单一来源、`VERSION` 与版本目录同源 |
+| `tools/dev/check_bad.py` | **v2.32**：`tests/bad/` 里每个文件都必须**编不过**。负向用例的价值全在"它失败"上——特性一旦落地（v1.96 的 enum 派生 / f64 派生 / 运行时反射），原本该失败的用例就变成"能编过"，而主回归只跑名单里的用例，**不会有任何东西变红**。这个门禁把整目录扫一遍（并行，约 36 s），列出失效清单 |
 | `tools/dev/fault_probe.py` | **v2.19**：让 exe 在调试器下跑，捕获访问违例并打印 RIP/RSP/RBP、AV 地址、rbp 链（支持 `PROBE_TRIES=n` 重试，因为这类崩溃常常是间歇的） |
 | `tools/dev/frame_scan.py` | **v2.19**：扫 PE 里所有函数的帧大小（`push rbp; mov rbp,rsp; sub rsp,N`），报出 ≥ 阈值的——帧 > 4 KB 必须做栈探测，见 §7.17 |
 | `quelmara doc std --missing` + `gen_stdlib_doc.py --check --require-doc` | 公开 API 面缺 `///` 文档、doc 块脱离、`03-stdlib.md` 与源码漂移 |
@@ -1181,6 +1182,7 @@ alpha = "registry|path:../qreg|1.2.0|<sha256>|<1.2.0>|<tree>|beta@^1.0;gamma@~2.
 python tools/dev/check_names.py
 python tools/dev/check_origin.py
 python tools/dev/check_docs.py
+python tools/dev/check_bad.py      # 负向用例必须仍然编不过（约 36 s，不放进主回归）
 python tools/stage0/qlm_cli.py doc std --missing          # 公开 API 面缺 /// 就失败
 python tools/dev/gen_stdlib_doc.py --check --require-doc  # 03-stdlib 与源码一致 + 覆盖
 ```
