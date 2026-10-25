@@ -2509,12 +2509,20 @@ fn _out_arg_reg(k: int) -> int {
 }
 
 /// 变量池：callee-saved，调用不会清（RDI/RSI 不用——运行库例程会踩它们）
+/// 变量寄存器表（**全部是 Win64 的 callee-saved**）。
+/// v2.51 加了 `RSI`/`RDI` —— 它们在 Win64 ABI 里也是非易失的，以前白放着没用。
+/// 加之前必须确认**没有任何运行库例程碰它们**（或者碰了就自己 push/pop）：
+/// `__memcpy` 的指针实参改成了 `r8/r9`，`__str_cat` 加了 `push rdi/push rsi`。
+const N_VARREG = 7
+
 fn _cs_reg(i: int) -> int {
     if i == 0 { return RBX }
     if i == 1 { return 12 }
     if i == 2 { return 13 }
     if i == 3 { return 14 }
-    return 15
+    if i == 4 { return 15 }
+    if i == 5 { return RSI }
+    return RDI
 }
 
 fn _cs_index(r: int) -> int {
@@ -2523,6 +2531,8 @@ fn _cs_index(r: int) -> int {
     if r == 13 { return 2 }
     if r == 14 { return 3 }
     if r == 15 { return 4 }
+    if r == RSI { return 5 }
+    if r == RDI { return 6 }
     return -1
 }
 
@@ -2877,7 +2887,7 @@ fn _new_var(fc: FnCtx, nid: int, ty: int) -> int {
         return v
     }
     let n = fc.cells.get(C_NV)
-    if n < 5 {
+    if n < N_VARREG {
         fc.vloc.set(v, _cs_reg(n) + 1)
         fc.cells.set(C_NV, n + 1)
     } else {
@@ -6227,8 +6237,13 @@ fn _emit_ir(fc: FnCtx, i: int) {
     }
     if op == OP_RETAGG {
         let sv = fc.cells.get(C_SRET)
-        _to_reg(fc, RDI, sv)
-        _to_reg(fc, RSI, ins.a)
+        // v2.51：运行库的指针实参改成 r8/r9（rsi/rdi 已是变量寄存器）。
+        // **必须先落到 RAX/RDX 再搬** —— 它们发射器保留、永不持有 vreg，
+        // 否则"某个操作数本来就在 r8/r9 里"会被提前踩掉。
+        _to_reg(fc, RAX, sv)
+        _to_reg(fc, RDX, ins.a)
+        _mov_rr(code, R8, RAX)
+        _mov_rr(code, R9, RDX)
         _mov_imm(code, RCX, ins.imm)
         let p = _call_rel(code)
         _addfix(fc.fixes, p, RT_MEMCPY, FK_RT)
@@ -6311,30 +6326,42 @@ fn _emit_ir(fc: FnCtx, i: int) {
         return
     }
     if op == OP_COPY {
-        _to_reg(fc, RDI, ins.a)
-        _to_reg(fc, RSI, ins.b)
+        // v2.51：运行库的指针实参改成 r8/r9（rsi/rdi 已是变量寄存器）。
+        // **必须先落到 RAX/RDX 再搬** —— 它们发射器保留、永不持有 vreg，
+        // 否则"某个操作数本来就在 r8/r9 里"会被提前踩掉。
+        _to_reg(fc, RAX, ins.a)
+        _to_reg(fc, RDX, ins.b)
+        _mov_rr(code, R8, RAX)
+        _mov_rr(code, R9, RDX)
         _mov_imm(code, RCX, ins.imm)
         let p = _call_rel(code)
         _addfix(fc.fixes, p, RT_MEMCPY, FK_RT)
         return
     }
     if op == OP_MEMCPYN {
-        _to_reg(fc, RDI, ins.a)
-        _to_reg(fc, RSI, ins.b)
+        // v2.51：运行库的指针实参改成 r8/r9（rsi/rdi 已是变量寄存器）。
+        // **必须先落到 RAX/RDX 再搬** —— 它们发射器保留、永不持有 vreg，
+        // 否则"某个操作数本来就在 r8/r9 里"会被提前踩掉。
         _to_reg(fc, RCX, ins.dst)          // 字节数（运行时）
+        _to_reg(fc, RAX, ins.a)
+        _to_reg(fc, RDX, ins.b)
+        _mov_rr(code, R8, RAX)
+        _mov_rr(code, R9, RDX)
         let p = _call_rel(code)
         _addfix(fc.fixes, p, RT_MEMCPY, FK_RT)
         return
     }
     if op == OP_ZERON {
-        _to_reg(fc, RDI, ins.a)
+        _to_reg(fc, RAX, ins.a)            // v2.51：实参改 r8
+        _mov_rr(code, R8, RAX)
         _to_reg(fc, RCX, ins.b)
         let p = _call_rel(code)
         _addfix(fc.fixes, p, RT_ZERO, FK_RT)
         return
     }
     if op == OP_ZERO {
-        _to_reg(fc, RDI, ins.a)
+        _to_reg(fc, RAX, ins.a)            // v2.51：实参改 r8
+        _mov_rr(code, R8, RAX)
         _mov_imm(code, RCX, ins.imm)
         let p = _call_rel(code)
         _addfix(fc.fixes, p, RT_ZERO, FK_RT)
@@ -6381,9 +6408,9 @@ fn _frame_bytes(fc: FnCtx) -> int {
 /// 一个函数：序言（保存用到的 callee-saved）+ 体 + 尾声
 fn _emit_fn(fc: FnCtx) {
     let code = fc.code
-    let used = vec[int].new(5)
+    let used = vec[int].new(N_VARREG)
     let mut i = 0
-    while i < 5 {
+    while i < N_VARREG {
         used.push(0)
         i = i + 1
     }
@@ -6401,7 +6428,7 @@ fn _emit_fn(fc: FnCtx) {
     }
     let mut nsaved = 0
     i = 0
-    while i < 5 {
+    while i < N_VARREG {
         if used.get(i) == 1 {
             _push_r(code, _cs_reg(i))
             nsaved = nsaved + 1
@@ -6440,7 +6467,7 @@ fn _emit_fn(fc: FnCtx) {
     }
     _mov_rsp_rbp(code)
     _pop_rbp(code)
-    i = 4
+    i = N_VARREG - 1
     while i >= 0 {
         if used.get(i) == 1 {
             _pop_r(code, _cs_reg(i))
@@ -6450,7 +6477,8 @@ fn _emit_fn(fc: FnCtx) {
     _ret(code)
 }
 
-/// __zero(rdi = 地址, rcx = 字节数)：逐字节清零
+/// __zero(r8 = 地址, rcx = 字节数)：逐字节清零
+/// v2.51：地址参数从 `rdi` 改成 **`r8`** —— `rdi` 现在是变量寄存器（callee-saved）。
 fn _gen_zero(ctx: Ctx) {
     let code: vec[int] = ctx.code
     let labs: vec[int] = ctx.labs
@@ -6463,12 +6491,13 @@ fn _gen_zero(ctx: Ctx) {
     let p0 = _jcc(code, 0x84)
     _addfix(ctx.fixes, p0, ldone, FK_LAB)
     _setlab(labs, code, ltop)
-    _b(code, 0xC6)                         // mov byte [rdi], 0
-    _b(code, 0x07)
+    _b(code, 0x41)                         // mov byte [r8], 0
+    _b(code, 0xC6)
+    _b(code, 0x00)
     _b(code, 0)
-    _b(code, 0x48)                         // inc rdi
+    _b(code, 0x49)                         // inc r8
     _b(code, 0xFF)
-    _b(code, 0xC7)
+    _b(code, 0xC0)
     _b(code, 0x48)                         // dec rcx
     _b(code, 0xFF)
     _b(code, 0xC9)
@@ -9084,16 +9113,21 @@ fn _gen_memcpy(ctx: Ctx) {
     let p0 = _jcc(code, 0x84)
     _addfix(ctx.fixes, p0, ldone, 1)
     _setlab(labs, code, ltop)
-    _b(code, 0x8A)                         // mov al, [rsi]
-    _b(code, 0x06)
-    _b(code, 0x88)                         // mov [rdi], al
-    _b(code, 0x07)
-    _b(code, 0x48)                         // inc rsi
+    // v2.51：源/目的从 rsi/rdi 换成 **r9/r8** —— 因为 rsi/rdi 在 Win64 里是
+    // callee-saved，v2.51 起拿它们当第 6/7 个变量寄存器。运行库例程**绝不能**
+    // 碰这两个寄存器（除非自己 push/pop）。
+    _b(code, 0x41)                         // mov al, [r9]
+    _b(code, 0x8A)
+    _b(code, 0x01)
+    _b(code, 0x41)                         // mov [r8], al
+    _b(code, 0x88)
+    _b(code, 0x00)
+    _b(code, 0x49)                         // inc r9
     _b(code, 0xFF)
-    _b(code, 0xC6)
-    _b(code, 0x48)                         // inc rdi
+    _b(code, 0xC1)
+    _b(code, 0x49)                         // inc r8
     _b(code, 0xFF)
-    _b(code, 0xC7)
+    _b(code, 0xC0)
     _b(code, 0x48)                         // dec rcx
     _b(code, 0xFF)
     _b(code, 0xC9)
@@ -9107,6 +9141,11 @@ fn _gen_memcpy(ctx: Ctx) {
 fn _gen_str_cat(ctx: Ctx) {
     let code: vec[int] = ctx.code
     ctx.rt_pos.set(RT_CAT, len(code))
+    // v2.51：rsi/rdi 现在是变量寄存器（callee-saved），本例程内部拿它们当临时
+    // 寄存器用，必须自己保存。**两个 push 是 16 字节，`sub rsp,0x68` 之后 rsp
+    // 仍 ≡ 0 (mod 16)**，后面调 __alloc/__memcpy 的对齐不受影响。
+    _b(code, 0x57)                         // push rdi
+    _b(code, 0x56)                         // push rsi
     _sub_rsp(code, 0x68)
     _mov_rsp_store(code, 0x28, RCX)        // a
     _mov_rsp_store(code, 0x30, RDX)        // b
@@ -9137,6 +9176,8 @@ fn _gen_str_cat(ctx: Ctx) {
     // 拷 a
     _mov_rsp_load(code, RSI, 0x28)
     _mov_rsp_load(code, RCX, 0x38)
+    _mov_rr(code, R8, RDI)                 // __memcpy 的实参改成 r8/r9
+    _mov_rr(code, R9, RSI)
     _call_rt(ctx, RT_MEMCPY)
     // 拷 b：dst = data + la
     _mov_rsp_load(code, RDI, 0x50)
@@ -9144,6 +9185,8 @@ fn _gen_str_cat(ctx: Ctx) {
     _alu_rr(code, 0x01, RDI, R8)
     _mov_rsp_load(code, RSI, 0x30)
     _mov_rsp_load(code, RCX, 0x40)
+    _mov_rr(code, R8, RDI)
+    _mov_rr(code, R9, RSI)
     _call_rt(ctx, RT_MEMCPY)
     // NUL
     _mov_rsp_load(code, RDI, 0x50)
@@ -9156,6 +9199,8 @@ fn _gen_str_cat(ctx: Ctx) {
     _b(code, 0)
     _mov_rsp_load(code, RAX, 0x50)
     _add_rsp(code, 0x68)
+    _b(code, 0x5E)                         // pop rsi（后 push 的先 pop）
+    _b(code, 0x5F)                         // pop rdi
     _ret(code)
 }
 

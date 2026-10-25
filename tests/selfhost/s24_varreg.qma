@@ -1,0 +1,42 @@
+// s24_varreg.qma —— 变量寄存器池扩到 7 个之后的**踩踏回归**（v2.51）
+//
+// 背景：v2.51 把 `RSI`/`RDI` 也拿来当变量寄存器（Win64 里它们是 callee-saved）。
+// 危险在于**运行库例程可能踩它们** —— 一旦踩了，第 6/7 个变量会被悄悄改值，
+// 而且**不崩溃**，只出错值。这个夹具专门构造那个形状：
+//   · `work` 有 9 个标量变量 → 前 7 个进寄存器（含 RSI/RDI），后 2 个落帧槽；
+//   · 循环里反复调 `__memcpy`（vec 扩容、结构体按值拷贝）与 `__str_cat`；
+//   · 每轮都把 7 个常量变量全部加进累加器 —— 任何一个被踩，和就变了。
+// 与 stage-0 逐字节差分。
+struct P {
+    x: int
+    y: int
+}
+
+fn work(n: int) -> int {
+    let v1 = 11
+    let v2 = 22
+    let v3 = 33
+    let v4 = 44
+    let v5 = 55
+    let v6 = 66
+    let v7 = 77
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        let v = vec[int].new(4)
+        v.push(i)
+        v.push(i + 1)
+        let p = P { x: i, y: i + 1 }
+        let q = p
+        let s = "ab" + "cd" + i.to_str()
+        acc = acc + v1 + v2 + v3 + v4 + v5 + v6 + v7
+        acc = acc + v.get(0) + v.get(1) + q.x + q.y + len(s)
+        i = i + 1
+    }
+    return acc
+}
+
+fn main() {
+    print(work(5))
+    print(work(1))
+}
