@@ -5115,7 +5115,106 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
 // 线性扫描分配（只分配临时值；变量在 `_new_var` 里已固定）
 // ---------------------------------------------------------------------------
 
-fn _alloc(fc: FnCtx) {
+/// 变量寄存器分配（v2.50）：**按使用次数**把寄存器给最热的标量变量。
+///
+/// 以前是"按创建顺序"：`_new_var` 里前 5 个标量拿 RBX/R12-R15，第 6 个起落帧槽。
+/// 于是 `let n/v/i/s/t/t0/t1` 这种 7 个变量的函数里，**热的累加器和循环变量
+/// 跟第 6、7 个一起溢出**，热循环每轮多两次内存往返，而且 store→load 形成串行
+/// 依赖链 —— 实测 b4_array 每元素 21 个周期（C 只要 5 个）。
+///
+/// 两条安全边界：
+///   ① **只动标量**。聚合变量的"值 = 区域地址"，槽号在降级期就被 `OP_ADDRV`
+///      烧进 IR 了，搬了就错。
+///   ② 标量也要查：它的槽号有没有被 `OP_ADDRV` 引用过（`baked` 位图）。
+///      寄存器里的变量不可能被烧过（它压根没有槽），所以降级永远安全。
+///
+/// 算法：贪心交换 —— 反复找"使用次数最少的寄存器标量"和"使用次数最多的槽内标量"，
+/// 前者比后者少就互换位置，最多 8 轮（每轮至少提一个，够用）。
+fn _alloc_vars(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
+    let n = len(fc.vloc)
+    ucnt.clear()
+    let mut i = 0
+    while i < n {
+        ucnt.push(0)
+        i = i + 1
+    }
+    baked.clear()
+    i = 0
+    while i < MAX_SLOT {
+        baked.push(0)
+        i = i + 1
+    }
+    // 一遍扫 IR：统计每个 vreg 被读几次 + 记录被 ADDRV 烧过的槽号
+    i = 0
+    while i < len(fc.ir) {
+        let ins = fc.ir.get(i)
+        if ins.op == OP_ADDRV {
+            if ins.imm >= 0 && ins.imm < MAX_SLOT {
+                baked.set(ins.imm, 1)
+            }
+        }
+        if ins.a > 0 && ins.a < n {
+            ucnt.set(ins.a, ucnt.get(ins.a) + 1)
+        }
+        // BINI / CMPI / DIVC 的 `b` 槽不是 vreg
+        if ins.b > 0 && ins.b < n && ins.op != OP_BINI &&
+           ins.op != OP_CMPI && ins.op != OP_DIVC {
+            ucnt.set(ins.b, ucnt.get(ins.b) + 1)
+        }
+        // 这几个操作码的 dst 槽是被读的（"值"/"地址"/"字节数"）
+        if ins.dst > 0 && ins.dst < n {
+            if ins.op == OP_MEMCPYN || ins.op == OP_STORED || ins.op == OP_STOREX ||
+               ins.op == OP_STORE8D || ins.op == OP_STORE8X || ins.op == OP_STORE8I ||
+               ins.op == OP_FBIN || ins.op == OP_ITOF {
+                ucnt.set(ins.dst, ucnt.get(ins.dst) + 1)
+            }
+        }
+        i = i + 1
+    }
+    let mut round = 0
+    while round < 8 {
+        let mut wr = -1            // 最不值钱的寄存器标量
+        let mut wru = 0
+        let mut bs = -1            // 最值钱的槽内标量
+        let mut bsu = 0
+        let mut v = 1
+        while v < n {
+            if fc.vpin.get(v) == 1 && _ty_is_agg(fc.vty.get(v)) == 0 {
+                let loc = fc.vloc.get(v)
+                let u = ucnt.get(v)
+                if loc > 0 {
+                    if _cs_index(loc - 1) >= 0 {
+                        if wr < 0 || u < wru {
+                            wr = v
+                            wru = u
+                        }
+                    }
+                } else if loc < 0 {
+                    let slot = 0 - loc - 1
+                    if slot < MAX_SLOT && baked.get(slot) == 0 {
+                        if bs < 0 || u > bsu {
+                            bs = v
+                            bsu = u
+                        }
+                    }
+                }
+            }
+            v = v + 1
+        }
+        if wr < 0 || bs < 0 || bsu <= wru {
+            round = 8                      // 没有值得换的
+        } else {
+            let rloc = fc.vloc.get(wr)
+            let sloc = fc.vloc.get(bs)
+            fc.vloc.set(bs, rloc)
+            fc.vloc.set(wr, sloc)
+            round = round + 1
+        }
+    }
+}
+
+fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
+    _alloc_vars(fc, ucnt, baked)
     let n = len(fc.ir)
     // cp[i] = 下标 < i 的调用指令条数（用来判断区间是否跨调用）
     let cp = fc.cp
@@ -7588,6 +7687,9 @@ fn _compile_range(hdr: int, wid: int, nodes: vec[Node], names: vec[str],
     let cap = mem_load64(hdr, wid * 8 + 3)
     let fc = _new_fc(nodes, names, fns, rt, stt)
     // 优化层的复用缓冲（每线程一份，跨函数复用）
+    // 分配器 / 优化层的复用缓冲（每线程一份，跨函数复用）
+    let ucnt = vec[int].new(512)
+    let baked = vec[int].new(512)
     let cok = vec[int].new(512)
     let cval = vec[int].new(512)
     let use = vec[int].new(512)
@@ -7601,7 +7703,7 @@ fn _compile_range(hdr: int, wid: int, nodes: vec[Node], names: vec[str],
         _fc_reset(fc)
         _lower_fn(fc, fi)
         _opt(fc, cok, cval, use, ndef, out)
-        _alloc(fc)
+        _alloc(fc, ucnt, baked)
         _emit_fn(fc)
         let code = fc.code
         let labs = fc.labs
