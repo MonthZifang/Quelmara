@@ -4154,9 +4154,11 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
     if nd.op == S_PRINT {
         let v = _lower_expr(fc, nd.a)
         if fc.vty.get(v) == TY_F64 {
-            // f64 的十进制格式化（最短往返）是 std/f64 的 f64_repr 的活，qlmc 还没移植。
-            // 想输出就先 `.to_int()`（或自己拆整数位），别让用户以为 print 坏了。
-            eprint("qlmc: print 还不支持 f64（用 x.to_int() 或等 f64 格式化移植）")
+            // print(f64) 还没做（v2.39 试过两条路都不通，见 07-gaps §7.26）：
+            //   ① wsprintfA（user32）不支持 `%f` —— 只认 %d/%u/%x/%s/%c
+            //   ② msvcrt 的 sprintf 在无 CRT 上下文里写不出东西（管道本身用 stub 验证过是通的）
+            // 所以只能像 stage-0 那样手写整数路径格式化（x*1e6 取整 → 拆整数/小数 → 补零 → 去尾零）。
+            eprint("qlmc: print 还不支持 f64（用 x.to_int()，或等手写格式化）")
             exit(2)
         }
         if _ty_is_agg(fc.vty.get(v)) {
