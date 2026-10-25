@@ -678,7 +678,7 @@ build/qlmc.exe version
 **流水线**（改哪一层一目了然）：
 
 ```
-.qma ─lex─▶ 记号 ─parse─▶ 平坦 AST ─lower─▶ 三地址 IR ─alloc─▶ 带位置 IR ─emit─▶ 机器码
+.qma ─lex─▶ 记号 ─parse─▶ 平坦 AST ─lower─▶ 三地址 IR ─opt─▶ 精简 IR ─alloc─▶ 带位置 IR ─emit─▶ 机器码
                                                                   │
                                                        按函数分片并行（每线程一段 arena）
 ```
@@ -688,12 +688,34 @@ build/qlmc.exe version
 | 词法 | `lex` | 只认 S2 的记号集；不认识的字符 fail-fast（不静默跳过） |
 | 语法 | `parse` / `_expr` / `_stmt` | 递归下降 + 优先级爬升；**平坦 AST**（节点表 + `nx` 链），块用链不用区间 |
 | 降级 | `_lower_expr` / `_lower_into` / `_lower_cond` | AST → IR。`_lower_into` 把赋值**直接算进目标变量**，`_lower_cond` 直接发 `cmp+jcc` |
-| IR | `Ir { op, dst, a, b, imm }` | 26 个操作码：常量 / 搬运 / 算术 / 比较 / 标签 / 跳转 / 条件跳 / 实参 / 调用 / 返回 / 打印 / 退出 / 取址 / 取长度 / 入参 |
+| IR | `Ir { op, dst, a, b, imm }` | 57 个操作码：常量 / 搬运 / 算术 / 位运算 / 比较 / 标签 / 跳转 / 条件跳 / 实参 / 调用 / 返回 / 打印 / 退出 / 取址 / 取长度 / 入参 / 聚合 / f64 / `OP_NOP` |
+| **优化** | **`_opt`** | **v2.44**：常量折叠 + 常量进变量 + 死临时值删除 + 空跳删除。只改"哪条指令还在"，消掉的写 `OP_NOP`，**不改下标**（见下） |
 | 分配 | `_alloc` | **两段式**：变量固定 callee-saved（RBX/R12-R15，满了落帧槽）；临时值按活跃区间线性扫描（R8-R11），**跨调用**的临时值直接落帧槽 |
-| 发射 | `_emit_ir` / `_emit_fn` | x86-64 手写编码（REX/ModRM/SIB、rel32 回填）；操作数按位置选 reg-reg / reg-mem 形态 |
+| 发射 | `_emit_ir` / `_emit_fn` | x86-64 手写编码（REX/ModRM/SIB、rel32 回填）；操作数按位置选 reg-reg / reg-mem 形态；**帧按实际用量给**（`_frame_bytes`） |
 | 并行 | `_compile_range` | 每个线程编一段函数，写 arena 里自己那段；主线程按函数序拼装 + 统一回填 |
 | 文件 | `build_rdata` / `build_pe` | **三节**（`.text`/`.rdata`/`.bss`）、导入表（kernel32 + user32）、PE32+ 头；`.bss` 1 MB 当堆（不占文件体积） |
-| 运行库 | `_gen_*` | 8 个手写例程：print_i64（`wsprintfA("%I64d\n")`）/ print_str / **print_bool** / memcpy / alloc（bump）/ str_cat / str_eq / die。全走 Win32，不引 CRT |
+| 运行库 | `_gen_*` | 手写例程：print_i64（`wsprintfA("%I64d\n")`）/ print_str / print_bool / memcpy / alloc（bump）/ str_cat / str_eq / die / **`__f64_fmt`**。全走 Win32，不引 CRT |
+
+**优化层（v2.44）——三条铁律，改之前先读**：
+
+1. **只改"指令还在不在"，绝不改下标。** 被消掉的指令写成 `OP_NOP`，发射时一条
+   字节都不发。这样 `vstart`/`vend`（活跃区间）、标签位置、`cp`（调用前缀和）
+   全部保持有效。**重建索引**过一遍就会踩 §7.17 那类布局敏感问题。
+2. **只动临时值，不动变量。** 临时值是单赋值的（`_vnew` 每次给新号），所以
+   "这个临时值等于常数"在整个函数里都成立，不需要支配树/SSA 重命名。变量可以
+   被重新赋值，删它的定义会改变别的路径上看到的值。
+3. **DCE 倒着扫一趟就够。** 删掉一条指令时把它操作数的使用计数减掉，而那些操作数
+   定义在更前面 —— 倒序扫描还没走到它们，所以同一条链上的死定义会在同一趟里连着
+   删掉。不需要迭代到不动点。
+
+**不做的**（留个记号，免得下次又"顺手"加进来）：拷贝传播 / 临时值合并（v2.43 的
+`_map_set` 段错误就是"合并两个定义"引起的）、强度削减 / CSE / LICM（要循环信息与
+支配关系，另一个量级）、内联。
+
+**优化层的缓冲必须复用**：`cok`/`cval`/`use`/`out` 由 `_compile_range` 持有，
+跨函数 `clear()` 重用。早一版在 `_opt` 里 `vec.new`，`s3_manyfns`（200 个小函数）
+光分配就慢 7%。
+
 
 **寄存器分配的两条硬规则**（改分配器前先读）：
 
@@ -946,6 +968,16 @@ main             按 fi 升序拷字节 + 回填 → 线程数不影响产物字
     或者用 `_pin` 出来的变量（固定帧槽，`_map_slot_of` 的 `lfull` 分支就是这么写的）。
     **排查手法**：`tools/dev/fault_probe.py` 拿 RVA → 把整个 `.text` 线性反汇编（capstone
     在 managed python 里有）→ 对着 RVA 找指令，比猜快得多。
+46. **帧里必须留 Win64 的 32 字节影子空间**（v2.44 踩过，见 §7.29）：调用点只在
+    ">4 个实参"时才发 `OP_STKALLOC`，被调方默认 `[rsp .. rsp+0x20)` 可写。
+    帧大（比如以前的 4 KB）时这块被顺带兜住，**一旦把帧按需缩到十几字节，
+    影子空间就压在活跃帧槽上** —— 现象是 `print(f(0)+f(1))` 打出 `f(0)+1`。
+    `_frame_bytes` 的返回值里固定 +32。
+47. **qlmc 的"临时值"不是严格单赋值**（v2.44 踩过）：`_map_get` 先用
+    `CONST d, 0` 给未命中兜底、命中后再 `LOAD d, va`，**同一个 vreg 两个定义**。
+    照 SSA 的思路做常量传播会把 `return m.get(k)` 折成 `return 0`。
+    做任何"值不变"的推理之前，先统计每个 vreg 的定义次数（`_opt_ndef`），
+    只有单定义的临时值才能当常量源。
 
 ## 2. 配置文件 `Quelmara.toml`
 

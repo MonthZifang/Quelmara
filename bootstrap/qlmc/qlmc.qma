@@ -1932,10 +1932,48 @@ fn _modrm(code: vec[int], mod: int, reg: int, rm: int) {
 }
 
 // mov dst, imm64
+/// `mov dst, imm`（v2.44：按值选最短编码）。
+///
+/// 原来恒定发 `movabs reg, imm64`（10 字节）。实测 qlmc 编自己时 9 317 个
+/// movabs 里 **3 159 个是 0、6 117 个在 imm32 内、只有 41 个真需要 64 位** ——
+/// 也就是 99.6% 的立即数白付了 4~7 个字节。现在三档：
+///   [0, 2^32)        → `mov r32, imm32`（5 字节，r8-r15 多一个 REX.B）
+///   [-2^31, 0)       → `REX.W C7 /0 imm32` 符号扩展（7 字节）
+///   其余             → `movabs`（10 字节）
 fn _mov_imm(code: vec[int], dst: int, v: int) {
+    if v >= 0 && v <= 4294967295 {
+        if dst >= 8 {
+            _b(code, 0x41)                     // REX.B
+        }
+        _b(code, 0xB8 + (dst & 7))
+        _w32(code, v)
+        return
+    }
+    if v < 0 && v >= -2147483648 {
+        _rex2(code, 1, 0, dst)                 // REX.W
+        _b(code, 0xC7)
+        _modrm(code, 3, 0, dst)
+        _w32(code, v)
+        return
+    }
     _rex2(code, 1, 0, dst)
     _b(code, 0xB8 + (dst & 7))
     _w64(code, v)
+}
+
+/// `mov qword [base+disp], imm`（v2.44：能直接写内存就别先搬进 rax）。
+/// imm32 符号扩展的一档是 8 字节；超出就退回"先 movabs 到 rax 再存"。
+fn _mov_imm_mem(code: vec[int], base: int, disp: int, v: int) {
+    if v >= -2147483648 && v <= 2147483647 {
+        _rex2(code, 1, 0, base)                // REX.W，扩展位在 rm
+        _b(code, 0xC7)
+        _modrm_mem(code, 2, 0, base)
+        _w32(code, disp)
+        _w32(code, v)
+        return
+    }
+    _mov_imm(code, RAX, v)
+    _mov_store(code, base, disp, RAX)
 }
 
 // mov dst, src（寄存器到寄存器）
@@ -4272,6 +4310,322 @@ fn _lower_fn(fc: FnCtx, fi: int) {
 }
 
 // ---------------------------------------------------------------------------
+// 优化层（v2.44）：降级之后、分配之前跑，只看 IR，不认识 AST
+// ---------------------------------------------------------------------------
+//
+// 为什么卡在这个位置：分配看活跃区间（`vstart`/`vend`），发射看位置（`vloc`）。
+// 所以优化**只改"哪条指令还在"，不改指令的下标** —— 被消掉的指令写成
+// `OP_NOP`，发射时一条字节都不发。这样 `vstart`/`vend`/标签位置全部保持有效，
+// 不需要重建任何索引（重建过一遍就会踩 §7.17 那类布局敏感问题）。
+//
+// 三条 pass，都只做"局部可证"的变换：
+//   1. 常量折叠：`OP_CONST` 定义的临时值参与算术/位运算就当场算掉。
+//      临时值是**单赋值**的（`_vnew` 每次给新号），所以"这个临时值等于常数"
+//      在整个函数里都成立，不需要支配树、也不需要 SSA 重命名。
+//   2. 常量进变量：`MOV 变量, 常量临时值` → `CONST 变量, v`（省一次寄存器搬运）。
+//   3. 空跳删除：`jmp L` 而 L 就在下一条（中间只隔着 `OP_LAB`）。
+//
+// **不做的**（留个记号，免得下次又"顺手"加进来）：
+//   · 拷贝传播 / 临时值合并：v2.43 的 `_map_set` 段错误就是这类"合并两个定义"
+//     引起的，变量不是 SSA，别碰。
+//   · 死代码删除：得先把"哪些操作数是被读的"逐条列清楚（`OP_MEMCPYN` 的字节数
+//     在 dst 槽、`OP_JCMP` 的 cc 在 dst 槽），列错一条就是静默删掉活代码。
+//   · 强度削减 / CSE / LICM：都要循环信息与支配关系，是另一个量级的工程。
+const OP_NOP = 56      // 优化掉的位置：发射时什么都不发
+
+/// 二元运算能不能折、折成多少。返回 1 表示能折，值写进 `out.get(0)`。
+///
+/// 用 vec 当出参是刻意的：写成"返回 (ok, v) 两元组"要加结构体，
+/// 而写成 `let mut fok/fv` + if 链会在分支里重赋值再跨 join 用 —— 那正是
+/// 坑表 #45 的形状。这里干脆让每个分支自己把结果写进 out。
+fn _fold_bin(op: int, x: int, y: int, out: vec[int]) -> int {
+    if op == OP_ADD {
+        out.set(0, x + y)
+        return 1
+    }
+    if op == OP_SUB {
+        out.set(0, x - y)
+        return 1
+    }
+    if op == OP_MUL {
+        out.set(0, x * y)
+        return 1
+    }
+    if op == OP_DIV {
+        // 除以 0 留着让运行期 idiv 抛（口径不变）；-1 也跳过：INT64_MIN/-1 会 #DE，
+        // 编译器自己算也会溢出，两边都不该"折"。
+        if y != 0 && y != -1 {
+            out.set(0, x / y)
+            return 1
+        }
+        return 0
+    }
+    if op == OP_MOD {
+        if y != 0 && y != -1 {
+            out.set(0, x % y)
+            return 1
+        }
+        return 0
+    }
+    if op == OP_AND {
+        out.set(0, x & y)
+        return 1
+    }
+    if op == OP_OR {
+        out.set(0, x | y)
+        return 1
+    }
+    if op == OP_XOR {
+        out.set(0, x ^ y)
+        return 1
+    }
+    // 移位：x86 把计数掩到 63，语言层对 >= 64 是未定义。**只在 [0,63] 内折**，
+    // 免得把"未定义"折成某个具体值。
+    if y >= 0 && y < 64 {
+        if op == OP_SHL {
+            out.set(0, x << y)
+            return 1
+        }
+        if op == OP_SAR {
+            out.set(0, x >> y)
+            return 1
+        }
+        if op == OP_SHR {
+            out.set(0, x >>> y)
+            return 1
+        }
+    }
+    return 0
+}
+
+/// 一元运算同理
+fn _fold_un(op: int, x: int, out: vec[int]) -> int {
+    if op == OP_NEG {
+        out.set(0, 0 - x)
+        return 1
+    }
+    if op == OP_BNOT {
+        out.set(0, 0 - x - 1)          // ~x = -x-1（64 位补码）
+        return 1
+    }
+    if op == OP_NOT {
+        if x == 0 {
+            out.set(0, 1)
+        } else {
+            out.set(0, 0)
+        }
+        return 1
+    }
+    if op == OP_NZ {
+        if x != 0 {
+            out.set(0, 1)
+        } else {
+            out.set(0, 0)
+        }
+        return 1
+    }
+    return 0
+}
+
+/// 这个操作码的 `dst` 槽是"写一个 vreg"吗？
+///
+/// 不是的情况分两类：① dst 槽里放的是别的东西（`OP_JCMP` 放 setcc 机器码、
+/// `OP_MEMCPYN` 放字节数、`OP_LAB`/`OP_JMP`/`OP_STKALLOC`/`OP_STKFREE` 用 imm）；
+/// ② 根本没有 dst（`OP_STORE`/`OP_COPY`/`OP_ZERO`/`OP_ZERON`/`OP_RETAGG`/
+/// `OP_RET`/`OP_PRINT`/`OP_EXIT`/`OP_ARG`/`OP_STKARG`/`OP_JZ`/`OP_JNZ`）。
+fn _opt_writes(op: int) -> int {
+    if op == OP_LAB || op == OP_JMP || op == OP_JCMP { return 0 }
+    if op == OP_MEMCPYN || op == OP_STKALLOC || op == OP_STKFREE { return 0 }
+    if op == OP_STORE || op == OP_COPY || op == OP_ZERO || op == OP_ZERON { return 0 }
+    if op == OP_RETAGG || op == OP_RETSRET || op == OP_RET { return 0 }
+    if op == OP_PRINT || op == OP_EXIT || op == OP_ARG || op == OP_STKARG { return 0 }
+    if op == OP_JZ || op == OP_JNZ || op == OP_NOP { return 0 }
+    return 1
+}
+
+/// 每个 vreg 被定义几次。
+///
+/// **这一步不能省**：qlmc 的"临时值"并不是严格单赋值的。`_map_get` 就是
+/// 先 `CONST d, 0`（未命中时的默认值）、命中后再 `LOAD d, va` —— 同一个 vreg
+/// 两个定义。要是照"临时值单赋值"去传播常量，就会把 `return m.get(k)`
+/// 折成 `return 0`（v2.44 实测：s23_map_grow 的 get 全变 0）。
+fn _opt_ndef(ir: vec[Ir], ndef: vec[int]) {
+    let n = len(ir)
+    let mut i = 0
+    while i < n {
+        let ins = ir.get(i)
+        if ins.dst > 0 && ins.dst < len(ndef) && _opt_writes(ins.op) == 1 {
+            ndef.set(ins.dst, ndef.get(ins.dst) + 1)
+        }
+        i = i + 1
+    }
+}
+
+/// 这个操作码"算出 dst 之外没有任何副作用"吗？
+///
+/// **只列真正安全的那些**：不碰内存、不调用、不跳转。`OP_LOAD`/`OP_LOAD8`
+/// 虽然也是"纯"的，但删掉它就少一次可能 AV 的访存，口径会变 —— 不列。
+fn _opt_pure(op: int) -> int {
+    if op == OP_CONST || op == OP_MOV { return 1 }
+    if op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_DIV || op == OP_MOD {
+        return 1
+    }
+    if op == OP_AND || op == OP_OR || op == OP_XOR { return 1 }
+    if op == OP_SHL || op == OP_SAR || op == OP_SHR { return 1 }
+    if op == OP_NEG || op == OP_NOT || op == OP_NZ || op == OP_BNOT { return 1 }
+    if op == OP_CMP || op == OP_FCMP { return 1 }
+    return 0
+}
+
+/// 统计一条指令读了哪些 vreg。
+///
+/// 规则：`a` 和 `b` 非 0 就是被读（对所有操作码都成立）；`dst` 绝大多数是**写**，
+/// 只有 `OP_MEMCPYN` 例外（字节数塞在 dst 槽里，是被读的）。
+/// `OP_JCMP` 的 dst 是 setcc 机器码（不是 vreg），所以不碰它 —— 漏了会把一个
+/// 机器码当成"用了某个 vreg"，无害但会白白保住一条死指令。
+fn _opt_mark(ins: Ir, use: vec[int]) {
+    if ins.a > 0 && ins.a < len(use) {
+        use.set(ins.a, use.get(ins.a) + 1)
+    }
+    if ins.b > 0 && ins.b < len(use) {
+        use.set(ins.b, use.get(ins.b) + 1)
+    }
+    if ins.op == OP_MEMCPYN && ins.dst > 0 && ins.dst < len(use) {
+        use.set(ins.dst, use.get(ins.dst) + 1)
+    }
+}
+
+/// 死临时值删除：临时值（`vpin == 0`）的定义如果一次都没被读，且操作码是纯的，
+/// 就把那条指令换成 `OP_NOP`。**只动临时值** —— 变量不是 SSA，删它的定义会
+/// 改变别的路径上看到的值。
+///
+/// **倒着扫一趟就够**（不用迭代到不动点）：删掉一条指令时把它操作数的使用计数
+/// 减掉，而那些操作数定义在更前面 —— 倒序扫描还没走到它们，所以同一条链上的
+/// 死定义会在同一趟里被连着删掉。
+fn _opt_dce(fc: FnCtx, use: vec[int]) {
+    let ir = fc.ir
+    let mut i = len(ir) - 1
+    while i >= 0 {
+        let ins = ir.get(i)
+        if ins.dst > 0 && ins.dst < len(use) && _opt_pure(ins.op) == 1 {
+            if fc.vpin.get(ins.dst) == 0 && use.get(ins.dst) == 0 {
+                if ins.a > 0 && ins.a < len(use) {
+                    use.set(ins.a, use.get(ins.a) - 1)
+                }
+                if ins.b > 0 && ins.b < len(use) {
+                    use.set(ins.b, use.get(ins.b) - 1)
+                }
+                ir.set(i, Ir { op: OP_NOP, dst: 0, a: 0, b: 0, imm: 0 })
+            }
+        }
+        i = i - 1
+    }
+}
+
+/// 优化入口。三个缓冲由调用方（`_compile_range`）持有并复用 —— **别在这里
+/// `vec.new`**：s3_manyfns 那种 200 个小函数一次编译要开 800 个 vec，光分配
+/// 就让编译慢 7%（v2.44 实测）。
+///   `cok`/`cval`：常量表，cok[v]=1 表示临时值 v 在所有执行路径上都等于 cval[v]
+///   `use`：每个 vreg 被读几次（给 DCE 用）
+///   `out`：`_fold_*` 的出参（长度恒为 2）
+fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
+         ndef: vec[int], out: vec[int]) {
+    let ir = fc.ir
+    let n = len(ir)
+    cok.clear()
+    cval.clear()
+    use.clear()
+    ndef.clear()
+    let mut i = 0
+    while i < len(fc.vloc) {
+        cok.push(0)
+        cval.push(0)
+        use.push(0)
+        ndef.push(0)
+        i = i + 1
+    }
+    _opt_ndef(ir, ndef)
+    // ---- 一趟干三件事：常量折叠 / 常量进变量 / 统计使用 ----
+    i = 0
+    while i < n {
+        let ins = ir.get(i)
+        let op = ins.op
+        if op == OP_CONST {
+            // 只有**单定义**的临时值才能当常量源
+            if fc.vpin.get(ins.dst) == 0 && ndef.get(ins.dst) == 1 {
+                cok.set(ins.dst, 1)
+                cval.set(ins.dst, ins.imm)
+            }
+        } else if op == OP_MOV {
+            // 常量临时值搬进变量 → 直接 CONST 变量（聚合变量不能这么干）
+            if ins.a > 0 && fc.vpin.get(ins.a) == 0 && cok.get(ins.a) == 1 {
+                if fc.vpin.get(ins.dst) == 1 && _ty_is_agg(fc.vty.get(ins.dst)) == 0 {
+                    ir.set(i, Ir { op: OP_CONST, dst: ins.dst, a: 0, b: 0,
+                                   imm: cval.get(ins.a) })
+                }
+            }
+        } else if op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_DIV ||
+                  op == OP_MOD || op == OP_AND || op == OP_OR || op == OP_XOR ||
+                  op == OP_SHL || op == OP_SAR || op == OP_SHR {
+            // 两个操作数都得是"已知常量"的临时值
+            if ins.a > 0 && ins.b > 0 && fc.vpin.get(ins.a) == 0 && fc.vpin.get(ins.b) == 0 {
+                if cok.get(ins.a) == 1 && cok.get(ins.b) == 1 {
+                    if _fold_bin(op, cval.get(ins.a), cval.get(ins.b), out) == 1 {
+                        let v = out.get(0)
+                        ir.set(i, Ir { op: OP_CONST, dst: ins.dst, a: 0, b: 0, imm: v })
+                        if fc.vpin.get(ins.dst) == 0 && ndef.get(ins.dst) == 1 {
+                            cok.set(ins.dst, 1)
+                            cval.set(ins.dst, v)
+                        }
+                    }
+                }
+            }
+        } else if op == OP_NEG || op == OP_BNOT || op == OP_NOT || op == OP_NZ {
+            if ins.a > 0 && fc.vpin.get(ins.a) == 0 && cok.get(ins.a) == 1 {
+                if _fold_un(op, cval.get(ins.a), out) == 1 {
+                    let v = out.get(0)
+                    ir.set(i, Ir { op: OP_CONST, dst: ins.dst, a: 0, b: 0, imm: v })
+                    if fc.vpin.get(ins.dst) == 0 && ndef.get(ins.dst) == 1 {
+                        cok.set(ins.dst, 1)
+                        cval.set(ins.dst, v)
+                    }
+                }
+            }
+        }
+        // 按**最终形态**统计使用：折成 CONST 之后它就没有操作数了，
+        // 于是原来那两个常量定义自然变成死代码，交给 _opt_dce 收走。
+        _opt_mark(ir.get(i), use)
+        i = i + 1
+    }
+    _opt_dce(fc, use)
+    // ---- 空跳：`jmp L` 后面（跳过连续的 LAB）就是 L 本身 → 删掉 ----
+    i = 0
+    while i < n {
+        let ins = ir.get(i)
+        if ins.op == OP_JMP {
+            let mut j = i + 1
+            let mut hit = 0
+            let mut go = 1
+            while go == 1 && j < n {
+                let nx = ir.get(j)
+                if nx.op == OP_LAB {
+                    if nx.imm == ins.imm {
+                        hit = 1
+                    }
+                    j = j + 1
+                } else {
+                    go = 0
+                }
+            }
+            if hit == 1 {
+                ir.set(i, Ir { op: OP_NOP, dst: 0, a: 0, b: 0, imm: 0 })
+            }
+        }
+        i = i + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 线性扫描分配（只分配临时值；变量在 `_new_var` 里已固定）
 // ---------------------------------------------------------------------------
 
@@ -4305,10 +4659,14 @@ fn _alloc(fc: FnCtx) {
         rend.push(-1)
         i = i + 1
     }
-    // 临时槽池（从 SLOT_TEMP 起）
+    // 临时槽池：**紧接变量区**（v2.44）。以前从固定的 SLOT_TEMP(384) 起，
+    // 于是"3 个局部变量 + 1 个溢出临时值"这种函数也要 385 个槽 → 3 KB 帧。
+    // 现在 tbase = 变量区末尾，帧大小才真正反映用量。
+    let tbase = fc.cells.get(C_ST)
+    let tpool = MAX_SLOT - SLOT_TEMP
     let send = fc.send
     i = 0
-    while i < MAX_SLOT - SLOT_TEMP {
+    while i < tpool {
         send.push(-1)
         i = i + 1
     }
@@ -4338,19 +4696,19 @@ fn _alloc(fc: FnCtx) {
             }
             if placed == 0 {
                 let mut s = 0
-                while s < MAX_SLOT - SLOT_TEMP {
+                while s < tpool {
                     if send.get(s) < st {
-                        fc.vloc.set(v, -(SLOT_TEMP + s + 1))
+                        fc.vloc.set(v, -(tbase + s + 1))
                         send.set(s, en)
                         placed = 1
-                        s = MAX_SLOT - SLOT_TEMP
+                        s = tpool
                     } else {
                         s = s + 1
                     }
                 }
             }
             if placed == 0 {
-                eprint("qlmc: 活跃临时值超过 " + (MAX_SLOT - SLOT_TEMP).to_str() + " 个")
+                eprint("qlmc: 活跃临时值超过 " + tpool.to_str() + " 个")
                 exit(2)
             }
         }
@@ -4412,13 +4770,16 @@ fn _emit_ir(fc: FnCtx, i: int) {
     let ins = fc.ir.get(i)
     let code = fc.code
     let op = ins.op
+    if op == OP_NOP {
+        return                             // 优化层消掉的位置：一条字节都不发
+    }
     if op == OP_CONST {
         let dloc = fc.vloc.get(ins.dst)
         if dloc > 0 {
             _mov_imm(code, dloc - 1, ins.imm)
         } else {
-            _mov_imm(code, RAX, ins.imm)
-            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+            // v2.44：直接写帧槽（8 字节），不再"先搬 rax 再存"（18 字节）
+            _mov_imm_mem(code, RBP, _slot_disp(-dloc - 1), ins.imm)
         }
         return
     }
@@ -4426,6 +4787,9 @@ fn _emit_ir(fc: FnCtx, i: int) {
         let dloc = fc.vloc.get(ins.dst)
         if dloc > 0 {
             _to_reg(fc, dloc - 1, ins.a)
+        } else if fc.vloc.get(ins.a) > 0 {
+            // v2.44：源已经在寄存器里就直接存，省掉一条 `mov rax, X`
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), fc.vloc.get(ins.a) - 1)
         } else {
             _to_reg(fc, RAX, ins.a)
             _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
@@ -5010,6 +5374,40 @@ fn _emit_ir(fc: FnCtx, i: int) {
     exit(2)
 }
 
+/// 一个函数实际需要的帧字节数（v2.44）。
+///
+/// 以前是**固定 4 KB**（`FRAME`），代价不是浪费点内存那么简单：每层递归都吃 4 KB，
+/// 而 PE 的 `SizeOfStackReserve` 只有 1 MB → **递归深度上限约 250 层**。实测后果：
+/// - qlmc 编自己时，`print(1+1+…+1)` 到 **37 项**就 `0xC00000FD`
+///   （STATUS_STACK_OVERFLOW，降级是递归的，一层 AST 要好几帧）；
+/// - qlmc 编出来的程序，`fn down(n){ if n<=0 {return 0}; return 1+down(n-1) }`
+///   在 `n=400` 时栈溢出（stage-0 的产物跑 1000 没事）。
+///
+/// 现在按实际用量给：变量/聚合区看 `C_ST`，临时槽看 `vloc` 里最深的那个。
+/// 上限仍是 `MAX_SLOT*8 = 4096`（分配器不给更深的槽），所以**永远不需要栈探测**
+/// （§7.17 的红线是"帧 > 4 KB"）。
+fn _frame_bytes(fc: FnCtx) -> int {
+    let mut units = fc.cells.get(C_ST)
+    let mut i = 1
+    while i < len(fc.vloc) {
+        let loc = fc.vloc.get(i)
+        if loc < 0 {
+            // loc = -(slot+1) → 槽号 +1 = -loc，字节数 = -8*loc
+            let u = 0 - loc
+            if u > units {
+                units = u
+            }
+        }
+        i = i + 1
+    }
+    // **必须给 Win64 的 32 字节影子空间留位置**（v2.44 踩过）：调用点没有
+    // `sub rsp,0x20`（只有 >4 个实参才发 OP_STKALLOC），被调方默认
+    // `[rsp .. rsp+0x20)` 可写。以前帧是 4 KB，这块"顺带"兜住了；帧缩到 16 字节
+    // 之后影子空间直接压在活跃槽上 —— 现象是 `print(metric(0)+metric(1))`
+    // 打出 1921（第二次调用的返回地址/影子区把前一个结果冲掉了）。
+    return units * 8 + 32
+}
+
 /// 一个函数：序言（保存用到的 callee-saved）+ 体 + 尾声
 fn _emit_fn(fc: FnCtx) {
     let code = fc.code
@@ -5042,10 +5440,18 @@ fn _emit_fn(fc: FnCtx) {
     }
     _push_rbp(code)
     _mov_rbp_rsp(code)
-    // 16 字节对齐：入口 rsp ≡ 8 (mod 16)，已 push (nsaved+1) 次
-    let mut frame = FRAME
+    // 16 字节对齐：入口 rsp ≡ 8 (mod 16)，已 push (nsaved+1) 次。
+    // (nsaved+1) 为奇数时 rsp 已 ≡ 0，帧取 16 的倍数；为偶数时要多补 8。
+    let mut frame = _frame_bytes(fc)
+    if frame < 16 {
+        frame = 16
+    }
+    let rem = frame % 16
+    if rem != 0 {
+        frame = frame + (16 - rem)
+    }
     if (nsaved + 1) % 2 == 0 {
-        frame = FRAME + 8
+        frame = frame + 8
     }
     // 栈形参的偏移要加 8*nsaved（见 C_NSAVED 的注释）
     fc.cells.set(C_NSAVED, nsaved)
@@ -6295,11 +6701,20 @@ fn _compile_range(hdr: int, wid: int, nodes: vec[Node], names: vec[str],
     let base = mem_load64(hdr, wid * 8 + 2)
     let cap = mem_load64(hdr, wid * 8 + 3)
     let fc = _new_fc(nodes, names, fns, rt, stt)
+    // 优化层的复用缓冲（每线程一份，跨函数复用）
+    let cok = vec[int].new(512)
+    let cval = vec[int].new(512)
+    let use = vec[int].new(512)
+    let ndef = vec[int].new(512)
+    let out = vec[int].new(2)
+    out.push(0)
+    out.push(0)
     let mut off = 0
     let mut fi = lo
     while fi < hi {
         _fc_reset(fc)
         _lower_fn(fc, fi)
+        _opt(fc, cok, cval, use, ndef, out)
         _alloc(fc)
         _emit_fn(fc)
         let code = fc.code

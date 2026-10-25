@@ -956,7 +956,7 @@ p50 从 1,904 → 473 µs 是 **4.0×**，与 worker 数同阶——多核确实
 降到 4–13 ms；冷路径不变（委托 stage-0，2136 ms）。失效正确性实测：`exit(7)` 改成
 `exit(8)` 后 `qlm run` 的退出码从 7 变 8，产物被重新生成。
 
-### 3.25 stage-1 编译器 `qlmc`（v2.43：子集 S12，**自举不动点达成 + f64 完整 + map 自动扩容**）
+### 3.25 stage-1 编译器 `qlmc`（v2.44：子集 S12，**自举不动点 + f64 完整 + map 扩容 + IR 优化层**）
 
 口径：本机 20 逻辑核（VBS 开着，噪声见 §3.26，只做纵向比较）；`qlmc` 的耗时是
 **它自己报的**（`now_ns()` 差，排除进程创建税），每个数字取 5 次的最小值。
@@ -964,46 +964,53 @@ p50 从 1,904 → 473 µs 是 **4.0×**，与 worker 数同阶——多核确实
 
 | 用例 | 源码 | 产物 | 编译（进程内，min of 5） |
 |---|---|---|---|
-| `examples/fib.qma` | 0.2 KB | 2560 B | 4.1–5.1 ms |
-| `examples/loop_sum.qma` | 0.3 KB | 2560 B | 4.8 ms |
-| `tests/selfhost/s4_agg.qma`（struct+数组+for） | 1.3 KB | 4096 B | **5.6 ms** |
-| `tests/selfhost/s5_enum.qma`（enum+match） | 1.5 KB | 3584 B | **8.9 ms** |
-| `tests/selfhost/s6_vec.qma`（vec） | 0.9 KB | 4096 B | **5.8–6.0 ms** |
-| `tests/selfhost/s7_aggfn.qma`（聚合形参/返回） | 1.2 KB | 4096 B | **4.9 ms** |
-| `tests/selfhost/s8_map.qma`（map + 4 实参） | 0.8 KB | 7168 B | **4.9 ms** |
-| `tests/selfhost/s9_slice.qma`（切片） | 0.9 KB | 4096 B | **4.7 ms** |
-| `tests/selfhost/s10_defer.qma`（defer） | 1.0 KB | 2560 B | **4.6 ms** |
-| `tests/selfhost/s11_import.qma`（import，2 个文件） | 1.1 KB | 2560 B | **6.3 ms** |
-| `tests/selfhost/s12_ffi.qma`（@ffi 三个 API） | 0.7 KB | 2560 B | **5.7 ms** |
-| `tests/selfhost/s13_closure.qma`（闭包） | 1.1 KB | 3584 B | **5.1 ms** |
-| `tests/selfhost/s14_vecgrow.qma`（扩容 + 别名） | 1.5 KB | 9216 B | **6.1–7.8 ms** |
-| `tests/selfhost/s15_bitops.qma`（位运算/移位/进制） | 2.2 KB | 4096 B | **6.8 ms** |
-| `tests/selfhost/s16_stackargs.qma`（5/6/7 形参走栈） | 1.9 KB | 5632 B | **5.8 ms** |
-| `tests/selfhost/s17_constexpr.qma`（const 常量表达式） | 2.0 KB | 4608 B | **5.6 ms** |
-| `tests/selfhost/s18_vecagg.qma`（vec[Struct] + else if） | 2.3 KB | 9728 B | **7.4 ms** |
-| `tests/selfhost/s19_spawn.qma`（spawn/join，0/1/2/5/8 实参） | 1.5 KB | 6656 B | **6.2 ms** |
-| `tests/selfhost/s20_mem.qma`（内存/串/诊断内建） | 2.4 KB | 6656 B | **7.6 ms** |
-| `tests/selfhost/s21_f64.qma`（f64 数值） | 2.4 KB | 6656 B | **9.6 ms** |
-| `tests/selfhost/s22_f64print.qma`（f64 打印） | 1.1 KB | 11776 B | **5.4 ms** |
-| `tests/selfhost/s23_map_grow.qma`（map 自动扩容） | 3.6 KB | 28160 B | **8.2 ms** |
-| **`bootstrap/qlmc/qlmc.qma`（自己编自己 → stage-2）** | 296 KB | **492 544 B** | **308–325 ms**（`-j4`） |
-| **stage-2 编自己 → stage-3（不动点）** | 296 KB | **492 544 B**（与 stage-2 逐字节相同） | **`-j1` 同量级** |
-| `tests/selfhost/s3_manyfns.qma`（200 函数，`-j1`） | 96 KB | 44 544 B | **17.5–18.5 ms** |
-| └ 其中后端阶段 | — | — | **2.5–3.4 ms（-j1）/ 1.6–2.5 ms（-j4）** |
+| `examples/fib.qma` | 0.2 KB | 4096 B | 4.9 ms |
+| `examples/loop_sum.qma` | 0.3 KB | 4096 B | 7.6 ms |
+| `tests/selfhost/s4_agg.qma`（struct+数组+for） | 1.7 KB | 6144 B | **6.7 ms** |
+| `tests/selfhost/s5_enum.qma`（enum+match） | 1.8 KB | 5632 B | **7.3 ms** |
+| `tests/selfhost/s6_vec.qma`（vec） | 0.8 KB | 8192 B | **7.1 ms** |
+| `tests/selfhost/s7_aggfn.qma`（聚合形参/返回） | 1.2 KB | 6144 B | **7.2 ms** |
+| `tests/selfhost/s8_map.qma`（map + 4 实参） | 0.8 KB | 11776 B | **8.5 ms** |
+| `tests/selfhost/s9_slice.qma`（切片） | 0.9 KB | 6144 B | **7.4 ms** |
+| `tests/selfhost/s10_defer.qma`（defer） | 1.0 KB | 4608 B | **7.3 ms** |
+| `tests/selfhost/s11_import.qma`（import，2 个文件） | 0.5 KB | 4608 B | **8.3 ms** |
+| `tests/selfhost/s12_ffi.qma`（@ffi 三个 API） | 0.8 KB | 4608 B | **6.2 ms** |
+| `tests/selfhost/s13_closure.qma`（闭包） | 1.0 KB | 5632 B | **6.4 ms** |
+| `tests/selfhost/s14_vecgrow.qma`（扩容 + 别名） | 1.4 KB | 10752 B | **8.0 ms** |
+| `tests/selfhost/s15_bitops.qma`（位运算/移位/进制） | 2.7 KB | 5120 B | **6.4 ms** |
+| `tests/selfhost/s16_stackargs.qma`（5/6/7 形参走栈） | 2.4 KB | 7168 B | **7.7 ms** |
+| `tests/selfhost/s17_constexpr.qma`（const 常量表达式） | 1.7 KB | 6144 B | **7.0 ms** |
+| `tests/selfhost/s18_vecagg.qma`（vec[Struct] + else if） | 1.9 KB | 11264 B | **9.1 ms** |
+| `tests/selfhost/s19_spawn.qma`（spawn/join，0/1/2/5/8 实参） | 1.7 KB | 8192 B | **7.6 ms** |
+| `tests/selfhost/s20_mem.qma`（内存/串/诊断内建） | 3.4 KB | 7680 B | **8.3 ms** |
+| `tests/selfhost/s21_f64.qma`（f64 数值） | 1.9 KB | 7168 B | **7.4 ms** |
+| `tests/selfhost/s22_f64print.qma`（f64 打印） | 1.1 KB | 11264 B | **7.5 ms** |
+| `tests/selfhost/s23_map_grow.qma`（map 自动扩容） | 3.6 KB | 24576 B | **10.8 ms** |
+| **`bootstrap/qlmc/qlmc.qma`（自己编自己 → stage-2）** | 305 KB | **459 776 B** | **320 ms**（`-j1`） |
+| **stage-2 编自己 → stage-3（不动点）** | 305 KB | **459 776 B**（与 stage-2 逐字节相同） | **`-j1` 同量级** |
+| `tests/selfhost/s3_manyfns.qma`（200 函数，`-j1`） | 46 KB | 39 424 B | **31.2 ms** |
+| └ 其中后端阶段 | — | — | **~3 ms（-j1）** |
 
-`build/qlmc.exe` 自身 **2030 KB**（v2.37 1743 KB；v2.38→v2.43 的增量来自 f64 的 7 个
-运行库例程 + `__f64_fmt` 手写格式化 + map 扩容），由 stage-0 编出来。
+`build/qlmc.exe` 自身 **2105 KB**（v2.43 2030 KB；增量来自优化层自己的代码 ——
+`qlmc.qma` 从 303 319 涨到 311 533 字节），由 stage-0 编出来。
 
-**自举状态（v2.43）**：**不动点仍成立**。`qlmc` 编自己 → stage-2（492 544 字节），
+**自举状态（v2.44）**：**不动点仍成立**。`qlmc` 编自己 → stage-2（459 776 字节），
 stage-2 再编自己 → stage-3，**两者逐字节相同**（`-j1`）。stage-2 编
 `tests/selfhost/` 全部 25 组独立程序与 stage-1 逐字节相同。
 `python tests/bootstrap_test.py --strict` **五级全 PASS**。
-注意源码从 v2.38 的 231 KB 涨到 296 KB，**编译耗时不能跨版本直接比**。
+注意源码从 v2.38 的 231 KB 涨到 305 KB，**编译耗时不能跨版本直接比**；
+横向对比一律走 git worktree 基线（v2.44 的口径见 `versions/v2.44/CHANGELOG.md`）。
 
 **`-jN` 编自己也通了（v2.43 复测）**：`-j 1 / 2 / 4 / 8` 四种取值编 qlmc 自己都是
-rc=0、产物 492 544 字节且 md5 相同。v2.35 记的"多线程编自己段错误"（§7.24）已不复现，
+rc=0、产物字节数相同且 md5 相同。v2.35 记的"多线程编自己段错误"（§7.24）已不复现，
 真凶应该是堆上限（32 → 64 MB）与 `ARENA_CAP`（16 → 4 MB）—— 多线程下每线程一份
 arena 才是吃满堆的地方。注意 `-j` 与数字**必须用空格分开**，`-j4` 会被忽略。
+
+**优化层（v2.44）**：降级之后、分配之前跑三条 pass —— 常量折叠 / 常量进变量 /
+死临时值删除 / 空跳删除。**产物 `.text` 真实字节 −10.9%、指令 −5.1%，编译耗时
++1.7% ~ +3.2%，运行期中性**（git worktree 基线双向对照，28 个夹具，逐用例无负优化）。
+同一版把 4 KB 固定帧改成按需（16~232 字节），修掉了编译期 37 项表达式、运行期
+400 层递归两个栈溢出（§7.29）。
 
 **`push` 的机器码代价**（v2.27 实测，用 `tools/dev/dumpasm.py` 数指令，不受噪声影响）：
 
