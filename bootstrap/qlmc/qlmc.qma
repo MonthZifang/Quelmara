@@ -227,8 +227,8 @@ const TY_MAP = 0x10000       // 0x10000+(K<<8)+V：map 句柄也是标量
 const TY_SLICE = 0x20000     // 0x20000+elem：切片 = (ptr, len) 两字聚合
 const TY_FN = 0x30000        // 闭包 = {code, env} 两字聚合（本版 env 恒为 0）
 const TY_ARRAY = 0x100000
-const ST_STRIDE = 18        // 每个 struct 在 stt 里占 18 字：name, nf, 8*(fname, fty)
-const MAX_FIELD = 8
+const MAX_FIELD = 24         // v2.31：8 → 24（qlmc 自己的 FnCtx 有 22 个字段）
+const ST_STRIDE = 2 + MAX_FIELD * 2   // 每个 struct 在 stt 里占 name, nf, MAX_FIELD*(fname, fty)
 const MAX_STRUCT = 64
 const EN_HDR = 1200          // stt[EN_HDR] = enum 个数，enum 区从 EN_HDR+1 起
 const EN_STRIDE = 26         // name, nvar, 8×(变体名, 载荷名, 载荷类型)
@@ -639,8 +639,11 @@ fn _type(p: P, pos: vec[int]) -> int {
         _eat_p(p, pos, P_LBRACK)
         let e = _type(p, pos)
         _eat_p(p, pos, P_RBRACK)
-        if e >= TY_STRUCT {
-            _fail(p, pos, "本版 vec 元素只支持 int/bool/str")
+        // 聚合元素（v2.31）：struct / enum / 定长数组都行。
+        // 嵌套 vec/map/切片/闭包仍然拒绝——它们的类型码会和区间撞
+        // （0x8000+0x8000 = TY_MAP，见 07-gaps §7.18）。
+        if e >= TY_VEC && e < TY_ARRAY {
+            _fail(p, pos, "本版 vec 元素不支持嵌套 vec/map/切片/闭包（类型码撞区间，见 07-gaps §7.18）")
         }
         return TY_VEC + e
     }
@@ -1344,7 +1347,15 @@ fn _stmt(p: P, pos: vec[int]) -> int {
         let id = _node(p, S_IF, cond, th, -1)
         if _cur(p, pos).k == T_KW && _cur(p, pos).n == K_ELSE {
             _adv(pos)
-            let eh = _block(p, pos)
+            let mut eh = -1
+            if _cur(p, pos).k == T_KW && _cur(p, pos).n == K_IF {
+                // `else if`（v2.31）：else 体就是那一条 if 语句（单节点链）。
+                // 之前只认 `else {`，而 qlmc 自己的源码里全是 `else if`——
+                // 自举时第一个撞上的语法就是它。
+                eh = _stmt(p, pos)
+            } else {
+                eh = _block(p, pos)
+            }
             p.nodes.set(id, Node { op: S_IF, a: cond, b: th, c: -1,
                                    n: eh, slot: 0, ty: TY_INT, nx: -1 })
         }
@@ -1593,11 +1604,15 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
                 _adv(pos)
                 _eat_p(p, pos, P_COLON)
                 let fty = _type(p, pos)
-                if fty >= TY_STRUCT {
-                    _fail(p, pos, "本版 struct 字段只支持 int/bool/str")
+                // 字段必须是**标量**（8 字节）：int/bool/str + vec/map 句柄都行，
+                // 聚合字段（struct/enum/数组/切片/闭包）还没有递归布局。
+                // 之前按 `fty >= TY_STRUCT` 拦，把 vec 句柄也误伤了——
+                // 而 qlmc 自己的 `struct P { toks: vec[Tok] ... }` 正是这个形状（v2.31）。
+                if _ty_is_agg(fty) {
+                    _fail(p, pos, "本版 struct 字段不支持聚合类型（struct/enum/数组/切片/闭包）")
                 }
                 if nf >= MAX_FIELD {
-                    _fail(p, pos, "struct 字段超过 8 个")
+                    _fail(p, pos, "struct 字段超过上限（MAX_FIELD）")
                 }
                 p.stt.set(_st_base(nst) + 2 + nf * 2, _name_id(p, fnm.s))
                 p.stt.set(_st_base(nst) + 2 + nf * 2 + 1, fty)
@@ -2117,6 +2132,9 @@ const OP_PARAMSTK = 47 // dst = [rbp + imm]（被调方取栈上的形参）
 const OP_STKALLOC = 48 // sub rsp, imm（调用点开 shadow space + 栈实参）
 const OP_STKARG = 49   // [rsp + imm] = a（写栈实参）
 const OP_STKFREE = 50  // add rsp, imm
+// dst = a + b*imm（imm = 元素字节步长）。vec 元素是聚合时步长不是 8，
+// OP_ADDRX 的 `shl 3` 就不够用了（v2.31）。
+const OP_ADDRXN = 51
 
 struct Ir {
     op: int
@@ -2871,9 +2889,10 @@ fn _addr_index(fc: FnCtx, base_nid: int, ix_nid: int) -> int {
         let h = _lower_expr(fc, base_nid)
         let i = _lower_expr(fc, ix_nid)
         _vec_check(fc, h, i)
-        fc.cells.set(C_ADDRTY, bty0 - TY_VEC)
+        let et0 = bty0 - TY_VEC
+        fc.cells.set(C_ADDRTY, et0)
         let data = _vec_field(fc, h, 0)
-        return _vec_elem_addr(fc, data, i)
+        return _vec_elem_addr(fc, data, i, _ty_size(fc, et0))
     }
     if bty0 >= TY_SLICE && bty0 < TY_ARRAY {
         // 切片：(ptr, len)，先查边界再用 ptr 当下标基址
@@ -3189,8 +3208,21 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         _ir_emit(fc, OP_LOAD, d, a, 0, 8)
         return d
     }
-    if nd.op == E_STRUCTLIT || nd.op == E_ARRLIT {
-        eprint("qlmc: 聚合字面量只能出现在 let / 赋值 / 字段初始化里")
+    if nd.op == E_STRUCTLIT {
+        // 结构体字面量当**值**用（v2.31）：开一块临时区域逐字段写进去，
+        // 值 = 区域地址（与 E_ENUMCTOR / 字段读同一约定）。push / set /
+        // 函数实参都靠这条——qlmc 自己的源码里 `nodes.push(Node{...})`
+        // 就是这个形状。
+        let ty = TY_STRUCT + nd.a
+        let d = _new_var(fc, -1, ty)
+        _lower_into_agg(fc, nid, d, ty)
+        let a = _vnew(fc)
+        fc.vty.set(a, ty)
+        _ir_emit(fc, OP_ADDRV, a, 0, 0, -fc.vloc.get(d) - 1)
+        return a
+    }
+    if nd.op == E_ARRLIT {
+        eprint("qlmc: 数组字面量只能出现在 let / 赋值 / 字段初始化里")
         exit(2)
     }
     eprint("qlmc: 不支持的表达式节点 " + nd.op.to_str())
@@ -3565,8 +3597,13 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
     }
     if nd.op == S_ASG_INDEX {
         let a = _addr_index(fc, nd.a, nd.b)
+        let ety = fc.cells.get(C_ADDRTY)      // 先取走：_lower_expr 会覆盖它
         let v = _lower_expr(fc, nd.c)
-        _ir_emit(fc, OP_STORE, 0, a, v, 8)
+        if _ty_is_agg(ety) {
+            _ir_emit(fc, OP_COPY, 0, a, v, _ty_size(fc, ety))
+        } else {
+            _ir_emit(fc, OP_STORE, 0, a, v, 8)
+        }
         return
     }
     if nd.op == S_ASSIGN {
@@ -4354,6 +4391,18 @@ fn _emit_ir(fc: FnCtx, i: int) {
         }
         return
     }
+    if op == OP_ADDRXN {
+        // dst = a + b*imm（imul rcx, rcx, imm32）
+        _to_reg(fc, RCX, ins.b)
+        _b(code, 0x48)
+        _b(code, 0x69)
+        _b(code, 0xC9)
+        _w32(code, ins.imm)
+        _to_reg(fc, RAX, ins.a)
+        _alu_rr(code, 0x01, RAX, RCX)
+        _store_rax(fc, fc.vloc.get(ins.dst))
+        return
+    }
     if op == OP_ADDRX {
         _to_reg(fc, RCX, ins.b)
         _b(code, 0x48)                      // shl rcx, 3
@@ -4894,11 +4943,17 @@ fn _vec_check(fc: FnCtx, h: int, i: int) {
     _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
 }
 
-/// 元素地址 = data + i*8（data 是**数据块**基址，不是句柄）
-fn _vec_elem_addr(fc: FnCtx, data: int, i: int) -> int {
+/// 元素地址 = data + i*stride（data 是**数据块**基址，不是句柄）。
+/// stride = 8 走 `shl 3` 的快路径；聚合元素用 `OP_ADDRXN`（imul）——vec[Struct]
+/// 的元素步长是结构体字节数，v2.31 起才存在这种情况。
+fn _vec_elem_addr(fc: FnCtx, data: int, i: int, stride: int) -> int {
     let a = _vnew(fc)
     fc.vty.set(a, TY_INT)
-    _ir_emit(fc, OP_ADDRX, a, data, i, 8)
+    if stride == 8 {
+        _ir_emit(fc, OP_ADDRX, a, data, i, 8)
+    } else {
+        _ir_emit(fc, OP_ADDRXN, a, data, i, stride)
+    }
     return a
 }
 
@@ -4911,7 +4966,7 @@ fn _vec_elem_addr(fc: FnCtx, data: int, i: int) -> int {
 ///
 /// ncp = max(cap*2, 4)：new(0) 的容量是 0，翻倍还是 0，必须兜底成 4，
 /// 否则 push 会往 0 字节的块里写，踩下一块堆。
-fn _vec_grow_body(fc: FnCtx, h: int) {
+fn _vec_grow_body(fc: FnCtx, h: int, stride: int) {
     let hp = _pin(fc, h)
     let len = _pin(fc, _vec_field(fc, hp, 8))
     let cap = _pin(fc, _vec_field(fc, hp, 16))
@@ -4935,10 +4990,10 @@ fn _vec_grow_body(fc: FnCtx, h: int) {
     _ir_emit(fc, OP_JZ, 0, lt, 0, lge)
     _ir_emit(fc, OP_MOV, ncp, four, 0, 0)
     _ir_emit(fc, OP_LAB, 0, 0, 0, lge)
-    // 分配 ncp*8 字节
+    // 分配 ncp*stride 字节
     let eight = _vnew(fc)
     fc.vty.set(eight, TY_INT)
-    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, stride)
     let nb = _vnew(fc)
     fc.vty.set(nb, TY_INT)
     _ir_emit(fc, OP_MUL, nb, ncp, eight, 0)
@@ -4947,10 +5002,10 @@ fn _vec_grow_body(fc: FnCtx, h: int) {
     fc.vty.set(nd, TY_INT)
     _ir_emit(fc, OP_CALLRT, nd, 0, 0, RT_ALLOC)
     let dp = _pin(fc, nd)
-    // 搬 len*8 字节（运行时长度 → OP_MEMCPYN）
+    // 搬 len*stride 字节（运行时长度 → OP_MEMCPYN）
     let eight2 = _vnew(fc)
     fc.vty.set(eight2, TY_INT)
-    _ir_emit(fc, OP_CONST, eight2, 0, 0, 8)
+    _ir_emit(fc, OP_CONST, eight2, 0, 0, stride)
     let cb = _vnew(fc)
     fc.vty.set(cb, TY_INT)
     _ir_emit(fc, OP_MUL, cb, len, eight2, 0)
@@ -4976,12 +5031,14 @@ fn _lower_vecnew(fc: FnCtx, nd: Node) -> int {
     _ir_emit(fc, OP_CONST, hdr, 0, 0, 24)
     _ir_emit(fc, OP_ARG, 0, hdr, 0, 0)
     _ir_emit(fc, OP_CALLRT, h, 0, 0, RT_ALLOC)
-    let eight = _vnew(fc)
-    fc.vty.set(eight, TY_INT)
-    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    // 数据块 = cap * 元素步长（聚合元素时步长是结构体字节数，v2.31）
+    let stride = _ty_size(fc, nd.a)
+    let stv = _vnew(fc)
+    fc.vty.set(stv, TY_INT)
+    _ir_emit(fc, OP_CONST, stv, 0, 0, stride)
     let bytes = _vnew(fc)
     fc.vty.set(bytes, TY_INT)
-    _ir_emit(fc, OP_MUL, bytes, n, eight, 0)
+    _ir_emit(fc, OP_MUL, bytes, n, stv, 0)
     _ir_emit(fc, OP_ARG, 0, bytes, 0, 0)
     let data = _vnew(fc)
     fc.vty.set(data, TY_INT)
@@ -5036,6 +5093,8 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
         exit(2)
     }
     let et = hty - TY_VEC
+    let stride = _ty_size(fc, et)
+    let eagg = _ty_is_agg(et)
     let m = fc.names.get(nd.b)
     if m == "len" {
         let d = _vnew(fc)
@@ -5055,13 +5114,18 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
         let cap0 = _vec_field(fc, hp, 16)
         let lpush = _newlab(fc.labs)
         _ir_emit(fc, OP_JCMP, 0x8C, len0, cap0, lpush)   // jl：还有空间
-        _vec_grow_body(fc, hp)
+        _vec_grow_body(fc, hp, stride)
         _ir_emit(fc, OP_LAB, 0, 0, 0, lpush)
         // 扩容会换数据块，所以 len/data 在汇合点之后重新读（顺带保证不跨调用）
         let len = _vec_field(fc, hp, 8)
         let data = _vec_field(fc, hp, 0)
-        let addr = _vec_elem_addr(fc, data, len)
-        _ir_emit(fc, OP_STORE, 0, addr, x, 8)
+        let addr = _vec_elem_addr(fc, data, len, stride)
+        if eagg {
+            // 聚合元素：槽里存的是**值**，不是指针 → 整块拷进去
+            _ir_emit(fc, OP_COPY, 0, addr, x, stride)
+        } else {
+            _ir_emit(fc, OP_STORE, 0, addr, x, 8)
+        }
         let one = _vnew(fc)
         fc.vty.set(one, TY_INT)
         _ir_emit(fc, OP_CONST, one, 0, 0, 1)
@@ -5085,13 +5149,39 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
         let i = _lower_expr(fc, nd.c)
         _vec_check(fc, h, i)
         let data = _vec_field(fc, h, 0)
-        let addr = _vec_elem_addr(fc, data, i)
+        let addr = _vec_elem_addr(fc, data, i, stride)
         let d = _vnew(fc)
         fc.vty.set(d, et)
-        _ir_emit(fc, OP_LOAD, d, addr, 0, 8)
+        if eagg {
+            // 聚合值 = 区域地址（与字段/下标读同一约定）。
+            // 数据块是 bump 分配的、扩容也不回收旧块，所以这个地址稳定。
+            _ir_emit(fc, OP_MOV, d, addr, 0, 0)
+        } else {
+            _ir_emit(fc, OP_LOAD, d, addr, 0, 8)
+        }
         return d
     }
-    eprint("qlmc: vec 只支持 .push(x) / .get(i) / .len()")
+    if m == "set" {
+        if nd.n < 0 {
+            eprint("qlmc: set 需要两个实参")
+            exit(2)
+        }
+        let i = _lower_expr(fc, nd.c)
+        let x = _lower_expr(fc, nd.n)
+        _vec_check(fc, h, i)
+        let data = _vec_field(fc, h, 0)
+        let addr = _vec_elem_addr(fc, data, i, stride)
+        if eagg {
+            _ir_emit(fc, OP_COPY, 0, addr, x, stride)
+        } else {
+            _ir_emit(fc, OP_STORE, 0, addr, x, 8)
+        }
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+        return d
+    }
+    eprint("qlmc: vec 只支持 .push(x) / .get(i) / .set(i,x) / .len()")
     exit(2)
     return 0
 }
@@ -5886,7 +5976,7 @@ fn main() {
         exit(2)
     }
     if a[0] == "version" {
-        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S16：int/bool/str + struct/数组/enum/vec（可扩容）/map/切片 + 位运算/移位 + 进制字面量 + const 常量表达式 + defer + import + @ffi + 闭包 + 聚合形参返回 + 形参实参不限个数 + for；IR + 线性扫描 + 并行）")
+        print("qlmc 0.5（Quelmara 写的 stage-1 编译器，子集 S17：int/bool/str + struct/数组/enum/vec（可扩容、元素可为聚合）/map/切片 + 位运算/移位 + 进制字面量 + const 常量表达式 + else if + defer + import + @ffi + 闭包 + 聚合形参返回 + 形参实参不限个数 + for；IR + 线性扫描 + 并行）")
         return
     }
     if len(a) < 2 {

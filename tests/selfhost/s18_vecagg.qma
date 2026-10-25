@@ -1,0 +1,71 @@
+// s18_vecagg.qma —— stage-1 编译器（qlmc）聚合作容器元素的差分夹具（v2.31）
+//
+// 覆盖：
+//   1) vec[Struct] 的 new / push / get / set / len / 下标读
+//   2) 元素步长不是 8：2 字（16 字节）与 3 字（24 字节，非 8 的幂）两种
+//   3) 扩容时元素值要跟着搬（从 1 格长到 11 格，跨 4 次翻倍）
+//   4) 结构体字面量直接当实参（push / set 的参数位置）
+//   5) `else if` 链（v2.31 补的语法，之前只认 `else {`）
+// 与 stage-0 做逐字节差分（tests/qlmc_test.py）。
+struct P { x: int, y: int }
+struct Big { a: int, b: int, c: int }
+
+fn pick(n: int) -> int {
+    // else if 链：之前 qlmc 只认 `else {`，这条是自举时撞出来的
+    if n == 0 {
+        return 10
+    } else if n == 1 {
+        return 20
+    } else if n == 2 {
+        return 30
+    } else {
+        return 40
+    }
+}
+
+fn main() {
+    let v = vec[P].new(1)
+    v.push(P { x: 1, y: 2 })
+    v.push(P { x: 3, y: 4 })
+    v.push(P { x: 5, y: 6 })
+    print(len(v))
+    let p = v.get(1)
+    print(p.x)
+    print(p.y)
+    print(v[2].x)
+
+    // set：整块覆盖
+    v.set(0, P { x: 100, y: 200 })
+    print(v[0].x)
+    print(v[0].y)
+    let q = v.get(1)
+    print(q.y)
+
+    // 扩容：1 → 11 格，跨 4 次翻倍，旧元素必须完整搬过去
+    let mut i = 0
+    while i < 8 {
+        v.push(P { x: i * 10, y: i * 10 + 1 })
+        i = i + 1
+    }
+    print(len(v))
+    print(v[0].x)
+    print(v[3].x)
+    print(v[10].y)
+
+    // 3 字结构体：步长 24（不是 8 的幂，走 imul 而不是 shl）
+    let b = vec[Big].new(2)
+    b.push(Big { a: 1, b: 2, c: 3 })
+    b.push(Big { a: 4, b: 5, c: 6 })
+    b.push(Big { a: 7, b: 8, c: 9 })
+    let g = b.get(2)
+    print(g.c)
+    print(b[1].a)
+    print(len(b))
+    b.set(1, Big { a: 40, b: 50, c: 60 })
+    print(b[1].b)
+
+    // else if
+    print(pick(0))
+    print(pick(2))
+    print(pick(9))
+}
