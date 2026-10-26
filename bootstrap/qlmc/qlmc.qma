@@ -2571,6 +2571,9 @@ const OP_FNEG = 75        // dst(f64) = -a（翻符号位，内联；以前是 C
 // v2.56：编译期算好的 f64 字面量位模式（imm = 8 字节 IEEE）。以前字面量要
 // "开槽 + 标志位 + 每轮一次带分支的 strtod 守卫"，在循环体里是 14 条指令。
 const OP_F64IMM = 76      // dst(f64) = imm 的位模式
+// v2.57：条件跳转的立即数形式。`cmp r64, imm32` 一条顶"装载常量 + 比较"两条。
+// dst = jcc 码、a = 左操作数、b = 常量、imm = 目标标签。
+const OP_JCMPI = 77
 
 struct Ir {
     op: int
@@ -5006,7 +5009,7 @@ fn _fold_un(op: int, x: int, out: vec[int]) -> int {
 /// ② 根本没有 dst（`OP_STORE`/`OP_COPY`/`OP_ZERO`/`OP_ZERON`/`OP_RETAGG`/
 /// `OP_RET`/`OP_PRINT`/`OP_EXIT`/`OP_ARG`/`OP_STKARG`/`OP_JZ`/`OP_JNZ`）。
 fn _opt_writes(op: int) -> int {
-    if op == OP_LAB || op == OP_JMP || op == OP_JCMP { return 0 }
+    if op == OP_LAB || op == OP_JMP || op == OP_JCMP || op == OP_JCMPI { return 0 }
     if op == OP_JCMPVLEN || op == OP_JCMPSTR { return 0 }
     if op == OP_MEMCPYN || op == OP_STKALLOC || op == OP_STKFREE { return 0 }
     if op == OP_STORE || op == OP_COPY || op == OP_ZERO || op == OP_ZERON { return 0 }
@@ -5066,7 +5069,8 @@ fn _opt_mark(ins: Ir, use: vec[int]) {
         use.set(ins.a, use.get(ins.a) + 1)
     }
     // OP_BINI / OP_CMPI 的 `b` 槽放的是子操作码 / setcc 机器码，不是 vreg
-    if ins.op != OP_BINI && ins.op != OP_CMPI && ins.op != OP_DIVC {
+    if ins.op != OP_BINI && ins.op != OP_CMPI && ins.op != OP_DIVC &&
+       ins.op != OP_JCMPI {
         if ins.b > 0 && ins.b < len(use) {
             use.set(ins.b, use.get(ins.b) + 1)
         }
@@ -5081,6 +5085,55 @@ fn _opt_mark(ins: Ir, use: vec[int]) {
         if ins.dst > 0 && ins.dst < len(use) {
             use.set(ins.dst, use.get(ins.dst) + 1)
         }
+    }
+}
+
+/// 相邻拷贝传播（v2.57）：`OP_MOV d, a` 后面紧跟**唯一**读 `d` 的那条指令时，
+/// 把那条指令的读操作数换成 `a`，MOV 消成 NOP。
+///
+/// 为什么值得专门做一次：qlmc 的降级期"每个值都先落一个临时 vreg"（`_lower_into`
+/// 会先 `_lower_expr` 再 `OP_MOV`），于是到处是纯搬运 —— fib 的 25 条里 6 条是
+/// `mov rax, r8` / `mov r12, rbx; mov rax, r12` 这种。这不是某个既有 pass 顺手
+/// 能消掉的，得单独一趟。
+///
+/// 安全边界（三条都不能省）：
+///   ① `d` 必须是**单定义、单使用**的临时值（不是变量、不是聚合）；
+///   ② 只换 `a` / `b` 这两个**只读**操作数 —— **`dst` 绝不能动**：`x = x op y`
+///      这种形状里 dst 也是被读的，换了就错；
+///   ③ 读 `d` 的那条指令不能同时写 `d`（否则它既读又写，换掉 dst 就错）。
+fn _opt_copy(fc: FnCtx, ir: vec[Ir], use: vec[int], ndef: vec[int]) {
+    let n = len(ir)
+    let mut i = 0
+    while i + 1 < n {
+        let ins = ir.get(i)
+        if ins.op == OP_MOV && ins.dst > 0 && ins.a > 0 && ins.dst != ins.a {
+            let d = ins.dst
+            let a = ins.a
+            if fc.vpin.get(d) == 0 && use.get(d) == 1 && ndef.get(d) == 1 &&
+               _ty_is_agg(fc.vty.get(d)) == 0 && _ty_is_agg(fc.vty.get(a)) == 0 {
+                let nx = ir.get(i + 1)
+                let mut hit = 0
+                if nx.a == d && nx.b != d {
+                    hit = 1
+                }
+                if nx.b == d && nx.a != d {
+                    hit = 2
+                }
+                if hit > 0 && nx.dst != d {
+                    let mut na = nx.a
+                    let mut nb = nx.b
+                    if hit == 1 {
+                        na = a
+                    } else {
+                        nb = a
+                    }
+                    ir.set(i + 1, Ir { op: nx.op, dst: nx.dst, a: na, b: nb, imm: nx.imm })
+                    ir.set(i, Ir { op: OP_NOP, dst: 0, a: 0, b: 0, imm: 0 })
+                    use.set(d, 0)
+                }
+            }
+        }
+        i = i + 1
     }
 }
 
@@ -5247,6 +5300,7 @@ fn _opt_fuse(fc: FnCtx, ir: vec[Ir], use: vec[int], ndef: vec[int]) {
                         go = 0
                     } else {
                         if nx.op == OP_LAB || nx.op == OP_JMP || nx.op == OP_JCMP ||
+                           nx.op == OP_JCMPI ||
                            nx.op == OP_JCMPVLEN || nx.op == OP_JCMPSTR ||
                            nx.op == OP_JZ || nx.op == OP_JNZ {
                             go = 0
@@ -5442,6 +5496,24 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
         _opt_mark(ir.get(i), use)
         i = i + 1
     }
+    // v2.57：`JCMP` 的右操作数是常量 → `JCMPI`（`cmp r64, imm32` 一条顶两条）。
+    // 这是 b9_json 里最肥的一处：`jws`/`jnum` 每字节都要比 `' '`/`'\t'`/`'0'`/`'9'`，
+    // 以前每个比较都先 `mov r8d, imm` 再 `cmp`。
+    i = 0
+    while i < n {
+        let ins = ir.get(i)
+        if ins.op == OP_JCMP && ins.b > 0 && ins.b < len(cok) {
+            if fc.vpin.get(ins.b) == 0 && cok.get(ins.b) == 1 && ndef.get(ins.b) == 1 {
+                let cv = cval.get(ins.b)
+                if cv >= -2147483648 && cv <= 2147483647 {
+                    ir.set(i, Ir { op: OP_JCMPI, dst: ins.dst, a: ins.a, b: cv, imm: ins.imm })
+                }
+            }
+        }
+        i = i + 1
+    }
+    // 拷贝传播放在融合之前：它先把纯搬运消掉，融合看到的形状更干净
+    _opt_copy(fc, ir, use, ndef)
     // 融合要用到完整的 use[]，所以放在标记之后、DCE 之前
     _opt_fuse(fc, ir, use, ndef)
     _opt_dce(fc, use)
@@ -5517,9 +5589,9 @@ fn _alloc_vars(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
         if ins.a > 0 && ins.a < n {
             ucnt.set(ins.a, ucnt.get(ins.a) + 1)
         }
-        // BINI / CMPI / DIVC 的 `b` 槽不是 vreg
+        // BINI / CMPI / DIVC / JCMPI 的 `b` 槽不是 vreg
         if ins.b > 0 && ins.b < n && ins.op != OP_BINI &&
-           ins.op != OP_CMPI && ins.op != OP_DIVC {
+           ins.op != OP_CMPI && ins.op != OP_DIVC && ins.op != OP_JCMPI {
             ucnt.set(ins.b, ucnt.get(ins.b) + 1)
         }
         // 这几个操作码的 dst 槽是被读的（"值"/"地址"/"字节数"）
@@ -5573,7 +5645,7 @@ fn _alloc_vars(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
     }
 }
 
-fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
+fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int], csb: vec[int], lpm: vec[int]) {
     _alloc_vars(fc, ucnt, baked)
     // v2.55：给"被占用的 XMM 变量寄存器"分配保存槽。**必须在临时池之前** ——
     // 临时池的基址是当时的 `C_ST`，之后再 `_st_slot` 就会落在池子里，互相踩。
@@ -5617,6 +5689,40 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
         }
         i = i + 1
     }
+    // v2.57：哪些指令在**循环体内**（差分数组 + 前缀和）。
+    //
+    // 用途：跨调用的临时值默认溢出到帧槽。若它同时在循环里，溢出就是
+    // **每轮两次内存往返**；改用空着的 callee-saved 寄存器只花每函数一次
+    // push/pop，明显划算。反过来，**循环外**的跨调用临时值溢出只发生一次，
+    // 换寄存器反而白搭一对 push/pop（实测 fib 慢 4.7%）—— 所以要区分。
+    lpm.clear()
+    i = 0
+    while i <= n {
+        lpm.push(0)
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        let ins = fc.ir.get(i)
+        if ins.op == OP_JMP || ins.op == OP_JZ || ins.op == OP_JNZ ||
+           ins.op == OP_JCMP || ins.op == OP_JCMPVLEN || ins.op == OP_JCMPSTR {
+            let tgt = ins.imm
+            if tgt >= 0 && tgt <= i {
+                lpm.set(tgt, lpm.get(tgt) + 1)
+                if i + 1 <= n {
+                    lpm.set(i + 1, lpm.get(i + 1) - 1)
+                }
+            }
+        }
+        i = i + 1
+    }
+    let mut acc0 = 0
+    i = 0
+    while i <= n {
+        acc0 = acc0 + lpm.get(i)
+        lpm.set(i, acc0)
+        i = i + 1
+    }
     // 每个寄存器的"占用到哪条指令为止"
     let rend = fc.rend
     i = 0
@@ -5635,6 +5741,26 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
     // 临时槽池：**紧接变量区**（v2.44）。以前从固定的 SLOT_TEMP(384) 起，
     // 于是"3 个局部变量 + 1 个溢出临时值"这种函数也要 385 个槽 → 3 KB 帧。
     // 现在 tbase = 变量区末尾，帧大小才真正反映用量。
+    // v2.57：哪些 callee-saved 被**变量**占着（其余空着，可给循环里的临时值）
+    csb.clear()
+    i = 0
+    while i < N_VARREG {
+        csb.push(0)
+        i = i + 1
+    }
+    i = 1
+    while i < len(fc.vloc) {
+        if fc.vpin.get(i) == 1 {
+            let l0 = fc.vloc.get(i)
+            if l0 > 0 && l0 < XLOC {
+                let k0 = _cs_index(l0 - 1)
+                if k0 >= 0 {
+                    csb.set(k0, 1)
+                }
+            }
+        }
+        i = i + 1
+    }
     let tbase = fc.cells.get(C_ST)
     let tpool = MAX_SLOT - SLOT_TEMP
     let send = fc.send
@@ -5654,6 +5780,29 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
             // 区间 (st, en] 里有调用 → caller-saved 寄存器不能用
             let crosses = cp.get(en + 1) - cp.get(st + 1)
             let mut placed = 0
+            // 区间里有循环体（`st` 或 `en` 落在循环内）才值得换 callee-saved
+            let mut inloop = 0
+            if lpm.get(st) > 0 || lpm.get(en) > 0 {
+                inloop = 1
+            }
+            if crosses > 0 && inloop == 1 && fc.vty.get(v) != TY_F64 {
+                // v2.57：**循环里**跨调用的临时值先试空着的 callee-saved 寄存器。
+                // 变量没占满 7 个寄存器是常态（`fib` 只有 1 个参数），空着的
+                // RBX/R12-R15/RSI/RDI 白放着。溢出是每轮两条内存往返，占用一个
+                // callee-saved 只是每函数一次 push/pop。序言/尾声的 push/pop
+                // 由 `_emit_fn` 从 vloc 自动推出，不用另记。
+                let mut k = 0
+                while k < N_VARREG {
+                    if csb.get(k) == 0 {
+                        csb.set(k, 1)
+                        fc.vloc.set(v, _cs_reg(k) + 1)
+                        placed = 1
+                        k = N_VARREG
+                    } else {
+                        k = k + 1
+                    }
+                }
+            }
             if crosses == 0 {
                 if fc.vty.get(v) == TY_F64 {
                     let mut rx = 0
@@ -6486,6 +6635,29 @@ fn _emit_ir(fc: FnCtx, i: int) {
         _b(code, 0x3B)                         // cmp rax, [rcx+disp8]
         _modrm(code, 1, RAX, RCX)
         _b(code, disp & 0xFF)
+        let p = _jcc(code, ins.dst)
+        _addfix(fc.fixes, p, ins.imm, FK_LAB)
+        return
+    }
+    if op == OP_JCMPI {
+        // v2.57：`cmp r64, imm32` + jcc。imm32 会被符号扩展到 64 位，
+        // 所以只接受 [-2^31, 2^31-1]（优化层已经检查过）。
+        if ins.dst < 0x80 || ins.dst > 0x8F {
+            eprint("qlmc: 内部错误：OP_JCMPI 的条件码必须是 jcc（0x80..0x8F）")
+            exit(2)
+        }
+        _to_reg(fc, RCX, ins.a)
+        if ins.b >= -128 && ins.b <= 127 {
+            _b(code, 0x48)                     // cmp rcx, imm8（83 /7 ib）
+            _b(code, 0x83)
+            _b(code, 0xF9)
+            _b(code, ins.b & 0xFF)
+        } else {
+            _b(code, 0x48)                     // cmp rcx, imm32（81 /7 id）
+            _b(code, 0x81)
+            _b(code, 0xF9)
+            _w32(code, ins.b)
+        }
         let p = _jcc(code, ins.dst)
         _addfix(fc.fixes, p, ins.imm, FK_LAB)
         return
@@ -8443,6 +8615,8 @@ fn _compile_range(hdr: int, wid: int, nodes: vec[Node], names: vec[str],
     // 分配器 / 优化层的复用缓冲（每线程一份，跨函数复用）
     let ucnt = vec[int].new(512)
     let baked = vec[int].new(512)
+    let csb = vec[int].new(16)
+    let lpm = vec[int].new(512)
     let cok = vec[int].new(512)
     let cval = vec[int].new(512)
     let use = vec[int].new(512)
@@ -8456,7 +8630,7 @@ fn _compile_range(hdr: int, wid: int, nodes: vec[Node], names: vec[str],
         _fc_reset(fc)
         _lower_fn(fc, fi)
         _opt(fc, cok, cval, use, ndef, out)
-        _alloc(fc, ucnt, baked)
+        _alloc(fc, ucnt, baked, csb, lpm)
         _emit_fn(fc)
         let code = fc.code
         let labs = fc.labs
