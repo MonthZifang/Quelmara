@@ -2119,6 +2119,24 @@ fn _sse_mem0(code: vec[int], pf: int, opc: int, x: int, base: int) {
     _modrm(code, 0, x, base)
 }
 
+/// `movaps xmm, xmm`（0F 28 /r）—— **整 128 位搬，不用 `movsd`**。
+///
+/// 这是 v2.55 在 CI 上踩到的性能坑：`movsd xmm0, xmm2` 只写低 64 位，
+/// **对目标寄存器的旧值有假依赖**（部分寄存器写）。于是
+/// `movsd xmm0,xmm2; divsd xmm0,xmm1` 里的 `divsd` 必须等**上一轮**的
+/// `divsd` 写完 xmm0 才能开始 —— 除法被串行化，实测 15 周期/轮（C 只要 4）。
+/// `movaps` 写整个寄存器，重命名器可以直接断掉这条链。
+/// 上 64 位我们从来不读，搬过去无所谓。
+fn _sse_mov_reg(code: vec[int], d: int, s: int) {
+    if d == s {
+        return
+    }
+    _rex2(code, 0, d, s)
+    _b(code, 0x0F)
+    _b(code, 0x28)
+    _modrm(code, 3, d, s)
+}
+
 /// `movq xmm, r64`（66 REX.W 0F 6E /r）
 fn _movq_x_from_r(code: vec[int], x: int, r: int) {
     _b(code, 0x66)
@@ -2651,6 +2669,12 @@ const C_NXF = 120
 // v2.55：每个 XMM 变量寄存器的保存槽（-1 = 没用到）。由 `_alloc` 在**临时池之前**
 // 分配 —— 临时池的基址是当时的 C_ST，之后再 `_st_slot` 会撞上池子。
 const C_XSAV0 = 121
+// v2.56：编译期算出来的 f64 字面量放进**帧里的常量槽**，函数序言写一次，
+// 之后 `divsd xmm, [rbp+slot]` 直接用内存操作数 —— 循环体里一条指令都不用。
+// 布局：C_F64K_N = 个数，之后每个三格 (串 id, 槽号, 位模式)。
+const C_F64K_N = 140
+const C_F64K0 = 141
+const F64K_MAX = 24
 const FNUM_MAX = 32
 const FRAME = 4096          // 帧大小（512 个 8 字节槽）
 const MAX_VAR = 64          // 变量最多占 64 个寄存器位（其余落槽）
@@ -3449,6 +3473,38 @@ fn _fnum_flag(fc: FnCtx, slot: int) {
     _cell_set(fc, C_FNUM_NF, nf + 1)
 }
 
+/// 编译期 f64 字面量的常量槽查表：串 id → 槽号。没查到返回 -1。
+fn _f64k_get(fc: FnCtx, sid: int) -> int {
+    if len(fc.cells) <= C_F64K_N {
+        return -1
+    }
+    let n = fc.cells.get(C_F64K_N)
+    let mut i = 0
+    while i < n {
+        if fc.cells.get(C_F64K0 + 3 * i) == sid {
+            return fc.cells.get(C_F64K0 + 3 * i + 1)
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/// 登记一个常量槽（位模式一起存，`_emit_fn` 的序言里要发写槽指令）
+fn _f64k_put(fc: FnCtx, sid: int, slot: int, bits: int) {
+    let mut n = 0
+    if len(fc.cells) > C_F64K_N {
+        n = fc.cells.get(C_F64K_N)
+    }
+    if n >= F64K_MAX {
+        eprint("qlmc: 一个函数里超过 " + (F64K_MAX).to_str() + " 个 f64 字面量常量")
+        exit(2)
+    }
+    _cell_set(fc, C_F64K0 + 3 * n, sid)
+    _cell_set(fc, C_F64K0 + 3 * n + 1, slot)
+    _cell_set(fc, C_F64K0 + 3 * n + 2, bits)
+    _cell_set(fc, C_F64K_N, n + 1)
+}
+
 fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
     let tl = fc.vty.get(l)
     let tr = fc.vty.get(r)
@@ -3725,11 +3781,19 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         // 有 90% 的时间花在这上面：把 `1.0` 提到循环外，752 ms → 69.8 ms（10.8×）。
         // 现在第一个出现点做一次带标志的解析，之后直接复用那个槽。
         // 标志槽在函数序言里清零（见 `_emit_fn`），所以每次函数调用只解析一次。
-        // v2.56：编译期能精确算出来的字面量，直接发位模式（零运行时开销）
+        // v2.56：编译期能精确算出来的字面量 → **放进帧里的常量槽**。
+        // 序言写一次（`_emit_fn`），之后循环体里零指令：`divsd xmm, [rbp+slot]`
+        // 直接吃内存操作数，`_to_xmm` 也只要一条 `movsd`。
         if nd.c == 1 {
+            let kslot = _f64k_get(fc, nd.a)
+            let mut slot2 = kslot
+            if slot2 < 0 {
+                slot2 = _st_slot(fc)
+                _f64k_put(fc, nd.a, slot2, nd.b)
+            }
             let di = _vnew(fc)
             fc.vty.set(di, TY_F64)
-            _ir_emit(fc, OP_F64IMM, di, 0, 0, nd.b)
+            fc.vloc.set(di, -(slot2 + 1))
             return di
         }
         // v2.55：槽里存的是 8 字节位模式（f64 已是标量）。每次求值只要一条
@@ -5683,10 +5747,7 @@ fn _to_xmm(fc: FnCtx, x: int, v: int) {
     let code = fc.code
     let loc = fc.vloc.get(v)
     if loc >= XLOC {
-        let s0 = loc - XLOC
-        if s0 != x {
-            _sse_rr(code, 1, 0x10, x, s0)      // movsd x, s0
-        }
+        _sse_mov_reg(code, x, loc - XLOC)      // movaps（不用 movsd，见那里的注释）
         return
     }
     if loc < 0 {
@@ -5706,10 +5767,7 @@ fn _from_xmm(fc: FnCtx, x: int, v: int) {
     let code = fc.code
     let loc = fc.vloc.get(v)
     if loc >= XLOC {
-        let d0 = loc - XLOC
-        if d0 != x {
-            _sse_rr(code, 1, 0x10, d0, x)      // movsd d0, x
-        }
+        _sse_mov_reg(code, loc - XLOC, x)      // movaps
         return
     }
     if loc < 0 {
@@ -7103,6 +7161,16 @@ fn _emit_fn(fc: FnCtx) {
     }
     // f64 字面量的"已解析"标志槽：函数入口清零，否则第一次判断读的是上一帧的垃圾。
     // **不能走 IR** —— 分配已经跑完了，新开 vreg 会拿到 vloc = 0 而 fail-fast。
+    // v2.56：编译期 f64 字面量的常量槽 —— 序言里写一次，之后全用内存操作数。
+    // 与上面的标志槽一样**不能走 IR**（分配已跑完）。
+    if len(fc.cells) > C_F64K_N {
+        let mut fk = 0
+        while fk < fc.cells.get(C_F64K_N) {
+            _mov_imm(code, RAX, fc.cells.get(C_F64K0 + 3 * fk + 2))
+            _mov_store(code, RBP, _slot_disp(fc.cells.get(C_F64K0 + 3 * fk + 1)), RAX)
+            fk = fk + 1
+        }
+    }
     let mut fz = 0
     while fz < fc.cells.get(C_FNUM_NF) {
         _mov_imm_mem(code, RBP, _slot_disp(fc.cells.get(C_FNUM_FLAG0 + fz)), 0)
