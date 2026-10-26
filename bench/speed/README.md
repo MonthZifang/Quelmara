@@ -122,17 +122,40 @@ gh run download <run-id> -n bench-windows   # 取结果
 
 所以本地只做"改完有没有变慢"的粗判，**对外引用一律用 CI 的数字**。
 
+### 两条 Quelmara 列（别混淆）
+
+| 列 | 编译器 | 后端 | 用来看什么 |
+|---|---|---|---|
+| `quelmara` | qlmc（stage-1 自举） | **仅 Windows PE** | qlmc 的真实水平 |
+| `quelmara0` | stage-0（参考实现） | PE / ELF64 | 跨平台适配度；与 `quelmara` 之差 = **后端差距** |
+
+`qlmc` 目前只有 PE 后端，所以 posix 上没有 `quelmara` 列。为了让"quelmara
+在 Linux / macOS 上是什么样"也能测，`run.py` 加了 `quelmara0`：用
+`tools/stage0/qlm_cli.py` 编（Windows `--target win`、其他平台
+`--target native`）。`now_ns()` 在 ELF 后端有实现（`clock_gettime`），
+所以进程内计时的口径三个平台一致。
+
+```bash
+python bench/speed/run.py --langs quelmara quelmara0 c go python   # Windows 全五列
+python bench/speed/run.py --langs quelmara0 c go python            # 跨平台
+```
+
 ### 平台矩阵与"适配度"
 
 | runner | 跑什么 | 能回答什么 |
 |---|---|---|
-| `windows-latest` | 四语言全量 + 编译器轴 | **qlmc 对 C/Go 的真实比值**（qlmc 只有 PE 后端） |
-| `ubuntu-latest` | C / Go / Python | 同一道题在 Linux 上的样子 —— 与 Windows 列对比就是"平台适配度" |
-| `macos-latest` | C / Go / Python | 同上（clang + Apple Silicon/Intel） |
+| `windows-latest` | `quelmara` + `quelmara0` + C/Go/Python + 编译器轴 | **qlmc 对 C/Go 的真实比值**，以及 qlmc vs stage-0 的**后端差距** |
+| `ubuntu-latest` | `quelmara0` + C/Go/Python | 同一道题在 **x86_64 Linux + GCC** 上的样子 |
+| `macos-latest` | `quelmara0` + C/Go/Python | 同上，**arm64 macOS（Apple Silicon）+ clang** |
+| `macos-13`（实验性） | `quelmara0` + C/Go/Python | 同上，**x86_64 macOS（Intel）** |
 
-**qlmc 在 posix 两行没有数字，不是跑不过，是还没有 ELF 后端。**
-等 `--target elf` 落地，把 `run.py` 里那句"qlmc 只有 Windows PE 后端"的跳过
-去掉即可 —— 那才是"跨平台适配度"这一列真正有意义的时刻。
+于是三种对照都拿得到：**同 OS 不同架构**（两种 Mac）、**同架构不同 OS**
+（Linux vs macOS x86_64）、**同语言不同后端**（Windows 上两列）。
+
+**`quelmara` 列在 posix 上是空的**（qlmc 还没有 ELF 后端），但
+`quelmara0` 列有数 —— 那是**参考编译器**在同一份源码、同一平台上跑出来的，
+所以"语言层面的平台适配度"这一栏已经能读了。等 qlmc 的 ELF 后端落地，
+把 `run.py` 里那句跳过去掉，两条列就都能跨平台比。
 
 为了让 C 能在三个平台都跑，`c/bench.h` 把计时抽象掉了（Windows 用 QPC、
 POSIX 用 `CLOCK_MONOTONIC`），`b8_threads4.c` 用 `CreateThread`/`pthread`

@@ -6,14 +6,20 @@
 # 放到干净的 runner 上噪声低一个量级，而且能拿到**多个平台**的数字 ——
 # 那才是"适配度"的真实依据。
 #
-# 两个 job：
-#   windows —— 四语言全量（qlmc 只有 Windows PE 后端）+ 编译器轴（qlmc vs stage-0）
-#   posix   —— ubuntu / macos 上的 C/Go/Python 参照值（这三个是可移植的）
+# 两条 Quelmara 列（别混淆）：
+#   quelmara   = qlmc（stage-1 自举编译器）产物，**只有 Windows PE 后端**
+#   quelmara0  = stage-0（参考编译器）产物，win / linux / macos 三个后端都有
+# 于是：
+#   · Windows 上 quelmara vs quelmara0 = **后端差距**（同一个语言、同一台机器）
+#   · quelmara0 在各平台上 = **同一份源码在不同 CPU/OS 上的适配度**
+#   · posix 上没有 quelmara 列不是"跑不过"，是 qlmc 还没有 ELF 后端
+#
+# job：
+#   windows —— 五列全量（qlmc + stage-0 + C/Go/Python）+ 编译器轴
+#   posix   —— ubuntu(x86_64) / macOS(arm64) / macOS(x86_64) 上的
+#              stage-0 + C/Go/Python
 #
 # 结果去处：① job summary（人看，带机器信息）② artifact（机器读，保留 90 天）
-#
-# 注意：qlmc 目前**只有 win 后端**，所以 posix 那两行没有 quelmara 列 ——
-# 这不是"跑不过"，是"还没有产物"。等 ELF 后端落地，删掉这段注释即可。
 
 name: bench
 
@@ -83,9 +89,10 @@ jobs:
       - name: 自举 qlmc
         run: python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe
 
-      - name: 语言基准（四语言）
+      - name: 语言基准（qlmc + stage-0 + C/Go/Python）
         shell: pwsh
-        run: python bench/speed/run.py --reps $env:REPS --markdown 2>&1 | Tee-Object -FilePath bench.md
+        run: |
+          python bench/speed/run.py --langs quelmara quelmara0 c go python --reps $env:REPS --markdown 2>&1 | Tee-Object -FilePath bench.md
 
       - name: 编译器轴（qlmc vs stage-0）
         continue-on-error: true
@@ -97,6 +104,7 @@ jobs:
         shell: pwsh
         run: |
           Add-Content $env:GITHUB_STEP_SUMMARY "## 语言基准 · Windows"
+          Add-Content $env:GITHUB_STEP_SUMMARY 'quelmara = qlmc（自举编译器，PE 后端）；quelmara0 = stage-0（参考编译器）。两者之差 = 后端差距。'
           Add-Content $env:GITHUB_STEP_SUMMARY '```'
           Get-Content bench.md -ErrorAction SilentlyContinue | Add-Content $env:GITHUB_STEP_SUMMARY
           Add-Content $env:GITHUB_STEP_SUMMARY '```'
@@ -118,8 +126,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          # x86_64 Linux（GCC）
+          - os: ubuntu-latest
+            arch: x86_64
+          # arm64 macOS（Apple Silicon，clang）
+          - os: macos-latest
+            arch: arm64
+          # x86_64 macOS（Intel，clang）—— 同一套代码在两种 Mac 上的差就是架构差。
+          # 这个 runner 型号可能被 GitHub 回收，标成实验性，别让它拖红整个 run。
+          - os: macos-13
+            arch: x86_64
+            experimental: true
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental || false }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -135,23 +155,25 @@ jobs:
 
       - name: 机器信息
         run: |
-          if command -v lscpu >/dev/null 2>&1; then
-            LINE="CPU: $(lscpu | awk -F': +' '/Model name/{print $2; exit}') / 逻辑核 $(nproc)"
+          if [ "$(uname -s)" = "Darwin" ]; then
+            LINE="CPU: $(sysctl -n machdep.cpu.brand_string) / 逻辑核 $(sysctl -n hw.ncpu) / $(sw_vers -productName) $(sw_vers -productVersion) / arch $(uname -m)"
           else
-            LINE="CPU: $(sysctl -n machdep.cpu.brand_string) / 逻辑核 $(sysctl -n hw.ncpu)"
+            LINE="CPU: $(lscpu | awk -F': +' '/Model name/{print $2; exit}') / 逻辑核 $(nproc) / $(. /etc/os-release && echo "$PRETTY_NAME") / arch $(uname -m)"
           fi
           echo "$LINE"
           echo "> $LINE" >> "$GITHUB_STEP_SUMMARY"
+          echo "> C 编译器：$(cc --version 2>/dev/null | head -1 || gcc --version | head -1)"
 
-      - name: 语言基准（C / Go / Python 参照值）
+      - name: 语言基准（stage-0 + C/Go/Python）
         run: |
-          python bench/speed/run.py --langs c go python --reps "$REPS" --markdown 2>&1 | tee bench.md
+          python bench/speed/run.py --langs quelmara0 c go python --reps "$REPS" --markdown 2>&1 | tee bench.md
 
       - name: 写 job summary
         if: always()
         run: |
           {
-            echo "## 语言基准 · ${{ matrix.os }}（qlmc 无该平台后端）"
+            echo "## 语言基准 · ${{ matrix.os }}（${{ matrix.arch }}）"
+            echo 'quelmara0 = stage-0（参考编译器）产物。qlmc 还没有 ELF 后端，所以本平台没有 quelmara 列。'
             echo '```'
             cat bench.md 2>/dev/null || echo "(没跑出来)"
             echo '```'

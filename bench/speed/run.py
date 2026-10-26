@@ -13,6 +13,7 @@
     python bench/speed/run.py --reps 7         # 每个基准跑 7 次取最小
     python bench/speed/run.py --only b1_int b7_sort
     python bench/speed/run.py --langs quelmara go
+    python bench/speed/run.py --langs quelmara0 c go python   # 跨平台（stage-0 后端）
     python bench/speed/run.py --markdown       # 直接出 markdown 表
 
 环境：
@@ -193,6 +194,27 @@ def build_all(langs, only):
                     continue
                 built[("quelmara", b)] = [exe]
 
+    if "quelmara0" in langs:
+        py = sys.executable
+        cli = os.path.join(ROOT, "tools", "stage0", "qlm_cli.py")
+        tgt = "win" if IS_WIN else "native"
+        for b, _ in BENCHES:
+            if only and b not in only:
+                continue
+            src = os.path.join(HERE, "quelmara", b + ".qma")
+            exe = os.path.join(OUT, "qlm0_" + b + EXE)
+            r = subprocess.run([py, cli, "build", src, "--target", tgt,
+                                "-o", exe],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                notes.setdefault("quelmara0", f"{b} 编译失败: " +
+                                 (r.stdout + r.stderr).strip()[:200])
+                continue
+            if not IS_WIN:
+                # POSIX 上刚写出来的文件没有执行位（Windows 不需要）
+                os.chmod(exe, 0o755)
+            built[("quelmara0", b)] = [exe]
+
     if "c" in langs:
         name, cc = cc_command()
         if not cc:
@@ -240,7 +262,29 @@ def build_all(langs, only):
 
 
 # ---------------------------------------------------------------- 主流程
-LANGS = ["quelmara", "c", "go", "python"]
+# quelmara   = qlmc（stage-1 自举编译器）编出来的产物，**只有 Windows PE 后端**
+# quelmara0  = stage-0（参考编译器）编出来的产物，**win / linux / macos 都有后端**
+#   加这一列是为了拿到"同一个语言在不同平台上"的数字（也就是适配度），
+#   同时它和 quelmara 列在同一台 Windows 机器上的差就是**后端差距**。
+LANGS = ["quelmara", "quelmara0", "c", "go", "python"]
+
+
+def report_checksums(fails, rows):
+    """校验和门禁：四种实现必须打印**逐字节相同**的校验和。
+
+    不一致说明其中一份写错了（或语言语义有分歧），此时时间数字一概不看。
+    """
+    if fails:
+        print("\n[FAIL] 这些基准的校验和在不同语言之间不一致：")
+        for b in fails:
+            r = next(x for x in rows if x["bench"] == b)
+            print(f"  {b}")
+            for l, o in r["out"].items():
+                print(f"    {l:<10} {o!r}")
+        return 1
+    n = len(rows[0]["out"]) if rows else 0
+    print(f"\n校验和：{len(rows)} 个基准 × {n} 个语言，全部一致。")
+    return 0
 
 
 def main():
@@ -306,7 +350,10 @@ def main():
             print(f"| `{r['bench']}` | {r['desc']} | " + " | ".join(cells) +
                   f" | {ratio:.0f}× |")
         print("\n单位：毫秒（min of %d）" % args.reps)
-        return 0
+        # **校验和门禁在 markdown 模式下也必须走**（CI 用的就是 --markdown）。
+        # 以前这里直接 return 0，于是"某个语言写错了"在 CI 上是静默的 ——
+        # 而校验和一致是整张表的前提，不一致时时间数字一概不能看。
+        return report_checksums(fails, rows)
 
     print()
     w = 13
@@ -325,16 +372,7 @@ def main():
     print("-" * (w + 13 * len(langs) + 11))
     print(f"单位：毫秒（min of {args.reps}）。本机 VBS 噪声大，只做同表横向比较。")
 
-    if fails:
-        print("\n[FAIL] 这些基准的校验和在不同语言之间不一致：")
-        for b in fails:
-            r = next(x for x in rows if x["bench"] == b)
-            print(f"  {b}")
-            for l, o in r["out"].items():
-                print(f"    {l:<10} {o!r}")
-        return 1
-    print(f"\n校验和：{len(rows)} 个基准 × {len(langs)} 个语言，全部一致。")
-    return 0
+    return report_checksums(fails, rows)
 
 
 if __name__ == "__main__":
