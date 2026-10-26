@@ -101,10 +101,17 @@ class A64:
         self.V = 1 if ((a ^ b) & (a ^ res)) >> 63 else 0
 
     def cond_holds(self, cond):
+        # v2.66：补无符号条件码（越界检查用 `b.lo` = LO=0x3 一次覆盖 [0,n)）。
+        # A64 编码：HS/CS=0x2（unsigned >=）、LO/CC=0x3（unsigned <）、
+        #           HI=0x8（unsigned >）、LS=0x9（unsigned <=）
         EQ, NE, GE, LT, LE, GT = 0x0, 0x1, 0xA, 0xB, 0xD, 0xC
+        HS, LO, HI, LS = 0x2, 0x3, 0x8, 0x9
         return {EQ: self.Z == 1, NE: self.Z == 0, GE: self.N == self.V,
                 LT: self.N != self.V, LE: self.Z == 1 or self.N != self.V,
-                GT: self.Z == 0 and self.N == self.V}[cond]
+                GT: self.Z == 0 and self.N == self.V,
+                HS: self.C == 1, LO: self.C == 0,
+                HI: self.C == 1 and self.Z == 0,
+                LS: self.C == 0 or self.Z == 1}[cond]
 
     def sext(self, v, bits):
         s = 1 << (bits - 1)
@@ -264,7 +271,9 @@ class A64:
         if (w & 0xFFE00C00) == 0x9A800400 and ((w >> 5) & 31) == 31 and ((w >> 16) & 31) == 31:
             rd = w & 31
             inv = (w >> 12) & 0xF
-            real = {0x1: 0x0, 0x0: 0x1, 0xB: 0xA, 0xA: 0xB, 0xD: 0xC, 0xC: 0xD}[inv]
+            real = {0x1: 0x0, 0x0: 0x1, 0xB: 0xA, 0xA: 0xB, 0xD: 0xC, 0xC: 0xD,
+                    # 无符号条件的取反：HS(0x2) <-> LO(0x3)、HI(0x8) <-> LS(0x9)
+                    0x2: 0x3, 0x3: 0x2, 0x8: 0x9, 0x9: 0x8}[inv]
             self.put(rd, 1 if self.cond_holds(real) else 0)
             return
         # CMP reg = SUBS XZR, Rn, Rm
