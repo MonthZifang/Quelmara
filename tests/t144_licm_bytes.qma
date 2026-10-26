@@ -1,0 +1,53 @@
+// t144_licm_bytes.qma：LICM 外提 + 字节存储的寄存器编码（v2.59）
+//
+// 背景：`mov byte [mem], reg` 在 reg 编号 4..7（spl/bpl/sil/dil）时**必须**
+// 带 REX 前缀，否则编码落到 ah/ch/dh/bh —— 写进去的是**另一个寄存器的值**。
+// 分配器把 store8 的**值**分到 rsi/rdi（caller-saved 的前两个）时必然触发。
+//
+// 为什么它"布局敏感"：LICM 把循环不变量提到循环外，改变活跃区间 →
+// 改变线性扫描的分配结果 → 让这个潜伏的编码 bug 现形。所以本夹具同时
+// 覆盖两件事：
+//   1) 字节存储的写/读往返（值必须原样）
+//   2) 循环不变量外提后的布局（结果不能变）
+// 回归口径：LICM 开/关都要通过（`QLM_DISABLE_LICM=1` 跑一遍）。
+module t144
+
+fn main() {
+    let p = mem_alloc(64)
+    let q = mem_alloc(64)
+
+    // 1) 循环内字节存储：值来自变量 → 会被分到 rsi/rdi
+    let mut i = 0
+    while i < 8 {
+        mem_store8(p, i, i + 1)
+        i = i + 1
+    }
+    let mut s = 0
+    let mut j = 0
+    while j < 8 {
+        s = s + mem_load8(p, j)
+        j = j + 1
+    }
+    assert(s == 36, "字节往返 1..8 求和")
+    assert(mem_load8(p, 0) == 1 && mem_load8(p, 7) == 8, "字节往返首尾")
+
+    // 2) 循环不变量：LICM 外提后结果必须不变
+    let k = 7
+    let mut m = 0
+    let mut acc = 0
+    while m < 8 {
+        let t = k * 3 + 1
+        mem_store8(q, m, (t + m) & 0xFF)
+        acc = acc + mem_load8(q, m)
+        m = m + 1
+    }
+    assert(acc == 204, "不变量外提后累加一致")
+
+    // 3) memcpy 的两条路径：8 字节字块 + 尾字节
+    mem_copy(q, p, 8)
+    assert(mem_load8(q, 0) == 1 && mem_load8(q, 7) == 8, "memcpy 字块路径")
+    mem_copy(q, p, 5)
+    assert(mem_load8(q, 4) == 5 && mem_load8(q, 5) == 6, "memcpy 尾字节路径")
+
+    print("licm bytes ok")
+}

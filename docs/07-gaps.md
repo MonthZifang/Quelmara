@@ -103,7 +103,11 @@
 | ~~`std/timer` 的 poll 扫描~~ | ✅ v2.08 已做：`timer_poll` 从"每次弹堆后线性扫平行数组找 id"（O(n)）改成**堆里同时存 id、弹到即返回**（O(log n)）；2 万个取消项 drain **256 ns/项** | 取消改成存活位（O(1)，不搬堆），到期时静默丢弃。10 万个定时器：push **136 ns**、poll **433 ns**、cancel **12 ns**。数字见 `06-status.md` §3.20 |
 | ~~SHA-256 轮展开~~ | ❌ **已验证无收益**（v2.02）：8 轮展开 + 状态变量环移位命名，每轮 8 条搬移全部消失，1 MiB 仍是 41–42 ms | 瓶颈不是搬移而是**指令数**：每块约 3000 条，8450 cycles/块 ≈ 2.8 cycles/条；x86 的 `mov` 在重命名阶段就消掉了，省它不省时间。要更快只有两条路：SHA-NI（本机无该扩展）或 `int` 走 32 位指令（现为恒 64 位，`& 0xFFFFFFFF` 掩码消不掉）。数字见 `06-status.md` §3.17 |
 | **GHASH 4 路并行** | 现在是串行依赖（每块依赖上一块结果）；4 路聚合可再快 2–3× | 需要重排 CTR/GHASH 交织，收益已不大 |
-| **LICM 根修** | 普适（所有循环） | 根因是 x64 分配器布局敏感段错误；修好前 LICM 只能关 |
+| ~~LICM 根修~~ | ✅ v2.59 已做：LICM **默认开启** | 根因不是分配器，是 `mov8_mr` 漏 REX（reg 4..7 编成 `ah/ch/dh/bh`）；审计工具与 `allocate()` 对拍证明分配器无冲突。见 §7.32 |
+| ~~无帧函数（省 `push rbp` 四条）~~ | ❌ **已验证无收益**（v2.60）：b3_recursion 三轮 A/B，frameless 8.0/8.8/8.0 vs 带 rbp 7.4/7.7/8.8 | `push/pop` 走栈引擎、`mov rbp,rsp` 被重命名消掉，省的是指令槽位不是延迟；fib 的瓶颈是**调用延迟链**。见 `versions/v2.60/CHANGELOG.md` |
+| ~~`vec.push` 容量检查内联~~ | ❌ **已验证无收益**（v2.60）：b4_array 三轮 A/B 28.5 vs 28.4 | b4 是内存带宽瓶颈（16 MB 工作集），push 阶段的调用开销被掩盖 |
+| ~~LICM 外提 `load`（vec 句柄字段）~~ | ❌ **未采用**（v2.60）：`load` 会陷入，循环可能执行 0 次 → 外提改变语义 | 要做必须先证明"循环至少执行一次"（loop rotation / 常量上界），另一个量级的工程 |
+| **寄存器池扩到 11（+RCX/RDX）** | b9_json 的 jval 198 vreg / 24 溢出槽；caller-saved 现在只用 RSI/RDI/R8/R9 四个 | 需先审计 `idiv`（RDX:RAX）、变量移位（CL）、`cpuid`（四寄存器全占）的隐式使用；分配器要按"指令类别"排除 |
 | **loop_sum 三件套** | 循环 10.8 → ~4 cycles/iter | ① phi copy 消除（分配器 coalescing）② do-while 变换（CFG 要容错 jcc 回边）③ cssub 形态 |
 | ~~JSON memchr 化~~ | ❌ **已验证不可行**（v1.35）：1.35 MB 负载 29 ms → 62 ms（**慢 2 倍**） | JSON 字符串普遍 <32 字节，SWAR 每次调用的固定开销（参数搬运 + 调用 + 三次独立扫描）远大于逐字节循环（循环体 4 条指令）。结论：**8 字节扫描只在长串且单字节目标时划算** |
 | ~~gzip 编码提速~~ | ✅ v1.30 已做：**25–27 ms → 16 ms（1.6×）**，输出字节不变 | 走的是「mem_diff 批量比对 + 插入/滚动合并」，不是 lazy matching——lazy 只会更慢、压缩率更好 |
@@ -1014,6 +1018,130 @@ Win64 里它们是 **callee-saved**，现在只用 `RBX + R12-R15` 五个。`jva
 （变量被例程悄悄改掉、不崩溃）。正确顺序：先用反汇编脚本机械审计所有 `_gen_*` 的
 寄存器用法 → 给用到的例程加 `push rsi/push rdi` + `pop`（`__str_cat` 里有调用，
 要注意 16 字节对齐）→ 再扩 `_cs_reg`/`_cs_index`。收益估计 10–15%。
+
+### 7.32 已修（v2.59）：LICM 默认开启 —— 两个潜伏 bug 一起挖出来
+
+**现象**：`opt_licm` 从 v1.5.1 起默认关闭，理由写在 `_skip_pass()` 里：
+"外提在 QuIR 层语义等价（A64 模拟器同程序全绿），但触发 x64 线性扫描
+分配器的布局敏感 bug，表现为越界写段错误"。这条记录把根因指向**分配器**，
+而分配器一直是清白的。
+
+**最小复现**（`build/licm/t1.qma`，就是 `mem_store8` 往返）：
+
+```quelmara
+fn main() {
+    let p = mem_alloc(64)
+    let mut i = 0
+    while i < 64 { mem_store8(p, i, i + 1); i = i + 1 }
+    let mut k = 1
+    while k <= 8 { mem_copy(q, p, k); print(mem_load8(q, k - 1)); k = k + 1 }
+}
+```
+
+| 编译器 | LICM | 输出 | 说明 |
+|---|---|---|---|
+| 未修 | 关 | `1 2 3 4 5 6 7 8` | 正常 |
+| 未修 | 开 | `0 0 0 0 0 0 0 0` | **静默错值**（不是崩溃，所以更难发现） |
+| 已修 | 开 | `1 2 3 4 5 6 7 8` | 正常 |
+
+全量回归（未修 + `QLM_ENABLE_LICM=1`）里 `t113_csv` 也会挂在
+`assert failed: 三列`——CSV 解析拿到的字段数与实际不符。**越界写只是
+同一根因的极端形态**：写错的字节一旦是长度/偏移，后续就拿它去索引。
+
+**定位过程**（工具全部用 Quelmara 写，见 `docs/00-convention`）：
+
+1. `--dump-ir-json`（新增）把 LICM 开/关两份 QuIR 导出成 JSON；
+2. `tools/qlm_licm_audit.qma` 读两份，输出逐 vreg 的 def/use/活跃区间、
+   复算线性扫描（含回边扩展、跨调用约束、溢出槽），并报三类问题：
+   同寄存器区间重叠 / 溢出槽复用 / **`store8` 的 base+index+src 都 <8 且
+   src 落在 4..7**；
+3. `build/licm/xcheck.py` 用编译器自己的 `allocate()` 复算同一份 JSON，
+   与工具输出**逐 vreg diff** —— 两边完全一致，**分配器没有区间重叠、
+   没有槽复用**；
+4. 于是"布局敏感"的解释只剩一个：LICM 改变活跃区间 → 改变分配结果 →
+   让某个**编码层**的潜伏 bug 现形。工具的第三类报告直接指到
+   `store8 base=rbx index=rsi src=rdi`。
+
+**根因**：`Enc.mov8_mr` 用 `rex(r=src, x=index, b=base)` 生成前缀，而
+`rex()` 在 w/r/x/b 全为 0 时返回**空串**。此时 `88 /r` 的 reg 字段
+4..7 不是 `spl/bpl/sil/dil`，而是 `ah/ch/dh/bh` —— 存的是**另一个寄存器
+的值**。分配池里 `rsi`/`rdi` 正是 caller-saved 的前两个，字节存储的
+"值"极容易落到它们身上（`tests/t144_licm_bytes.qma` 里四条 store8 全是
+`src=rdi`）。同一个坑 `setcc` 早就单独处理过（`if 4 <= dst8 <= 7: 0x40`），
+`mov8_mr` 漏了。
+
+**修法**：
+
+```python
+r = rex(r=src, x=index, b=base)
+if not r and 4 <= (src & 7) <= 7:
+    r = b"\x40"          # 强制 REX，让 4..7 落在 spl/bpl/sil/dil
+self.emit(r, b"\x88", modrm_mem(src, base, index, scale, disp))
+```
+
+---
+
+**(B) 第二个 bug：`loop_regions` 按"一条回边一个 region"，多回边时区间残缺**
+
+修完 (A) 之后 `t113_csv` 仍然挂在 `assert failed: 三列`，说明还有独立的
+第二个错。最小复现（`build/licm/m2.qma`，两行 CSV）：
+
+```quelmara
+let r1 = csv_parse("a,b,c\r\n1,2,3\r\n")
+print(len(r1))          // LICM=0: 2    LICM=1: 2
+print(len(r1.get(0)))   // LICM=0: 3    LICM=1: 5   ← 多出两列
+```
+
+用审计工具 diff 两份 QuIR，外提的 13 条指令里有 `('mov', 178, 14)`：
+`v14` 在函数里定义了**两次**（@38 与 @298），而 `v178` 只定义一次。
+LICM 的条件 2 只看**目标** vreg 的定义次数，操作数由条件 1 检查
+"是否在循环内定义"——`v14` 的第二次定义在 @298，**没被算进 region**。
+
+原因：`csv_parse` 的 while 头有 **7 条回边**（114/121/134/145/185/303/317，
+`continue` 与多个 `if` 分支各跳一次）。旧的 `loop_regions` 是
+"一条 `jmp` 一个 region"，同一个 h 重复出现 7 次、每次只覆盖到**某一条**
+回边。LICM 处理 `(h=56, b=185)` 时，region 只到 185 —— 看不到 @298 对
+`v14` 的赋值，于是把循环携带的值当成不变量提到循环外。
+
+**修法**：按循环头合并、取**最远的回边**：
+
+```python
+best = {}
+for i, ins in enumerate(fn.instrs):
+    if ins[0] == "jmp" and ins[1] in labs:
+        h = labs[ins[1]]
+        if h < i:
+            if h not in best or i > best[h][0]:
+                best[h] = (i, ins[1])
+return sorted((h, b, lab) for h, (b, lab) in best.items())
+```
+
+区间 = `[循环头, 最远回边]`，会把"跳出路径上的指令"也算进循环体
+（它们确实在回边之前），对**所有** 8 个用 `loop_regions` 的 pass 都只会
+更保守。回归：`tests/t145_licm_multiedge.qma` 在旧实现 + LICM=1 下断言
+失败，新实现下 LICM 开/关都通过。
+
+**验证**：`tests/t144_licm_bytes.qma` 在"关掉那两行"的编译器上、LICM=1
+时断言失败；打开后 LICM 开/关都通过。默认配置与 `QLM_ENABLE_LICM=1`
+产物**逐字节相同**，`QLM_DISABLE_LICM=1` / `QLM_SKIP_PASSES=opt_licm`
+与关闭一致。
+
+**教训**：
+
+* 把"布局敏感"当成根因，等于承认"不知道"。真正的解释是**某个只在特定
+  分配结果下才成立的编码假设**。差别在于：前者只能关掉优化，后者能修。
+* **字节寄存器 4..7 必须显式 REX** 这条规则，凡是有 8 位 reg 字段的
+  指令（`88 /r`、`8A /r`、`setcc`、`movzx` 之外的裸字节操作）都要过一遍。
+  目前全库只有 `mov8_mr` 与 `setcc` 两处，后者本来就对。
+* 差分测试必须覆盖"**值来自变量**"的字节存储：常量会被 `mov imm` 走
+  `SCRATCH(r11)`，REX 一定非空，永远测不出这个坑。
+* **"循环区间"不是"一条回边"**。`continue`、循环体里多个 `if` 各自跳回
+  头部，都会给同一个 label 加回边。任何拿 `(h, b)` 当区间用的 pass 都必须
+  取**最远的回边**，否则看到的是残缺循环 —— 而残缺循环的后果是"把循环
+  携带的值当不变量"，是**误编译**，不是性能问题。
+* 一个"默认关闭的优化"背后可能有**多个**独立原因。修掉第一个（mov8_mr）
+  之后 `t113_csv` 仍然红，第二个（loop_regions）才露出来。别急着宣布
+  根修完成 —— **把回归跑到底**再说话。
 
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。

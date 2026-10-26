@@ -1041,6 +1041,13 @@ def main():
     case_selfcheck("t113_csv", "tests/t113_csv.qma")
     # 路径处理（v1.75）：join / clean / dir / base / ext / stem
     case_selfcheck("t114_path", "tests/t114_path.qma")
+    # LICM 默认开启 + 字节存储的寄存器编码（v2.59）：store8 的值落在
+    # rsi/rdi 时必须带 REX 前缀，否则编成 ah/ch/dh/bh
+    case_selfcheck("t144_licm_bytes", "tests/t144_licm_bytes.qma")
+    # 同一循环头多条回边（continue）：循环携带值不得被 LICM 当不变量
+    case_selfcheck("t145_licm_multiedge", "tests/t145_licm_multiedge.qma")
+    # 常数除法/取模的魔数乘法（v2.61）：商*C+余数==被除数 且 0<=余数<C
+    case_selfcheck("t146_const_div", "tests/t146_const_div.qma")
     # UUID（v1.77）：v4 生成 / 校验 / 版本与变体位
     case_selfcheck("t115_uuid", "tests/t115_uuid.qma")
     # 所有权检查 v2（v1.84）：视图生命周期 / 写别名 / 跨线程的正例

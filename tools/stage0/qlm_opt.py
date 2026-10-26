@@ -179,16 +179,40 @@ def label_index(fn):
 
 
 def loop_regions(fn):
-    """返回 [(h, b, lab)]:h=循环头下标,b=回边下标,lab=循环头标签"""
+    """返回 [(h, b, lab)]:h=循环头下标,b=回边下标,lab=循环头标签
+
+    ⚠ **同一个循环头可以有多条回边**：`continue`、以及循环体里多个 `if`
+    分支各自 `jmp` 回头部，都会产生指向同一个 label 的回边。v2.58 及以前
+    这里是"一条 jmp 一个 region"，于是同一个 h 会重复出现多次、每次只覆盖
+    到**某一条**回边 —— 下游 pass 拿到的是**残缺的循环区间**。
+
+    v2.59 的实测事故：`csv_parse` 的 while 头有 7 条回边（114/121/134/145/
+    185/303/317）。`opt_licm` 处理 (h=56, b=185) 这个残缺区间时，看不到
+    @298 对 `v14` 的第二次定义（它落在 (56, 317) 那段），于是把循环携带的
+    值当成不变量外提 → 第一行解析出 5 列。
+
+    现在按 h 合并、取**最远的回边**：区间 = [循环头, 最远回边]。这会把
+    "跳出路径上的指令"也算进循环体（它们确实在回边之前），对优化只会更
+    保守，不会更激进。
+    """
     labs = label_index(fn)
-    out = []
+    best = {}
     for i, ins in enumerate(fn.instrs):
-        if ins[0] == "jmp" and ins[1] in labs:
-            h = labs[ins[1]]
+        # v2.61：回边可以是 `jmp L`，也可以是 `jcc cc, a, b, L`
+        # （循环旋转之后就是后者）—— 不认 jcc 会让旋转后的循环对
+        # 所有依赖 loop_regions 的 pass 隐身。
+        tgt = None
+        if ins[0] == "jmp" and isinstance(ins[1], str):
+            tgt = ins[1]
+        elif ins[0] == "jcc" and isinstance(ins[4], str):
+            tgt = ins[4]
+        if tgt in labs:
+            h = labs[tgt]
             if h < i:                      # 向后跳 = 回边
-                out.append((h, i, ins[1]))
-    out.sort()
-    return out
+                cur = best.get(h)
+                if cur is None or i > cur[0]:
+                    best[h] = (i, tgt)
+    return sorted((h, b, lab) for h, (b, lab) in best.items())
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +242,27 @@ def loop_regions(fn):
 # ---------------------------------------------------------------------------
 
 def opt_strlen_hoist(fn, rounds=6):
+    """把循环内不变的 `len(s)` 提到循环外，同一指针只求一次。
+
+    **三种形态都要认**（v2.62）：
+      1. `('call', dst, '__str_len', [p])` —— 内联前的调用形态；
+      2. `('bin','sub', t, p, ('imm',8))` + `('load', dst, t, ('imm',0))`
+         相邻，都在循环内 —— 内联后的直读形态（b9_json 的 jnum/jws/jstr）；
+      3. `('load', dst, t, ('imm',0))` 而 `t = p - 8` 在**循环外**算好。
+
+    只认形态 1 是个长期漏洞：`len(s)` 降级/内联后变成 2/3，于是循环里
+    每轮重读长度。后果有两层：
+      * 每轮多 1-2 条指令；
+      * **更要命**——`opt_bounds_elim` 的循环级证明要求 guard 的 hi 在循环
+        内不被重定义，而 hi 就是这条 `load` 的结果。每轮重定义 ⇒ 证明失效
+        ⇒ 每次 `s[p]` 的越界检查（2 条指令 + 1 分支）全部保留。
+        b9_json 每字节一次下标，这是它 5.8× 差距的主要来源。
+
+    **支配要求**（v2.61 两次实现都在这里让 b9 段错误）：外提是无条件执行，
+    `p` 必须支配循环头 —— 要么定义在函数入口块（第一个 label 之前，如
+    `args`/常量初始化），要么与循环头同一基本块（h 前最后一个 label 之后，
+    且循环头没有其他前驱）。
+    """
     if not fn.instrs:
         return fn
     def_count = {}
@@ -225,60 +270,126 @@ def opt_strlen_hoist(fn, rounds=6):
         for d in vreg_mentions(ins)[0]:
             def_count[d] = def_count.get(d, 0) + 1
 
+    def _sub_of(fn):
+        """t -> p：t 由 ('bin','sub', t, p, ('imm',8)) 定义（长度前缀地址）"""
+        m = {}
+        for ins in fn.instrs:
+            if (ins[0] == "bin" and ins[1] == "sub" and len(ins) == 5
+                    and isinstance(ins[3], int) and isinstance(ins[4], tuple)
+                    and ins[4] == ("imm", 8)):
+                m[ins[2]] = ins[3]
+        return m
+
     for _ in range(rounds):
         moved = False
-        for (h, b, _lab) in loop_regions(fn):
+        sub_of = _sub_of(fn)
+        for (h, b, lab) in loop_regions(fn):
             region = fn.instrs[h:b + 1]
             defs_in_loop = set()
             for ins in region:
                 defs_in_loop.update(vreg_mentions(ins)[0])
+            first_lab = min([k for k, x in enumerate(fn.instrs)
+                             if x[0] == "label"] or [len(fn.instrs)])
+            last_lab = max([k for k, x in enumerate(fn.instrs[:h])
+                            if x[0] == "label"] or [-1])
+            multi_pred = any(x[0] in ("jmp", "jcc", "jz", "jnz")
+                             and x[-1] == lab for x in fn.instrs[:h])
 
-            cand = []                     # [(offset, dst, ptr)]
+            def dominates(p):
+                dp = [k for k, x in enumerate(fn.instrs[:h])
+                      if p in vreg_mentions(x)[0]]
+                if not dp:
+                    return False
+                if dp[0] < first_lab:
+                    return True                     # 入口块，支配全函数
+                return dp[0] > last_lab and not multi_pred
+
+            cand = []                  # [(offs, dst, ptr, hoist)]
+            skip = set()
             for off, ins in enumerate(region):
-                if ins[0] != "call" or ins[2] != "__str_len" or len(ins) != 4:
+                if off in skip:
                     continue
-                dst, args = ins[1], ins[3]
-                if len(args) != 1 or not isinstance(args[0], int):
+                # ---- 形态 1：call __str_len ----
+                if ins[0] == "call" and ins[2] == "__str_len" and len(ins) == 4:
+                    dst, args = ins[1], ins[3]
+                    if len(args) != 1 or not isinstance(args[0], int):
+                        continue
+                    p = args[0]
+                    if p in defs_in_loop or def_count.get(dst, 0) != 1:
+                        continue
+                    if any(dst in vreg_mentions(x)[1]
+                           for x in fn.instrs[:h] + fn.instrs[b + 1:]):
+                        continue
+                    cand.append(([off], dst, p, [ins]))
                     continue
-                p = args[0]
-                if p in defs_in_loop:      # 指针每轮都变，不能提
+                # ---- 形态 2：sub + load 相邻 ----
+                if (ins[0] == "bin" and ins[1] == "sub" and len(ins) == 5
+                        and isinstance(ins[3], int) and isinstance(ins[4], tuple)
+                        and ins[4] == ("imm", 8) and off + 1 < len(region)):
+                    nx = region[off + 1]
+                    if (nx[0] == "load" and nx[2] == ins[2]
+                            and isinstance(nx[3], tuple) and nx[3] == ("imm", 0)):
+                        t, p, d = ins[2], ins[3], nx[1]
+                        if p in defs_in_loop:
+                            continue
+                        if def_count.get(t, 0) != 1 or def_count.get(d, 0) != 1:
+                            continue
+                        if any(t in vreg_mentions(x)[1] for x in fn.instrs
+                               if x is not nx):
+                            continue
+                        if any(d in vreg_mentions(x)[1]
+                               for x in fn.instrs[:h] + fn.instrs[b + 1:]):
+                            continue
+                        if not dominates(p):
+                            continue
+                        cand.append(([off, off + 1], d, p, [ins, nx]))
+                        skip.add(off + 1)
+                        continue
+                # ---- 形态 3：t 在循环外，循环内只有 load ----
+                if (ins[0] == "load" and len(ins) == 4
+                        and isinstance(ins[2], int) and ins[2] in sub_of
+                        and isinstance(ins[3], tuple) and ins[3] == ("imm", 0)):
+                    t, p, d = ins[2], sub_of[ins[2]], ins[1]
+                    if t in defs_in_loop or p in defs_in_loop:
+                        continue
+                    if def_count.get(d, 0) != 1:
+                        continue
+                    if any(d in vreg_mentions(x)[1]
+                           for x in fn.instrs[:h] + fn.instrs[b + 1:]):
+                        continue
+                    if not dominates(p):
+                        continue
+                    cand.append(([off], d, p, [ins]))
                     continue
-                if def_count.get(dst, 0) != 1:
-                    continue
-                if any(dst in vreg_mentions(x)[1]
-                       for x in fn.instrs[:h] + fn.instrs[b + 1:]):
-                    continue
-                cand.append((off, dst, p))
             if not cand:
                 continue
 
-            first = {}                    # ptr -> 第一个 dst
-            keep, repl = [], {}
-            for off, dst, p in cand:
+            first = {}                 # ptr -> 第一个 dst
+            keep, keep_at, repl_at, drop = [], set(), {}, set()
+            for offs, dst, p, hoist in cand:
                 if p in first:
-                    repl[off] = first[p]
+                    repl_at[offs[0]] = (dst, first[p])
+                    for o in offs[1:]:
+                        drop.add(o)
                 else:
                     first[p] = dst
-                    keep.append(off)
+                    keep.append((offs, dst, p, hoist))
+                    keep_at.update(offs)
 
             new_region = []
             for off, ins in enumerate(region):
-                if off in repl:
-                    new_region.append(("mov", ins[1], repl[off]))
-                elif off in keep:
+                if off in repl_at:
+                    d_dst, d_src = repl_at[off]
+                    new_region.append(("mov", d_dst, d_src))
+                elif off in drop or off in keep_at:
                     continue
                 else:
                     new_region.append(ins)
             # 合并：循环前同指针的既有求长（见文件头「合并规则」）。
-            # 先收集每条跳转的 (来源下标, 目标 label)，用于判定「调用支配
-            # 循环头」：调用与循环头之间的 label 只能被 [调用位置, 循环头)
-            # 或循环内部的跳转引用才安全；被更早的跳转引用 ⇒ 调用被绕过。
             jumps = [(idx, x[-1]) for idx, x in enumerate(fn.instrs)
                      if x[0] in ("jcc", "jnz", "jmp") and isinstance(x[-1], str)]
             hoisted = []
-            for off in keep:
-                ins = region[off]
-                p = ins[3][0]
+            for offs, dst, p, hoist in keep:
                 merge_dst = None
                 for j, x in enumerate(fn.instrs[:h]):
                     if (x[0] == "call" and x[2] == "__str_len" and len(x) == 4
@@ -291,10 +402,16 @@ def opt_strlen_hoist(fn, rounds=6):
                         if not unsafe:
                             merge_dst = x[1]
                         break
+                    if (x[0] == "load" and len(x) == 4
+                            and isinstance(x[2], int) and sub_of.get(x[2]) == p
+                            and isinstance(x[3], tuple) and x[3] == ("imm", 0)
+                            and def_count.get(x[1], 0) == 1):
+                        merge_dst = x[1]
+                        break
                 if merge_dst is not None:
-                    hoisted.append(("mov", ins[1], merge_dst))
+                    hoisted.append(("mov", dst, merge_dst))
                 else:
-                    hoisted.append(ins)
+                    hoisted.extend(hoist)
             fn.instrs = fn.instrs[:h] + hoisted + new_region + fn.instrs[b + 1:]
             moved = True
             break
@@ -303,16 +420,26 @@ def opt_strlen_hoist(fn, rounds=6):
     return fn
 
 
-# ---------------------------------------------------------------------------
 # LICM:循环不变量外提
 # ---------------------------------------------------------------------------
 
 LICM_SAFE = {"mov", "neg", "not", "cmpset", "movaddr"}
 
 
-def _licm_safe(ins):
+def _licm_safe(ins, readonly=False):
     if ins[0] in LICM_SAFE:
         return True
+    if ins[0] == "load":
+        # v2.60：**纯读循环里的 load 也能外提**。
+        # 这是 vec/str 的热路径大头：`a[i]` 内联成
+        #   load len, h, 1 / cmpset+jz / load data, h, 0 / load d, data, i
+        # 其中前两个 load 的 base 是**句柄 h**，循环内不变 —— 每轮重读纯属浪费
+        # （b4_array 两个读循环 400 万次、b7_sort 内层每轮两次）。
+        #
+        # 安全性靠 readonly：循环内既没有 call（可能通过参数改 h 指向的内存），
+        # 也没有 store/store8（可能别名）。只对**整段循环零写**才开口子 ——
+        # 不做指针别名推理，宁可少提。
+        return readonly
     return ins[0] == "bin" and ins[1] in NON_TRAPPING
 
 
@@ -341,11 +468,18 @@ def opt_licm(fn, rounds=3):
                 defs_in_loop.update(d)
                 for x in u:
                     use_pos.setdefault(x, []).append(off)
+            # 本循环是不是"纯读"：没有 call、没有 store/store8。
+            # 只有纯读循环才允许外提 load（见 _licm_safe 的说明）。
+            readonly = not any(
+                i[0] in ("call", "callr", "syscall", "winapi", "ffi",
+                         "store", "store8", "xchg", "atomic", "stlr",
+                         "ffi", "spawn_child")
+                for i in region)
 
             hoist_offs = []
             for off in range(1, len(region) - 1):     # 跳过循环头标签与回边
                 ins = region[off]
-                if not _licm_safe(ins):
+                if not _licm_safe(ins, readonly):
                     continue
                 d, u = vreg_mentions(ins)
                 if not d:
@@ -459,6 +593,62 @@ def _is_imm(x, v=None):
     return isinstance(x, tuple) and x[0] == "imm" and (v is None or x[1] == v)
 
 
+def _find_guard(fn, h, b):
+    """宽松找循环 guard：h+1，或跳过标志位后的 h+4。
+
+    `while a && b` 降级成两组 `jcc+jmp`，h+1 是标志位（与立即数比较），
+    真正的上界在 h+4。_loop_shape 认不出这种（step 不在末尾），但
+    opt_bounds_elim 只需要"guard 建立上界 + body 单调不减"。
+    """
+    ins = fn.instrs
+    g1 = ins[h + 1] if h + 1 < b else None
+    if g1 is not None and g1[0] == "jcc" and len(g1) > 4 and not _is_imm(g1[3]):
+        return g1
+    if h + 4 < b:
+        g2 = ins[h + 4]
+        if (g2[0] == "jcc" and len(g2) > 4 and not _is_imm(g2[3])
+                and g1 is not None and g1[0] == "jcc"):
+            return g2
+    return None
+
+
+def _monotone_incr(body, ivar):
+    """body 内对 ivar 的每次重定义都是"加上非负常量"（含 tmp+mov 形态）。
+
+    循环 guard 只建立"进入时 0 <= ivar < hi"。只要 body 里 ivar **只增不减**，
+    这个上界在整个循环体内一直成立 —— 不需要完整的范围分析。
+
+    v2.63：`opt_bounds_elim` 以前直接用"body 内不重定义归纳变量"当条件，
+    于是 `if 数字 { p += 1 } else { go = 0 }` 这种（b9_json 的 jnum/jws/jstr）
+    全被拒掉，每次 `s[p]` 的越界检查（2 条指令 + 1 分支，每字节一次）
+    一条都消不掉。
+
+    接受两种降级形态（与 _loop_shape 的 step 识别一致）：
+      A: ('bin','add', ivar, ivar, ('imm', k))          k >= 0
+      B: ('bin','add', t, ivar, ('imm', k)) ; ('mov', ivar, t)
+    其他任何定义（减、赋常量、来自未知值）一律返回 False —— 保守。
+    """
+    n = len(body)
+    i = 0
+    while i < n:
+        ins = body[i]
+        if ivar not in vreg_mentions(ins)[0]:
+            i += 1
+            continue
+        if (ins[0] == "bin" and ins[1] == "add" and ins[2] == ivar
+                and ins[3] == ivar and _is_imm(ins[4]) and ins[4][1] >= 0):
+            i += 1
+            continue
+        if (ins[0] == "bin" and ins[1] == "add" and isinstance(ins[2], int)
+                and ins[2] != ivar and ins[3] == ivar
+                and _is_imm(ins[4]) and ins[4][1] >= 0
+                and i + 1 < n and body[i + 1] == ("mov", ivar, ins[2])):
+            i += 2
+            continue
+        return False
+    return True
+
+
 def _loop_shape(fn, h, b, lab):
     """识别规范循环形态,返回 (guard, body, step, exit_label) 或 None。
 
@@ -472,7 +662,24 @@ def _loop_shape(fn, h, b, lab):
     ins = fn.instrs
     if ins[h][0] != "label" or b - 1 <= h + 1:
         return None
-    guard = ins[h + 1]
+    # v2.62：`while a && b` 降级成**两组** `jcc + jmp`，共享同一个出口：
+    #   L: jcc e flag, ('imm',1), L2 ; jmp End ; L2: jcc l i, n, Body ; jmp End
+    #     ; Body: ...
+    # 以前只取 `ins[h+1]`，于是归纳变量被当成那个**标志位**（`go`）——
+    # 后面的"body 内不重定义归纳变量"单调性检查、以及 opt_bounds_elim 的
+    # 循环级证明全部失效（b9_json 的 `while go == 1 && p < n` 就是这种，
+    # 它每次 `s[p]` 的越界检查因此一条都没消掉）。
+    # 这里跳过"与立即数比较"的标志位条件，用真正带 vreg 上界的那条当 guard。
+    gi = h + 1
+    if (ins[gi][0] == "jcc" and len(ins[gi]) > 4 and _is_imm(ins[gi][3])
+            and gi + 4 < b
+            and ins[gi + 1][0] == "jmp" and ins[gi + 2][0] == "label"
+            and ins[gi + 3][0] == "jcc" and ins[gi + 4][0] == "jmp"
+            and ins[gi + 4][1] == ins[gi + 1][1]
+            and ins[gi + 2][1] == ins[gi][4]
+            and not _is_imm(ins[gi + 3][3])):
+        gi += 3
+    guard = ins[gi]
     if guard[0] != "jcc":
         return None
     ivar = guard[2]
@@ -480,27 +687,38 @@ def _loop_shape(fn, h, b, lab):
     # 归纳步长两种降级形态:
     #   S1  ('bin','add', i, i, ('imm',1))
     #   S2  ('bin','add', tmp, i, ('imm',1)) ; ('mov', i, tmp)
-    tail = ins[b - 1]
+    # v2.62：step 不一定紧贴回边 —— `while a && b` 的循环体末尾会先落一个
+    # 分支汇合 label（`go = 0` 之后 label iend ; jmp L），step 在它前面。
+    # 以前直接取 ins[b-1]，遇到 label 就返回 None（b9_json 的 jnum/jws/jstr
+    # 全部识别失败）。
+    ti = b - 1
+    while ti > h + 2 and ins[ti][0] == "label":
+        ti -= 1
+    tail = ins[ti]
     if (tail[0] == "bin" and tail[1] == "add" and tail[2] == ivar
             and tail[3] == ivar and _is_imm(tail[4], 1)):
-        step_ins, body_end = [tail], b - 1
-    elif (b - 2 > h and tail[0] == "mov" and tail[1] == ivar
+        step_ins, body_end = [tail], ti
+    elif (ti - 1 > h and tail[0] == "mov" and tail[1] == ivar
           and isinstance(tail[2], int)):
-        p = ins[b - 2]
+        p = ins[ti - 1]
         if (p[0] == "bin" and p[1] == "add" and p[2] == tail[2]
                 and p[3] == ivar and _is_imm(p[4], 1)):
-            step_ins, body_end = [p, tail], b - 2
+            step_ins, body_end = [p, tail], ti - 1
         else:
             return None
     else:
         return None
 
     # 形态 B:guard 跳进循环体,紧跟着一条跳出的 jmp
-    if (ins[h + 2][0] == "jmp" and ins[h + 3][0] == "label"
-            and ins[h + 3][1] == guard[4]):
-        body = ins[h + 4:body_end]
-        return guard, body, step_ins, ins[h + 2][1], True
-    body = ins[h + 2:body_end]
+    # ⚠ 偏移是相对 **gi**（guard 下标）的：jmp 在 gi+1、label 在 gi+2、
+    #   body 从 gi+3 开始。v2.62 第一版把 `h+2/h+3/h+4` 直接换成 `gi+2/+3/+4`，
+    #   多偏了 1 —— body 少第一条，opt_mod_inductive 的归纳削减匹配不上，
+    #   b1_int 的 `%13` 退回 6 条魔数除法，循环体 9 → 21 条（+27% 时间）。
+    if (gi + 1 < b and ins[gi + 1][0] == "jmp" and ins[gi + 2][0] == "label"
+            and ins[gi + 2][1] == guard[4]):
+        body = ins[gi + 3:body_end]
+        return guard, body, step_ins, ins[gi + 1][1], True
+    body = ins[gi + 1:body_end]
     return guard, body, step_ins, guard[4], False
 
 
@@ -893,6 +1111,85 @@ def _sched_block(block):
             if cnt[s] == 0:
                 heapq.heappush(heap, (-height[s], s))
     return out if len(out) == n else block   # 理论上不可能，兑底保持原序
+
+
+def _magic_u64(d):
+    """无符号常数除法：返回 (M, s, add) 使 floor(n/d) 可算（n < 2^64）。
+
+    Granlund-Montgomery：找最小的 s 使 2^(64+s) <= M*d <= 2^(64+s) + 2^s，
+    此时 floor(n/d) = umulhi(n, M) >> s。
+
+    **M 可能装不进 64 位**（d=7 就是），这时要用 libdivide 的修正式：
+        t = umulhi(n, M - 2^64)
+        q = (t + ((n - t) >> 1)) >> (s - 1)
+    返回 add=True 表示走这条。只支持 s >= 1 的情形（d >= 3 都满足）。
+    """
+    for s in range(1, 64):
+        M = ((1 << (64 + s)) + d - 1) // d
+        if M < (1 << 64):
+            if M * d - (1 << (64 + s)) <= (1 << s):
+                return M, s, False
+        else:
+            M2 = M - (1 << 64)
+            if 0 < M2 < (1 << 64):
+                return M2, s, True
+    return None
+
+
+def opt_const_div(fn):
+    """v2.61：常数除法 / 取模 → **无符号魔数乘法**（被除数已知非负时）。
+
+    背景：stage-0 的 `('bin','div'/'mod', d, a, ('imm',C))` 一直是 `idiv`
+    （x86 上 20-40 周期，还是微码化的）。`__str_from_i64` / `__print_i64`
+    每转一个数就要做两次 `div 10` —— b5_string 的 50 万次 int→str 就是
+    100 万次 idiv。
+
+    这里换成 `umulhi + shr`（取模再加 `imul + sub`），3-4 周期。
+    **只对 analyze_nonneg 能证明 a >= 0 的位置做** —— 有符号魔数除法要额外
+    的符号修正链（+3 条），而且负数的 floor 语义容易写错；非负是安全的
+    多数场景（转字符串、取模索引、哈希）。
+
+    必须排在 `opt_mod_inductive` **之后**：归纳削减靠 `('bin','mod')` 的
+    形态做匹配，先转成魔数就再也匹配不上了。
+    """
+    nn = analyze_nonneg(fn)
+    out = []
+    changed = False
+    for ins in fn.instrs:
+        if (ins[0] == "bin" and ins[1] in ("div", "mod")
+                and len(ins) == 5 and isinstance(ins[4], tuple)
+                and ins[4][0] == "imm"):
+            dst, a, c = ins[2], ins[3], ins[4][1]
+            if isinstance(a, int) and a in nn and isinstance(c, int) \
+                    and 1 < c < (1 << 31):
+                mg = _magic_u64(c)
+                if mg is not None:
+                    M, s, add = mg
+                    t = fn.new_v()
+                    out.append(("bin", "umulhi", t, a, ("imm", M)))
+                    q = fn.new_v()
+                    if add:
+                        # M 装不进 64 位：q = (t + ((a - t) >> 1)) >> (s - 1)
+                        u = fn.new_v()
+                        out.append(("bin", "sub", u, a, t))
+                        out.append(("bin", "shr", u, u, ("imm", 1)))
+                        out.append(("bin", "add", q, t, u))
+                        out.append(("bin", "shr", q, q, ("imm", s - 1)))
+                    elif s:
+                        out.append(("bin", "shr", q, t, ("imm", s)))
+                    else:
+                        out.append(("mov", q, t))
+                    if ins[1] == "div":
+                        out.append(("mov", dst, q))
+                    else:
+                        out.append(("bin", "mul", q, q, ("imm", c)))
+                        out.append(("bin", "sub", dst, a, q))
+                    changed = True
+                    continue
+        out.append(ins)
+    if changed:
+        fn.instrs = out
+    return fn
 
 
 def opt_schedule(fn):
@@ -1337,20 +1634,31 @@ def opt_bounds_elim(fn):
     for h, b, lab in loop_regions(fn):
         shape = _loop_shape(fn, h, b, lab)
         if shape is None:
-            continue
-        guard, body, step_ins, _exit, _isw = shape
+            # v2.63 宽松路径：step 落在 if/else 分支里（`if 数字 { p += 1 }
+            # else { go = 0 }`），_loop_shape 认不出，但"guard 建立上界 +
+            # body 单调不减"依然成立 —— 这正是 b9_json 的 jnum/jws/jstr。
+            guard = _find_guard(fn, h, b)
+            if guard is None:
+                continue
+            body_start, body_end = h + 1, b
+            body, step_ins = ins[body_start:body_end], []
+        else:
+            guard, body, step_ins, _exit, _isw = shape
+            body_start = b - len(step_ins) - len(body)
+            body_end = b - len(step_ins)
         if guard[0] != "jcc" or guard[1] not in ("l", "ge"):
             continue
         ivar, hi_spec = guard[2], guard[3]
         if not isinstance(ivar, int):
             continue
-        if any(ivar in vreg_mentions(p)[0] for p in body):
-            continue                        # body 内重定义归纳变量，单调性失效
+        # v2.63：允许"只增不减"的重定义（见 _monotone_incr）。以前这里是
+        # "body 内不重定义"，把 `if 数字 { p += 1 } else { ... }` 这种最常见的
+        # 扫描循环全拒了 —— b9_json 每次 s[p] 的越界检查都因此留着。
+        if not _monotone_incr(body, ivar):
+            continue
         init = _const_before(fn, h, ivar)
         if init is None or not (0 <= init[1] < 2 ** 62):
             continue                        # 下界不可追溯（或为负）
-        body_start = b - len(step_ins) - len(body)
-        body_end = b - len(step_ins)        # step 之后的取值可能 == hi
         if _is_imm(hi_spec):
             guards.append((ivar, None, hi_spec[1], body_start, body_end))
         elif isinstance(hi_spec, int):
@@ -1701,16 +2009,32 @@ def _skip_pass(name):
     """QLM_SKIP_PASSES=a,b,c：调试用 pass 级跳过开关。
     二分优化器引入的坏变换时用（如：QLM_SKIP_PASSES=opt_bounds_elim）。
 
-    opt_licm 默认禁用（v1.5.1，实测段错误）：licm 的外提在 QuIR 层
-    语义等价（A64 模拟器同程序全绿），但触发 x64 线性扫描分配器的
-    布局敏感 bug——外提改变指令布局后，某些 vreg 的寄存器/溢出槽
-    分配出错，表现为越界写段错误（复现：循环体内含内联 memcpy 的
-    程序，数据量跨过某阈值）。根修需要独立的分配器验证轮次，
-    在此之前正确性优先：licm 只在 QLM_ENABLE_LICM=1 时启用。
+    opt_licm 自 v2.59 起**默认启用**。历史上它默认关闭（v1.5.1）的原因是
+    "外提改变指令布局 → x64 分配器布局敏感段错误"。v2.59 把这个根因挖到
+    了底：**不是分配器错，是编码器错** —— `mov byte [mem], reg` 在 reg
+    编号 4..7（spl/bpl/sil/dil）时漏了 REX 前缀，被编码成 ah/ch/dh/bh，
+    于是"存 sil"变成"存 ch"，写进去的是另一个寄存器的值。分配器把字节
+    存储的**值**分到 rsi/rdi 时必然触发；被写错的值一旦是长度/偏移就是
+    越界写（段错误），否则是静默错值。
+
+    证据链：
+      * `tools/qlm_licm_audit.qma`（Quelmara 写的审计工具）复算的活跃区间
+        与线性扫描分配，与 `qlm_native.allocate()` 逐 vreg 完全一致
+        （`build/licm/xcheck.py` 对拍），分配器本身没有区间重叠 / 槽复用；
+      * 关掉那两行 REX 强制后，`tests/t144_licm_bytes.qma` 在 LICM=1 下
+        立刻断言失败，LICM=0 下通过 —— 与"布局敏感"的现象吻合。
+
+    逃生阀（按优先级）：
+      QLM_SKIP_PASSES=opt_licm  /  QLM_DISABLE_LICM=1  /  QLM_ENABLE_LICM=0
     """
+    if name in _os.environ.get("QLM_SKIP_PASSES", "").split(","):
+        return True
     if name == "opt_licm":
-        return "1" not in _os.environ.get("QLM_ENABLE_LICM", "").split(",")
-    return name in _os.environ.get("QLM_SKIP_PASSES", "").split(",")
+        if "1" in _os.environ.get("QLM_DISABLE_LICM", "").split(","):
+            return True
+        if "0" in _os.environ.get("QLM_ENABLE_LICM", "").split(","):
+            return True
+    return False
 
 
 def opt_all(fn, unroll=True):
@@ -1740,6 +2064,8 @@ def opt_all(fn, unroll=True):
         # 展开之前（展开复制的是已变换形态，每段各回绕一次，语义正确）。
         if not _skip_pass("opt_mod_inductive"):
             opt_mod_inductive(fn)
+        if not _skip_pass("opt_const_div"):
+            opt_const_div(fn)
         if not _skip_pass("opt_cse"):
             opt_cse(fn)
         if not _skip_pass("opt_dce"):

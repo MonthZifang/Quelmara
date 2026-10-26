@@ -21,6 +21,7 @@ Quelmara 源码 -> QuIR -> 优化passes -> 线性扫描寄存器分配 -> 自研
 
 import argparse
 import hashlib
+import json
 import os
 import random
 import struct
@@ -212,8 +213,19 @@ class Enc:
                   modrm_mem(dst, base, index, scale, disp))
 
     def mov8_mr(self, base, index, scale, disp, src):
-        self.emit(rex(r=src, x=index, b=base), b"\x88",
-                  modrm_mem(src, base, index, scale, disp))
+        # ⚠ 与 setcc 同一个坑：**字节寄存器 spl/bpl/sil/dil（编号 4..7）必须
+        #   强制 REX 前缀**。无 REX 时 `88 /r` 的 reg=4..7 编码成 ah/ch/dh/bh，
+        #   于是"存 sil"变成"存 ch"——写进去的是**另一个寄存器的值**。
+        #
+        # §7.32（v2.59 修）：`mem_store8(p, j, j+10)` 被编成
+        #   `mov byte ptr [rbx+rsi], bh`   ← 值在 RDI，却存了 BH
+        # 分配器把字节存储的**值**分到 RSI/RDI（caller-saved 的前两个）时
+        # 必然触发。若被存的是地址/长度，就是越界写 → 段错误。
+        # 所以它是"布局敏感"的：改几行无关代码就可能翻转。
+        r = rex(r=src, x=index, b=base)
+        if not r and 4 <= (src & 7) <= 7:
+            r = b"\x40"
+        self.emit(r, b"\x88", modrm_mem(src, base, index, scale, disp))
 
     def lea(self, dst, base, disp):
         self.emit(rex(w=1, r=dst, b=base), b"\x8d", modrm_mem(dst, base, 4, 0, disp))
@@ -6297,6 +6309,10 @@ class Lower:
             msg = "quelmara: index out of bounds (fail-fast)\n"
             gid_b = self.intern_str(msg)
             f = Fn("__bounds_fail")
+            # v2.60：失败路径**不内联**。内联后每个下标访问点都复制一份
+            # "movaddr + WriteFile + ExitProcess"（5-8 条），b9_json 那种大函数
+            # 会多出几十份，纯粹挤 I-cache；而这条路径正常情况一次都不走。
+            f.no_inline = True
             f.emit("args", [])
             bp = f.new_v()
             f.emit("movaddr", bp, gid_b)
@@ -7127,6 +7143,7 @@ class Lower:
             msg = "quelmara: vec index out of bounds (fail-fast)\n"
             gid_v = self.intern_str(msg)
             f = Fn("__vec_fail")
+            f.no_inline = True      # 同上：失败路径只留一条 call
             f.emit("args", [])
             bp = f.new_v()
             f.emit("movaddr", bp, gid_v)
@@ -11599,6 +11616,13 @@ def cfg_digest(cfg):
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+def _ir_json(v):
+    """QuIR 操作数 -> JSON 可序列化值（tuple 递归转 list，int/str 原样）。"""
+    if isinstance(v, (tuple, list)):
+        return [_ir_json(x) for x in v]
+    return v
+
+
 def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
                   asset_root=None,
                        platform="linux", prog=None,
@@ -11727,10 +11751,20 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
     import qlm_opt as _qopt
     _qopt.check_suspicious_loops(fns)
     if dump_ir:
-        for fn in fns:
-            print(f"== {fn.name} (vregs={fn.nv}) ==")
-            for ins in fn.instrs:
-                print("   ", ins)
+        if dump_ir == "json":
+            # v2.59：结构化 QuIR，给 tools/*.qma（自研语言写的分析工具）读。
+            # 只导出"分析要用的三件套"：函数名 / vreg 总数 / 指令数组。
+            # 指令里的 tuple（('imm',3) 这类）递归转 list，整型 vreg 保持 int，
+            # 消费端用"是数组还是整数"区分立即数与 vreg。
+            print(json.dumps({"fns": [
+                {"name": fn.name, "nv": fn.nv,
+                 "instrs": [_ir_json(x) for x in fn.instrs]}
+                for fn in fns]}, ensure_ascii=False))
+        else:
+            for fn in fns:
+                print(f"== {fn.name} (vregs={fn.nv}) ==")
+                for ins in fn.instrs:
+                    print("   ", ins)
     if meta is not None:
         _fill_meta(meta, fns, low, fns_ast, hashes, reuse_map, structs, enums,
                    ifaces, keep_all, cdg)

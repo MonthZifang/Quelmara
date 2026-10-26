@@ -1,0 +1,1031 @@
+// tools/qlm_licm_audit.qma —— LICM 前后 QuIR 的虚拟寄存器 / 活跃区间 / 分配审计
+//
+// 为什么用 Quelmara 写：这是工具链自举的活（只读分析，不碰 OS API），
+// 按 docs/00-convention 的规矩，只读分析工具一律用自研语言写。
+// 输入是编译器自己吐的 `--dump-ir-json`，输出是"哪条指令的哪个 vreg
+// 在 LICM 前后改变了活跃区间、分配器给了它什么、有没有冲突"。
+//
+// 用法：
+//   quelmara build tools/qlm_licm_audit.qma -o build/qlm_licm_audit.exe
+//   build/qlm_licm_audit.exe <off.json> <on.json> [--fn NAME] [-v]
+//
+// 口径（必须与 tools/stage0/qlm_native.py 的 allocate() 逐条对齐，
+// 否则"冲突"全是误报）：
+//   * 区间 = 闭区间 [first, last]，first/last 取该 vreg 任一出现位置
+//   * 回边扩展：凡在循环头 live_in 里的 vreg，区间拉到整个循环区
+//     （jmp 回边且目标标签下标 < 自身下标 = 回边）
+//   * 跨调用（first < c < last）只能用 callee-saved
+//   * 溢出槽单调增长、不复用（本分配器语义）
+// 退出码：0 未发现问题 / 1 发现问题 / 2 用法或输入错误
+
+module qlm_licm_audit
+
+import std.json
+import std.str
+
+const INF = 1073741824
+const NPOOL = 9
+
+// 分配池与 qlm_native.POOL 同源：RBX RSI RDI R8 R9 R12 R13 R14 R15
+fn pool_at(i: int) -> int {
+    if i == 0 { return 3 }
+    if i == 1 { return 6 }
+    if i == 2 { return 7 }
+    if i == 3 { return 8 }
+    if i == 4 { return 9 }
+    if i == 5 { return 12 }
+    if i == 6 { return 13 }
+    if i == 7 { return 14 }
+    return 15
+}
+
+fn reg_name(r: int) -> str {
+    if r == 3 { return "rbx" }
+    if r == 6 { return "rsi" }
+    if r == 7 { return "rdi" }
+    if r == 8 { return "r8" }
+    if r == 9 { return "r9" }
+    if r == 12 { return "r12" }
+    if r == 13 { return "r13" }
+    if r == 14 { return "r14" }
+    if r == 15 { return "r15" }
+    if r == 0 { return "rax" }
+    if r == 1 { return "rcx" }
+    if r == 2 { return "rdx" }
+    if r == 10 { return "r10" }
+    if r == 11 { return "r11" }
+    return "r?" + r.to_str()
+}
+
+// callee-saved（跨调用可保活）：RBX R12 R13 R14 R15
+fn is_callee(r: int) -> bool {
+    return r == 3 || r == 12 || r == 13 || r == 14 || r == 15
+}
+
+// ---------------------------------------------------------------------------
+// 操作数角色：1 = 定义，0 = 使用，-1 = 不是 vreg 位置
+// 与 qlm_opt.vreg_mentions 一一对应（新增指令必须在这里同步登记，
+// 漏一处 = 工具看不见那个 vreg = 审计结论不可信）
+// ---------------------------------------------------------------------------
+fn op_role(op: str, k: int) -> int {
+    if op == "mov" {
+        if k == 1 { return 1 }
+        if k == 2 { return 0 }
+        return -1
+    }
+    if op == "bin" {
+        if k == 2 { return 1 }
+        if k == 3 { return 0 }
+        if k == 4 { return 0 }
+        return -1
+    }
+    if op == "fbin" {
+        if k == 3 { return 1 }
+        if k == 4 { return 0 }
+        if k == 5 { return 0 }
+        return -1
+    }
+    if op == "fneg" {
+        if k == 2 { return 1 }
+        if k == 3 { return 0 }
+        return -1
+    }
+    if op == "fcmpset" {
+        if k == 3 { return 1 }
+        if k == 4 { return 0 }
+        if k == 5 { return 0 }
+        return -1
+    }
+    if op == "fcvt" {
+        if k == 2 { return 1 }
+        if k == 3 { return 0 }
+        return -1
+    }
+    if op == "neg" || op == "not" {
+        if k == 1 { return 1 }
+        if k == 2 { return 0 }
+        return -1
+    }
+    if op == "cmpset" {
+        if k == 2 { return 1 }
+        if k == 3 { return 0 }
+        if k == 4 { return 0 }
+        return -1
+    }
+    if op == "trunc" {
+        if k == 1 { return 1 }
+        if k == 2 { return 0 }
+        return -1
+    }
+    if op == "vsum" || op == "vsumd" {
+        if k == 1 { return 1 }
+        if k == 2 { return 0 }
+        if k == 3 { return 0 }
+        return -1
+    }
+    if op == "vdot" || op == "vdotd" {
+        if k == 1 { return 1 }
+        if k == 2 { return 0 }
+        if k == 3 { return 0 }
+        if k == 4 { return 0 }
+        return -1
+    }
+    if op == "atomic" {
+        if k == 2 { return 1 }
+        if k == 3 || k == 4 || k == 5 { return 0 }
+        return -1
+    }
+    if op == "rdtsc" || op == "cpuid_sha" || op == "cpuid_aes" || op == "cpuid_pclmul" {
+        if k == 1 { return 1 }
+        return -1
+    }
+    if op == "label" || op == "jmp" || op == "mfence" || op == "pause" || op == "spawn_child" {
+        return -1
+    }
+    if op == "jz" || op == "jnz" {
+        if k == 1 { return 0 }
+        return -1
+    }
+    if op == "jcc" {
+        if k == 2 || k == 3 { return 0 }
+        return -1
+    }
+    if op == "call" {
+        if k == 1 { return 1 }
+        if k == 3 { return 3 }
+        return -1
+    }
+    if op == "callr" {
+        if k == 1 { return 1 }
+        if k == 2 { return 0 }
+        if k == 3 { return 3 }
+        return -1
+    }
+    if op == "cssub" {
+        if k == 1 { return 1 }
+        if k == 2 || k == 3 { return 0 }
+        return -1
+    }
+    if op == "ret" {
+        if k == 1 { return 0 }
+        return -1
+    }
+    if op == "load" || op == "load8" || op == "load32" {
+        if k == 1 { return 1 }
+        if k == 2 || k == 3 { return 0 }
+        return -1
+    }
+    if op == "store" || op == "store8" {
+        if k == 1 || k == 2 || k == 3 { return 0 }
+        return -1
+    }
+    if op == "movaddr" || op == "frameaddr" {
+        if k == 1 { return 1 }
+        return -1
+    }
+    if op == "syscall" || op == "winapi" {
+        if k == 1 { return 1 }
+        if k == 3 { return 3 }
+        return -1
+    }
+    if op == "ffi" {
+        if k == 1 { return 1 }
+        if k == 6 { return 3 }
+        return -1
+    }
+    if op == "args" || op == "winargs" {
+        if k == 1 { return 2 }
+        return -1
+    }
+    if op == "xchg" {
+        if k == 1 { return 1 }
+        if k == 2 || k == 3 { return 0 }
+        return -1
+    }
+    if op == "ldar" {
+        if k == 1 { return 1 }
+        if k == 2 { return 0 }
+        return -1
+    }
+    if op == "stlr" {
+        if k == 1 || k == 2 { return 0 }
+        return -1
+    }
+    if op == "line" {
+        return -1
+    }
+    if op == "dbgvar" || op == "dbgparam" {
+        if k == 2 { return 0 }
+        return -1
+    }
+    // SSE / SHA 族：只有非负 int 是地址 vreg（xmm 槽是负数）
+    if op == "xmm_ld" || op == "xmm_st" || op == "sha_nexte" || op == "sha_rnds2" ||
+       op == "sha_msg1" || op == "sha_msg2" || op == "xmm_paddd" || op == "xmm_pxor" ||
+       op == "xmm_pshufd" || op == "xmm_palignr" || op == "aesenc" ||
+       op == "aesenclast" || op == "aesdec" || op == "aesdeclast" || op == "aesimc" ||
+       op == "aeskeygenassist" {
+        return 0
+    }
+    if op == "xmm_mov" || op == "pand_x" || op == "por_x" || op == "pshufb_x" ||
+       op == "pclmul_x" || op == "psrlw_i" || op == "psllw_i" || op == "psrlq_i" ||
+       op == "psllq_i" || op == "pslldq_i" || op == "psrldq_i" {
+        return -1
+    }
+    return -1
+}
+
+fn zeros(n: int) -> vec[int] {
+    let v = vec[int].new(n + 1)
+    let mut i = 0
+    while i < n {
+        v.push(0)
+        i += 1
+    }
+    return v
+}
+
+fn fill(n: int, x: int) -> vec[int] {
+    let v = vec[int].new(n + 1)
+    let mut i = 0
+    while i < n {
+        v.push(x)
+        i += 1
+    }
+    return v
+}
+
+// 取一个操作数节点里的 vreg（写进 out）。
+// role: 1=标量定义 2=列表定义 3=列表使用 0=标量使用
+// ⚠ 数组型操作数（('imm',3) / ('ga',2)）**不是 vreg**，只有"列表型位置"
+//   （call 的实参数组、args 的返回位数组）才展开。这一条对不上，
+//   工具就会把立即数当 vreg，区间全错（对拍时立刻暴露）。
+fn operands(d: int, node: int, role: int, out: vec[int]) {
+    if json_is_arr(d, node) {
+        if role >= 2 {
+            // 列表型位置：只取**顶层整数**（与 Python 的 ints() 一致）。
+            // 元素里嵌的 ('imm',n) 是立即数，不是 vreg —— 递归展开会把
+            // 立即数当 vreg（t1 里 WriteFile 的第 3 实参 ('imm',1) 就这样
+            // 凭空造出一个 v1，整条分配链错位）。
+            let n = json_arr_len(d, node)
+            let mut i = 0
+            while i < n {
+                let e = json_arr_at(d, node, i)
+                if !json_is_arr(d, e) {
+                    let raw2 = json_num_raw(d, e)
+                    if len(raw2) > 0 {
+                        out.push(to_int(raw2))
+                    }
+                }
+                i += 1
+            }
+        }
+        return
+    }
+    let raw = json_num_raw(d, node)
+    if len(raw) == 0 {
+        return
+    }
+    out.push(to_int(raw))
+}
+
+// 把一条指令的 def/use 记进扁平位图（下标 = pos*nv + vreg）
+fn mark_ins(d: int, ins: int, pos: int, nv: int,
+            defs_at: vec[int], uses_at: vec[int]) {
+    let op = json_str(d, json_arr_at(d, ins, 0))
+    let na = json_arr_len(d, ins)
+    let tmp = vec[int].new(8)
+    let mut k = 1
+    while k < na {
+        let r = op_role(op, k)
+        if r >= 0 {
+            let n0 = len(tmp)
+            operands(d, json_arr_at(d, ins, k), r, tmp)
+            let mut q = n0
+            while q < len(tmp) {
+                let v = tmp.get(q)
+                if v >= 0 && v < nv {
+                    if r == 1 || r == 2 {
+                        defs_at.set(pos * nv + v, 1)
+                    } else {
+                        uses_at.set(pos * nv + v, 1)
+                    }
+                }
+                q += 1
+            }
+            // 清空临时（vec 没有 clear 语义保证，用 pop 逐个退）
+            while len(tmp) > 0 {
+                tmp.pop()
+            }
+        }
+        k += 1
+    }
+}
+
+fn is_call_op(op: str) -> bool {
+    return op == "call" || op == "syscall" || op == "winapi" || op == "callr" || op == "ffi"
+}
+
+// 扫描一遍：填 defs_at / uses_at / calls
+fn scan(d: int, instrs: int, ni: int, nv: int,
+        defs_at: vec[int], uses_at: vec[int], calls: vec[int]) -> int {
+    let mut i = 0
+    while i < ni {
+        let ins = json_arr_at(d, instrs, i)
+        let op = json_str(d, json_arr_at(d, ins, 0))
+        if is_call_op(op) {
+            calls.push(i)
+        }
+        mark_ins(d, ins, i, nv, defs_at, uses_at)
+        i += 1
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// 区间：朴素 [first,last] + 回边扩展（与 allocate() 的数据流口径一致）
+// ---------------------------------------------------------------------------
+struct Ranges {
+    first: vec[int],
+    last: vec[int],
+    ndef: vec[int],
+    calls: vec[int],
+    ni: int,
+    nv: int,
+}
+
+fn has_bit(m: vec[int], pos: int, v: int, nv: int) -> bool {
+    return m.get(pos * nv + v) != 0
+}
+
+fn compute_ranges(d: int, instrs: int, ni: int, nv: int) -> Ranges {
+    let defs_at = zeros(ni * nv)
+    let uses_at = zeros(ni * nv)
+    let calls = vec[int].new(8)
+    scan(d, instrs, ni, nv, defs_at, uses_at, calls)
+
+    let first = fill(nv, INF)
+    let last = fill(nv, -1)
+    let ndef = zeros(nv)
+    let mut i = 0
+    while i < ni {
+        let mut v = 0
+        while v < nv {
+            if defs_at.get(i * nv + v) != 0 {
+                if i < first.get(v) { first.set(v, i) }
+                if i > last.get(v) { last.set(v, i) }
+                ndef.set(v, ndef.get(v) + 1)
+            }
+            if uses_at.get(i * nv + v) != 0 {
+                if i < first.get(v) { first.set(v, i) }
+                if i > last.get(v) { last.set(v, i) }
+            }
+            v += 1
+        }
+        i += 1
+    }
+
+    // 标签位置：label 名 -> 指令下标（只留最后一次出现，与 dict 语义一致）
+    let lnames = vec[str].new(16)
+    let lpos = vec[int].new(16)
+    i = 0
+    while i < ni {
+        let ins = json_arr_at(d, instrs, i)
+        if json_str(d, json_arr_at(d, ins, 0)) == "label" {
+            let nm = json_str(d, json_arr_at(d, ins, 1))
+            let mut hit = -1
+            let mut j = 0
+            while j < len(lnames) {
+                if lnames.get(j) == nm { hit = j }
+                j += 1
+            }
+            if hit >= 0 {
+                lpos.set(hit, i)
+            } else {
+                lnames.push(nm)
+                lpos.push(i)
+            }
+        }
+        i += 1
+    }
+
+    // 回边：(循环头下标, 回边下标)
+    let rs = vec[int].new(8)
+    let re = vec[int].new(8)
+    i = 0
+    while i < ni {
+        let ins = json_arr_at(d, instrs, i)
+        if json_str(d, json_arr_at(d, ins, 0)) == "jmp" {
+            let tgt = json_str(d, json_arr_at(d, ins, 1))
+            let mut j = 0
+            while j < len(lnames) {
+                if lnames.get(j) == tgt && lpos.get(j) < i {
+                    rs.push(lpos.get(j))
+                    re.push(i)
+                }
+                j += 1
+            }
+        }
+        i += 1
+    }
+
+    if len(rs) > 0 {
+        // live_in 不动点：live[i*nv+v]
+        let live = zeros(ni * nv)
+        let mut round = 0
+        let limit = ni + 2
+        while round < limit {
+            let mut changed = false
+            let mut ii = ni - 1
+            while ii >= 0 {
+                let ins = json_arr_at(d, instrs, ii)
+                let op = json_str(d, json_arr_at(d, ins, 0))
+                // 后继列表（最多 2 个）
+                let mut s0 = -1
+                let mut s1 = -1
+                if op == "ret" {
+                    s0 = -1
+                } else if op == "jmp" {
+                    let tgt = json_str(d, json_arr_at(d, ins, 1))
+                    let mut j = 0
+                    while j < len(lnames) {
+                        if lnames.get(j) == tgt { s0 = lpos.get(j) }
+                        j += 1
+                    }
+                } else if op == "jz" || op == "jnz" {
+                    let tgt = json_str(d, json_arr_at(d, ins, 2))
+                    let mut j = 0
+                    while j < len(lnames) {
+                        if lnames.get(j) == tgt { s0 = lpos.get(j) }
+                        j += 1
+                    }
+                    if ii + 1 < ni { s1 = ii + 1 }
+                } else if op == "jcc" {
+                    let tgt = json_str(d, json_arr_at(d, ins, 4))
+                    let mut j = 0
+                    while j < len(lnames) {
+                        if lnames.get(j) == tgt { s0 = lpos.get(j) }
+                        j += 1
+                    }
+                    if ii + 1 < ni { s1 = ii + 1 }
+                } else {
+                    if ii + 1 < ni { s0 = ii + 1 }
+                }
+                let mut v = 0
+                while v < nv {
+                    let mut lo = false
+                    if s0 >= 0 && has_bit(live, s0, v, nv) { lo = true }
+                    if s1 >= 0 && has_bit(live, s1, v, nv) { lo = true }
+                    let mut nw = false
+                    if lo && defs_at.get(ii * nv + v) == 0 { nw = true }
+                    if uses_at.get(ii * nv + v) != 0 { nw = true }
+                    let old = live.get(ii * nv + v) != 0
+                    if nw != old {
+                        if nw { live.set(ii * nv + v, 1) } else { live.set(ii * nv + v, 0) }
+                        changed = true
+                    }
+                    v += 1
+                }
+                ii -= 1
+            }
+            if !changed {
+                round = limit
+            } else {
+                round += 1
+            }
+        }
+        // 循环头活跃的值：区间拉到整个循环区
+        let mut r = 0
+        while r < len(rs) {
+            let hs = rs.get(r)
+            let he = re.get(r)
+            let mut v = 0
+            while v < nv {
+                if live.get(hs * nv + v) != 0 {
+                    if first.get(v) > hs { first.set(v, hs) }
+                    if last.get(v) < he { last.set(v, he) }
+                }
+                v += 1
+            }
+            r += 1
+        }
+    }
+    return Ranges { first: first, last: last, ndef: ndef, calls: calls, ni: ni, nv: nv }
+}
+
+// ---------------------------------------------------------------------------
+// 线性扫描复算（与 allocate() 逐条对齐）
+// ---------------------------------------------------------------------------
+struct Alloc {
+    kind: vec[int],     // 0=未分配 1=寄存器 2=栈槽
+    val: vec[int],      // 寄存器号 / 槽字节偏移
+    nslots: int,
+    callee: vec[int],
+}
+
+fn span_call(rg: Ranges, v: int) -> bool {
+    let mut i = 0
+    while i < len(rg.calls) {
+        let c = rg.calls.get(i)
+        if rg.first.get(v) < c && c < rg.last.get(v) {
+            return true
+        }
+        i += 1
+    }
+    return false
+}
+
+fn in_vec(v: vec[int], x: int) -> bool {
+    let mut i = 0
+    while i < len(v) {
+        if v.get(i) == x { return true }
+        i += 1
+    }
+    return false
+}
+
+fn allocate_scan(rg: Ranges) -> Alloc {
+    let nv = rg.nv
+    let kind = zeros(nv)
+    let val = zeros(nv)
+    // 按 first 升序（选择排序；nv 小，够用）
+    let order = vec[int].new(nv + 1)
+    let mut v = 0
+    while v < nv {
+        if rg.last.get(v) >= 0 {
+            order.push(v)
+        }
+        v += 1
+    }
+    let n = len(order)
+    let mut i = 0
+    while i < n {
+        let mut best = i
+        let mut j = i + 1
+        while j < n {
+            if rg.first.get(order.get(j)) < rg.first.get(order.get(best)) {
+                best = j
+            }
+            j += 1
+        }
+        if best != i {
+            let t = order.get(i)
+            order.set(i, order.get(best))
+            order.set(best, t)
+        }
+        i += 1
+    }
+
+    let aend = vec[int].new(8)
+    let av = vec[int].new(8)
+    let areg = vec[int].new(8)
+    let mut nslots = 0
+    let callee = vec[int].new(8)
+
+    let mut oi = 0
+    while oi < n {
+        let cur = order.get(oi)
+        let f = rg.first.get(cur)
+        // 释放已结束区间
+        let mut k = 0
+        while k < len(aend) {
+            if aend.get(k) < f {
+                // 删除第 k 项（尾部搬移）
+                let mut m = k
+                while m + 1 < len(aend) {
+                    aend.set(m, aend.get(m + 1))
+                    av.set(m, av.get(m + 1))
+                    areg.set(m, areg.get(m + 1))
+                    m += 1
+                }
+                aend.pop()
+                av.pop()
+                areg.pop()
+            } else {
+                k += 1
+            }
+        }
+        // free = POOL - active
+        let free = vec[int].new(NPOOL + 1)
+        let mut pi = 0
+        while pi < NPOOL {
+            let r = pool_at(pi)
+            if !in_vec(areg, r) {
+                free.push(r)
+            }
+            pi += 1
+        }
+        let sc = span_call(rg, cur)
+        let mut pick = -1
+        if sc {
+            let mut q = 0
+            while q < len(free) {
+                if is_callee(free.get(q)) { pick = free.get(q) }
+                if pick >= 0 { q = len(free) }
+                q += 1
+            }
+        } else {
+            // caller-saved 优先
+            let mut q = 0
+            while q < len(free) {
+                if !is_callee(free.get(q)) { pick = free.get(q) }
+                if pick >= 0 { q = len(free) }
+                q += 1
+            }
+            if pick < 0 && len(free) > 0 {
+                pick = free.get(0)
+            }
+        }
+        if pick >= 0 {
+            kind.set(cur, 1)
+            val.set(cur, pick)
+            aend.push(rg.last.get(cur))
+            av.push(cur)
+            areg.push(pick)
+            if is_callee(pick) && !in_vec(callee, pick) {
+                callee.push(pick)
+            }
+        } else {
+            nslots += 1
+            kind.set(cur, 2)
+            val.set(cur, 8 * nslots)
+        }
+        oi += 1
+    }
+    return Alloc { kind: kind, val: val, nslots: nslots, callee: callee }
+}
+
+// ---------------------------------------------------------------------------
+// 报告
+// ---------------------------------------------------------------------------
+fn fn_count(d: int) -> int {
+    return json_arr_len(d, json_obj_get(d, json_root(d), "fns"))
+}
+
+fn fn_at(d: int, i: int) -> int {
+    return json_arr_at(d, json_obj_get(d, json_root(d), "fns"), i)
+}
+
+fn find_fn(d: int, name: str) -> int {
+    let n = fn_count(d)
+    let mut i = 0
+    while i < n {
+        let f = fn_at(d, i)
+        if json_str(d, json_obj_get(d, f, "name")) == name {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+fn ins_count(d: int, fi: int) -> int {
+    return json_arr_len(d, json_obj_get(d, fn_at(d, fi), "instrs"))
+}
+
+fn ins_at(d: int, fi: int, k: int) -> int {
+    return json_arr_at(d, json_obj_get(d, fn_at(d, fi), "instrs"), k)
+}
+
+fn ins_text(d: int, node: int) -> str {
+    if json_is_arr(d, node) {
+        let n = json_arr_len(d, node)
+        let mut s = "("
+        let mut i = 0
+        while i < n {
+            if i > 0 { s += ", " }
+            s += ins_text(d, json_arr_at(d, node, i))
+            i += 1
+        }
+        return s + ")"
+    }
+    let raw = json_num_raw(d, node)
+    if len(raw) > 0 {
+        return raw
+    }
+    return "'" + json_str(d, node) + "'"
+}
+
+fn describe(d: int, fi: int, k: int) -> str {
+    return ins_text(d, ins_at(d, fi, k))
+}
+
+// 单函数审计；返回问题数
+fn audit_fn(d0: int, i0: int, d1: int, i1: int, verbose: bool) -> int {
+    let name = json_str(d0, json_obj_get(d0, fn_at(d0, i0), "name"))
+    let nv = json_int(d0, json_obj_get(d0, fn_at(d0, i0), "nv"))
+    let ni0 = ins_count(d0, i0)
+    let ni1 = ins_count(d1, i1)
+    let mut bad = 0
+    print("== " + name + ": off " + ni0.to_str() + " 条/" + nv.to_str() +
+          " vreg -> on " + ni1.to_str() + " 条/" +
+          json_int(d1, json_obj_get(d1, fn_at(d1, i1), "nv")).to_str() + " vreg")
+
+    // 第一处差异（含上下文）
+    let mut diff = -1
+    let mut k = 0
+    while k < ni0 && k < ni1 {
+        if describe(d0, i0, k) != describe(d1, i1, k) {
+            diff = k
+            k = ni0 + ni1
+        }
+        k += 1
+    }
+    if diff >= 0 {
+        print("   第一处差异 @" + diff.to_str())
+        let mut j = diff - 4
+        if j < 0 { j = 0 }
+        let lim = diff + 6
+        while j < lim && j < ni0 && j < ni1 {
+            if j == diff {
+                print("     off[" + j.to_str() + "] " + describe(d0, i0, j))
+                print("     on [" + j.to_str() + "] " + describe(d1, i1, j))
+            } else {
+                print("         [" + j.to_str() + "] " + describe(d0, i0, j))
+            }
+            j += 1
+        }
+    }
+
+    // 两侧各自算区间 + 分配
+    let rg0 = compute_ranges(d0, json_obj_get(d0, fn_at(d0, i0), "instrs"), ni0, nv)
+    let al0 = allocate_scan(rg0)
+    print("   [off] 溢出槽=" + al0.nslots.to_str() + " 用到的 callee=" + join_regs(al0.callee))
+
+    let nv1 = json_int(d1, json_obj_get(d1, fn_at(d1, i1), "nv"))
+    let rg1 = compute_ranges(d1, json_obj_get(d1, fn_at(d1, i1), "instrs"), ni1, nv1)
+    let al1 = allocate_scan(rg1)
+    print("   [on ] 溢出槽=" + al1.nslots.to_str() + " 用到的 callee=" + join_regs(al1.callee))
+
+    // 区间变化（只报变化，避免刷屏）
+    let mut nvmin = nv
+    if nv1 < nvmin { nvmin = nv1 }
+    let mut v = 0
+    while v < nvmin {
+        let f0 = rg0.first.get(v)
+        let l0 = rg0.last.get(v)
+        let f1 = rg1.first.get(v)
+        let l1 = rg1.last.get(v)
+        if f0 != f1 || l0 != l1 {
+            print("   ~ v" + v.to_str() + " 区间 [" + f0.to_str() + "," + l0.to_str() +
+                  "] -> [" + f1.to_str() + "," + l1.to_str() +
+                  "]  分配 " + loc_text(al0, v) + " -> " + loc_text(al1, v))
+        }
+        v += 1
+    }
+    if verbose {
+        v = 0
+        while v < nvmin {
+            print("   v" + v.to_str() + " [" + rg1.first.get(v).to_str() + "," +
+                  rg1.last.get(v).to_str() + "] def×" + rg1.ndef.get(v).to_str() +
+                  " -> " + loc_text(al1, v))
+            v += 1
+        }
+    }
+
+    bad += check_conflicts(al1, rg1, "[on ]")
+    bad += check_conflicts(al0, rg0, "[off]")
+    bad += check_store8(d1, i1, ni1, nv1, al1)
+    return bad
+}
+
+fn join_regs(v: vec[int]) -> str {
+    let mut s = ""
+    let mut i = 0
+    while i < len(v) {
+        if i > 0 { s += " " }
+        s += reg_name(v.get(i))
+        i += 1
+    }
+    if len(v) == 0 { return "(无)" }
+    return s
+}
+
+fn loc_text(a: Alloc, v: int) -> str {
+    if a.kind.get(v) == 1 {
+        return reg_name(a.val.get(v))
+    }
+    if a.kind.get(v) == 2 {
+        return "[rbp-" + a.val.get(v).to_str() + "]"
+    }
+    return "-"
+}
+
+// 同一寄存器的两个 vreg 区间不得重叠
+fn check_conflicts(a: Alloc, rg: Ranges, tag: str) -> int {
+    let mut bad = 0
+    let mut x = 0
+    while x < rg.nv {
+        if a.kind.get(x) == 1 {
+            let mut y = x + 1
+            while y < rg.nv {
+                if a.kind.get(y) == 1 && a.val.get(y) == a.val.get(x) {
+                    let f1 = rg.first.get(x)
+                    let l1 = rg.last.get(x)
+                    let f2 = rg.first.get(y)
+                    let l2 = rg.last.get(y)
+                    if f1 <= l2 && f2 <= l1 {
+                        print("   !! " + tag + " 寄存器冲突 " + reg_name(a.val.get(x)) +
+                              ": v" + x.to_str() + " [" + f1.to_str() + "," + l1.to_str() +
+                              "] 与 v" + y.to_str() + " [" + f2.to_str() + "," + l2.to_str() +
+                              "] 重叠")
+                        bad += 1
+                    }
+                }
+                y += 1
+            }
+        }
+        x += 1
+    }
+    return bad
+}
+
+// 字节存储的值寄存器落在 4..7（ah/ch/dh/bh 编码区）：必须强制 REX
+fn check_store8(d: int, fi: int, ni: int, nv: int, a: Alloc) -> int {
+    let mut bad = 0
+    let mut i = 0
+    while i < ni {
+        let ins = ins_at(d, fi, i)
+        if json_str(d, json_arr_at(d, ins, 0)) == "store8" {
+            let b = json_arr_at(d, ins, 1)
+            let x = json_arr_at(d, ins, 2)
+            let s = json_arr_at(d, ins, 3)
+            let rb = reg_of(d, b, a)
+            let rx = reg_of(d, x, a)
+            let rs = reg_of(d, s, a)
+            if rb >= 0 && rb < 8 && rx >= 0 && rx < 8 && rs >= 4 && rs < 8 {
+                print("   !! @ " + i.to_str() + " store8 base=" + reg_name(rb) +
+                      " index=" + reg_name(rx) + " src=" + reg_name(rs) +
+                      " → 无 REX 时 src 会编码成 ah/ch/dh/bh（必须强制 0x40）")
+                bad += 1
+            }
+        }
+        i += 1
+    }
+    return bad
+}
+
+fn reg_of(d: int, node: int, a: Alloc) -> int {
+    if json_is_arr(d, node) {
+        return 11          // 立即数走 SCRATCH(r11)：REX 一定非空，安全
+    }
+    let raw = json_num_raw(d, node)
+    if len(raw) == 0 {
+        return -1
+    }
+    let v = to_int(raw)
+    if v < 0 || v >= len(a.kind) {
+        return -1
+    }
+    if a.kind.get(v) == 1 {
+        return a.val.get(v)
+    }
+    return 10          // 溢出槽走 SCRATCH2(r10)：同样安全
+}
+
+// 追踪单个 vreg 的每次出现（哪条指令、哪个操作数位置、定义还是使用）
+fn trace_v(d: int, i: int, want: int) {
+    let f = fn_at(d, i)
+    let name = json_str(d, json_obj_get(d, f, "name"))
+    let instrs = json_obj_get(d, f, "instrs")
+    let ni = json_arr_len(d, instrs)
+    print("trace v" + want.to_str() + " in " + name)
+    let mut k = 0
+    while k < ni {
+        let ins = json_arr_at(d, instrs, k)
+        let op = json_str(d, json_arr_at(d, ins, 0))
+        let na = json_arr_len(d, ins)
+        let mut j = 1
+        while j < na {
+            let r = op_role(op, j)
+            if r >= 0 {
+                let tmp = vec[int].new(4)
+                operands(d, json_arr_at(d, ins, j), r, tmp)
+                let mut q = 0
+                while q < len(tmp) {
+                    if tmp.get(q) == want {
+                        print("  @" + k.to_str() + " k=" + j.to_str() +
+                              " role=" + r.to_str() + "  " + ins_text(d, ins))
+                    }
+                    q += 1
+                }
+            }
+            j += 1
+        }
+        k += 1
+    }
+}
+
+fn usage() {
+    print("用法: qlm_licm_audit <off.json> <on.json> [--fn NAME] [-v] [--alloc]")
+    print("  off.json / on.json = quelmara build <src> -o x.exe --dump-ir-json 的 stdout")
+    print("  --alloc  只输出机器可读的分配表（供 build/licm/xcheck.py 对拍）")
+}
+
+// 机器可读分配表：格式与 build/licm/xcheck.py 的输出逐行可比
+fn dump_alloc(d: int, i: int) {
+    let f = fn_at(d, i)
+    let name = json_str(d, json_obj_get(d, f, "name"))
+    let nv = json_int(d, json_obj_get(d, f, "nv"))
+    let ni = ins_count(d, i)
+    let rg = compute_ranges(d, json_obj_get(d, f, "instrs"), ni, nv)
+    let a = allocate_scan(rg)
+    let mut cl = ""
+    let mut q = 0
+    while q < len(a.callee) {
+        if q > 0 { cl += ", " }
+        cl += a.callee.get(q).to_str()
+        q += 1
+    }
+    print("  [" + name + "] nv=" + nv.to_str() + " nslots=" + a.nslots.to_str() +
+          " callee=[" + cl + "]")
+    let mut v = 0
+    while v < nv {
+        if a.kind.get(v) == 1 {
+            print("    v" + v.to_str() + " r" + a.val.get(v).to_str())
+        } else if a.kind.get(v) == 2 {
+            print("    v" + v.to_str() + " m" + a.val.get(v).to_str())
+        }
+        v += 1
+    }
+}
+
+fn main() -> int {
+    let a = args()
+    if len(a) < 2 {
+        usage()
+        return 2
+    }
+    let mut only = ""
+    let mut verbose = false
+    let mut alloc_only = false
+    let mut tracev = -1
+    let mut i = 2
+    while i < len(a) {
+        if a[i] == "--fn" && i + 1 < len(a) {
+            only = a[i + 1]
+            i += 2
+        } else if a[i] == "-v" {
+            verbose = true
+            i += 1
+        } else if a[i] == "--alloc" {
+            alloc_only = true
+            i += 1
+        } else if a[i] == "--trace-v" && i + 1 < len(a) {
+            tracev = to_int(a[i + 1])
+            i += 2
+        } else {
+            i += 1
+        }
+    }
+    let d0 = json_parse(read_text(a[0]))
+    if !json_ok(d0) {
+        print("解析失败(off) @" + json_error_pos(d0).to_str())
+        return 2
+    }
+    let d1 = json_parse(read_text(a[1]))
+    if !json_ok(d1) {
+        print("解析失败(on) @" + json_error_pos(d1).to_str())
+        return 2
+    }
+    let n = fn_count(d0)
+    if tracev >= 0 {
+        i = 0
+        while i < n {
+            trace_v(d0, i, tracev)
+            i += 1
+        }
+        return 0
+    }
+    if alloc_only {
+        i = 0
+        while i < n {
+            dump_alloc(d0, i)
+            i += 1
+        }
+        return 0
+    }
+    print("off 函数 " + n.to_str() + " 个 / on 函数 " + fn_count(d1).to_str() + " 个")
+    let mut bad = 0
+    i = 0
+    while i < n {
+        let name = json_str(d0, json_obj_get(d0, fn_at(d0, i), "name"))
+        let j = find_fn(d1, name)
+        if only != "" && name != only {
+            i += 1
+        } else if j < 0 {
+            print("== " + name + ": on 侧缺失")
+            bad += 1
+            i += 1
+        } else {
+            bad += audit_fn(d0, i, d1, j, verbose)
+            i += 1
+        }
+    }
+    print("")
+    if bad > 0 {
+        print("审计结论：发现 " + bad.to_str() + " 处问题")
+        return 1
+    }
+    print("审计结论：未发现问题（区间 / 分配 / 字节存储编码一致）")
+    return 0
+}

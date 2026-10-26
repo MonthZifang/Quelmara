@@ -59,7 +59,7 @@ def require_source(path):
     _rs(path)
 
 # 版本号口径：与 docs/versions/ 下的目录一致（vX.Y → "X.Y.0"，补丁 → "X.Y.Z"）
-VERSION = "2.58.0"
+VERSION = "2.63.0"
 
 def _default_target():
     """当前主机默认只选自研后端；不把 C99 当产品默认链路。"""
@@ -303,6 +303,8 @@ def _qla_tag(meta):
 
 
 def cmd_build(args):
+    if getattr(args, "dump_ir_json", False):
+        args.dump_ir = "json"
     srcs = args.src if isinstance(args.src, list) else [args.src]
     if len(srcs) > 1 and args.out:
         print("[qlm] 多源构建不能用 -o（每个源各自落到 build/<名字>）")
@@ -440,6 +442,8 @@ def cmd_qla(args):
 
 
 def cmd_run(args):
+    if getattr(args, "dump_ir_json", False):
+        args.dump_ir = "json"
     out, size, cfg, info = build(args.src, args.target, args.out,
                                  dump_ir=args.dump_ir, optimize=not args.no_opt,
                                  dbg_info=args.dbg_info, cache=not args.no_cache)
@@ -950,6 +954,8 @@ def main(argv=None):
         p.add_argument("-o", "--out", default=None)
         p.add_argument("--no-opt", action="store_true", help="关闭优化管线")
         p.add_argument("--dump-ir", action="store_true", help="打印 QuIR")
+        p.add_argument("--dump-ir-json", action="store_true",
+                       help="打印 QuIR 的 JSON 形式（供 tools/*.qma 自研分析工具消费）")
         p.add_argument("--no-cache", action="store_true",
                        help="跳过增量缓存强制重编（等价 QLM_NO_CACHE=1）")
         p.add_argument("--dbg-info", action="store_true",

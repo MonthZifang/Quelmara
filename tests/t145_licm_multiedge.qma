@@ -1,0 +1,34 @@
+// t145_licm_multiedge.qma：同一循环头多条回边时，LICM 不得把循环携带值当不变量（v2.59）
+//
+// 背景：`continue` 会给循环头**再加一条回边**。若把"循环区间"按单条回边
+// 界定，区间就是残缺的 —— 落在另一条回边之后的那次赋值看不见，于是
+// "只在某分支里更新"的循环携带值被误判成不变量，提到循环外。
+//
+// 本夹具的形状（`t = acc*3` 在早回边之前，`acc = acc+5` 在早回边之后）：
+//   h:  guard
+//       t = acc*3          <- 想外提的就是它
+//       total += t
+//       if i%3==0 { i+=1; continue }   <- 回边 A（早）
+//       acc = acc+5                    <- 在回边 A 之后
+//       i+=1
+//       jmp h                          <- 回边 B（晚）
+// 区间若只到回边 A，就看不到 `acc = acc+5`，t 被外提 → total 变小。
+module t145
+
+fn main() {
+    let mut total = 0
+    let mut i = 0
+    let mut acc = 1
+    while i < 12 {
+        let t = acc * 3
+        total = total + t
+        if i % 3 == 0 {
+            i = i + 1
+            continue
+        }
+        acc = acc + 5
+        i = i + 1
+    }
+    assert(total == 636, "循环携带值不得被当不变量外提")
+    print("licm multiedge ok")
+}

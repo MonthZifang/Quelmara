@@ -226,7 +226,7 @@ SHA     cpuid_sha  sha_rnds2  sha_msg1  sha_msg2  sha_nexte
 | 内联 | 小函数内联（`QLM_NO_INLINE=1` 关）；worker 是寄存器分配边界，不内联 |
 | `opt_strlen_hoist` | 循环内 `len(s)` 外提（长度前缀使之为纯读） |
 | `opt_cse` | 公共子表达式消除（GVN 风格） |
-| `opt_licm` | 循环不变量外提（**默认关闭**，`QLM_ENABLE_LICM=1` 开） |
+| `opt_licm` | 循环不变量外提（**v2.59 起默认开启**；`QLM_DISABLE_LICM=1` 或 `QLM_SKIP_PASSES=opt_licm` 关） |
 | `opt_loop_unroll` | 循环展开（阈值可配） |
 | `opt_strength_reduce` | 强度削减（乘 2 的幂 → 移位等） |
 | `opt_signed_divmod_simplify` | 有符号除模的符号修正消除 |
@@ -257,7 +257,14 @@ SHA     cpuid_sha  sha_rnds2  sha_msg1  sha_msg2  sha_nexte
 - 调用约定：整数参数 `rdi rsi rdx rcx r8 r9`，返回 `rax`；浮点走 `xmm0` 起。
 - 溢出槽按 8 字节对齐，`mem_load64/store64` 的偏移是**槽索引**（×8）。
 - **worker（`parfor`/`spawn`）是分配边界**：跨 worker 不做寄存器级优化，也不内联。
-- LICM 关闭的根因就在这里：x64 分配器对布局敏感，开启后偶发段错误（未根修）。
+- **LICM 曾长期默认关闭，但根因不在分配器**（v2.59 定性）：`mov byte [mem], reg`
+  在 reg 编号 4..7（`spl/bpl/sil/dil`）时漏了 REX 前缀，被编码成 `ah/ch/dh/bh`
+  ——"存 `sil`"变成"存 `ch`"，写进去的是另一个寄存器的值。分配器把字节存储的
+  **值**分到 `rsi`/`rdi`（caller-saved 的前两个）时必然触发；被写错的值一旦是
+  长度/偏移，就是越界写（段错误），否则是静默错值。LICM 只是**改变了活跃区间
+  → 改变了分配结果**，于是"看起来对布局敏感"。
+  审计工具 `tools/qlm_licm_audit.qma` 复算的区间与分配与 `allocate()` 逐 vreg
+  一致（对拍脚本 `build/licm/xcheck.py`），分配器本身没有区间重叠/槽复用。
 
 ## 6. 后端
 
@@ -354,7 +361,8 @@ SHA     cpuid_sha  sha_rnds2  sha_msg1  sha_msg2  sha_nexte
 | `QLM_NO_DCE=1` | 关闭全局 DCE（保留所有函数） |
 | `QLM_DCE_VERBOSE=1` | 打印 DCE 统计（保留/删除的函数数） |
 | `QLM_NO_INLINE=1` | 关闭内联 |
-| `QLM_ENABLE_LICM=1` | 打开 LICM（**已知会崩**，仅用于复现） |
+| `QLM_DISABLE_LICM=1` | 关闭 LICM（v2.59 起 LICM 默认开启） |
+| `QLM_ENABLE_LICM=0` | 同上（旧开关，兼容保留） |
 | `QLM_SKIP_PASSES=a,b` | 跳过指定 pass |
 | `QLM_MULTICORE=0` | 单核降级 |
 | `QLM_HEAP_LIMIT_MB=n` | 覆盖堆上限 |

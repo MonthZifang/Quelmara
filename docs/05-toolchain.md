@@ -1083,6 +1083,36 @@ main             按 fi 升序拷字节 + 回填 → 线程数不影响产物字
     把寄存器中途复用掉 —— 现象是数组/切片用例**间歇** AV（`s4_agg` / `s9_slice`），
     换个文件就不复现。融合成功后要 `vend[x] = max(vend[x], hit)`。
 
+### 1.12 QuIR 审计工具（v2.59，用 Quelmara 写）
+
+`tools/qlm_licm_audit.qma` 吃编译器自己吐的 `--dump-ir-json`，做"优化前后
+的虚拟寄存器 / 活跃区间 / 分配"审计。为什么用 Quelmara 写：这是只读分析，
+按 `docs/00-convention.md` 的规矩归自研语言。
+
+```bash
+# 1) 导出 LICM 开/关两份 QuIR（--dump-ir-json 不进缓存）
+QLM_ENABLE_LICM=0 quelmara build x.qma -o /tmp/o.exe --dump-ir-json > off.json
+QLM_ENABLE_LICM=1 quelmara build x.qma -o /tmp/n.exe --dump-ir-json > on.json
+
+# 2) 审计
+quelmara build tools/qlm_licm_audit.qma -o build/audit.exe
+build/audit.exe off.json on.json            # 差异 + 区间变化 + 冲突
+build/audit.exe off.json on.json --fn main -v
+build/audit.exe off.json on.json --trace-v 14   # 单个 vreg 的每次出现
+build/audit.exe off.json on.json --alloc        # 机器可读分配表
+```
+
+口径（必须与 `qlm_native.allocate()` 一致，否则"冲突"全是误报）：闭区间
+`[first, last]`、回边扩展（循环头 `live_in` 里的 vreg 拉到整个循环区）、
+跨调用（`first < c < last`）只能用 callee-saved、溢出槽单调增长不复用。
+
+对拍脚本 `build/licm/xcheck.py` 用编译器自己的 `allocate()` 复算同一份
+JSON，与工具输出逐 vreg diff。**工具的可信度靠这一步，不靠"看起来对"。**
+
+它报三类问题：同寄存器区间重叠 / 溢出槽复用 / `store8` 的
+base+index+src 全 < 8 且 src 落在 4..7（字节寄存器缺 REX 的触发条件）。
+v2.59 的 LICM 根修就是靠第三类定位到 `Enc.mov8_mr` 的。
+
 ## 2. 配置文件 `Quelmara.toml`
 
 从源文件目录向上查找（以及 cwd），**最近的一份生效**；缺失则用默认值。
