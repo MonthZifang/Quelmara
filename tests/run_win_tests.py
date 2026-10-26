@@ -1050,6 +1050,8 @@ def main():
     case_selfcheck("t146_const_div", "tests/t146_const_div.qma")
     # int→str 的取位循环改用魔数乘（v2.64）：往返对拍 + 进位边界
     case_selfcheck("t147_itoa_magic", "tests/t147_itoa_magic.qma")
+    # f64 住 XMM（v2.65）：循环/直线两条路径对拍 + 结构体/数组/调用/取负
+    case_selfcheck("t148_f64_xmm", "tests/t148_f64_xmm.qma")
     # UUID（v1.77）：v4 生成 / 校验 / 版本与变体位
     case_selfcheck("t115_uuid", "tests/t115_uuid.qma")
     # 所有权检查 v2（v1.84）：视图生命周期 / 写别名 / 跨线程的正例

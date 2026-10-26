@@ -44,6 +44,19 @@ CALLEE_SAVED = [RBX, R12, R13, R14, R15]              # 跨调用存活用
 ARG_REGS = [RDI, RSI, RDX, RCX, R8, R9]               # 调用约定（自研 ABI，SysV 形状）
 SCRATCH, SCRATCH2, ACC = R11, R10, RAX                # 编码期临时寄存器（不参与分配）
 
+# ---- f64 的 XMM 寄存器文件（v2.65）----
+# 以前 f64 值住在 GPR 里，每条浮点指令都要 movq 进出 XMM 各一次，
+# 循环里还过一趟 GPR —— b2_float 的热循环 23 条指令里有 8 条是这个往返，
+# 每轮多 10 个以上周期。现在 f64 值直接住 XMM。
+#
+# 只用 XMM0-XMM3 当分配池、XMM4/XMM5 当编码期临时（**都不参与分配**）：
+# 六个全是 caller-saved，所以**跨调用的值必须落栈**（见 allocate 的
+# span_call 分支）。不用 XMM6-XMM15（Win64 非易失）是刻意的 —— 用它们就得
+# 在序言里额外保存/恢复，还要和 WinAPI 调用的约定对齐，收益抵不上风险。
+XPOOL = [0, 1, 2, 3]                       # caller-saved：不跨调用的值
+XPOOL_CALLEE = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]   # 非易失：跨调用存活
+XS0, XS1 = 4, 5          # 编码期临时 XMM（f64 与 f32 共用，不参与分配）
+
 CC = {"e": (0x84, 0x94), "ne": (0x85, 0x95), "l": (0x8C, 0x9C),
       "ge": (0x8D, 0x9D), "le": (0x8E, 0x9E), "g": (0x8F, 0x9F),
       "p": (0x8A, 0x9A), "np": (0x8B, 0x9B), "b": (0x82, 0x92),
@@ -336,6 +349,43 @@ class Enc:
     def movq_rx(self, r, x):
         """movq r64, xmm_x"""
         self.emit(b"\x66", rex(w=1, r=x, b=r), b"\x0f\x7e", modrm_reg(x, r))
+
+    def movsd_xm(self, x, base, index, scale, disp):
+        """movsd xmm_x, [base + index*2^scale + disp]（F2 0F 10 /r）
+
+        f64 从内存直接进 XMM —— 以前是 `mov gpr,[mem]` + `movq xmm,gpr`
+        两条，且要过一趟 GPR 的存储转发。
+        """
+        self.emit(b"\xf2", rex(r=x, x=index, b=base), b"\x0f\x10",
+                  modrm_mem(x, base, index, scale, disp))
+
+    def movsd_mx(self, base, index, scale, disp, x):
+        """movsd [base + index*2^scale + disp], xmm_x（F2 0F 11 /r）"""
+        self.emit(b"\xf2", rex(r=x, x=index, b=base), b"\x0f\x11",
+                  modrm_mem(x, base, index, scale, disp))
+
+    def movaps_rr(self, xd, xs):
+        """整 128 位寄存器搬移（0F 28 /r）。
+
+        **不能用 movsd xmm,xmm**：那是部分寄存器写，高 64 位保留 ⇒ 有假依赖
+        （v2.56 在 qlmc 上踩过：让每轮除法都等上一轮除法写完）。
+        """
+        self.emit(rex(r=xd, b=xs), b"\x0f\x28", modrm_reg(xd, xs))
+
+    def movups_xm(self, x, base, index, scale, disp):
+        """movups xmm_x, [mem]（0F 10 /r，无前缀）—— 保存非易失 XMM 用。
+        帧里的保存区不保证 16 字节对齐，所以用 unaligned 形式。"""
+        self.emit(rex(r=x, x=index, b=base), b"\x0f\x10",
+                  modrm_mem(x, base, index, scale, disp))
+
+    def movups_mx(self, base, index, scale, disp, x):
+        """movups [mem], xmm_x（0F 11 /r）"""
+        self.emit(rex(r=x, x=index, b=base), b"\x0f\x11",
+                  modrm_mem(x, base, index, scale, disp))
+
+    def pxor_rr(self, xd, xs):
+        """pxor xmm_xd, xmm_xs（66 0F EF /r）——整 128 位写，用来断开假依赖"""
+        self.emit(b"\x66", rex(r=xd, b=xs), b"\x0f\xef", modrm_reg(xd, xs))
 
     # ---- SSE2 打包（v1.8 @simd）----
     def pxor_x(self, xd, xs):
@@ -10140,7 +10190,102 @@ def dbg_vreg_ranges(fn):
     return first, last
 
 
-def allocate(fn, pool=POOL, callee_saved=CALLEE_SAVED):
+def f64_vregs(fn):
+    """返回承载 **f64**（8 字节 IEEE 位模式）的 vreg 集合。
+
+    IR 里的类型是**逐指令**携带的（`fbin`/`fcvt`/`fneg`/`fcmpset` 都带
+    width 字段），所以这里从这些"根"出发做不动点：
+
+      * `fbin f64 d,a,b`   → d,a,b 是 f64
+      * `fneg f64 d,a`     → d,a
+      * `fcmpset f64 ...`  → a,b（dst 是 int！）
+      * `fcvt i2f64 d,a`   → d；`f64i d,a` → a；`f32f64 d,a` → d；`f64f32 d,a` → a
+      * `mov d,a`          → 双向传播（f64 只会在 f64 之间搬）
+
+    保守边界：**只认 f64**。f32 仍走原来的"GPR 存位模式 + 每条指令 movd
+    进出 XMM"路径 —— f32 的寄存器文件共用会牵扯 movd/movss 的部分寄存器
+    写语义，收益小得多。
+
+    误判风险：如果某个 f64 值只被 `mov` 传递、从不参与任何 f64 运算，
+    它就不会进集合，继续住 GPR（ABI 本来就是 GPR 传位模式），无害。
+    """
+    # **SIMD 归约函数直接放弃**：`vsumd`/`vdotd` 的发射把 xmm0/xmm1 当固定
+    # 临时寄存器用（movupd/addpd/movhlps 全写死），与 XPOOL 的 0-3 直接
+    # 冲突。这类函数整体退回"f64 住 GPR"，正确性优先。
+    if any(ins[0] in ("vsum", "vsumd", "vdot", "vdotd") for ins in fn.instrs):
+        return set()
+
+    s = set()
+    changed = True
+    while changed:
+        changed = False
+        for ins in fn.instrs:
+            op = ins[0]
+            add = ()
+            if op == "fbin" and ins[1] == "f64":
+                add = (ins[3], ins[4], ins[5])
+            elif op == "fneg" and ins[1] == "f64":
+                add = (ins[2], ins[3])
+            elif op == "fcmpset" and ins[1] == "f64":
+                add = (ins[3], ins[4])
+            elif op == "fcvt":
+                k = ins[1]
+                if k == "i2f64":
+                    add = (ins[2],)
+                elif k == "f64i":
+                    add = (ins[3],)
+                elif k == "f32f64":
+                    add = (ins[2],)
+                elif k == "f64f32":
+                    add = (ins[3],)
+            elif op == "mov":
+                d, a = ins[1], ins[2]
+                if isinstance(a, int) and a in s:
+                    add = (d,)
+                elif isinstance(d, int) and d in s and isinstance(a, int):
+                    add = (a,)
+            for v in add:
+                if isinstance(v, int) and v not in s:
+                    s.add(v)
+                    changed = True
+
+    # ---- 冲突消解：vreg 编号在非 SSA 的 IR 里会被**复用** ----
+    # 同一个编号可能在 A 处装 f64、在 B 处装整数（实测：`fcmpset` 的 dst
+    # 在 inlined `__f64_to_str` 里又被当成整数用）。这种编号**一律退回 GPR**
+    # —— f64 的发射路径对 GPR 操作数本来就有 movq 分支，只是慢一点；
+    # 而判错方向（该在 GPR 的住进 XMM）会直接崩。
+    #
+    # 例外：`mov`/`load`/`store`/`ret`/`args`/`call` 是**类型无关**的搬运，
+    # 它们不产生"必须是整数"的约束 —— 否则 `acc = acc + x` 这类
+    # `mov var, tmp` 会把整个循环的浮点值赶回 GPR，优化直接失效。
+    must_int = set()
+    for ins in fn.instrs:
+        op = ins[0]
+        if op in ("fbin", "fneg") and ins[1] == "f64":
+            continue
+        if op == "fcmpset" and ins[1] == "f64":
+            must_int.add(ins[3])                  # dst 是 0/1 的整数
+            continue
+        if op == "fcvt":
+            k = ins[1]
+            if k in ("i2f64", "f32f64"):
+                must_int.add(ins[3])              # 源是整数/f32（住 GPR）
+            elif k in ("f64i", "f64f32"):
+                must_int.add(ins[2])              # 目的不是 f64
+            else:
+                d, u = vreg_mentions(ins)
+                must_int.update(d)
+                must_int.update(u)
+            continue
+        if op in ("mov", "load", "store", "ret", "args", "call", "callr"):
+            continue
+        d, u = vreg_mentions(ins)
+        must_int.update(d)
+        must_int.update(u)
+    return s - must_int
+
+
+def allocate(fn, pool=POOL, callee_saved=CALLEE_SAVED, f64=()):
     n = fn.nv
     first = [10 ** 9] * n
     last = [-1] * n
@@ -10217,6 +10362,8 @@ def allocate(fn, pool=POOL, callee_saved=CALLEE_SAVED):
 
     order = sorted([v for v in range(n) if last[v] >= 0], key=lambda v: first[v])
     for v in order:
+        if v in f64:
+            continue                     # f64 走 XMM 文件，见下面第二遍扫描
         # 释放已结束区间
         active = [(e, w, r) for (e, w, r) in active if e >= first[v]]
         free = list(pool)
@@ -10240,7 +10387,40 @@ def allocate(fn, pool=POOL, callee_saved=CALLEE_SAVED):
         else:
             alloc[v] = ("m", 8 * (nslots + 1))   # 溢出到栈槽：[rbp-8], [rbp-16], ...
             nslots += 1
-    return alloc, nslots, sorted(used_callee)
+
+    # ---- 第二遍：f64 走 XMM 寄存器文件（v2.65）----
+    # 与 GPR 同一套线性扫描，只是换一个寄存器池。两条硬约束：
+    #   1. **跨调用的值落栈**：XMM0-3 全是 caller-saved，任何被调方（含
+    #      WinAPI）都可以随手踩掉；
+    #   2. 栈槽与 GPR 溢出槽**共用 nslots 计数器**，否则会互相覆盖。
+    used_xcallee = set()
+    if f64:
+        active = []
+        for v in order:
+            if v not in f64:
+                continue
+            active = [(e, w, r) for (e, w, r) in active if e >= first[v]]
+            span_call = any(first[v] < c < last[v] for c in call_sites)
+            busy = {r for (_, _, r) in active}
+            # 跨调用 → 非易失池（XMM6-15，序言保存/尾声恢复）；
+            # 不跨调用 → caller-saved 池（省掉保存/恢复）。
+            pools = (XPOOL_CALLEE, XPOOL) if span_call else (XPOOL, XPOOL_CALLEE)
+            reg = None
+            for pl in pools:
+                cand = [r for r in pl if r not in busy]
+                if cand:
+                    reg = cand[0]
+                    break
+            if reg is not None:
+                alloc[v] = ("x", reg)
+                active.append((last[v], v, reg))
+                active.sort()
+                if reg in XPOOL_CALLEE:
+                    used_xcallee.add(reg)
+            else:
+                alloc[v] = ("m", 8 * (nslots + 1))
+                nslots += 1
+    return alloc, nslots, sorted(used_callee), sorted(used_xcallee)
 
 
 # ---------------------------------------------------------------------------
@@ -10286,6 +10466,9 @@ class Codegen:
         # （import 的库函数 / 运行库合成函数）。
         self.dbg = {"funcs": []}
         self._dbg = None           # 当前函数的收集态
+        self.f64v = set()          # 当前函数里承载 f64 的 vreg（住 XMM）
+        self.used_xcallee = []     # 本函数用到的非易失 XMM（序言保存/尾声恢复）
+        self.xsave_base = 0
 
     # ---- v1.62 调试信息收集 ----
     def _dbg_reset(self, fn):
@@ -10369,6 +10552,10 @@ class Codegen:
     def fetch(self, target, spec):
         if isinstance(spec, int):
             kind, val = self.alloc[spec]
+            if kind == "x":
+                raise RuntimeError(
+                    f"[{getattr(self, 'cur_fn_name', '?')}] f64 vreg v{spec} "
+                    f"走了整数路径（fetch）—— 该指令的发射没接 XMM 分支")
             if kind == "r":
                 return val
             self.enc.mov_rm(target, RBP, 4, 0, -val)
@@ -10387,6 +10574,58 @@ class Codegen:
         self.global_fixups.append((self.enc.pos(), spec[1]))
         self.enc.emit(b"\x00" * 8)
         return target
+
+    def commit_ret(self, dst):
+        """被调方返回值落地。ABI 不变（f64 也按位模式走 RAX），
+        所以 f64 结果要额外搬进 XMM 家。"""
+        if isinstance(dst, int) and dst in self.f64v:
+            kind, val = self.alloc[dst]
+            if kind == "x":
+                self.enc.movq_xr(val, ACC)
+                return
+            self.enc.movq_xr(XS0, ACC)
+            self.fcommit(dst, XS0)
+            return
+        self.commit(dst, ACC)
+
+    def fx(self, x, spec):
+        """把 f64 操作数放进 XMM `x`，返回**真正**持有它的 XMM 号。
+
+        - 已经在 XMM 里 → 直接返回那个号（零搬运）
+        - 在 GPR 里     → movq（1 条，1 周期）
+        - 在栈槽里      → movsd 直接从内存进 XMM（以前是 mov gpr,[mem] +
+                          movq xmm,gpr 两条，还要过一趟存储转发）
+        """
+        if isinstance(spec, int):
+            kind, val = self.alloc[spec]
+            if kind == "x":
+                if val != x:
+                    # 已在 XMM 但不在目标号 —— 必须真的搬过去。
+                    # （v2.65 第一版这里直接 return val，调用方以为值在 x 里，
+                    #   b2 算出 0.0 —— 静默错值，不是崩溃。）
+                    self.enc.movaps_rr(x, val)
+                return x
+            if kind == "r":
+                self.enc.movq_xr(x, val)
+                return x
+            self.enc.movsd_xm(x, RBP, 4, 0, -val)
+            return x
+        if isinstance(spec, tuple) and spec[0] == "imm":
+            self.enc.mov_ri(SCRATCH, spec[1])
+            self.enc.movq_xr(x, SCRATCH)
+            return x
+        raise RuntimeError(f"f64 操作数形态不支持：{spec!r}")
+
+    def fcommit(self, dst, x):
+        """XMM `x` -> dst 的家（XMM / GPR / 栈槽）。"""
+        kind, val = self.alloc[dst]
+        if kind == "x":
+            if val != x:
+                self.enc.movaps_rr(val, x)
+        elif kind == "r":
+            self.enc.movq_rx(val, x)
+        else:
+            self.enc.movsd_mx(RBP, 4, 0, -val, x)
 
     def fp_from_gpr(self, w, x, r):
         """GPR 位模式 -> XMM x（f64 走 movq，f32 走 movd）"""
@@ -10412,6 +10651,10 @@ class Codegen:
 
     def commit(self, dst, reg):
         kind, val = self.alloc[dst]
+        if kind == "x":
+            raise RuntimeError(
+                f"[{getattr(self, 'cur_fn_name', '?')}] f64 vreg v{dst} "
+                f"走了整数路径（commit）—— 该指令的发射没接 XMM 分支")
         if kind == "r":
             if val != reg:
                 self.enc.mov_rr(val, reg)
@@ -10428,11 +10671,15 @@ class Codegen:
     def src_move(self, spec):
         if isinstance(spec, int):
             kind, val = self.alloc[spec]
+            if kind == "x":
+                return ("x", val)
             return (kind, val) if kind == "r" else ("m", val)
         return spec  # ('imm', n) / ('ga', gid)
 
     def dst_move(self, dst):
         kind, val = self.alloc[dst]
+        if kind == "x":
+            return ("x", val)
         return ("r", val) if kind == "r" else ("m", val)
 
     def safe_dst_reg(self, dst, others=()):
@@ -10482,6 +10729,10 @@ class Codegen:
                         self.enc.mov_rr(SCRATCH, src[1])
                         pending[i] = (("r", SCRATCH), dst)
                         break
+                    if src[0] == "x":
+                        self.enc.movaps_rr(XS0, src[1])
+                        pending[i] = (("x", XS0), dst)
+                        break
                 else:
                     raise RuntimeError("并行搬移无法调度")
 
@@ -10500,7 +10751,11 @@ class Codegen:
         if stk:
             self.enc.alu_ri("sub", RSP, 8 * len(stk))
             for j, a in enumerate(stk):
-                self.mat(SCRATCH, a)
+                if isinstance(a, int) and a in self.f64v:
+                    self.fx(XS0, a)
+                    self.enc.movq_rx(SCRATCH, XS0)
+                else:
+                    self.mat(SCRATCH, a)
                 self.enc.mov_mr(RSP, 4, 0, 8 * j, SCRATCH)
         return len(stk)
 
@@ -10517,6 +10772,29 @@ class Codegen:
         return 8 * (2 + n)
 
     def emit_move(self, src, dst):
+        # ---- XMM 端（f64）：GPR 侧一律走 movq 位模式搬运，ABI 不变 ----
+        if src[0] == "x" or dst[0] == "x":
+            if src[0] == "x" and dst[0] == "x":
+                if src[1] != dst[1]:
+                    self.enc.movaps_rr(dst[1], src[1])
+            elif src[0] == "x" and dst[0] == "r":
+                self.enc.movq_rx(dst[1], src[1])
+            elif src[0] == "r" and dst[0] == "x":
+                self.enc.movq_xr(dst[1], src[1])
+            elif src[0] == "x" and dst[0] == "m":
+                self.enc.movsd_mx(RBP, 4, 0, -dst[1], src[1])
+            elif src[0] == "m" and dst[0] == "x":
+                self.enc.movsd_xm(dst[1], RBP, 4, 0, -src[1])
+            elif src[0] == "imm" and dst[0] == "x":
+                self.enc.mov_ri(SCRATCH, src[1])
+                self.enc.movq_xr(dst[1], SCRATCH)
+            elif src[0] == "stk" and dst[0] == "x":
+                base = self._stkarg_base() + src[1] * 8
+                self.enc.mov_rm(SCRATCH, RBP, 4, 0, base)
+                self.enc.movq_xr(dst[1], SCRATCH)
+            else:
+                raise RuntimeError(f"f64 搬移不支持：{src!r} -> {dst!r}")
+            return
         if src[0] == "r" and dst[0] == "r":
             if src[1] != dst[1]:
                 self.enc.mov_rr(dst[1], src[1])
@@ -10948,22 +11226,61 @@ class Codegen:
             self.commit(ins[1], ra)
         elif op == "fbin":
             w, fop, dst, a, b = ins[1], ins[2], ins[3], ins[4], ins[5]
-            self.fp_from_gpr(w, 0, self.mat(SCRATCH2, a))
-            self.fp_from_gpr(w, 1, self.mat(SCRATCH, b))
-            enc.fp_alu(w, fop, 0, 1)
-            self.fp_to_dst(w, dst, 0)
+            if w == "f64":
+                # v2.65：f64 值直接住 XMM。**尽量少搬**：
+                #   · b 已经在 XMM 里 → 直接用它的寄存器当源，不拷到 scratch
+                #   · dst 有自己的 XMM 家 → 结果直接算进去（1 条 movaps + 1 条运算）
+                # 以前是「两个操作数各拷到 scratch + 算 + 再拷回 dst」= 4 条。
+                ka = self.alloc[a] if isinstance(a, int) else None
+                kb = self.alloc[b] if isinstance(b, int) else None
+                xa = ka[1] if (ka is not None and ka[0] == "x") else None
+                xb = kb[1] if (kb is not None and kb[0] == "x") else None
+                if xb is None:
+                    xb = self.fx(XS1, b)
+                kd = self.alloc[dst]
+                if kd[0] == "x":
+                    d = kd[1]
+                    if d == xa:
+                        enc.fp_alu(w, fop, d, xb)          # 已与 a 合并
+                    elif d != xb:
+                        if xa is None:
+                            self.fx(d, a)                  # 直接拷进 dst 的家
+                        else:
+                            enc.movaps_rr(d, xa)
+                        enc.fp_alu(w, fop, d, xb)
+                    else:
+                        # d == xb：b 的值还要用，不能就地写
+                        xa = self.fx(XS0, a)
+                        enc.fp_alu(w, fop, xa, xb)
+                        enc.movaps_rr(d, xa)
+                else:
+                    xa = self.fx(XS0, a)
+                    enc.fp_alu(w, fop, xa, xb)
+                    self.fcommit(dst, xa)
+            else:
+                self.fp_from_gpr(w, XS0, self.mat(SCRATCH2, a))
+                self.fp_from_gpr(w, XS1, self.mat(SCRATCH, b))
+                enc.fp_alu(w, fop, XS0, XS1)
+                self.fp_to_dst(w, dst, XS0)
         elif op == "fneg":
             w, dst, a = ins[1], ins[2], ins[3]
-            self.fp_from_gpr(w, 0, self.mat(SCRATCH2, a))
+            self.fx(XS0, a)
             enc.mov_ri(SCRATCH, 0x8000000000000000 if w == "f64" else 0x80000000)
-            self.fp_from_gpr(w, 2, SCRATCH)
-            enc.fp_xor(w, 0, 2)
-            self.fp_to_dst(w, dst, 0)
+            self.fp_from_gpr(w, XS1, SCRATCH)
+            enc.fp_xor(w, XS0, XS1)
+            if w == "f64":
+                self.fcommit(dst, XS0)
+            else:
+                self.fp_to_dst(w, dst, XS0)
         elif op == "fcmpset":
             w, cc, dst, a, b = ins[1], ins[2], ins[3], ins[4], ins[5]
-            self.fp_from_gpr(w, 0, self.mat(SCRATCH2, a))
-            self.fp_from_gpr(w, 1, self.mat(SCRATCH, b))
-            enc.fp_cmp(w, 0, 1)
+            if w == "f64":
+                self.fx(XS0, a)
+                self.fx(XS1, b)
+            else:
+                self.fp_from_gpr(w, XS0, self.mat(SCRATCH2, a))
+                self.fp_from_gpr(w, XS1, self.mat(SCRATCH, b))
+            enc.fp_cmp(w, XS0, XS1)
             # 有序语义与 C 一致：NaN 时 PF=1，比较结果必须为假（!= 为真）
             if cc == "ne":
                 enc.setcc("p", SCRATCH)
@@ -10983,20 +11300,45 @@ class Codegen:
             self.commit(dst, ACC)
         elif op == "fcvt":
             kind, dst, a = ins[1], ins[2], ins[3]
-            if kind in ("i2f64", "i2f32"):
-                # cvtsi2sd/ss 的源是 GPR，不是 XMM
-                enc.cvt(kind, 0, self.mat(SCRATCH2, a))
-                self.fp_to_dst("f32" if kind == "i2f32" else "f64", dst, 0)
+            if kind == "i2f64":
+                # cvtsi2sd 的源是 GPR。**先 pxor 再 cvt**：SSE2 形式的
+                # cvtsi2sd 只写低 64 位、高 64 位保留 ⇒ 对目的寄存器有
+                # 假依赖，会把循环里的每一轮除法串行化（b2_float 实测）。
+                r = self.mat(SCRATCH2, a)
+                kd = self.alloc[dst]
+                if kd[0] == "x":
+                    enc.pxor_rr(kd[1], kd[1])
+                    enc.cvt(kind, kd[1], r)
+                else:
+                    enc.pxor_rr(XS0, XS0)
+                    enc.cvt(kind, XS0, r)
+                    self.fcommit(dst, XS0)
                 return
-            if kind in ("f64i", "f32i"):
-                self.fp_from_gpr("f64" if kind == "f64i" else "f32", 0, self.mat(SCRATCH2, a))
-                enc.cvt(kind, ACC, 0)
+            if kind == "f64i":
+                self.fx(XS0, a)
+                enc.cvt(kind, ACC, XS0)
                 self.commit(dst, ACC)
                 return
-            self.fp_from_gpr("f32" if kind in ("i2f32", "f32f64") else "f64", 0,
-                             self.mat(SCRATCH2, a))
-            enc.cvt(kind, 0, 0)
-            self.fp_to_dst("f32" if kind in ("i2f32", "f64f32") else "f64", dst, 0)
+            if kind == "f32f64":
+                self.fp_from_gpr("f32", XS0, self.mat(SCRATCH2, a))
+                enc.cvt(kind, XS0, XS0)
+                self.fcommit(dst, XS0)
+                return
+            if kind == "f64f32":
+                self.fx(XS0, a)
+                enc.cvt(kind, XS0, XS0)
+                self.fp_to_dst("f32", dst, XS0)      # f32 仍住 GPR
+                return
+            if kind == "i2f32":
+                enc.cvt(kind, XS0, self.mat(SCRATCH2, a))
+                self.fp_to_dst("f32", dst, XS0)
+                return
+            if kind == "f32i":
+                self.fp_from_gpr("f32", XS0, self.mat(SCRATCH2, a))
+                enc.cvt(kind, ACC, XS0)
+                self.commit(dst, ACC)
+                return
+            raise SyntaxError(f"未知浮点转换 {kind}")
         elif op == "cmpset":
             cc, dst, a, b = ins[1], ins[2], ins[3], ins[4]
             rd = self.safe_dst_reg(dst, [a, b])
@@ -11022,7 +11364,7 @@ class Codegen:
             if nk:
                 enc.alu_ri("add", RSP, 8 * nk)     # 回卷溢出区（v1.42）
             if ins[1] is not None:
-                self.commit(ins[1], ACC)
+                self.commit_ret(ins[1])
         elif op == "callr":
             # 间接调用（自研 ABI，与 call 同参数布局）。函数地址先物化进
             # SCRATCH2（r10 不在分配池，不会被随后的参数搬移覆盖；
@@ -11035,7 +11377,7 @@ class Codegen:
             if nk:
                 enc.alu_ri("add", RSP, 8 * nk)     # 回卷溢出区（v1.42）
             if ins[1] is not None:
-                self.commit(ins[1], ACC)
+                self.commit_ret(ins[1])
         elif op == "cssub":
             # dst = (a >= b) ? a - b : a。妙点：借位就在 sub 的标志位里——
             #   host = a ; rax = a - b（SF = (a-b) < 0） ; CMOVns host, rax
@@ -11057,12 +11399,23 @@ class Codegen:
                 self.commit(ins[1], SCRATCH2)
         elif op == "ret":
             if ins[1] is not None:
-                r = self.fetch(ACC, ins[1])
-                if r != ACC:
-                    enc.mov_rr(ACC, r)
+                if isinstance(ins[1], int) and ins[1] in self.f64v:
+                    # f64 走 XMM 文件，返回仍按 ABI 放 RAX（位模式）
+                    self.fx(XS0, ins[1])
+                    enc.movq_rx(ACC, XS0)
+                else:
+                    r = self.fetch(ACC, ins[1])
+                    if r != ACC:
+                        enc.mov_rr(ACC, r)
             self.emit_epilogue()
             enc.ret()
         elif op in ("load", "load8", "load32"):
+            if op == "load" and isinstance(ins[1], int) and ins[1] in self.f64v:
+                fb = self.fetch(SCRATCH2, ins[2])
+                fi = self.fetch(SCRATCH, ins[3])
+                enc.movsd_xm(XS0, fb, fi, 3, 0)
+                self.fcommit(ins[1], XS0)
+                return
             rd = self.safe_dst_reg(ins[1], [ins[2], ins[3]])
             fb = self.fetch(SCRATCH2, ins[2])
             fi = self.fetch(SCRATCH, ins[3])
@@ -11079,6 +11432,10 @@ class Codegen:
         elif op in ("store", "store8"):
             fb = self.fetch(SCRATCH2, ins[1])
             fi = self.fetch(SCRATCH, ins[2])
+            if op == "store" and isinstance(ins[3], int) and ins[3] in self.f64v:
+                self.fx(XS0, ins[3])
+                enc.movsd_mx(fb, fi, 3, 0, XS0)
+                return
             fs = self.fetch(ACC, ins[3])
             if op == "store":
                 enc.mov_mr(fb, fi, 3, 0, fs)
@@ -11379,6 +11736,8 @@ class Codegen:
 
     def emit_epilogue(self):
         enc = self.enc
+        for _i, _xr in enumerate(getattr(self, "used_xcallee", ())):
+            enc.movups_xm(_xr, RBP, 4, 0, -self.xsave_base + 16 * _i)
         enc.mov_rr(RSP, RBP)
         enc.pop(RBP)
         for r in reversed(self.used_callee):
@@ -11410,7 +11769,10 @@ class Codegen:
         for fn in self.fns:
             self._dbg_reset(fn)
             ins_off = []
-            self.alloc, nslots, self.used_callee = allocate(fn)
+            self.f64v = f64_vregs(fn)
+            self.cur_fn_name = fn.name
+            (self.alloc, nslots, self.used_callee,
+             self.used_xcallee) = allocate(fn, f64=self.f64v)
             self.nslots = nslots
             self.frame_words = getattr(fn, "frame_words", 0)
             enc.labels[fn.name] = enc.pos()
@@ -11433,7 +11795,11 @@ class Codegen:
             self._dbg["push"] = (len(self.used_callee) + 1
                                  + (2 if self.cur_fn_thread else 0))
             rbp_mod = (8 - 8 * (len(self.used_callee) + 1)) % 16
-            frame = (nslots + self.frame_words) * 8
+            # XMM 保存区放在**帧的最底部**（比溢出槽与结构体区都低），
+            # 每个非易失 XMM 占 16 字节（整 128 位，callee-saved 语义）。
+            nx = len(self.used_xcallee)
+            self.xsave_base = (nslots + self.frame_words) * 8 + 16 * nx
+            frame = self.xsave_base
             while frame % 16 != rbp_mod:
                 frame += 8
             if frame:
@@ -11452,6 +11818,8 @@ class Codegen:
                         enc.emit(b"\x48\xc7\x84\x24",
                                  struct.pack("<I", off), b"\x00\x00\x00\x00")
                         off -= 0x1000
+            for _i, _xr in enumerate(self.used_xcallee):
+                enc.movups_mx(RBP, 4, 0, -self.xsave_base + 16 * _i, _xr)
             for ins in fn.instrs:
                 ins_off.append(enc.pos())
                 self.gen_instr(ins)

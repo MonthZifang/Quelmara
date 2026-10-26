@@ -1,0 +1,95 @@
+// t148_f64_xmm —— f64 住 XMM 寄存器后的语义回归（v2.65）
+//
+// 背景：f64 以前住在 GPR 里，每条浮点指令 movq 进出 XMM；现在 f64 值
+// 直接住 XMM（caller-saved 0-3 / callee-saved 6-15，临时 4-5）。
+// 这条路线的典型错法是"寄存器搬错"——不是崩溃，而是**静默算成 0 或旧值**
+// （第一版 `fx` 少了一条 movaps，b2_float 直接算出 0.0）。
+//
+// 所以这里的口径是**同一条算式用两条不同路径各算一遍，必须相等**：
+//   路径 A：循环里累加（值在 XMM 里跨迭代存活 → 走 callee-saved 池）
+//   路径 B：展开成一条直线表达式（每个中间值都是短命临时 → 走 caller-saved 池）
+// 两条路径的寄存器分配不同，搬错必然对不上。
+fn harmonic(n: int) -> float {
+    let mut acc = 0.0
+    let mut i = 1
+    while i <= n {
+        acc = acc + 1.0 / to_float(i)
+        i = i + 1
+    }
+    return acc
+}
+
+fn straight() -> float {
+    let mut x = 1.0 / 1.0
+    x = x + 1.0 / 2.0
+    x = x + 1.0 / 3.0
+    x = x + 1.0 / 4.0
+    x = x + 1.0 / 5.0
+    x = x + 1.0 / 6.0
+    x = x + 1.0 / 7.0
+    x = x + 1.0 / 8.0
+    x = x + 1.0 / 9.0
+    x = x + 1.0 / 10.0
+    return x
+}
+
+fn half(x: float) -> float {
+    return x * 0.5
+}
+
+struct Pair {
+    a: float,
+    b: float,
+}
+
+fn main() {
+    // 1) 循环（XMM 跨迭代）vs 直线（短命临时）
+    let h = harmonic(10)
+    let s = straight()
+    assert(h == s, "harmonic(10) == 直线展开")
+
+    // 2) f64 穿过函数实参/返回值（ABI 仍走 GPR 位模式，XMM 在边界转换）
+    let t = half(h)
+    assert(t == h * 0.5, "half 往返")
+    assert(half(half(h)) == h * 0.25, "嵌套调用")
+
+    // 3) 结构体字段（load/store 走 movsd）
+    let p = Pair { a: 1.5, b: 2.25 }
+    assert(p.a + p.b == 3.75, "结构体字段相加")
+    assert(p.a * p.b == 3.375, "结构体字段相乘")
+    assert(p.a / p.b == 1.5 / 2.25, "结构体字段相除")
+
+    // 4) f64 数组（顺序读 + 归约）
+    let arr = [1.0, 2.0, 4.0, 8.0, 16.0]
+    let mut sum = 0.0
+    let mut i = 0
+    while i < 5 {
+        sum = sum + arr[i]
+        i = i + 1
+    }
+    assert(sum == 31.0, "数组归约")
+
+    // 5) 比较与取负（comisd / 符号位异或）
+    let mut a = 1.0
+    let mut b = 2.0
+    assert(a < b, "lt")
+    assert(b > a, "gt")
+    assert(a != b, "ne")
+    assert(0.0 - a == 0.0 - 1.0, "取负")
+    assert((0.0 - a) + b == 1.0, "取负后相加")
+
+    // 6) 整数/浮点互转（cvtsi2sd 前必须 pxor 断开假依赖）
+    let mut k = 0
+    let mut acc2 = 0.0
+    while k < 100 {
+        acc2 = acc2 + to_float(k) / 4.0
+        k = k + 1
+    }
+    assert(acc2 == 1237.5, "i2f64 累加")
+
+    // 7) 大循环 + 小量（数值敏感：搬错一位就变）
+    let big = harmonic(1000)
+    assert(big > 7.4 && big < 7.6, "harmonic(1000) 量级")
+
+    print("t148 ok")
+}

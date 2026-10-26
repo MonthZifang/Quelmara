@@ -680,7 +680,9 @@ class CodegenA64:
         enc.svc()
 
         for fn in self.fns:
-            self.alloc, nslots, self.used_callee = allocate(fn, pool=POOL_A64, callee_saved=CALLEE_A64)
+            (self.alloc, nslots, self.used_callee,
+             self.used_xcallee) = allocate(fn, pool=POOL_A64,
+                                           callee_saved=CALLEE_A64)
             self.nslots = nslots
             enc.labels[fn.name] = enc.pos()
             self.emit_prologue(self.used_callee, nslots, getattr(fn, "frame_words", 0))
