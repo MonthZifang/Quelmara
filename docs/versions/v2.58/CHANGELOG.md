@@ -106,6 +106,43 @@ Windows 的 job 同时跑两列，所以同一台机器上能直接读出"自举
 - YAML `safe_load` 通过：2 个 job / windows 10 step / posix 7 step /
   矩阵 3 项
 
+## 第二次跑：三个 job 全绿，拿到完整矩阵（run 40284535963）
+
+### Windows 五列 —— 两个后端各有胜负
+
+| 基准 | quelmara (qlmc) | quelmara0 (stage-0) | C | Go |
+|---|---|---|---|---|
+| `b1_int` | 18.1 | **14.1** | **4.2** | 13.0 |
+| `b2_float` | **4.7** | 43.2 | 4.8 | 4.6 |
+| `b3_recursion` | 3.4 | **3.1** | **1.6** | 2.6 |
+| `b4_array` | **7.7** | 9.2 | **2.9** | 3.5 |
+| `b5_string` | 23.5 | **17.5** | 21.1 | **11.3** |
+| `b6_hash` | 9.9 | **7.4** | 8.8 | 8.9 |
+| `b7_sort` | **15.0** | 21.8 | **11.2** | 10.9 |
+| `b8_threads1` | 148.8 | **114.8** | **35.0** | 104.7 |
+| `b8_threads4` | 72.0 | **59.2** | **49.5** | 57.1 |
+| `b9_json` | **10.9** | 14.6 | **2.8** | 3.1 |
+
+- qlmc 赢在 `b2_float`（**4.7 vs 43.2，9.2 倍**）、`b9_json`、`b7_sort`、`b4_array`
+  —— 正是 v2.44~v2.57 做的优化（IR 优化层 / 越界检查融合 / f64 进 XMM /
+  条件跳转立即数）。
+- **stage-0 反而赢在 `b1_int`、`b5_string`、`b6_hash`、`b8_threads1`** ——
+  整数主循环、字符串、哈希这三类，qlmc 的代码还不如参考编译器紧。
+  **这是下一轮最具体的线索**：去 dump stage-0 编出来的 `b1_int` 循环逐条比。
+
+### Linux —— quelmara 快于 C 两项
+
+`b6_hash` **1.3 vs 2.1**、`b5_string` **17.9 vs 19.5**；`b1_int` 16.4 vs 12.1
+（只差 1.35×）。原因是 **GCC 不像 clang 那样把 `(i*7)%13` 向量化** ——
+同一个 C 程序 Windows 4.2 ms、Linux 12.1 ms。
+
+### macOS —— 只有三列，缺口写在明处
+
+`quelmara0` 被显式跳过并打印原因（`--target native` 在 Darwin 上产的是
+ELF64）。C/Go/Python 数据齐全，其中 **Go 的 `b8_threads1` 在 Apple Silicon 上
+是 205.1 ms（比 C 慢 3.8 倍）**，而 Windows 只慢 3 倍、Linux 只慢 1.6 倍 ——
+同一份 Go 代码在不同平台上的调度表现差异很大。
+
 ## 已知边界
 
 - `b8_threads4` 在 ELF 后端走 `clone()` + `wait4()`（不是 pthread），
