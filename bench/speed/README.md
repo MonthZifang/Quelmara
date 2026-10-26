@@ -146,11 +146,16 @@ python bench/speed/run.py --langs quelmara0 c go python            # 跨平台
 |---|---|---|
 | `windows-latest` | `quelmara` + `quelmara0` + C/Go/Python + 编译器轴 | **qlmc 对 C/Go 的真实比值**，以及 qlmc vs stage-0 的**后端差距** |
 | `ubuntu-latest` | `quelmara0` + C/Go/Python | 同一道题在 **x86_64 Linux + GCC** 上的样子 |
-| `macos-latest` | `quelmara0` + C/Go/Python | 同上，**arm64 macOS（Apple Silicon）+ clang** |
-| `macos-13`（实验性） | `quelmara0` + C/Go/Python | 同上，**x86_64 macOS（Intel）** |
+| `macos-latest` | **只有** C/Go/Python | **arm64 macOS（Apple Silicon）+ clang**。quelmara 在这没有后端（见下） |
 
-于是三种对照都拿得到：**同 OS 不同架构**（两种 Mac）、**同架构不同 OS**
-（Linux vs macOS x86_64）、**同语言不同后端**（Windows 上两列）。
+于是两种对照拿得到：**同架构不同 OS**（Linux x86_64 vs Windows x86_64）、
+**同语言不同后端**（Windows 上 `quelmara` vs `quelmara0`）。
+**macOS 的 quelmara 列是空的** —— 那是真缺口，不是没跑：
+
+> `--target native` 在 Darwin 上产出的仍是 **ELF64**（stage-0 只有
+> PE / ELF64 / arm64 三个后端），执行直接 `Exec format error`；qlmc 只有 PE。
+> macOS 需要 **Mach-O 后端**，记在 `docs/07-gaps.md` §4 平台表里。
+> 补上之后把 `run.py` 里那段 `sys.platform == "darwin"` 的跳过删掉即可。
 
 **`quelmara` 列在 posix 上是空的**（qlmc 还没有 ELF 后端），但
 `quelmara0` 列有数 —— 那是**参考编译器**在同一份源码、同一平台上跑出来的，

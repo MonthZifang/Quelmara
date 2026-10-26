@@ -35,26 +35,60 @@ Windows 的 job 同时跑两列，所以同一台机器上能直接读出"自举
 编译器快多少"；posix 的 job 跑 `quelmara0`，于是 quelmara 在 Linux / macOS
 上也有数字了。
 
-## 矩阵扩到三/四个平台
+## 第一次跑：Linux 通了，macOS 暴露了一个真缺口
 
-```yaml
-posix:
-  matrix:
-    include:
-      - os: ubuntu-latest   # x86_64 Linux + GCC
-      - os: macos-latest    # arm64 macOS（Apple Silicon）+ clang
-      - os: macos-13        # x86_64 macOS（Intel）+ clang，标实验性
-        experimental: true
-```
+`posix` 的矩阵第一版放了三项（ubuntu / macos-latest / macos-13）。结果：
 
-`macos-13` 加 `continue-on-error: ${{ matrix.experimental || false }}` ——
-这个 runner 型号可能被 GitHub 回收，别让它拖红整个 run。
+| 平台 | 结果 |
+|---|---|
+| `ubuntu-latest` x86_64 | ✅ **quelmara 列跑通了**，10 个基准 × 4 语言的校验和全一致 |
+| `macos-latest` arm64 | ❌ `OSError: [Errno 8] Exec format error` |
+| `macos-13` x86_64 | ⏳ runner 一直排队（型号可能被回收），40 分钟没起来 |
 
-现在拿到的对照：
+**macOS 的失败是真缺口，不是配置问题**：`--target native` 在 Darwin 上产出的
+仍然是 **ELF64**（stage-0 只有 PE / ELF64 / arm64 三个后端），macOS 需要
+**Mach-O**。而 qlmc 只有 PE。所以 quelmara 在 macOS 上**目前没有产物**。
 
-- **同 OS 不同架构**：macOS arm64 vs macOS x86_64
-- **同架构不同 OS**：Linux x86_64 vs macOS x86_64
-- **同语言不同后端**：Windows 上 `quelmara` vs `quelmara0`
+处理方式：
+- 矩阵缩回 `ubuntu-latest` + `macos-latest`（去掉排队不靠谱的 `macos-13`）；
+- `run.py` 在 Darwin 上**显式跳过** `quelmara0` 并打印原因，不假装跑过；
+- 缺口写进 `docs/07-gaps.md` §4 平台表（原本只有一行"❌ 新后端 + 新事件层"，
+  现在补上"连带着基准矩阵在 macOS 上没有 quelmara 列"这个后果）。
+
+## 顺带修掉两个**静默失效**的门禁
+
+**① `run.py --markdown` 跳过校验和检查。** 那个分支以前直接 `return 0`，
+而 CI 用的正是 `--markdown` —— 于是"某个语言的实现写错了"在 CI 上是静默的，
+表照样打出来。校验和一致是整张表的前提（不一致时时间数字一概不能看），
+现在抽成 `report_checksums()`，两条路径都走。
+
+**② `| tee` 吞掉退出码。** macOS 那次 python 抛了 `OSError` 并以 1 退出，
+但 `python ... | tee bench.md` 的退出码是 `tee` 的 0，**step 报"成功"**。
+现在 posix 侧 `set -o pipefail`，Windows 侧显式检查 `$LASTEXITCODE`。
+
+## Linux 的第一批 quelmara 数字（stage-0 后端，run 40281824686）
+
+`ubuntu-latest`（x86_64 + GCC），min of 5，**4 语言校验和全一致**：
+
+| 基准 | quelmara0 | C | Go | quelmara0 / C |
+|---|---|---|---|---|
+| `b1_int` | 14.4 | 11.3 | 14.9 | **1.27×** |
+| `b5_string` | **19.3** | 23.2 | 14.2 | **0.83×** |
+| `b6_hash` | **5.8** | 6.3 | 6.0 | **0.92×** |
+| `b8_threads1` | 97.0 | 89.7 | 115.3 | **1.08×** |
+| `b4_array` | 9.2 | 3.2 | 2.8 | 2.9× |
+| `b3_recursion` | 4.3 | 1.2 | 3.7 | 3.6× |
+| `b9_json` | 27.7 | 4.6 | 5.7 | 6.0× |
+| `b2_float` | 41.0 | 5.6 | 5.7 | 7.3× |
+| `b7_sort` | 27.2 | 13.1 | 13.4 | 2.1× |
+| `b8_threads4` | 77.1 | 45.1 | 60.5 | 1.71× |
+
+**`b5_string` 与 `b6_hash` 在 Linux 上快于 C**（stage-0 后端！），
+`b1_int`/`b8_threads1` 只差 1.1–1.3× —— 因为 **GCC 不像 clang 那样把
+`(i*7)%13` 向量化**（Windows 上 C 是 4.3 ms，Linux 上 11.3 ms）。
+
+`b2_float` 7.3× 说明 **stage-0 的 f64 路径还没有 v2.55/2.56 那套优化**
+（f64 进 XMM + movaps + 帧常量槽）—— 那是 qlmc 独有的，后端差距一目了然。
 
 ## 顺带修掉一个**静默失效的门禁**
 
@@ -76,6 +110,7 @@ posix:
 
 - `b8_threads4` 在 ELF 后端走 `clone()` + `wait4()`（不是 pthread），
   线程模型与 Windows 的 `CreateThread` 不完全同构 —— 跨平台比加速比时要留意。
-- `macos-13` 是实验性平台，取不到数不影响结论。
 - posix 的 `quelmara0` 数字**不能**直接和 Windows 的 `quelmara` 比 ——
   那是"参考编译器 vs 自举编译器"，不是"平台差异"。
+- **macOS 没有 quelmara 数字**：缺 Mach-O 后端。这是这一轮最该记住的结论 ——
+  "加平台"不是改 YAML，是**先得有那个平台的后端**。

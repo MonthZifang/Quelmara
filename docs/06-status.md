@@ -1099,6 +1099,16 @@ CI 权威数字（run 40280376387，windows EPYC 9V45，min of 5）：**10 项�
 `b1_int`/`b8` 的 C 版本是 **AVX2 向量化**的（48 条指令/16 元素），qlmc 标量
 追不上是必然的 —— 要追得写自动向量化器。
 
+**v2.58**：基准矩阵补平台 —— `run.py` 加 `quelmara0` 列（用 **stage-0** 编，
+win=PE / posix=ELF64），于是 **Linux 上第一次有了 quelmara 的数字**（run
+40281824686，4 语言校验和全一致）：`b5_string` **0.83×**、`b6_hash` **0.92×**
+（快于 C）、`b8_threads1` 1.08×、`b1_int` 1.27×、`b8_threads4` 1.71×、
+`b7_sort` 2.1×、`b4` 2.9×、`b3` 3.6×、`b9_json` 6.0×、`b2_float` 7.3×
+（后者的差距说明 stage-0 还没有 v2.55/2.56 那套 f64 优化 —— 后端差距一目了然）。
+**macOS 仍然没有 quelmara 数字**：`--target native` 在 Darwin 上产的是 ELF64，
+执行报 `Exec format error`；需要 Mach-O 后端（§4 平台表）。顺带修掉两个静默
+失效的门禁：`--markdown` 分支跳过校验和检查、`| tee` 吞掉退出码。
+
 **`push` 的机器码代价**（v2.27 实测，用 `tools/dev/dumpasm.py` 数指令，不受噪声影响）：
 
 | 版本 | push 常见路径 | 说明 |

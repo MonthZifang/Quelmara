@@ -81,7 +81,7 @@
 | Linux ELF64 | ✅ 构建级（CI 执行） | 本机无 gcc/WSL；**`tcp_*` 内建没有 Linux 实现**（`import std.net` 编 native 会在 `tcp_listen` 处报 `无法发射指令 ('winapi', … 'WSAStartup')`，v2.12 复核），Linux 侧的网络走 `qlm_uring` 那条 C 链 |
 | Linux io_uring | ✅ | 5.1+ 内核 |
 | AArch64 | 🟡 模拟器执行级 | 需补 chan/map/spawn/SHA（**atomic/acquire-release 已接**，v1.98）；~~vtable~~ ✅ v1.97（`tests/a64_iface_test.py` 执行级 7 用例） |
-| macOS Mach-O + kqueue | ❌ | 新后端 + 新事件层 |
+| macOS Mach-O + kqueue | ❌ | 新后端 + 新事件层。**连带后果（v2.58 实测）**：`--target native` 在 Darwin 上产的仍是 **ELF64**，执行直接 `OSError: [Errno 8] Exec format error` —— 所以 CI 的基准矩阵在 macOS 上**只有 C/Go/Python**，quelmara 没有数字。要补这一列，得先有 Mach-O 后端 |
 | wasm32/64 | ❌ | 新后端 + 线性内存模型 |
 | Android | ❌ | 依赖 AArch64 + NDK 链路 |
 

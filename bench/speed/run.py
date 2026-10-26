@@ -197,8 +197,19 @@ def build_all(langs, only):
     if "quelmara0" in langs:
         py = sys.executable
         cli = os.path.join(ROOT, "tools", "stage0", "qlm_cli.py")
+        # stage-0 的三个后端：win = PE、native = **ELF64（Linux）**、arm64。
+        # **macOS 没有后端**（它需要 Mach-O），`--target native` 在 Darwin 上
+        # 产出的仍是 ELF，执行时报 `OSError: [Errno 8] Exec format error`。
+        # 与其假装跑过，不如明确跳过 —— 缺口记在 docs/07-gaps.md 的平台支持表里。
         tgt = "win" if IS_WIN else "native"
-        for b, _ in BENCHES:
+        if sys.platform == "darwin":
+            notes["quelmara0"] = ("跳过：stage-0 的 native 后端是 ELF64，macOS 需要 "
+                                  "Mach-O（本版没有）。qlmc 也只有 PE 后端。")
+        # macOS 没有后端（见上）→ 整个循环跳过
+        bench_ids = []
+        if sys.platform != "darwin":
+            bench_ids = [x for x, _ in BENCHES]
+        for b in bench_ids:
             if only and b not in only:
                 continue
             src = os.path.join(HERE, "quelmara", b + ".qma")

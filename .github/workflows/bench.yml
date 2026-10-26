@@ -16,8 +16,10 @@
 #
 # job：
 #   windows —— 五列全量（qlmc + stage-0 + C/Go/Python）+ 编译器轴
-#   posix   —— ubuntu(x86_64) / macOS(arm64) / macOS(x86_64) 上的
-#              stage-0 + C/Go/Python
+#   posix   —— ubuntu(x86_64) 上跑 stage-0 + C/Go/Python；
+#              macOS(arm64) 上只有 C/Go/Python —— **quelmara 在 macOS 上没有后端**：
+#              qlmc 只有 PE，stage-0 的 native 是 ELF64（macOS 需要 Mach-O）。
+#              缺口记在 docs/07-gaps.md 的平台支持表。
 #
 # 结果去处：① job summary（人看，带机器信息）② artifact（机器读，保留 90 天）
 
@@ -92,7 +94,9 @@ jobs:
       - name: 语言基准（qlmc + stage-0 + C/Go/Python）
         shell: pwsh
         run: |
+          # Tee-Object 会把 python 的退出码吞掉，显式检查一次
           python bench/speed/run.py --langs quelmara quelmara0 c go python --reps $env:REPS --markdown 2>&1 | Tee-Object -FilePath bench.md
+          if ($LASTEXITCODE -ne 0) { Write-Error "run.py 失败（rc=$LASTEXITCODE）"; exit 1 }
 
       - name: 编译器轴（qlmc vs stage-0）
         continue-on-error: true
@@ -130,16 +134,10 @@ jobs:
           # x86_64 Linux（GCC）
           - os: ubuntu-latest
             arch: x86_64
-          # arm64 macOS（Apple Silicon，clang）
+          # arm64 macOS（Apple Silicon，clang）—— quelmara 在这没有后端，只跑 C/Go/Python
           - os: macos-latest
             arch: arm64
-          # x86_64 macOS（Intel，clang）—— 同一套代码在两种 Mac 上的差就是架构差。
-          # 这个 runner 型号可能被 GitHub 回收，标成实验性，别让它拖红整个 run。
-          - os: macos-13
-            arch: x86_64
-            experimental: true
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental || false }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -166,6 +164,10 @@ jobs:
 
       - name: 语言基准（stage-0 + C/Go/Python）
         run: |
+          # **必须开 pipefail**：`| tee` 的退出码是 tee 的，会把 python 的
+          # 非零退出码吞掉 —— v2.58 第一次跑就踩了（macOS 上 ELF 跑不了，
+          # python 抛 OSError，但 step 仍然报成功）。
+          set -o pipefail
           python bench/speed/run.py --langs quelmara0 c go python --reps "$REPS" --markdown 2>&1 | tee bench.md
 
       - name: 写 job summary
