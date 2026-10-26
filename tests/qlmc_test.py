@@ -60,6 +60,7 @@ CASES = [
     ("s23_map_grow", "tests/selfhost/s23_map_grow.qma"),
     ("s24_varreg", "tests/selfhost/s24_varreg.qma"),
     ("s25_divmod", "tests/selfhost/s25_divmod.qma"),
+    ("s26_alias", "tests/selfhost/s26_alias.qma"),
 ]
 
 npass = 0

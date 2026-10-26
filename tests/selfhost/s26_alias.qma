@@ -1,0 +1,49 @@
+// s26_alias.qma —— **dst 与右操作数是同一个位置**的别名回归（v2.55）
+//
+// 背景：`x = 0 - x` 这种"常量在左、变量在右"的写法，dst 和 b 是同一个寄存器。
+// qlmc 以前先 `_to_reg(d, a)` 再读 b —— 把 b 覆盖掉了，于是：
+//     x = 0 - x   → 恒得 0
+//     x = 5 - x   → 恒得 0
+//     x = 3 * x   → 得 a*a
+// **stage-0 是对的**，所以只有 qlmc 编出来错。从 v2.16 到 v2.54 一直没暴露，
+// 是 `_f64_bits` 里的 `e10 = 0 - e10` 撞出来的。浮点侧同一个坑（`v = 0.0 - v`）。
+fn main() {
+    let mut x = 20
+    x = 0 - x
+    print(x)
+    let mut y = 100
+    y = 5 - y
+    print(y)
+    let mut z = 7
+    z = 3 * z
+    print(z)
+    let mut w = 12
+    w = w - 3
+    print(w)
+    let mut b = 200
+    b = 240 & b
+    print(b)
+    let mut c = 200
+    c = 15 | c
+    print(c)
+    let mut d = 200
+    d = 255 ^ d
+    print(d)
+
+    // 浮点侧
+    let mut p = 2.5
+    p = 0.0 - p
+    print(p)
+    let mut q = 3.5
+    q = 10.0 - q
+    print(q)
+    let mut r = 4.0
+    r = 2.5 * r
+    print(r)
+
+    // 比较的左右操作数同值（走 ucomisd）
+    let s = 1.5
+    if s == s { print(1) } else { print(0) }
+    if s < s { print(1) } else { print(0) }
+    if s <= s { print(1) } else { print(0) }
+}

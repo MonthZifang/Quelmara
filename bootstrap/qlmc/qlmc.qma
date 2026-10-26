@@ -1206,14 +1206,147 @@ fn _call_node(p: P, pos: vec[int], op: int, nid: int) -> int {
     return cid
 }
 
+/// 把十进制浮点字面量算成 IEEE-754 double 的**位模式**（编译期）。
+///
+/// 只在"能被 double 精确表示"时返回位模式，否则返回 -1，降级期退回运行时
+/// `strtod`（正确性优先）。覆盖范围：
+///   · 正指数：mantissa * 10^k 且乘积 < 2^53；
+///   · 负指数：mantissa 能被 5^k 除尽（k = 小数位数），此时
+///     m/10^k = (m/5^k) * 2^(-k)，分子分母都精确 → 结果精确。
+/// 也就是 `1.0` / `0.5` / `2.5` / `100.0` / `1e3` 这些"整齐"的字面量。
+/// `3.14` / `0.1` 这种不精确的仍然走 strtod —— 宁可慢，也不能错。
+fn _f64_bits(s: str) -> int {
+    let n = len(s)
+    let mut i = 0
+    let mut neg = 0
+    if i < n && s[i] == 45 {                // '-'
+        neg = 1
+        i = i + 1
+    }
+    let mut m = 0
+    let mut frac = 0
+    let mut dot = 0
+    let mut any = 0
+    let mut e10 = 0
+    let mut eseen = 0
+    let mut eneg = 0
+    while i < n {
+        let c = s[i]
+        if c == 46 {                        // '.'
+            dot = 1
+            i = i + 1
+        } else if c == 101 || c == 69 {     // 'e' / 'E'
+            eseen = 1
+            i = i + 1
+            if i < n && s[i] == 45 {
+                eneg = 1
+                i = i + 1
+            } else if i < n && s[i] == 43 {
+                i = i + 1
+            }
+            while i < n {
+                let d = s[i]
+                if d < 48 || d > 57 {
+                    return -1
+                }
+                e10 = e10 * 10 + (d - 48)
+                if e10 > 400 {
+                    return -1
+                }
+                i = i + 1
+            }
+        } else {
+            if c < 48 || c > 57 {
+                return -1
+            }
+            if eseen == 1 {
+                return -1
+            }
+            if m > 900719925474099 {        // 2^53/10：再乘就会丢精度
+                return -1
+            }
+            m = m * 10 + (c - 48)
+            if dot == 1 {
+                frac = frac + 1
+            }
+            any = 1
+            i = i + 1
+        }
+    }
+    if any == 0 {
+        return -1
+    }
+    if eneg == 1 {
+        e10 = 0 - e10
+    }
+    let mut k = frac - e10                  // 要除以 10^k（k<0 就是乘）
+    // 去掉尾随零（顺便把 k 减小）
+    while k > 0 && m > 0 && m % 10 == 0 {
+        m = m / 10
+        k = k - 1
+    }
+    if m == 0 {
+        return 0
+    }
+    let mut be = 0                          // 二进制指数：值 = m * 2^be
+    if k > 0 {
+        let mut j = 0
+        while j < k {
+            if m % 5 != 0 {
+                return -1                   // 除不尽 → 不精确，退回 strtod
+            }
+            m = m / 5
+            j = j + 1
+        }
+        be = 0 - k
+    } else if k < 0 {
+        let mut j = k
+        while j < 0 {
+            if m > 900719925474099 {
+                return -1
+            }
+            m = m * 10
+            j = j + 1
+        }
+    }
+    if m <= 0 || m > 9007199254740992 {     // 2^53
+        return -1
+    }
+    // 找最高位 h（m ∈ [2^h, 2^(h+1))）
+    let mut h = 0
+    let mut t = m
+    while t > 1 {
+        t = t >> 1
+        h = h + 1
+    }
+    let e = h + be + 1023
+    if e < 1 || e > 2046 {
+        return -1
+    }
+    let mant = (m << (52 - h)) & 4503599627370495
+    let mut bits = (e << 52) | mant
+    if neg == 1 {
+        bits = bits | (0 - 9223372036854775807 - 1)   // 符号位
+    }
+    return bits
+}
+
 fn _primary(p: P, pos: vec[int]) -> int {
     let t = _cur(p, pos)
     if t.k == T_NUM || t.k == T_FNUM {
         _adv(pos)
         if t.k == T_FNUM {
-            // 字面量原文入串表；降级期用 OP_LEA + 运行时 strtod 解析（见 _gen_fparse）
+            // 字面量原文入串表（运行时 strtod 兜底用），同时**在编译期算出
+            // 精确可表示时的位模式**（v2.56）—— 存进节点的 b，c=1 表示可用。
+            // 这样 `1.0` 这类字面量在循环体里只剩 `movabs + movq` 两条指令，
+            // 不再是"标志位 + 分支 + 每轮一次 strtod 守卫"的 14 条。
             let sid = _str_id(p, t.s)
-            return _postfix(p, pos, _node(p, E_FNUM, sid, -1, -1))
+            let bits = _f64_bits(t.s)
+            let mut ok = 0
+            if bits >= 0 {
+                ok = 1
+            }
+            return _postfix(p, pos, _node(p, E_FNUM, sid, bits, ok))
         }
         return _postfix(p, pos, _node(p, E_NUM, t.n, -1, -1))
     }
@@ -1862,6 +1995,14 @@ const R8 = 8
 const R9 = 9
 const R10 = 10
 const R11 = 11
+// v2.55：XMM 寄存器编号（SSE 指令的 modrm/REX 用同一套 0..15）
+const XMM0 = 0
+const XMM1 = 1
+const XMM2 = 2
+const XMM3 = 3
+// XMM4/XMM5 既不在临时池（XMM0-3）也不在变量池（XMM6-15）→ **恒空闲**，
+// 用来当"不会与任何值撞车"的专用临时（别名处理、比较的左操作数）。
+const XMM_SCR = 4
 
 // PE 常量（与 qlm_pe.py 同源，改一处必须改另一处）
 const IMAGE_BASE = 0x140000000
@@ -1929,6 +2070,71 @@ fn _rex2(code: vec[int], w: int, reg: int, rm: int) {
 
 fn _modrm(code: vec[int], mod: int, reg: int, rm: int) {
     _b(code, (mod << 6) | ((reg & 7) << 3) | (rm & 7))
+}
+
+// ---- v2.55：SSE 指令编码（f64 值住 XMM 之后要用） ----
+//
+// 前缀顺序是 **强制前缀(66/F2) → REX → 0F → opcode → modrm**。REX 放在 0F 前面，
+// 放后面就是另一条指令（坑表 #49 的同类）。
+//
+// `pf`：0 = 66（ucomisd 这类），1 = F2（标量 double 的 movsd/addsd/...）。
+
+/// reg-reg 形式：`<pf> REX 0F opc /r`（mod=11）
+fn _sse_rr(code: vec[int], pf: int, opc: int, x: int, y: int) {
+    if pf == 0 {
+        _b(code, 0x66)
+    } else {
+        _b(code, 0xF2)
+    }
+    _rex2(code, 0, x, y)
+    _b(code, 0x0F)
+    _b(code, opc)
+    _modrm(code, 3, x, y)
+}
+
+/// `[base+disp32]` 形式（base 必须是 RBP 这类"必须带 disp"的寄存器）
+fn _sse_mem(code: vec[int], pf: int, opc: int, x: int, base: int, disp: int) {
+    if pf == 0 {
+        _b(code, 0x66)
+    } else {
+        _b(code, 0xF2)
+    }
+    _rex2(code, 0, x, base)
+    _b(code, 0x0F)
+    _b(code, opc)
+    _modrm(code, 2, x, base)
+    _w32(code, disp)
+}
+
+/// `[base]` 形式（mod=00，base 不能是 RBP/R13，我们用 RAX/RCX）
+fn _sse_mem0(code: vec[int], pf: int, opc: int, x: int, base: int) {
+    if pf == 0 {
+        _b(code, 0x66)
+    } else {
+        _b(code, 0xF2)
+    }
+    _rex2(code, 0, x, base)
+    _b(code, 0x0F)
+    _b(code, opc)
+    _modrm(code, 0, x, base)
+}
+
+/// `movq xmm, r64`（66 REX.W 0F 6E /r）
+fn _movq_x_from_r(code: vec[int], x: int, r: int) {
+    _b(code, 0x66)
+    _rex2(code, 1, x, r)
+    _b(code, 0x0F)
+    _b(code, 0x6E)
+    _modrm(code, 3, x, r)
+}
+
+/// `movq r64, xmm`（66 REX.W 0F 7E /r）
+fn _movq_r_from_x(code: vec[int], r: int, x: int) {
+    _b(code, 0x66)
+    _rex2(code, 1, x, r)
+    _b(code, 0x0F)
+    _b(code, 0x7E)
+    _modrm(code, 3, x, r)
 }
 
 // mov dst, imm64
@@ -2328,6 +2534,26 @@ const OP_STORE8I = 72  // [a + b] = dst 的低字节
 const OP_JCMPVLEN = 73 // cmp a, [b+8]; jcc → imm（vec 头块的长度在 +8）
 const OP_JCMPSTR = 74  // cmp a, [b-8]; jcc → imm（str 的长度在 -8）
 
+// ---- v2.55：f64 变成**标量**（8 字节 IEEE 位模式），值住 XMM 寄存器 ----
+//
+// 以前 f64 按"聚合"处理：变量是帧槽、值 = 槽地址、赋值走 `call __memcpy`。
+// b2_float 的主循环因此是 **52 条指令**（含一次 memcpy 调用），C 只要 6 条。
+//
+// 现在 f64 就是"8 字节标量"，与 int 同构，只是**位置**多一种：XMM 寄存器。
+// `vloc` 的编码：
+//     loc >= XLOC        → XMM，编号 = loc - XLOC
+//     0 < loc < XLOC     → 通用寄存器，编号 = loc - 1
+//     loc < 0            → 帧槽，槽号 = -loc - 1
+// XMM0-XMM5 在 Win64 里是**易失**的（只给临时值用），XMM6-XMM15 非易失（给变量）。
+const XLOC = 64           // vloc >= XLOC → XMM
+const XMM_VAR0 = 6        // 变量寄存器池：XMM6..XMM15
+const N_XMMVAR = 10
+const XMM_TMP0 = 0        // 临时值池：XMM0..XMM3（易失）
+const OP_FNEG = 75        // dst(f64) = -a（翻符号位，内联；以前是 CALLRT）
+// v2.56：编译期算好的 f64 字面量位模式（imm = 8 字节 IEEE）。以前字面量要
+// "开槽 + 标志位 + 每轮一次带分支的 strtod 守卫"，在循环体里是 14 条指令。
+const OP_F64IMM = 76      // dst(f64) = imm 的位模式
+
 struct Ir {
     op: int
     dst: int
@@ -2420,13 +2646,18 @@ const C_FNUM_NF = 10
 const C_FNUM_FLAG0 = 11
 const C_FNUM_NC = 50
 const C_FNUM_CACHE0 = 51
+// v2.55：f64 的 XMM 变量寄存器用了几个（0..N_XMMVAR）
+const C_NXF = 120
+// v2.55：每个 XMM 变量寄存器的保存槽（-1 = 没用到）。由 `_alloc` 在**临时池之前**
+// 分配 —— 临时池的基址是当时的 C_ST，之后再 `_st_slot` 会撞上池子。
+const C_XSAV0 = 121
 const FNUM_MAX = 32
 const FRAME = 4096          // 帧大小（512 个 8 字节槽）
 const MAX_VAR = 64          // 变量最多占 64 个寄存器位（其余落槽）
 // v2.33：变量/聚合区从 256 提到 384——qlmc 自己的 build_rdata 要 257 格。
 // 帧仍是 4 KB（512 格），临时值溢出区剩 128 格（够用：同时活跃的临时值很少 >8）。
 // **不要再靠加帧来扩**：帧 > 4 KB 必须做栈探测（§7.17），qlmc 还没做。
-const SLOT_TEMP = 384
+const SLOT_TEMP = 416
 const MAX_SLOT = 512
 
 // 运行库例程在 rt 里的槽号
@@ -2793,10 +3024,9 @@ fn _ir_emit(fc: FnCtx, op: int, dst: int, a: int, b: int, imm: int) -> int {
 }
 
 fn _ty_is_agg(ty: int) -> bool {
-    // f64 例外：它的码很小（5），但要按"聚合"处理 —— 值住在帧槽里、按地址传。
-    if ty == TY_F64 {
-        return true
-    }
+    // v2.55：**f64 不再是聚合**。它是 8 字节标量，值与 int 同构，只是可以住 XMM。
+    // 以前这里有一条 `if ty == TY_F64 { return true }` —— 那是"值住在帧槽里、
+    // 按地址传"的老约定，代价是每次赋值一次 memcpy、每次运算两次 movsd 往返。
     // 标量：int/bool/str(0..3)、vec 句柄、map 句柄；其余（struct/enum/array/slice/闭包）都是聚合
     if ty < TY_STRUCT {
         return false
@@ -2891,6 +3121,19 @@ fn _new_var(fc: FnCtx, nid: int, ty: int) -> int {
         fc.vval.push(v)
         return v
     }
+    // v2.55：f64 变量进 XMM6..XMM15（Win64 的非易失 XMM），用完才落帧槽
+    if ty == TY_F64 {
+        let nx = _nxf_get(fc)
+        if nx < N_XMMVAR {
+            fc.vloc.set(v, XLOC + XMM_VAR0 + nx)
+            _cell_set(fc, C_NXF, nx + 1)
+        } else {
+            fc.vloc.set(v, -(_st_slot(fc)) - 1)
+        }
+        fc.vmap.push(nid)
+        fc.vval.push(v)
+        return v
+    }
     let n = fc.cells.get(C_NV)
     if n < N_VARREG {
         fc.vloc.set(v, _cs_reg(n) + 1)
@@ -2901,6 +3144,14 @@ fn _new_var(fc: FnCtx, nid: int, ty: int) -> int {
     fc.vmap.push(nid)
     fc.vval.push(v)
     return v
+}
+
+/// 已经用掉几个 XMM 变量寄存器
+fn _nxf_get(fc: FnCtx) -> int {
+    if len(fc.cells) <= C_NXF {
+        return 0
+    }
+    return fc.cells.get(C_NXF)
 }
 
 fn _bind_push(fc: FnCtx, nid: int, v: int) {
@@ -3135,13 +3386,11 @@ fn _fcmp_cc(op: int) -> int {
 
 /// 把 int 值提升成 f64（混合运算时用），返回 f64 槽的地址
 fn _to_f64(fc: FnCtx, v: int) -> int {
-    let sv = _new_var(fc, -1, TY_F64)
-    let ad = _vnew(fc)
-    fc.vty.set(ad, TY_INT)
-    _ir_emit(fc, OP_ADDRV, ad, 0, 0, -fc.vloc.get(sv) - 1)
-    _ir_emit(fc, OP_ITOF, ad, v, 0, 0)         // v2.47：内联 cvtsi2sd
-    fc.vty.set(ad, TY_F64)
-    return ad
+    // v2.55：f64 是标量，直接产一个 TY_F64 临时值（以前要先开变量槽再取地址）
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_F64)
+    _ir_emit(fc, OP_ITOF, d, v, 0, 0)
+    return d
 }
 
 /// 把 `cells` 撑到至少 n 格（它是普通 vec，可以往后长）
@@ -3200,16 +3449,6 @@ fn _fnum_flag(fc: FnCtx, slot: int) {
     _cell_set(fc, C_FNUM_NF, nf + 1)
 }
 
-/// 开一块 f64 槽，返回它的地址（结果类型标成 TY_F64）
-fn _new_f64(fc: FnCtx) -> int {
-    let sv = _new_var(fc, -1, TY_F64)
-    let ad = _vnew(fc)
-    fc.vty.set(ad, TY_INT)
-    _ir_emit(fc, OP_ADDRV, ad, 0, 0, -fc.vloc.get(sv) - 1)
-    fc.vty.set(ad, TY_F64)
-    return ad
-}
-
 fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
     let tl = fc.vty.get(l)
     let tr = fc.vty.get(r)
@@ -3227,9 +3466,7 @@ fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
             // **结果必须写进调用方给的 dst**（`_lower_expr` 用 dst 当返回值，
             // 自己另开一个临时值会让调用方拿到一个从未定义过的 vreg ——
             // 现象是 `let c = a + b` 之后 c 里是别人的地址）。
-            let sv = _new_var(fc, -1, TY_F64)
-            _ir_emit(fc, OP_ADDRV, dst, 0, 0, -fc.vloc.get(sv) - 1)
-            // v2.47：内联成 3 条 SSE 指令（以前是 3×ARG + CALLRT 运行库调用）
+            // v2.55：dst 本身就是 f64 值（住 XMM / 帧槽），不再开槽取地址
             let mut sub = 0                    // 0=add 1=sub 2=mul 3=div
             if op == P_MINUS {
                 sub = 1
@@ -3488,12 +3725,27 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         // 有 90% 的时间花在这上面：把 `1.0` 提到循环外，752 ms → 69.8 ms（10.8×）。
         // 现在第一个出现点做一次带标志的解析，之后直接复用那个槽。
         // 标志槽在函数序言里清零（见 `_emit_fn`），所以每次函数调用只解析一次。
+        // v2.56：编译期能精确算出来的字面量，直接发位模式（零运行时开销）
+        if nd.c == 1 {
+            let di = _vnew(fc)
+            fc.vty.set(di, TY_F64)
+            _ir_emit(fc, OP_F64IMM, di, 0, 0, nd.b)
+            return di
+        }
+        // v2.55：槽里存的是 8 字节位模式（f64 已是标量）。每次求值只要一条
+        // `movsd`（以前是"取槽地址 + 当作 f64 值"，地址在寄存器里到处搬）。
         let cached = _fnum_get(fc, nd.a)
         if cached >= 0 {
-            return cached
+            let d1 = _vnew(fc)
+            fc.vty.set(d1, TY_F64)
+            _ir_emit(fc, OP_LOAD, d1, cached, 0, 8)
+            return d1
         }
-        let ad = _new_f64(fc)
+        let vslot = _st_slot(fc)
         let fslot = _st_slot(fc)
+        let ad = _vnew(fc)
+        fc.vty.set(ad, TY_INT)
+        _ir_emit(fc, OP_ADDRV, ad, 0, 0, vslot)
         _fnum_put(fc, nd.a, ad)
         _fnum_flag(fc, fslot)
         let lskip = _newlab(fc.labs)
@@ -3521,7 +3773,10 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         _ir_emit(fc, OP_CONST, one, 0, 0, 1)
         _ir_emit(fc, OP_STORE, 0, fa2, one, 8)
         _ir_emit(fc, OP_LAB, 0, 0, 0, lskip)
-        return ad
+        let d0 = _vnew(fc)
+        fc.vty.set(d0, TY_F64)
+        _ir_emit(fc, OP_LOAD, d0, ad, 0, 8)
+        return d0
     }
     if nd.op == E_VAR {
         let v = _var_id(fc, nd.a)
@@ -3549,15 +3804,11 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
                 eprint("qlmc: f64 只支持一元 -")
                 exit(2)
             }
-            let sv = _new_var(fc, -1, TY_F64)
-            let ad = _vnew(fc)
-            fc.vty.set(ad, TY_INT)
-            _ir_emit(fc, OP_ADDRV, ad, 0, 0, -fc.vloc.get(sv) - 1)
-            _ir_emit(fc, OP_ARG, 0, ad, 0, 0)
-            _ir_emit(fc, OP_ARG, 0, a, 0, 1)
-            _ir_emit(fc, OP_CALLRT, 0, 0, 0, RT_FNEG)
-            fc.vty.set(ad, TY_F64)
-            return ad
+            // v2.55：内联成"翻符号位"（以前是 2×ARG + CALLRT(__f64_neg)）
+            let d = _vnew(fc)
+            fc.vty.set(d, TY_F64)
+            _ir_emit(fc, OP_FNEG, d, a, 0, 0)
+            return d
         }
         let d = _vnew(fc)
         // `!` 在 stage-0 里是 int（打印 1/0）
@@ -3941,11 +4192,9 @@ fn _lower_into_agg(fc: FnCtx, nid: int, dst: int, dty: int) {
             let a1 = _vnew(fc)
             fc.vty.set(a1, TY_INT)
             _ir_emit(fc, OP_ADDRF, a1, a0, 0, fi * 8)
-            if fty == TY_F64 {
-                _ir_emit(fc, OP_COPY, 0, a1, v, 8)
-            } else {
-                _ir_emit(fc, OP_STORE, 0, a1, v, 8)
-            }
+            // v2.55：f64 已是标量 → 与 int 同一条 OP_STORE（发射器按值的类型
+            // 选 `mov [mem], reg` 还是 `movsd [mem], xmm`）
+            _ir_emit(fc, OP_STORE, 0, a1, v, 8)
             f = fd.nx
         }
         return
@@ -4122,6 +4371,15 @@ fn _lower_into(fc: FnCtx, nid: int, dst: int) {
     }
     if nd.op == E_UN {
         let a = _lower_expr(fc, nd.b)
+        if fc.vty.get(a) == TY_F64 {
+            // v2.55：f64 的 `-x` 是翻符号位（以前走运行库调用）
+            if nd.a != P_MINUS {
+                eprint("qlmc: f64 只支持一元 -")
+                exit(2)
+            }
+            _ir_emit(fc, OP_FNEG, dst, a, 0, 0)
+            return
+        }
         fc.vty.set(dst, TY_INT)
         if nd.a == P_MINUS {
             _ir_emit(fc, OP_NEG, dst, a, 0, 0)
@@ -4438,6 +4696,12 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
         let v = _lower_expr(fc, nd.a)
         if fc.vty.get(v) == TY_F64 {
             // f64：手写格式化（__f64_fmt）再按 str 打印（v2.42）
+            // v2.55：值住 XMM，而 __f64_fmt 要的是**地址** —— 先落进一个槽。
+            let pslot = _st_slot(fc)
+            let pa = _vnew(fc)
+            fc.vty.set(pa, TY_INT)
+            _ir_emit(fc, OP_ADDRV, pa, 0, 0, pslot)
+            _ir_emit(fc, OP_STORE, 0, pa, v, 8)
             let sz = _vnew(fc)
             fc.vty.set(sz, TY_INT)
             _ir_emit(fc, OP_CONST, sz, 0, 0, 96)
@@ -4446,7 +4710,7 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
             fc.vty.set(buf, TY_INT)
             _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
             _ir_emit(fc, OP_ARG, 0, buf, 0, 0)
-            _ir_emit(fc, OP_ARG, 0, v, 0, 1)
+            _ir_emit(fc, OP_ARG, 0, pa, 0, 1)
             let n = _vnew(fc)
             fc.vty.set(n, TY_INT)
             _ir_emit(fc, OP_CALLRT, n, 0, 0, RT_F64FMT)
@@ -4688,7 +4952,7 @@ fn _opt_writes(op: int) -> int {
     // STORE* 系列不写寄存器，dst 槽里放的是"要存的值"
     if op == OP_STORED || op == OP_STOREX { return 0 }
     if op == OP_STORE8D || op == OP_STORE8X || op == OP_STORE8I { return 0 }
-    if op == OP_FBIN || op == OP_ITOF { return 0 }   // dst 槽是"要写入的地址"，被读
+    // v2.55：FBIN/ITOF 的 dst 不再是"要写入的地址"，而是**被写的寄存器/槽**
     return 1
 }
 
@@ -4746,10 +5010,10 @@ fn _opt_mark(ins: Ir, use: vec[int]) {
     if ins.op == OP_MEMCPYN && ins.dst > 0 && ins.dst < len(use) {
         use.set(ins.dst, use.get(ins.dst) + 1)
     }
-    // STORE* 系列把"值"放在 dst 槽 —— 那是被读的
+    // STORE* 系列把"值"放在 dst 槽 —— 那是被读的。
+    // （v2.55：FBIN/ITOF 的 dst 已改成真正的"被写"，从这里移除了）
     if ins.op == OP_STORED || ins.op == OP_STOREX ||
-       ins.op == OP_STORE8D || ins.op == OP_STORE8X || ins.op == OP_STORE8I ||
-       ins.op == OP_FBIN || ins.op == OP_ITOF {
+       ins.op == OP_STORE8D || ins.op == OP_STORE8X || ins.op == OP_STORE8I {
         if ins.dst > 0 && ins.dst < len(use) {
             use.set(ins.dst, use.get(ins.dst) + 1)
         }
@@ -4928,7 +5192,26 @@ fn _opt_fuse(fc: FnCtx, ir: vec[Ir], use: vec[int], ndef: vec[int]) {
                 }
                 if hit >= 0 {
                     let u = ir.get(hit)
-                    if u.a == t {
+                    // v2.55：**f64 不参与访存融合**。融合出来的 LOADD/STORED 是
+                    // 整数路径（`mov reg, [mem]`），而 f64 值住 XMM，要发 movsd。
+                    // 融合会把 OP_LOAD/OP_STORE 的 f64 分支整个绕过去 ——
+                    // 现象是"结构体 f64 字段读出来是 0，且多一条死写"。
+                    let mut nofuse = 0
+                    if u.op == OP_LOAD || u.op == OP_STORE {
+                        if u.dst > 0 && u.dst < len(fc.vty) {
+                            if fc.vty.get(u.dst) == TY_F64 {
+                                nofuse = 1
+                            }
+                        }
+                        if u.op == OP_STORE && u.b > 0 && u.b < len(fc.vty) {
+                            if fc.vty.get(u.b) == TY_F64 {
+                                nofuse = 1
+                            }
+                        }
+                    }
+                    if nofuse == 1 {
+                        // 什么都不做
+                    } else if u.a == t {
                         let fop = _fuse_op(ins.op, u.op, ins.imm)
                         if fop == OP_LOADD {
                             ir.set(hit, Ir { op: OP_LOADD, dst: u.dst, a: ins.a, b: 0, imm: ins.imm })
@@ -5178,8 +5461,7 @@ fn _alloc_vars(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
         // 这几个操作码的 dst 槽是被读的（"值"/"地址"/"字节数"）
         if ins.dst > 0 && ins.dst < n {
             if ins.op == OP_MEMCPYN || ins.op == OP_STORED || ins.op == OP_STOREX ||
-               ins.op == OP_STORE8D || ins.op == OP_STORE8X || ins.op == OP_STORE8I ||
-               ins.op == OP_FBIN || ins.op == OP_ITOF {
+               ins.op == OP_STORE8D || ins.op == OP_STORE8X || ins.op == OP_STORE8I {
                 ucnt.set(ins.dst, ucnt.get(ins.dst) + 1)
             }
         }
@@ -5229,6 +5511,26 @@ fn _alloc_vars(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
 
 fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
     _alloc_vars(fc, ucnt, baked)
+    // v2.55：给"被占用的 XMM 变量寄存器"分配保存槽。**必须在临时池之前** ——
+    // 临时池的基址是当时的 `C_ST`，之后再 `_st_slot` 就会落在池子里，互相踩。
+    let mut xk = 0
+    while xk < N_XMMVAR {
+        _cell_set(fc, C_XSAV0 + xk, -1)
+        xk = xk + 1
+    }
+    let mut xv = 1
+    while xv < len(fc.vloc) {
+        let xl = fc.vloc.get(xv)
+        if xl >= XLOC {
+            let k2 = xl - XLOC - XMM_VAR0
+            if k2 >= 0 && k2 < N_XMMVAR {
+                if fc.cells.get(C_XSAV0 + k2) < 0 {
+                    _cell_set(fc, C_XSAV0 + k2, _st_slot(fc))
+                }
+            }
+        }
+        xv = xv + 1
+    }
     let n = len(fc.ir)
     // cp[i] = 下标 < i 的调用指令条数（用来判断区间是否跨调用）
     let cp = fc.cp
@@ -5258,6 +5560,14 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
         rend.push(-1)
         i = i + 1
     }
+    // v2.55：f64 临时值用 XMM0..XMM3（Win64 里易失，跨调用同样要溢出）。
+    // **不新增 FnCtx 字段**（字段数敏感，坑见 MEMORY）—— 复用 rend 的第 4..7 格。
+    let rendx = fc.rend
+    i = 0
+    while i < 4 {
+        rendx.push(-1)
+        i = i + 1
+    }
     // 临时槽池：**紧接变量区**（v2.44）。以前从固定的 SLOT_TEMP(384) 起，
     // 于是"3 个局部变量 + 1 个溢出临时值"这种函数也要 385 个槽 → 3 KB 帧。
     // 现在 tbase = 变量区末尾，帧大小才真正反映用量。
@@ -5281,15 +5591,29 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
             let crosses = cp.get(en + 1) - cp.get(st + 1)
             let mut placed = 0
             if crosses == 0 {
-                let mut r = 0
-                while r < 4 {
-                    if rend.get(r) < st {
-                        fc.vloc.set(v, _tmp_reg(r) + 1)
-                        rend.set(r, en)
-                        placed = 1
-                        r = 4
-                    } else {
-                        r = r + 1
+                if fc.vty.get(v) == TY_F64 {
+                    let mut rx = 0
+                    while rx < 4 {
+                        if rendx.get(4 + rx) < st {
+                            fc.vloc.set(v, XLOC + XMM_TMP0 + rx)
+                            rendx.set(4 + rx, en)
+                            placed = 1
+                            rx = 4
+                        } else {
+                            rx = rx + 1
+                        }
+                    }
+                } else {
+                    let mut r = 0
+                    while r < 4 {
+                        if rend.get(r) < st {
+                            fc.vloc.set(v, _tmp_reg(r) + 1)
+                            rend.set(r, en)
+                            placed = 1
+                            r = 4
+                        } else {
+                            r = r + 1
+                        }
                     }
                 }
             }
@@ -5336,6 +5660,12 @@ fn _idx_reg(fc: FnCtx, v: int) -> int {
 /// 把 v 搬进寄存器 r（r 不能是 v 自己已经待着的寄存器之外的分配结果）
 fn _to_reg(fc: FnCtx, r: int, v: int) {
     let loc = fc.vloc.get(v)
+    // v2.55：f64 值住 XMM。要把它当"8 字节标量"搬进通用寄存器时（返回、实参、
+    // 参数绑定），就是 `movq r, xmm` —— 位模式原样过去，语义不变。
+    if loc >= XLOC {
+        _movq_r_from_x(fc.code, r, loc - XLOC)
+        return
+    }
     if loc > 0 {
         if loc - 1 != r {
             _mov_rr(fc.code, r, loc - 1)
@@ -5348,8 +5678,67 @@ fn _to_reg(fc: FnCtx, r: int, v: int) {
     }
 }
 
+/// 把 `v` 的 f64 值搬进 XMM `x`（已在里面就什么都不发）
+fn _to_xmm(fc: FnCtx, x: int, v: int) {
+    let code = fc.code
+    let loc = fc.vloc.get(v)
+    if loc >= XLOC {
+        let s0 = loc - XLOC
+        if s0 != x {
+            _sse_rr(code, 1, 0x10, x, s0)      // movsd x, s0
+        }
+        return
+    }
+    if loc < 0 {
+        _sse_mem(code, 1, 0x10, x, RBP, _slot_disp(-loc - 1))
+        return
+    }
+    if loc > 0 {
+        _movq_x_from_r(code, x, loc - 1)
+        return
+    }
+    eprint("qlmc: 内部错误：f64 值 " + v.to_str() + " 未分配位置")
+    exit(2)
+}
+
+/// 把 XMM `x` 写进 `v` 的位置
+fn _from_xmm(fc: FnCtx, x: int, v: int) {
+    let code = fc.code
+    let loc = fc.vloc.get(v)
+    if loc >= XLOC {
+        let d0 = loc - XLOC
+        if d0 != x {
+            _sse_rr(code, 1, 0x10, d0, x)      // movsd d0, x
+        }
+        return
+    }
+    if loc < 0 {
+        _sse_mem(code, 1, 0x11, x, RBP, _slot_disp(-loc - 1))
+        return
+    }
+    if loc > 0 {
+        _movq_r_from_x(code, loc - 1, x)
+        return
+    }
+    eprint("qlmc: 内部错误：f64 值 " + v.to_str() + " 未分配位置")
+    exit(2)
+}
+
+/// 若 `v` 的 f64 值在帧槽里，返回槽号；否则 -1（给"内存操作数"快路径用）
+fn _f64_slot(fc: FnCtx, v: int) -> int {
+    let loc = fc.vloc.get(v)
+    if loc < 0 {
+        return -loc - 1
+    }
+    return -1
+}
+
 /// 把寄存器 src_reg 的值搬到位置 dloc（用于 OP_PARAM）
 fn _from_reg(fc: FnCtx, dloc: int, src_reg: int) {
+    if dloc >= XLOC {
+        _movq_x_from_r(fc.code, dloc - XLOC, src_reg)
+        return
+    }
     if dloc > 0 {
         if dloc - 1 != src_reg {
             _mov_rr(fc.code, dloc - 1, src_reg)
@@ -5357,6 +5746,25 @@ fn _from_reg(fc: FnCtx, dloc: int, src_reg: int) {
     } else {
         _mov_store(fc.code, RBP, _slot_disp(-dloc - 1), src_reg)
     }
+}
+
+/// `dst = a <op> b`，且 **dst 与 b 是同一个寄存器**（`x = 0 - x` 的形状）。
+///
+/// v2.55 踩过：以前直接 `_to_reg(d, a)` 再读 b —— 把 b 覆盖掉了。
+/// 后果是 `x = 0 - x` 恒得 0、`x = 5 - x` 恒得 0（乘法会得 a*a）。
+/// **stage-0 是对的，所以只有 qlmc 编出来错**；因为很少写"常量在左、变量在右"，
+/// 从 v2.16 到 v2.54 一直没暴露 —— 是 `_f64_bits` 里的 `e10 = 0 - e10` 撞出来的。
+fn _bin_alias(fc: FnCtx, d: int, a: int, b: int, op_rr: int, op_rm: int) {
+    _to_reg(fc, RAX, b)                    // 先把 b 存走（RAX 永不被 vreg 占用）
+    _to_reg(fc, d, a)
+    _alu_rr(fc.code, op_rr, d, RAX)
+}
+
+/// 同上，但用 `imul`（它没有通用的 `_alu_rr` 形式）
+fn _mul_alias(fc: FnCtx, d: int, a: int, b: int) {
+    _to_reg(fc, RAX, b)
+    _to_reg(fc, d, a)
+    _imul_rr(fc.code, d, RAX)
 }
 
 /// d = d <op> v（d 是寄存器，v 可以是寄存器或帧槽）
@@ -5370,6 +5778,10 @@ fn _bin_into(fc: FnCtx, d: int, v: int, op_rr: int, op_rm: int) {
 }
 
 fn _store_rax(fc: FnCtx, dloc: int) {
+    if dloc >= XLOC {
+        _movq_x_from_r(fc.code, dloc - XLOC, RAX)
+        return
+    }
     if dloc > 0 {
         if dloc - 1 != RAX {
             _mov_rr(fc.code, dloc - 1, RAX)
@@ -5537,217 +5949,56 @@ fn _emit_divc(fc: FnCtx, code: vec[int], ins: Ir, i: int) {
     _store_rax(fc, fc.vloc.get(ins.dst))
 }
 
-fn _emit_ir(fc: FnCtx, i: int) {
+/// f64 相关的发射（v2.55 / v2.56）。
+///
+/// **单独成函数**不是为了整洁，是为了不给 `_emit_ir` 加局部变量 —— 那个函数
+/// 已经贴着 `SLOT_TEMP`(384) 的帧上限，多一个 slot 就编不过自己
+/// （v2.55 第一次就踩到：`_emit_ir` 需要 385 个槽）。
+fn _emit_f64(fc: FnCtx, i: int) {
     let ins = fc.ir.get(i)
     let code = fc.code
     let op = ins.op
-    if op == OP_NOP {
-        return                             // 优化层消掉的位置：一条字节都不发
-    }
-    if op == OP_CONST {
-        let dloc = fc.vloc.get(ins.dst)
-        if dloc > 0 {
-            _mov_imm(code, dloc - 1, ins.imm)
-        } else {
-            // v2.44：直接写帧槽（8 字节），不再"先搬 rax 再存"（18 字节）
-            _mov_imm_mem(code, RBP, _slot_disp(-dloc - 1), ins.imm)
-        }
-        return
-    }
-    if op == OP_MOV {
-        let dloc = fc.vloc.get(ins.dst)
-        if dloc > 0 {
-            _to_reg(fc, dloc - 1, ins.a)
-        } else if fc.vloc.get(ins.a) > 0 {
-            // v2.44：源已经在寄存器里就直接存，省掉一条 `mov rax, X`
-            _mov_store(code, RBP, _slot_disp(-dloc - 1), fc.vloc.get(ins.a) - 1)
-        } else {
-            _to_reg(fc, RAX, ins.a)
-            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
-        }
-        return
-    }
-    if op == OP_LOADD || op == OP_LOADX || op == OP_LOAD8D || op == OP_LOAD8X {
-        // 一条搞定：`mov d, [base+disp]` / `mov d, [base+idx*8]`
-        // （LOAD8* 是 `movzx d, byte [...]`）。原来要 lea+mov+mov 三条算地址。
-        let dloc = fc.vloc.get(ins.dst)
-        let mut d = RAX
-        if dloc > 0 {
-            d = dloc - 1
-        }
-        let mut isbyte = 0
-        if op == OP_LOAD8D || op == OP_LOAD8X {
-            isbyte = 1
-        }
-        // 基址已经在寄存器里就直接寻址（省掉一条 `mov rax, rXX`）；
-        // 在帧槽里才搬进 RAX。`_modrm_mem` 会处理 RSP/R12 需要的 SIB。
-        let aloc = fc.vloc.get(ins.a)
-        let mut base = RAX
-        if aloc > 0 {
-            base = aloc - 1
-        } else {
-            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
-        }
-        if op == OP_LOADD || op == OP_LOAD8D {
-            _rex2(code, 1, d, base)
-            if isbyte == 1 {
-                _b(code, 0x0F)
-                _b(code, 0xB6)
-            } else {
-                _b(code, 0x8B)
-            }
-            _modrm_mem(code, 2, d, base)
-            _w32(code, ins.imm)
-        } else {
-            let idx = _idx_reg(fc, ins.b)
-            _rex_full(code, 1, d, idx, base)
-            if isbyte == 1 {
-                _b(code, 0x0F)
-                _b(code, 0xB6)
-            } else {
-                _b(code, 0x8B)
-            }
-            _modrm_sibidx(code, 2, d, base, idx, 3)
-            _w32(code, 0)
-        }
-        if dloc <= 0 {
-            _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
-        }
-        return
-    }
-    if op == OP_LOAD8I {
-        // dst = 零扩展 [a + b]（SIB scale=0 即 ×1）
-        let dloc = fc.vloc.get(ins.dst)
-        let mut d = RAX
-        if dloc > 0 {
-            d = dloc - 1
-        }
-        let aloc = fc.vloc.get(ins.a)
-        let mut base = RAX
-        if aloc > 0 {
-            base = aloc - 1
-        } else {
-            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
-        }
-        let idx = _idx_reg(fc, ins.b)
-        _rex_full(code, 1, d, idx, base)
-        _b(code, 0x0F)
-        _b(code, 0xB6)
-        _modrm_sibidx(code, 2, d, base, idx, 0)
-        _w32(code, 0)
-        if dloc <= 0 {
-            _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
-        }
-        return
-    }
-    if op == OP_STORE8I {
-        // [a + b] = dst 的低字节
-        let idx = _idx_reg(fc, ins.b)
-        let aloc = fc.vloc.get(ins.a)
-        let mut base = RAX
-        if aloc > 0 {
-            base = aloc - 1
-        } else {
-            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
-        }
-        _to_reg(fc, RCX, ins.dst)
-        _rex_full(code, 0, RCX, idx, base)
-        _b(code, 0x88)
-        _modrm_sibidx(code, 2, RCX, base, idx, 0)
-        _w32(code, 0)
-        return
-    }
-    if op == OP_STORED || op == OP_STOREX || op == OP_STORE8D || op == OP_STORE8X {
-        // 值是 ins.dst（STORE* 不写寄存器，dst 槽空着）；CL 是最稳的 8 位寄存器。
-        let mut isbyte = 0
-        if op == OP_STORE8D || op == OP_STORE8X {
-            isbyte = 1
-        }
-        let mut idx = 0
-        if op == OP_STOREX || op == OP_STORE8X {
-            idx = _idx_reg(fc, ins.b)
-        }
-        // 基址已在寄存器里就直接寻址（同 LOAD*）
-        let aloc = fc.vloc.get(ins.a)
-        let mut base = RAX
-        if aloc > 0 {
-            base = aloc - 1
-        } else {
-            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
-        }
-        _to_reg(fc, RCX, ins.dst)
-        if op == OP_STORED || op == OP_STORE8D {
-            if isbyte == 1 {
-                _rex_full(code, 0, RCX, 0, base)
-                _b(code, 0x88)
-                _modrm_mem(code, 2, RCX, base)
-                _w32(code, ins.imm)
-            } else {
-                _rex_full(code, 1, RCX, 0, base)
-                _b(code, 0x89)
-                _modrm_mem(code, 2, RCX, base)
-                _w32(code, ins.imm)
-            }
-        } else {
-            if isbyte == 1 {
-                _rex_full(code, 0, RCX, idx, base)
-                _b(code, 0x88)
-                _modrm_sibidx(code, 2, RCX, base, idx, 3)
-                _w32(code, 0)
-            } else {
-                _rex_full(code, 1, RCX, idx, base)
-                _b(code, 0x89)
-                _modrm_sibidx(code, 2, RCX, base, idx, 3)
-                _w32(code, 0)
-            }
-        }
-        return
-    }
-    if op == OP_DIVC {
-        _emit_divc(fc, code, ins, i)
-        return
-    }
     if op == OP_ITOF {
-        // [dst] = (f64)a —— cvtsi2sd xmm0, 值; movsd [地址], xmm0
-        _to_reg(fc, RAX, ins.dst)
-        _to_reg(fc, RCX, ins.a)
-        _b(code, 0xF2)                         // cvtsi2sd xmm0, rcx
-        _b(code, 0x48)
+        // v2.55：dst(f64) = (f64)a(int)。dst 若在 XMM 里就直接写进去（一条指令）。
+        let dloc = fc.vloc.get(ins.dst)
+        let mut x = XMM0
+        if dloc >= XLOC {
+            x = dloc - XLOC
+        }
+        // 源已在通用寄存器里就直接当 cvtsi2sd 的操作数（省一条 `mov rcx, r12`）
+        let aloc = fc.vloc.get(ins.a)
+        let mut src = RCX
+        if aloc > 0 {
+            src = aloc - 1
+        } else {
+            _to_reg(fc, RCX, ins.a)
+        }
+        _b(code, 0xF2)                         // cvtsi2sd x, src
+        _rex2(code, 1, x, src)
         _b(code, 0x0F)
         _b(code, 0x2A)
-        _b(code, 0xC1)
-        _b(code, 0xF2)                         // movsd [rax], xmm0
-        _b(code, 0x0F)
-        _b(code, 0x11)
-        _b(code, 0x00)
+        _modrm(code, 3, x, src)
+        if dloc < XLOC {
+            _from_xmm(fc, x, ins.dst)
+        }
         return
     }
     if op == OP_FTOI {
-        // dst = (int)[a] —— movsd xmm0, [地址]; cvttsd2si rax, xmm0
-        _to_reg(fc, RCX, ins.a)
-        _b(code, 0xF2)                         // movsd xmm0, [rcx]
-        _b(code, 0x0F)
-        _b(code, 0x10)
-        _b(code, 0x01)
+        // v2.55：dst(int) = (int)a(f64)。a 住 XMM 时是纯寄存器运算。
+        _to_xmm(fc, XMM0, ins.a)
         _b(code, 0xF2)                         // cvttsd2si rax, xmm0
-        _b(code, 0x48)
+        _rex2(code, 1, RAX, XMM0)
         _b(code, 0x0F)
         _b(code, 0x2C)
-        _b(code, 0xC0)
+        _modrm(code, 3, RAX, XMM0)
         _store_rax(fc, fc.vloc.get(ins.dst))
         return
     }
     if op == OP_FBIN {
-        // [dst] = [a] <op> [b]，三个操作数都是 f64 槽的地址。
-        // 地址只会落在 R8-R11 / 帧槽（RAX/RCX/RDX 是发射器保留），所以按
-        // RCX → RDX → RAX 的顺序搬不会互相踩。
-        _to_reg(fc, RCX, ins.a)
-        _to_reg(fc, RDX, ins.b)
-        _to_reg(fc, RAX, ins.dst)
-        _b(code, 0xF2)                         // movsd xmm0, [rcx]
-        _b(code, 0x0F)
-        _b(code, 0x10)
-        _b(code, 0x01)
+        // v2.55：dst = a <op> b，三个操作数都是 **f64 值**（住 XMM / 通用寄存器 / 帧槽）。
+        // 最理想的情况（b2_float 的 `acc = acc + 1.0/t`）只剩一条 `addsd xmm6, xmm0`：
+        //   · dst 在 XMM 里 → 直接往 dst 上算，省掉最后的搬运；
+        //   · b 在帧槽里 → 当内存操作数，省掉一次装载。
         let mut opc = 0x58                     // addsd
         if ins.imm == 1 {
             opc = 0x5C                         // subsd
@@ -5758,14 +6009,126 @@ fn _emit_ir(fc: FnCtx, i: int) {
         if ins.imm == 3 {
             opc = 0x5E                         // divsd
         }
-        _b(code, 0xF2)                         // <op>sd xmm0, [rdx]
+        let dloc = fc.vloc.get(ins.dst)
+        let mut x = XMM0
+        if dloc >= XLOC {
+            x = dloc - XLOC
+        }
+        let bloc = fc.vloc.get(ins.b)
+        // **dst 与 b 是同一个 XMM 时必须换临时**（`v = 0.0 - v` 的形状）：
+        // 否则 `_to_xmm(x, a)` 会先把 b 覆盖掉，算出来是 `a op a`。
+        if bloc >= XLOC && bloc - XLOC == x {
+            x = XMM_SCR
+        }
+        _to_xmm(fc, x, ins.a)
+        let bs = _f64_slot(fc, ins.b)
+        if bs >= 0 {
+            _sse_mem(code, 1, opc, x, RBP, _slot_disp(bs))
+        } else if bloc >= XLOC && bloc - XLOC != x {
+            // b 已经在某个 XMM 里 → 直接当第二操作数，别再搬一次
+            _sse_rr(code, 1, opc, x, bloc - XLOC)
+        } else {
+            let mut y = XMM1
+            if x == XMM1 {
+                y = XMM2
+            }
+            _to_xmm(fc, y, ins.b)
+            _sse_rr(code, 1, opc, x, y)
+        }
+        // 结果在 x 里：dst 不是那个 XMM 时（dst 在槽/通用寄存器，或者上面
+        // 因为别名把 x 换成了 XMM_SCR）要搬回去。
+        let mut same = 0
+        if dloc >= XLOC && dloc - XLOC == x {
+            same = 1
+        }
+        if same == 0 {
+            _from_xmm(fc, x, ins.dst)
+        }
+        return
+    }
+    if op == OP_F64IMM {
+        // v2.56：编译期算好的 f64 位模式 → `movabs rax, bits` + `movq xmm, rax`
+        let dloc = fc.vloc.get(ins.dst)
+        _mov_imm(code, RAX, ins.imm)
+        if dloc >= XLOC {
+            _movq_x_from_r(code, dloc - XLOC, RAX)
+        } else {
+            _movq_x_from_r(code, XMM0, RAX)
+            _from_xmm(fc, XMM0, ins.dst)
+        }
+        return
+    }
+    if op == OP_FNEG {
+        // dst = -a：翻符号位（`btc rax, 63`），不再走运行库调用。
+        _to_xmm(fc, XMM0, ins.a)
+        _movq_r_from_x(code, RAX, XMM0)
+        _b(code, 0x48)                         // btc rax, 63
         _b(code, 0x0F)
-        _b(code, opc)
-        _b(code, 0x02)
-        _b(code, 0xF2)                         // movsd [rax], xmm0
-        _b(code, 0x0F)
-        _b(code, 0x11)
-        _b(code, 0x00)
+        _b(code, 0xBA)
+        _b(code, 0xF8)
+        _b(code, 63)
+        _movq_x_from_r(code, XMM0, RAX)
+        _from_xmm(fc, XMM0, ins.dst)
+        return
+    }
+    if op == OP_FCMP {
+        // dst(int) = (a <cc> b)：a/b 是 **f64 值**，imm 是 setcc 操作码。
+        // ucomisd 对 NaN 会置 CF=ZF=PF=1，所以 EQ/NE/LT/LE 要用 PF 兜一下，
+        // 否则 `NaN == x` 会得到 true（GT/GE 用 seta/setae 天然排除 NaN）。
+        // 左操作数放进**专用临时 XMM_SCR**（恒空闲），这样永远不会与 b 撞车
+        _to_xmm(fc, XMM_SCR, ins.a)
+        let bs = _f64_slot(fc, ins.b)
+        let bloc = fc.vloc.get(ins.b)
+        if bs >= 0 {
+            _sse_mem(code, 0, 0x2E, XMM_SCR, RBP, _slot_disp(bs))
+        } else if bloc >= XLOC {
+            _sse_rr(code, 0, 0x2E, XMM_SCR, bloc - XLOC)
+        } else {
+            _to_xmm(fc, XMM1, ins.b)
+            _sse_rr(code, 0, 0x2E, XMM_SCR, XMM1)
+        }
+        _b(code, 0x0F)                         // setcc al
+        _b(code, ins.imm)
+        _b(code, 0xC0)
+        if ins.imm == 0x94 || ins.imm == 0x92 || ins.imm == 0x96 {
+            _b(code, 0x0F)                     // setnp cl
+            _b(code, 0x9B)
+            _b(code, 0xC1)
+            _b(code, 0x20)                     // and al, cl
+            _b(code, 0xC8)
+        }
+        if ins.imm == 0x95 {
+            _b(code, 0x0F)                     // setp cl
+            _b(code, 0x9A)
+            _b(code, 0xC1)
+            _b(code, 0x08)                     // or al, cl
+            _b(code, 0xC8)
+        }
+        _b(code, 0x0F)                         // movzx eax, al
+        _b(code, 0xB6)
+        _b(code, 0xC0)
+        let dloc = fc.vloc.get(ins.dst)
+        if dloc > 0 {
+            _mov_rr(code, dloc - 1, RAX)
+        } else {
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+        }
+        return
+    }
+}
+
+fn _emit_ir(fc: FnCtx, i: int) {
+    let ins = fc.ir.get(i)
+    let code = fc.code
+    let op = ins.op
+    if op == OP_NOP {
+        return                             // 优化层消掉的位置：一条字节都不发
+    }
+    // v2.55：f64 的几条指令整体交给 `_emit_f64`（见那里的注释：不能给本函数
+    // 加局部变量，帧已经顶到上限）
+    if op == OP_F64IMM || op == OP_FNEG || op == OP_ITOF || op == OP_FTOI ||
+       op == OP_FBIN || op == OP_FCMP {
+        _emit_f64(fc, i)
         return
     }
     if op == OP_BINI {
@@ -5860,12 +6223,16 @@ fn _emit_ir(fc: FnCtx, i: int) {
         if op == OP_MUL {
             if dloc > 0 {
                 let d = dloc - 1
-                _to_reg(fc, d, ins.a)
-                let bloc = fc.vloc.get(ins.b)
-                if bloc > 0 {
-                    _imul_rr(code, d, bloc - 1)
+                if fc.vloc.get(ins.b) == dloc {
+                    _mul_alias(fc, d, ins.a, ins.b)
                 } else {
-                    _imul_rm(code, d, RBP, _slot_disp(-bloc - 1))
+                    _to_reg(fc, d, ins.a)
+                    let bloc = fc.vloc.get(ins.b)
+                    if bloc > 0 {
+                        _imul_rr(code, d, bloc - 1)
+                    } else {
+                        _imul_rm(code, d, RBP, _slot_disp(-bloc - 1))
+                    }
                 }
             } else {
                 _to_reg(fc, RAX, ins.a)
@@ -5881,8 +6248,12 @@ fn _emit_ir(fc: FnCtx, i: int) {
         }
         if dloc > 0 {
             let d = dloc - 1
-            _to_reg(fc, d, ins.a)
-            _bin_into(fc, d, ins.b, rr, rm)
+            if fc.vloc.get(ins.b) == dloc {
+                _bin_alias(fc, d, ins.a, ins.b, rr, rm)
+            } else {
+                _to_reg(fc, d, ins.a)
+                _bin_into(fc, d, ins.b, rr, rm)
+            }
         } else {
             _to_reg(fc, RAX, ins.a)
             _bin_into(fc, RAX, ins.b, rr, rm)
@@ -5936,8 +6307,12 @@ fn _emit_ir(fc: FnCtx, i: int) {
         let dloc = fc.vloc.get(ins.dst)
         if dloc > 0 {
             let d = dloc - 1
-            _to_reg(fc, d, ins.a)
-            _bin_into(fc, d, ins.b, rr, rm)
+            if fc.vloc.get(ins.b) == dloc {
+                _bin_alias(fc, d, ins.a, ins.b, rr, rm)
+            } else {
+                _to_reg(fc, d, ins.a)
+                _bin_into(fc, d, ins.b, rr, rm)
+            }
         } else {
             _to_reg(fc, RAX, ins.a)
             _bin_into(fc, RAX, ins.b, rr, rm)
@@ -6177,6 +6552,11 @@ fn _emit_ir(fc: FnCtx, i: int) {
         //   之后是 32 字节 shadow space，再之后才是第 5 个实参
         let off = 48 + 8 * fc.cells.get(C_NSAVED) + 8 * ins.imm
         let dloc = fc.vloc.get(ins.dst)
+        if dloc >= XLOC {
+            _mov_load(code, RAX, RBP, off)
+            _movq_x_from_r(code, dloc - XLOC, RAX)
+            return
+        }
         if dloc > 0 {
             _mov_load(code, dloc - 1, RBP, off)
         } else {
@@ -6220,46 +6600,190 @@ fn _emit_ir(fc: FnCtx, i: int) {
         }
         return
     }
-    if op == OP_FCMP {
-        // dst(int) = (a <cc> b)：a/b 是 f64 槽地址，imm 是 setcc 操作码。
-        // ucomisd 对 NaN 会置 CF=ZF=PF=1，所以 EQ/NE/LT/LE 要用 PF 兜一下，
-        // 否则 `NaN == x` 会得到 true（GT/GE 用 seta/setae 天然排除 NaN）。
-        _to_reg(fc, RAX, ins.a)
-        _b(code, 0xF2)                         // movsd xmm0, [rax]
-        _b(code, 0x0F)
-        _b(code, 0x10)
-        _b(code, 0x00)
-        _to_reg(fc, RCX, ins.b)
-        _b(code, 0x66)                         // ucomisd xmm0, [rcx]
-        _b(code, 0x0F)
-        _b(code, 0x2E)
-        _b(code, 0x01)
-        _b(code, 0x0F)                         // setcc al
-        _b(code, ins.imm)
-        _b(code, 0xC0)
-        if ins.imm == 0x94 || ins.imm == 0x92 || ins.imm == 0x96 {
-            _b(code, 0x0F)                     // setnp cl
-            _b(code, 0x9B)
-            _b(code, 0xC1)
-            _b(code, 0x20)                     // and al, cl
-            _b(code, 0xC8)
-        }
-        if ins.imm == 0x95 {
-            _b(code, 0x0F)                     // setp cl
-            _b(code, 0x9A)
-            _b(code, 0xC1)
-            _b(code, 0x08)                     // or al, cl
-            _b(code, 0xC8)
-        }
-        _b(code, 0x0F)                         // movzx eax, al
-        _b(code, 0xB6)
-        _b(code, 0xC0)
+    if op == OP_CONST {
         let dloc = fc.vloc.get(ins.dst)
+        // v2.55：f64 目的 —— imm 是整数值，要转成 double 位模式。
+        // 0 用 `xorps`（全零 = +0.0，3 字节），其余走 cvtsi2sd。
+        // **不要在这里开局部变量** —— `_emit_ir` 贴着 384 槽的帧上限，
+        // 多一个就编不过自己（v2.55 踩过两次）。表达式直接内联。
+        if dloc >= XLOC {
+            if ins.imm == 0 {
+                _sse_rr(code, 0, 0x57, dloc - XLOC, dloc - XLOC)   // xorps x, x
+            } else {
+                _mov_imm(code, RAX, ins.imm)
+                _b(code, 0xF2)                                     // cvtsi2sd x, rax
+                _rex2(code, 1, dloc - XLOC, RAX)
+                _b(code, 0x0F)
+                _b(code, 0x2A)
+                _modrm(code, 3, dloc - XLOC, RAX)
+            }
+            return
+        }
         if dloc > 0 {
-            _mov_rr(code, dloc - 1, RAX)
+            _mov_imm(code, dloc - 1, ins.imm)
         } else {
+            // v2.44：直接写帧槽（8 字节），不再"先搬 rax 再存"（18 字节）
+            _mov_imm_mem(code, RBP, _slot_disp(-dloc - 1), ins.imm)
+        }
+        return
+    }
+    if op == OP_MOV {
+        let dloc = fc.vloc.get(ins.dst)
+        // v2.55：任一侧是 XMM 时走 movsd/movq。位模式复制，语义与 mov 相同。
+        if dloc >= XLOC || fc.vloc.get(ins.a) >= XLOC {
+            _to_xmm(fc, XMM0, ins.a)
+            _from_xmm(fc, XMM0, ins.dst)
+            return
+        }
+        if dloc > 0 {
+            _to_reg(fc, dloc - 1, ins.a)
+        } else if fc.vloc.get(ins.a) > 0 {
+            // v2.44：源已经在寄存器里就直接存，省掉一条 `mov rax, X`
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), fc.vloc.get(ins.a) - 1)
+        } else {
+            _to_reg(fc, RAX, ins.a)
             _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
         }
+        return
+    }
+    if op == OP_LOADD || op == OP_LOADX || op == OP_LOAD8D || op == OP_LOAD8X {
+        // 一条搞定：`mov d, [base+disp]` / `mov d, [base+idx*8]`
+        // （LOAD8* 是 `movzx d, byte [...]`）。原来要 lea+mov+mov 三条算地址。
+        let dloc = fc.vloc.get(ins.dst)
+        let mut d = RAX
+        if dloc > 0 {
+            d = dloc - 1
+        }
+        let mut isbyte = 0
+        if op == OP_LOAD8D || op == OP_LOAD8X {
+            isbyte = 1
+        }
+        // 基址已经在寄存器里就直接寻址（省掉一条 `mov rax, rXX`）；
+        // 在帧槽里才搬进 RAX。`_modrm_mem` 会处理 RSP/R12 需要的 SIB。
+        let aloc = fc.vloc.get(ins.a)
+        let mut base = RAX
+        if aloc > 0 {
+            base = aloc - 1
+        } else {
+            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
+        }
+        if op == OP_LOADD || op == OP_LOAD8D {
+            _rex2(code, 1, d, base)
+            if isbyte == 1 {
+                _b(code, 0x0F)
+                _b(code, 0xB6)
+            } else {
+                _b(code, 0x8B)
+            }
+            _modrm_mem(code, 2, d, base)
+            _w32(code, ins.imm)
+        } else {
+            let idx = _idx_reg(fc, ins.b)
+            _rex_full(code, 1, d, idx, base)
+            if isbyte == 1 {
+                _b(code, 0x0F)
+                _b(code, 0xB6)
+            } else {
+                _b(code, 0x8B)
+            }
+            _modrm_sibidx(code, 2, d, base, idx, 3)
+            _w32(code, 0)
+        }
+        if dloc <= 0 {
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
+        }
+        return
+    }
+    if op == OP_LOAD8I {
+        // dst = 零扩展 [a + b]（SIB scale=0 即 ×1）
+        let dloc = fc.vloc.get(ins.dst)
+        let mut d = RAX
+        if dloc > 0 {
+            d = dloc - 1
+        }
+        let aloc = fc.vloc.get(ins.a)
+        let mut base = RAX
+        if aloc > 0 {
+            base = aloc - 1
+        } else {
+            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
+        }
+        let idx = _idx_reg(fc, ins.b)
+        _rex_full(code, 1, d, idx, base)
+        _b(code, 0x0F)
+        _b(code, 0xB6)
+        _modrm_sibidx(code, 2, d, base, idx, 0)
+        _w32(code, 0)
+        if dloc <= 0 {
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
+        }
+        return
+    }
+    if op == OP_STORE8I {
+        // [a + b] = dst 的低字节
+        let idx = _idx_reg(fc, ins.b)
+        let aloc = fc.vloc.get(ins.a)
+        let mut base = RAX
+        if aloc > 0 {
+            base = aloc - 1
+        } else {
+            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
+        }
+        _to_reg(fc, RCX, ins.dst)
+        _rex_full(code, 0, RCX, idx, base)
+        _b(code, 0x88)
+        _modrm_sibidx(code, 2, RCX, base, idx, 0)
+        _w32(code, 0)
+        return
+    }
+    if op == OP_STORED || op == OP_STOREX || op == OP_STORE8D || op == OP_STORE8X {
+        // 值是 ins.dst（STORE* 不写寄存器，dst 槽空着）；CL 是最稳的 8 位寄存器。
+        let mut isbyte = 0
+        if op == OP_STORE8D || op == OP_STORE8X {
+            isbyte = 1
+        }
+        let mut idx = 0
+        if op == OP_STOREX || op == OP_STORE8X {
+            idx = _idx_reg(fc, ins.b)
+        }
+        // 基址已在寄存器里就直接寻址（同 LOAD*）
+        let aloc = fc.vloc.get(ins.a)
+        let mut base = RAX
+        if aloc > 0 {
+            base = aloc - 1
+        } else {
+            _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
+        }
+        _to_reg(fc, RCX, ins.dst)
+        if op == OP_STORED || op == OP_STORE8D {
+            if isbyte == 1 {
+                _rex_full(code, 0, RCX, 0, base)
+                _b(code, 0x88)
+                _modrm_mem(code, 2, RCX, base)
+                _w32(code, ins.imm)
+            } else {
+                _rex_full(code, 1, RCX, 0, base)
+                _b(code, 0x89)
+                _modrm_mem(code, 2, RCX, base)
+                _w32(code, ins.imm)
+            }
+        } else {
+            if isbyte == 1 {
+                _rex_full(code, 0, RCX, idx, base)
+                _b(code, 0x88)
+                _modrm_sibidx(code, 2, RCX, base, idx, 3)
+                _w32(code, 0)
+            } else {
+                _rex_full(code, 1, RCX, idx, base)
+                _b(code, 0x89)
+                _modrm_sibidx(code, 2, RCX, base, idx, 3)
+                _w32(code, 0)
+            }
+        }
+        return
+    }
+    if op == OP_DIVC {
+        _emit_divc(fc, code, ins, i)
         return
     }
     if op == OP_LOAD8 {
@@ -6404,6 +6928,12 @@ fn _emit_ir(fc: FnCtx, i: int) {
     if op == OP_LOAD {
         _to_reg(fc, RAX, ins.a)
         let dloc = fc.vloc.get(ins.dst)
+        // v2.55：读 f64（结构体字段 / 数组元素 / vec 元素 / 字面量槽）
+        if fc.vty.get(ins.dst) == TY_F64 {
+            _sse_mem0(code, 1, 0x10, XMM0, RAX)    // movsd xmm0, [rax]
+            _from_xmm(fc, XMM0, ins.dst)
+            return
+        }
         if dloc > 0 {
             _mov_load(code, dloc - 1, RAX, 0)
         } else {
@@ -6414,6 +6944,12 @@ fn _emit_ir(fc: FnCtx, i: int) {
     }
     if op == OP_STORE {
         _to_reg(fc, RAX, ins.a)
+        // v2.55：f64 值是 8 字节位模式，住 XMM —— `movsd [rax], xmm0`
+        if fc.vty.get(ins.b) == TY_F64 {
+            _to_xmm(fc, XMM0, ins.b)
+            _sse_mem0(code, 1, 0x11, XMM0, RAX)
+            return
+        }
         _to_reg(fc, RCX, ins.b)
         _mov_store(code, RAX, 0, RCX)
         return
@@ -6495,7 +7031,16 @@ fn _frame_bytes(fc: FnCtx) -> int {
     // `[rsp .. rsp+0x20)` 可写。以前帧是 4 KB，这块"顺带"兜住了；帧缩到 16 字节
     // 之后影子空间直接压在活跃槽上 —— 现象是 `print(metric(0)+metric(1))`
     // 打出 1921（第二次调用的返回地址/影子区把前一个结果冲掉了）。
-    return units * 8 + 32
+    let fb = units * 8 + 32
+    // **没有栈探测**（帧一直都很小），所以超 4 KB 会跨过 guard page，Windows
+    // 不会自动扩栈 —— 第一次写帧就 AV，而且表现为"换代码就换用例崩"（§7.17）。
+    // 与其静默崩，不如在编译期 fail-fast。
+    if fb > 4096 {
+        eprint("qlmc: 帧超过 4 KB（" + fb.to_str() + " 字节）—— 需要栈探测，本版没有")
+        eprint("  当前函数：" + fc.names.get(fc.fns.get(fc.cells.get(C_CFI)).name))
+        exit(2)
+    }
+    return fb
 }
 
 /// 一个函数：序言（保存用到的 callee-saved）+ 体 + 尾声
@@ -6546,6 +7091,16 @@ fn _emit_fn(fc: FnCtx) {
     // 栈形参的偏移要加 8*nsaved（见 C_NSAVED 的注释）
     fc.cells.set(C_NSAVED, nsaved)
     _sub_rsp(code, frame)
+    // v2.55：保存被用到的 XMM 变量寄存器（XMM6-XMM15 在 Win64 里是 callee-saved，
+    // 但 qlmc 以前一个都没用）。保存槽由 `_alloc` 在临时池之前分配。
+    let mut xk = 0
+    while xk < N_XMMVAR {
+        let sl = fc.cells.get(C_XSAV0 + xk)
+        if sl >= 0 {
+            _sse_mem(code, 1, 0x11, XMM_VAR0 + xk, RBP, _slot_disp(sl))
+        }
+        xk = xk + 1
+    }
     // f64 字面量的"已解析"标志槽：函数入口清零，否则第一次判断读的是上一帧的垃圾。
     // **不能走 IR** —— 分配已经跑完了，新开 vreg 会拿到 vloc = 0 而 fail-fast。
     let mut fz = 0
@@ -6557,6 +7112,14 @@ fn _emit_fn(fc: FnCtx) {
     while i < len(fc.ir) {
         _emit_ir(fc, i)
         i = i + 1
+    }
+    let mut xk2 = N_XMMVAR - 1
+    while xk2 >= 0 {
+        let sl2 = fc.cells.get(C_XSAV0 + xk2)
+        if sl2 >= 0 {
+            _sse_mem(code, 1, 0x10, XMM_VAR0 + xk2, RBP, _slot_disp(sl2))
+        }
+        xk2 = xk2 - 1
     }
     _mov_rsp_rbp(code)
     _pop_rbp(code)
