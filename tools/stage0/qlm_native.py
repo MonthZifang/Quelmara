@@ -7285,10 +7285,23 @@ class Lower:
             f = Fn("__vec_push")
             h, v = f.new_v(), f.new_v()
             f.emit("args", [h, v])
-            data = f.new_v()
-            f.emit("call", data, "__vec_grow", [h])
+            # v2.67：**容量检查内联**，只在真的需要扩容时才调 __vec_grow。
+            # 以前是"每次 push 都 call __vec_grow"，而它在容量够时只是
+            # `load data; ret` —— b4_array 的 200 万次 push 就是 200 万次
+            # 白白的 call/ret + 序言（约 15-20 周期/次）。
             ln = f.new_v()
             f.emit("load", ln, h, ("imm", 1))
+            cp = f.new_v()
+            f.emit("load", cp, h, ("imm", 2))
+            b_ = f.new_v()
+            l_g, l_h = f.label("vp.g"), f.label("vp.h")
+            f.emit("cmpset", "l", b_, ln, cp)
+            f.emit("jnz", b_, l_h)          # 容量够 -> 直接跳过扩容
+            f.emit("call", None, "__vec_grow", [h])
+            f.emit("label", l_h)
+            # 扩容会换数据块，所以 data 必须在检查之后读（与旧实现语义一致）
+            data = f.new_v()
+            f.emit("load", data, h, ("imm", 0))
             f.emit("store", data, ln, v)
             ln1 = f.new_v()
             f.emit("bin", "add", ln1, ln, ("imm", 1))
@@ -7300,10 +7313,19 @@ class Lower:
             f = Fn("__vec_push_n")
             h, src = f.new_v(), f.new_v()
             f.emit("args", [h, src])
-            data = f.new_v()
-            f.emit("call", data, "__vec_grow", [h])
+            # v2.67：容量检查内联（同 __vec_push）
             ln = f.new_v()
             f.emit("load", ln, h, ("imm", 1))
+            cp = f.new_v()
+            f.emit("load", cp, h, ("imm", 2))
+            b_ = f.new_v()
+            l_g, l_h = f.label("vpn.g"), f.label("vpn.h")
+            f.emit("cmpset", "l", b_, ln, cp)
+            f.emit("jnz", b_, l_h)
+            f.emit("call", None, "__vec_grow", [h])
+            f.emit("label", l_h)
+            data = f.new_v()
+            f.emit("load", data, h, ("imm", 0))
             ew = f.new_v()
             f.emit("load", ew, h, ("imm", 3))
             off = f.new_v()

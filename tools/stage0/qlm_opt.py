@@ -2037,6 +2037,70 @@ def _skip_pass(name):
     return False
 
 
+def opt_store_back(fn):
+    """`t = a OP b;  a = t`  →  `a = a OP b`（把"算完再搬回变量"折成就地更新）。
+
+    **为什么重要**：Quelmara 的 `acc = acc + x` / `i = i + 1` 降级成
+    "临时值算出来、再 mov 回变量"两条 IR。发射器对 `dst != a` 只能走
+    "mat → 运算 → commit" 的三条指令路径（因为 dst 的寄存器里还躺着 a 的
+    旧值）。折成就地更新后 dst == a，直接命中二地址路径：
+
+        mov r8, r12 ; add r8, rsi ; mov r12, r8      →  add r12, rsi
+        mov rsi, r13; add rsi, 1  ; mov r13, rsi     →  add r13, 1
+
+    b1_int 的热循环因此 15 → 10 条；b2_float 的累加链少一条 movaps
+    （f64 版同样处理）。
+
+    **安全性**：只在 `t` 是**纯临时值**时合并 —— 全函数内 `t` 恰好出现两次
+    （这里定义一次、紧邻的 mov 用一次），且 `t != a`、`t != b`。这样
+    "把 a 的旧值覆盖掉"发生在"a 作为本指令操作数被读完之后"，与原来的
+    临时值语义逐位等价。
+
+    与 v2.61 那次失败的"分配器级拷贝合并"的区别：那次是**改寄存器分配**，
+    打破了发射器 `safe_dst_reg` 的全套假设（30+ 误编译）；这次是**改 IR**，
+    发射器看到的仍然是它熟悉的 `dst == a` 形态，走既有的二地址路径。
+    """
+    ins = fn.instrs
+    defs = {}
+    mentions = {}
+    for p in ins:
+        d, u = vreg_mentions(p)
+        for x in d:
+            defs[x] = defs.get(x, 0) + 1
+            mentions[x] = mentions.get(x, 0) + 1
+        for x in u:
+            mentions[x] = mentions.get(x, 0) + 1
+
+    out = []
+    changed = False
+    i = 0
+    n = len(ins)
+    while i < n:
+        p = ins[i]
+        if i + 1 < n and p[0] in ("bin", "fbin"):
+            if p[0] == "bin":
+                op, t, a, bb = p[1], p[2], p[3], p[4]
+            else:
+                op, t, a, bb = p[2], p[3], p[4], p[5]
+            q = ins[i + 1]
+            if (isinstance(t, int) and isinstance(a, int)
+                    and q[0] == "mov" and q[1] == a and q[2] == t
+                    and t != a and t != bb
+                    and mentions.get(t, 0) == 2 and defs.get(t, 0) == 1):
+                if p[0] == "bin":
+                    out.append(("bin", op, a, a, bb))
+                else:
+                    out.append(("fbin", p[1], op, a, a, bb))
+                i += 2
+                changed = True
+                continue
+        out.append(p)
+        i += 1
+    if changed:
+        fn.instrs = out
+    return fn
+
+
 def opt_all(fn, unroll=True):
     """单函数收尾优化(内联之后调用)"""
     # 字符串求长外提（若调用方没在 inline 前跑过，这里兜一次）
@@ -2062,6 +2126,8 @@ def opt_all(fn, unroll=True):
             opt_copy_prop(fn)
         # 模归纳削减要在强度削减 + 收缩 + 复制传播之后（干净的 4 条窗口），
         # 展开之前（展开复制的是已变换形态，每段各回绕一次，语义正确）。
+        if not _skip_pass("opt_store_back"):
+            opt_store_back(fn)
         if not _skip_pass("opt_mod_inductive"):
             opt_mod_inductive(fn)
         if not _skip_pass("opt_const_div"):

@@ -1,0 +1,124 @@
+// t149_store_back —— "算完再搬回变量"折成就地更新（v2.67）
+//
+// `t = a OP b; a = t` → `a = a OP b`。安全性靠"t 是纯临时值"（全函数只出现
+// 两次）+ `t != a`、`t != b`。
+//
+// 这类改写最容易错的地方是**别名**：如果 b 和 a 是同一个变量（`x = x - x`、
+// `x = x / x`），或者 a 在 b 的表达式里再次出现，就地更新会让"读旧值"变成
+// "读刚写的值"。所以这里把每种运算都配上自反/别名用例，并且**每条都跟
+// 一个手工算出的期望值对拍**（不是只跟另一条路径比 —— 两条路径可能一起错）。
+fn main() {
+    // 1) 四则 + 位运算的自反/别名
+    let mut x = 7
+    x = x - x
+    assert(x == 0, "x - x")
+    x = 5
+    x = x * x
+    assert(x == 25, "x * x")
+    x = 9
+    x = x / x
+    assert(x == 1, "x / x")
+    x = 9
+    x = x % x
+    assert(x == 0, "x % x")
+    x = 6
+    x = x & x
+    assert(x == 6, "x & x")
+    x = 6
+    x = x ^ x
+    assert(x == 0, "x ^ x")
+    x = 6
+    x = x | x
+    assert(x == 6, "x | x")
+
+    // 2) 操作数顺序敏感（不可交换的 sub/div/mod/shr/shl）
+    let mut a = 100
+    let b = 7
+    a = a - b
+    assert(a == 93, "a - b")
+    a = a / b
+    assert(a == 13, "a / b")
+    a = a % b
+    assert(a == 6, "a % b")
+    let mut s = 1024
+    s = s >> 3
+    assert(s == 128, "s >> 3")
+    s = s << 2
+    assert(s == 512, "s << 2")
+
+    // 3) 变量在另一侧也出现（b 是变量、a 是变量）
+    let mut p = 3
+    let mut q = 4
+    p = p + q
+    assert(p == 7, "p + q")
+    q = q - p
+    assert(q == 0 - 3, "q - p")
+
+    // 4) 循环里累加 / 递减 / 自乘（热路径，也是这次优化的主目标）
+    let mut acc = 0
+    let mut i = 0
+    while i < 1000 {
+        acc = acc + i
+        i = i + 1
+    }
+    assert(acc == 499500, "0..999 求和")
+
+    let mut down = 1000
+    let mut cnt = 0
+    while down > 0 {
+        down = down - 7
+        cnt = cnt + 1
+    }
+    // 1000 - 7*143 = -1（第 143 步从 6 减到 -1 才退出）
+    assert(down == 0 - 1, "1000 减 7")
+    assert(cnt == 143, "1000/7 步数")
+
+    let mut m = 1
+    let mut k = 0
+    while k < 10 {
+        m = m * 2
+        k = k + 1
+    }
+    assert(m == 1024, "2^10")
+
+    // 5) int64 两端（就地更新不能把符号弄丢）
+    let mut big = 9223372036854775807
+    big = big - 1
+    assert(big == 9223372036854775806, "i64 max - 1")
+    let mut neg = 0 - 9223372036854775807
+    neg = neg + 1
+    assert(neg == 0 - 9223372036854775806, "i64 min + 1")
+
+    // 6) 浮点同样走这条（fbin 版本）
+    let mut f = 3.5
+    f = f * 2.0
+    assert(f == 7.0, "f * 2")
+    f = f - 7.0
+    assert(f == 0.0, "f - 7")
+    let mut g = 1.0
+    let mut j = 0
+    while j < 10 {
+        g = g / 2.0
+        j = j + 1
+    }
+    assert(g == 1.0 / 1024.0, "1/2^10")
+
+    // 7) **本 pass 的主要目标形态**：变量先被"不可就地传播"的运算更新
+    //    （`m = m % 13` 走 cssub），再累加一个它的副本。
+    //    这里 copy_prop 推不动（m 是循环携带变量），只能靠 store_back 折叠。
+    //    m 的序列周期 13：0,7,1,8,2,9,3,10,4,11,5,12,6（和 = 78）；
+    //    100000 = 7692*13 + 4，前 4 项和 = 16 ⇒ 599976 + 16 = 599992
+    let mut m2 = 0
+    let mut acc3 = 0
+    let mut n2 = 0
+    while n2 < 100000 {
+        let t2 = m2
+        m2 = m2 + 7
+        m2 = m2 % 13
+        acc3 = acc3 + t2
+        n2 = n2 + 1
+    }
+    assert(acc3 == 599992, "b1 形态的累加")
+
+    print("t149 ok")
+}
