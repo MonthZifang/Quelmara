@@ -169,6 +169,31 @@ def modrm_mem(reg, base, index, scale, disp):
     return modrm + sib + struct.pack("<i", disp)
 
 
+def _emit_divmod10(f, v):
+    """非负 v -> (q, d)：q = v/10、d = v%10，**不用 idiv**。
+
+    v2.64：`__str_from_i64` / `__print_i64` 的取位循环一直是
+    `mod 10` + `div 10` 两条指令 —— 在 x86 上是**两次** `idiv`
+    （20-40 周期，还是微码化的）。b5_string 做 50 万次 int→str，
+    每个数平均 5.9 位，就是 ~600 万次 idiv。
+
+    换成魔数乘：floor(v/10) == umulhi(v, 0xCCCCCCCCCCCCCCCD) >> 3，
+    余数用 `v - q*10` 反算（Granlund-Montgomery，对 64 位全范围成立）。
+    两条 idiv → umulhi + shr + imul + sub（4 条，各 3-4 周期，可流水）。
+
+    **前提 v >= 0**：调用点都在"负数已取绝对值"之后（INT64_MIN 单独
+    走定值分支），所以无符号魔数是对的。
+    """
+    q = f.new_v()
+    f.emit("bin", "umulhi", q, v, ("imm", 0xCCCCCCCCCCCCCCCD))
+    f.emit("bin", "shr", q, q, ("imm", 3))
+    t = f.new_v()
+    f.emit("bin", "mul", t, q, ("imm", 10))
+    d = f.new_v()
+    f.emit("bin", "sub", d, v, t)
+    return q, d
+
+
 class Enc:
     """函数级机器码发射器"""
 
@@ -6149,13 +6174,12 @@ class Lower:
         f.emit("mov", pos, ("imm", 29))
         l_dig, l_dige = f.label("dig"), f.label("dige")
         f.emit("label", l_dig)
-        d = f.new_v()
-        f.emit("bin", "mod", d, v, ("imm", 10))
+        q10, d = _emit_divmod10(f, v)
         chv = f.new_v()
         f.emit("bin", "add", chv, d, ("imm", ord("0")))
         f.emit("store8", buf, pos, chv)
         f.emit("bin", "sub", pos, pos, ("imm", 1))
-        f.emit("bin", "div", v, v, ("imm", 10))
+        f.emit("mov", v, q10)
         f.emit("jnz", v, l_dig)
         f.emit("label", l_dige)
         # write(1, buf+pos+1, 29-pos)
@@ -9283,13 +9307,12 @@ class Lower:
         f.emit("mov", pos, ("imm", 39))
         l_d, l_de = f.label("idig"), f.label("idige")
         f.emit("label", l_d)
-        dd = f.new_v()
-        f.emit("bin", "mod", dd, v, ("imm", 10))
+        q10, dd = _emit_divmod10(f, v)
         cc = f.new_v()
         f.emit("bin", "add", cc, dd, ("imm", 48))
         f.emit("store8", buf, pos, cc)
         f.emit("bin", "sub", pos, pos, ("imm", 1))
-        f.emit("bin", "div", v, v, ("imm", 10))
+        f.emit("mov", v, q10)
         f.emit("jnz", v, l_d)
         f.emit("label", l_de)
         ln = f.new_v()

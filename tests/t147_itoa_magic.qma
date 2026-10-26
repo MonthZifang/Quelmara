@@ -1,0 +1,60 @@
+// t147_itoa_magic —— int→str 的取位循环不再用 idiv（v2.64）
+//
+// `__str_from_i64` / `__print_i64` 的取位一直是 `mod 10` + `div 10` 两条
+// 指令 —— 在 x86 上是两次 `idiv`。换成魔数乘之后，
+// floor(v/10) == umulhi(v, 0xCCCCCCCCCCCCCCCD) >> 3、余数用 v - q*10 反算。
+//
+// 口径：**逐值对拍 to_str → to_int 的往返**，覆盖
+//   · 个位/进位边界（9→10、99→100）
+//   · 多位数（12345、1000000）
+//   · 负数（-7、-12345）
+//   · int64 两端（2^63-1、-(2^63-1)）
+// 只测"能跑不崩"是不够的：魔数算错时典型的错法是余数差 1（输出 "12346"），
+// 往返对拍能抓到。
+fn check(v: int) {
+    let s = v.to_str()
+    let back = s.to_int()
+    if back != v {
+        print("MISMATCH")
+        print(v)
+        print(s)
+        assert(false, "itoa 往返不一致")
+    }
+}
+
+fn main() {
+    check(0)
+    check(1)
+    check(9)
+    check(10)
+    check(11)
+    check(99)
+    check(100)
+    check(101)
+    check(999)
+    check(1000)
+    check(12345)
+    check(1000000)
+    check(0 - 1)
+    check(0 - 7)
+    check(0 - 10)
+    check(0 - 12345)
+    check(9223372036854775807)
+    check(0 - 9223372036854775807)
+    // 连续区间：把每一位上的进位都扫一遍（0..3000）
+    let mut i = 0
+    while i < 3000 {
+        check(i)
+        check(0 - i)
+        i = i + 1
+    }
+    // 10 的幂附近
+    let mut p = 1
+    while p < 1000000000000000000 {
+        check(p - 1)
+        check(p)
+        check(p + 1)
+        p = p * 10
+    }
+    print("t147 ok")
+}

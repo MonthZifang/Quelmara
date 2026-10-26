@@ -1048,6 +1048,8 @@ def main():
     case_selfcheck("t145_licm_multiedge", "tests/t145_licm_multiedge.qma")
     # 常数除法/取模的魔数乘法（v2.61）：商*C+余数==被除数 且 0<=余数<C
     case_selfcheck("t146_const_div", "tests/t146_const_div.qma")
+    # int→str 的取位循环改用魔数乘（v2.64）：往返对拍 + 进位边界
+    case_selfcheck("t147_itoa_magic", "tests/t147_itoa_magic.qma")
     # UUID（v1.77）：v4 生成 / 校验 / 版本与变体位
     case_selfcheck("t115_uuid", "tests/t115_uuid.qma")
     # 所有权检查 v2（v1.84）：视图生命周期 / 写别名 / 跨线程的正例

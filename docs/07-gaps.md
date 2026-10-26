@@ -107,6 +107,7 @@
 | ~~无帧函数（省 `push rbp` 四条）~~ | ❌ **已验证无收益**（v2.60）：b3_recursion 三轮 A/B，frameless 8.0/8.8/8.0 vs 带 rbp 7.4/7.7/8.8 | `push/pop` 走栈引擎、`mov rbp,rsp` 被重命名消掉，省的是指令槽位不是延迟；fib 的瓶颈是**调用延迟链**。见 `versions/v2.60/CHANGELOG.md` |
 | ~~`vec.push` 容量检查内联~~ | ❌ **已验证无收益**（v2.60）：b4_array 三轮 A/B 28.5 vs 28.4 | b4 是内存带宽瓶颈（16 MB 工作集），push 阶段的调用开销被掩盖 |
 | ~~LICM 外提 `load`（vec 句柄字段）~~ | ❌ **未采用**（v2.60）：`load` 会陷入，循环可能执行 0 次 → 外提改变语义 | 要做必须先证明"循环至少执行一次"（loop rotation / 常量上界），另一个量级的工程 |
+| ~~跨函数"形参非负"摘要~~ | ❌ **已验证零命中**（v2.64）：十个基准一个都没命中 | b9 的 `p` 来自 `jws(s,p0)` 的**返回值**，要第二层"返回值非负"摘要；再往上是 `jws(s, st.get(0))`，vec 取元素的非负性不可证 —— 链断在这里。代码已回退。见 `versions/v2.64/CHANGELOG.md` |
 | **寄存器池扩到 11（+RCX/RDX）** | b9_json 的 jval 198 vreg / 24 溢出槽；caller-saved 现在只用 RSI/RDI/R8/R9 四个 | 需先审计 `idiv`（RDX:RAX）、变量移位（CL）、`cpuid`（四寄存器全占）的隐式使用；分配器要按"指令类别"排除 |
 | **loop_sum 三件套** | 循环 10.8 → ~4 cycles/iter | ① phi copy 消除（分配器 coalescing）② do-while 变换（CFG 要容错 jcc 回边）③ cssub 形态 |
 | ~~JSON memchr 化~~ | ❌ **已验证不可行**（v1.35）：1.35 MB 负载 29 ms → 62 ms（**慢 2 倍**） | JSON 字符串普遍 <32 字节，SWAR 每次调用的固定开销（参数搬运 + 调用 + 三次独立扫描）远大于逐字节循环（循环体 4 条指令）。结论：**8 字节扫描只在长串且单字节目标时划算** |
