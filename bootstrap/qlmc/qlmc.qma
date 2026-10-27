@@ -5559,21 +5559,78 @@ fn _const_before(ir: vec[Ir], v: int, h: int) -> int {
 ///   前导（循环头之前）：`v = (k * C) % D`      ← 常量，编译期算好
 ///   循环体：`r = v`（替换原来的 DIVC）；`i = i + s` 之后 `v += C`，
 ///           若 `v >= D` 则 `v -= D`
+/// 归纳削减的**变换**部分（拆出来只为压帧槽：合在 `_opt_mod_ind` 里要 417 个槽，
+/// 上限 416）。参数是已经验证过的形状 + 守卫信息。
+fn _mod_ind_apply(fc: FnCtx, h: int, hit: int, di: int, i0: int, c: int, dd: int,
+                  k0: int, step: int, guard: int, lim: int, dst: int) {
+    let ir = fc.ir
+        let r0 = (k0 * c) % dd
+        let v = _new_var(fc, -1, TY_INT)
+        let lskip = _newlab(fc.labs)
+        let mut dbase = di
+        if guard == 1 {
+            // 守卫版：快路在前（fall-through 不了，所以让"快"的那侧是被跳到的）
+            let lfast = _newlab(fc.labs)
+            let ldone = _newlab(fc.labs)
+            let lv = _new_var(fc, -1, TY_INT)
+            _ir_insert(fc, hit + 1, OP_JMP, 0, 0, 0, ldone)
+            _ir_insert(fc, hit + 2, OP_LAB, 0, 0, 0, lfast)
+            _ir_insert(fc, hit + 3, OP_MOV, dst, v, 0, 0)
+            _ir_insert(fc, hit + 4, OP_LAB, 0, 0, 0, ldone)
+            _ir_insert(fc, hit, OP_JCMP, 0x8C, i0, lv, lfast)   // i0 < LIMIT → 快路
+            dbase = di + 5
+            _ir_insert(fc, h, OP_CONST, lv, 0, 0, lim)
+        } else {
+            // 常量上界版：直接把 DIVC 换成 `r = v`。
+            // **下标是 `hit` 不是 `hit+1`** —— 循环头的 CONST 是在最后才插的
+            // （v2.86 重构时这里写成 hit+1，把 DIVC 后面那条 `add acc, r`
+            // 覆盖掉了：b1 校验和从 119999988 变成 0，静默错）。
+            ir.set(hit, Ir { op: OP_MOV, dst: dst, a: v, b: 0, imm: 0 })
+        }
+        // 1) 循环体尾部的回绕（下标最大，先插不影响前面的下标）
+        _ir_insert(fc, dbase + 1, OP_BINI, v, v, OP_ADD, step)
+        _ir_insert(fc, dbase + 2, OP_JCMPI, 0x8C, v, dd, lskip)
+        _ir_insert(fc, dbase + 3, OP_BINI, v, v, OP_SUB, dd)
+        _ir_insert(fc, dbase + 4, OP_LAB, 0, 0, 0, lskip)
+        // 2) 循环头之前的常量初始化（h 在最前，最后插）
+        _ir_insert(fc, h, OP_CONST, v, 0, 0, r0)
+}
+
+fn _vec_has(v: vec[int], x: int) -> bool {
+    let n = len(v)
+    let mut i = 0
+    while i < n {
+        if v.get(i) == x {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 fn _opt_mod_ind(fc: FnCtx, use: vec[int], ndef: vec[int]) {
     let ir = fc.ir
     let mut n = len(ir)
     let mut i = 0
+    // 已变换过的循环（按**头标签 id** 记 —— 插入指令会让下标漂移，标签 id 不会）。
+    // 守卫版会把原 DIVC 留在原地（只有快路被换成 MOV），所以不记的话重扫会
+    // 一遍遍地对同一个窗口做变换，直到把帧槽吃光（v2.87 实测：work 要 417 个槽）。
+    let mut done = vec[int].new(4)
     while i < n {
         let ins = ir.get(i)
         if ins.op != OP_JMP && ins.op != OP_JCMP && ins.op != OP_JCMPI {
             i = i + 1
             continue
         }
-        let h = _lab_index(ir, ins.imm)
+        let lid = ins.imm
+        let h = _lab_index(ir, lid)
         let e = i
         i = i + 1
         if h < 0 || h >= e {
             continue                     // 不是回边
+        }
+        if _vec_has(done, lid) {
+            continue                     // 这个循环已经变换过
         }
         if DBG_MODIND == 1 {
             eprint("[modind] 回边 h=" + h.to_str() + " e=" + e.to_str())
@@ -5676,27 +5733,28 @@ fn _opt_mod_ind(fc: FnCtx, use: vec[int], ndef: vec[int]) {
             }
             k = k + 1
         }
+        // ---- 上界：能证明就用常量上界（无守卫），证不了就用**运行期守卫** ----
+        //
+        // v2.87：以前上界必须是常量才敢做，因为 `t = i*C` 溢出会让 `t` 变负，
+        // 非负前提就没了。但"上界是形参"是**最常见的形状**（`fn work(n)` 里
+        // `while i < n`）—— b8_threads1 就是它，一直吃不到这个优化。
+        //
+        // 换成运行期守卫：`i < LIMIT` 才走快路（LIMIT = 2^62/C，保证 `i*C` 不溢出），
+        // 否则走原来的除法。因为 `i` 单调递增，一旦越过 LIMIT 就再也回不到快路，
+        // 所以 `v` 变脏也无所谓。代价是每轮一条 `cmp`+`jcc`（永远走同一侧）。
+        let mut guard = 0
+        let mut lim = 0
         if bound < 0 {
-            if DBG_MODIND == 1 { eprint("[modind] 没有找到 i0 的常量上界守卫") }
-            continue
+            guard = 1
+            lim = 4611686018427387904 / c
+        } else if c * bound > 4611686018427387904 {
+            guard = 1                    // 常量上界也会溢出：同样用守卫兜住
+            lim = 4611686018427387904 / c
         }
-        if DBG_MODIND == 1 { eprint("[modind] 命中：D=" + dd.to_str() + " C=" + c.to_str() + " k0=" + k0.to_str() + " N=" + bound.to_str()) }
-        if c * bound > 4611686018427387904 {
-            continue                     // t 可能溢出 → 非负前提不成立
-        }
-        // ---- 变换 ----
-        let r0 = (k0 * c) % dd
-        let v = _new_var(fc, -1, TY_INT)
-        let lskip = _newlab(fc.labs)
-        // 1) 先插循环体尾部的回绕（下标最大，先插不影响前面的下标）
-        _ir_insert(fc, di + 1, OP_BINI, v, v, OP_ADD, step)
-        _ir_insert(fc, di + 2, OP_JCMPI, 0x8C, v, dd, lskip)
-        _ir_insert(fc, di + 3, OP_BINI, v, v, OP_SUB, dd)
-        _ir_insert(fc, di + 4, OP_LAB, 0, 0, 0, lskip)
-        // 2) 再插循环头之前的常量初始化（h 在 di 之前，不受上面影响）
-        _ir_insert(fc, h, OP_CONST, v, 0, 0, r0)
-        // 3) 原 DIVC → `r = v`（h 插入后整体 +1）
-        ir.set(hit + 1, Ir { op: OP_MOV, dst: w.dst, a: v, b: 0, imm: 0 })
+        if DBG_MODIND == 1 { eprint("[modind] 命中：D=" + dd.to_str() + " C=" + c.to_str() + " k0=" + k0.to_str() + " N=" + bound.to_str() + " guard=" + guard.to_str()) }
+        let dstd = w.dst
+        _mod_ind_apply(fc, h, hit, di, i0, c, dd, k0, step, guard, lim, dstd)
+        done.push(lid)
         // 这一轮只处理一条：插入已经改了长度，重新扫
         i = 0
         n = len(ir)
