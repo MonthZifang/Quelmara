@@ -63,8 +63,19 @@ def run(cmd, **kw):
 def build_interp():
     """解释器源码变了就重编（用 qlmc，自举产物）"""
     if not os.path.isfile(QLMC):
-        raise SystemExit("缺少 build/qlmc.exe（先自举：python tools/stage0/qlm_cli.py "
-                         "build bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe）")
+        # CI 上主回归跑在 [9b] 之前，build/qlmc.exe 可能还不存在 —— 就地自举。
+        # 慢（~90 s）但只有一次；不这么做这条测试在干净环境里必然红。
+        print("[build] build/qlmc.exe 不存在，先自举（stage-0 -> qlmc）…")
+        t0 = time.time()
+        p = run([sys.executable,
+                 os.path.join(ROOT, "tools", "stage0", "qlm_cli.py"),
+                 "build", os.path.join(ROOT, "bootstrap", "qlmc", "qlmc.qma"),
+                 "--target", "win", "-o", QLMC])
+        if p.returncode != 0 or not os.path.isfile(QLMC):
+            sys.stderr.write(p.stdout.decode("utf-8", "replace"))
+            sys.stderr.write(p.stderr.decode("utf-8", "replace"))
+            raise SystemExit("自举 qlmc 失败")
+        print(f"[build] qlmc.exe  {os.path.getsize(QLMC)} B  {time.time() - t0:.1f} s")
     need = (not os.path.isfile(INTERP)
             or os.path.getmtime(SRC) > os.path.getmtime(INTERP))
     if not need:
