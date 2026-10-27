@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-63 个模块，**530 个公开函数**（另有 522 个内部函数）
+63 个模块，**532 个公开函数**（另有 520 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -75,7 +75,7 @@
 | `std/uuid` | UUID v4 生成 + nil + 校验/版本/变体位（随机源为 std/rand，非密码学） | 5 / 9 |
 | `std/ws` | WebSocket 服务端（RFC 6455） | 0 / 24 |
 | `std/x25519` | Curve25519 上的 X25519 密钥交换（RFC 7748，TLS ECDHE 地基） | 3 / 21 |
-| `std/x509` | X.509 解析 + P-256 验签 + 证书链/有效期/域名校验 | 11 / 34 |
+| `std/x509` | X.509 解析 + P-256 验签 + 证书链/有效期/域名校验 | 13 / 34 |
 <!-- overview:end -->
 
 ## 2. 用法约定
@@ -1788,8 +1788,14 @@ fn x509_sig(cert: str) -> str
 /// 用证书自己的公钥验证它自己的签名（根证书 / 自签测试）。
 /// 返回 1 = 签名有效且是 P-256 证书。
 fn x509_verify_self_p256(cert: str) -> int
+/// 证书有效期：[not_before, not_after]（Unix 秒）；解析失败返回空 vec。
+/// 时间按 UTCTime/GeneralizedTime 都支持，调用方自己做区间判断。
+fn x509_validity(cert: str) -> vec[int]
 /// 在 [not_before, not_after] 内返回 1
 fn x509_time_valid(cert: str, now: int) -> int
+/// subjectAltName（2.5.29.17）里的 DNS 名列表；没有扩展返回空 vec。
+/// 通配符（`*.example.com`）原样返回，匹配规则由调用方决定。
+fn x509_san(cert: str) -> vec[str]
 /// 证书是否覆盖该主机名：逐个 SAN 比对，`*.example.com` 只匹配一级子域；任一命中返回 1。
 /// 只看 SAN，不回退 CN。
 fn x509_host_ok(cert: str, host: str) -> int

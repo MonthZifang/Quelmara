@@ -250,8 +250,24 @@ fn pend_add(ds: map[str]str, line: str) {
 fn flush_pending(ds: map[str]str) {
     let p = ds.get("pending")
     if p != "" {
-        emit(p)
+        queue_fn(ds, p)
         ds.set("pending", "")
+    }
+}
+
+/// 函数签名行**先排队，文件末尾一次刷出**（v2.78）。
+///
+/// 为什么：声明级对拍的 oracle（`tools/dev/astdecl.py`）的输出顺序是
+/// **struct/enum 全部在前、fn 全部在后**，而本解析器以前是"读到哪打到哪"。
+/// 源码里 struct 写在 fn 后面时（`tests/t148_f64_xmm.qma` 就是这样），两边
+/// 的行序对不上，对拍直接 FAIL —— 这不是解析能力问题，纯粹是输出顺序。
+/// 用 `map[str]str` 当队列：这个文件里的跨函数状态都走 map（见 `cur_get`）。
+fn queue_fn(ds: map[str]str, line: str) {
+    let cur = ds.get("fnq")
+    if cur == "" {
+        ds.set("fnq", line)
+    } else {
+        ds.set("fnq", cur + "\n" + line)
     }
 }
 
@@ -887,7 +903,7 @@ fn parse_postfix(src: str, n: int, k: map[str]int, ks: map[str]str) -> str {
     return out
 }
 
-fn parse_fn(src: str, n: int, k: map[str]int) {
+fn parse_fn(src: str, n: int, k: map[str]int, ds: map[str]str) {
     let name = read_name(src, n, k)
     skip_ws(src, n, k)
     if cur_get(k) < n && src[cur_get(k)] == 91 {
@@ -929,7 +945,7 @@ fn parse_fn(src: str, n: int, k: map[str]int) {
         cur_set(k, i2 + 2)
         ret = parse_type(src, n, k)
     }
-    emit("fn|" + name + "|(" + params + ")|" + ret)
+    queue_fn(ds, "fn|" + name + "|(" + params + ")|" + ret)
     skip_block(src, n, k)
 }
 
@@ -947,6 +963,7 @@ fn main() {
     let ds = map[str]str.new(4)
     ds.set("items", "")
     ds.set("pending", "")
+    ds.set("fnq", "")
     ds.set("jsonimp", "")
     cur_set(k, 0)
     k.set("skip", 0)
@@ -967,6 +984,10 @@ fn main() {
         let i = cur_get(k)
         if i >= n {
             flush_pending(ds)
+            let fq = ds.get("fnq")
+            if fq != "" {
+                emit(fq)
+            }
             return
         }
         let c = src[i]
@@ -1029,7 +1050,7 @@ fn main() {
                 let cname = read_name(src, n, k)
                 if cname == "fn" {
                     flush_pending(ds)
-                    parse_fn(src, n, k)
+                    parse_fn(src, n, k, ds)
                 } else {
                     expect(src, n, k, 61)
                     let mut j = cur_get(k)
@@ -1044,7 +1065,7 @@ fn main() {
                 parse_enum(src, n, k)
             } else if w == "fn" {
                 flush_pending(ds)
-                parse_fn(src, n, k)
+                parse_fn(src, n, k, ds)
             } else if w == "test" {
                 // test "name" { ... }：跳过字符串与块
                 skip_ws(src, n, k)

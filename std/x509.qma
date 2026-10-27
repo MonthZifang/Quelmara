@@ -434,8 +434,9 @@ fn _x509_days(y: int, m: int, d: int) -> int {
     return era * 146097 + doe - 719468
 }
 
-// 证书有效期：[not_before, not_after]（Unix 秒）；失败返回空 vec
-fn x509_validity(cert: str) -> vec[int] {
+/// 证书有效期：[not_before, not_after]（Unix 秒）；解析失败返回空 vec。
+/// 时间按 UTCTime/GeneralizedTime 都支持，调用方自己做区间判断。
+pub fn x509_validity(cert: str) -> vec[int] {
     let out = vec[int].new(3)
     let v = _x509_skip(cert, 2)
     if x509_ok(v) == 0 || v.get(0) != X509_TAG_SEQUENCE {
@@ -562,8 +563,9 @@ fn x509_is_ca(cert: str) -> int {
     return 0
 }
 
-// subjectAltName（2.5.29.17）→ DNS 名列表
-fn x509_san(cert: str) -> vec[str] {
+/// subjectAltName（2.5.29.17）里的 DNS 名列表；没有扩展返回空 vec。
+/// 通配符（`*.example.com`）原样返回，匹配规则由调用方决定。
+pub fn x509_san(cert: str) -> vec[str] {
     let out = vec[str].new(4)
     let v = _x509_ext_value(cert, "\x55\x1d\x11")
     if len(v) == 0 {
