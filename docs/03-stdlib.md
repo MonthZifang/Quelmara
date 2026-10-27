@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-63 个模块，**529 个公开函数**（另有 523 个内部函数）
+63 个模块，**530 个公开函数**（另有 522 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -26,7 +26,7 @@
 | `std/f64` | 十进制文本 ↔ f64（严格十进制解析 + Clinger 快路径，非十进制 fail-fast） | 3 / 16 |
 | `std/fs` | 文件读写（open/read/write/seek/size/sync/close/rename；Windows PE，@ffi 直调 kernel32） | 11 / 20 |
 | `std/gen` | 泛型算法库（min/max/clamp/dist/contains/index_of/reverse，调用点推导单态化） | 0 / 9 |
-| `std/gzip` | DEFLATE 编码 + gzip 包装 + CRC-32；v1.19 起含 inflate 解码 | 5 / 33 |
+| `std/gzip` | DEFLATE 编码 + gzip 包装 + CRC-32；v1.19 起含 inflate 解码 | 6 / 33 |
 | `std/hash` | FNV-1a 32/64 非密码学哈希（缓存键 / 分片） | 4 / 4 |
 | `std/hex` | 十六进制编解码 | 4 / 5 |
 | `std/http` | HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商） | 39 / 54 |
@@ -418,6 +418,9 @@ fn gzip_encode(s: str) -> str
 fn inflate_raw(s: str) -> str
 /// gzip_decode(s) -> str：逐 member 解，结果按顺序拼接
 fn gzip_decode(s: str) -> str
+/// zlib 容器（RFC 1950）解压：跳过 2 字节头与 4 字节 Adler-32，中间是 deflate。
+/// 头校验（CMF/FLG）、预置字典、窗口大小都在这里拦；数据过短直接 assert。
+fn zlib_decode(s: str) -> str
 ```
 
 ### `std/hash.qma`

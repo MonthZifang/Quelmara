@@ -976,7 +976,9 @@ fn adler32(s: str) -> int {
     return (b << 16) | a
 }
 
-fn zlib_decode(s: str) -> str {
+/// zlib 容器（RFC 1950）解压：跳过 2 字节头与 4 字节 Adler-32，中间是 deflate。
+/// 头校验（CMF/FLG）、预置字典、窗口大小都在这里拦；数据过短直接 assert。
+pub fn zlib_decode(s: str) -> str {
     let n = len(s)
     if n < 8 {
         assert(false, "zlib_decode: 数据过短")
