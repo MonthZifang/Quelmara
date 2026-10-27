@@ -753,9 +753,27 @@ fn _cur(p: P, pos: vec[int]) -> Tok {
     return _t(p, pos[0])
 }
 
+@ffi("kernel32.dll", "GetCurrentProcess")
+fn _GetCurrentProcess() -> int
+
+@ffi("kernel32.dll", "TerminateProcess")
+fn _TerminateProcess(h: int, code: int) -> bool
+
+/// 出错退出：**不用 ExitProcess，用 TerminateProcess**（v2.85）。
+///
+/// ExitProcess 会走 loader 的进程关闭流程（LdrShutdownProcess 遍历模块表、
+/// 逐个调 DLL 的 DETACH），而 qlmc 在**深层解析函数**里调它时那个流程会 AV
+/// （§7.34：先正确打印诊断，再 0xC0000005）。TerminateProcess 不做这些，
+/// 直接结束进程。编译器没有需要 flush 的缓冲（print/eprint 都是 WriteFile），
+/// 所以硬退出没有副作用。
+fn _die(code: int) {
+    _TerminateProcess(_GetCurrentProcess(), code)
+    exit(code)                       // 万一 TerminateProcess 失败
+}
+
 fn _fail(p: P, pos: vec[int], msg: str) {
     eprint("qlmc: line " + _cur(p, pos).line.to_str() + ": " + msg)
-    exit(2)
+    _die(2)
 }
 
 fn _is_p(p: P, pos: vec[int], pid: int) -> bool {

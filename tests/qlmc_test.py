@@ -110,6 +110,20 @@ def main():
     info = pe_info(QLMC)
     ok(f"qlmc.exe 是合法 PE（{info['size']} 字节）") if info else bad("qlmc.exe 不是 PE")
 
+    # ---- 错误路径：必须**干净退出**（rc=2），不能是崩溃（0xC0000005 / 139）----
+    # §7.34：qlmc 以前在表达式解析器深处报错时会 SIGSEGV（先正确打印诊断、
+    # 然后访问违例）。根因在 ExitProcess 的 loader 关闭流程，修法是出错走
+    # TerminateProcess。这条测试就是那个修复的判据 —— 只比退出码，不比产物。
+    print("== 错误路径（诊断 + 干净退出） ==")
+    bad_src = os.path.join(BUILD, "err_syntax.qma")
+    with open(bad_src, "w", encoding="utf-8") as f:
+        f.write("fn main() {\n    let x = \n}\n")
+    r = subprocess.run([QLMC, "dump", bad_src], capture_output=True)
+    if r.returncode == 2 and b"\xe6\x9c\x9f\xe6\x9c\x9b\xe8\xa1\xa8\xe8\xbe\xbe\xe5\xbc\x8f" in r.stderr:
+        ok("语法错：打印诊断且 rc=2（无崩溃）")
+    else:
+        bad(f"语法错：期望 rc=2 且带诊断，实际 rc={r.returncode} stderr={r.stderr[-120:]!r}")
+
     for name, rel in CASES:
         src = os.path.join(ROOT, rel)
         out0 = os.path.join(BUILD, f"qlmc_{name}_stage0.exe")

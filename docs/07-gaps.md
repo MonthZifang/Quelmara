@@ -1175,7 +1175,7 @@ Win64 前 4 个整型实参走 RCX/RDX/R8/R9，第 5 个起在栈上；`f64` 走
 节点里只存下标。**绕法不是修复**：真实程序里七参函数并不罕见，这条要在
 qlmc 里修掉，并加一条差分夹具钉住。
 
-### 7.34 待修：qlmc 在**编译错误路径**上 SIGSEGV（v2.82 发现，qlmc 侧）
+### 7.34 已修（v2.85，症状）：qlmc 在**编译错误路径**上 SIGSEGV（v2.82 发现，qlmc 侧）
 
 编译一个语法错的源文件时，qlmc 会先**正确打印**诊断，然后进程以访问违例结束
 （bash 报 139 / `0xC0000005`）：
@@ -1194,8 +1194,16 @@ Segmentation fault (exit 139)
 影响：退出码非零是对的（CI 判据不受影响），但**每次编译错误都留一个崩溃**，
 用户看到的是"编译器挂了"而不是"你的代码第 3 行有问题"。这条要修。
 
-排查入口：`tools/dev/fault_probe.py`（拿 RVA）+ `dumpasm.py`；先看
-`_fail` 的调用链上有没有 rsp 不平衡的函数（`push`/`pop` 数量对不上）。
+**v2.85 已修（症状）**：`_fail` 不再走 `ExitProcess`，改走
+`TerminateProcess(GetCurrentProcess(), code)`。排除过程见
+`docs/versions/v2.85/CHANGELOG.md`：不是 exit 本身、不是 `eprint`、不是栈深度
+（帧 ≤200 字节）、不是聚合形参 —— 只有"表达式解析器深处"这一条路径崩，
+崩在**系统 DLL 的地址空间**里（AV 读 0xFFFF…FFFF），所以定性为
+`ExitProcess` 的 loader 关闭流程（模块表遍历 / DLL DETACH）在那条栈上出问题。
+`TerminateProcess` 跳过整个关闭流程。
+
+**根因仍未定位**（本机没有 cdb/WinDbg）。判据：把 `_die` 换回 `exit`，
+`tests/qlmc_test.py` 不会红，但手工编一个语法错的文件就会看到 139。
 
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
