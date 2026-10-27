@@ -5588,6 +5588,13 @@ fn _mod_ind_apply(fc: FnCtx, h: int, hit: int, di: int, i0: int, c: int, dd: int
             ir.set(hit, Ir { op: OP_MOV, dst: dst, a: v, b: 0, imm: 0 })
         }
         // 1) 循环体尾部的回绕（下标最大，先插不影响前面的下标）
+        // 回绕用**条件减**（`if v >= D { v -= D }`），不用无分支序列。
+        //
+        // v2.88 试过 `t = v-D; m = t>>63; m &= D; v = t+m`（4 条算术、无分支）：
+        //   b8_threads1 只快 2~3%，而 **b1_int 慢了 6.6×**（21ms → 138ms）。
+        // 原因：它要多两个临时值，b1 的 `main` 里寄存器池（7 个）不够，溢出到
+        // 帧槽，热循环里多出访存。**b1 是延迟敏感型，b8 是吞吐型** —— 同一个
+        // 变换在两边方向相反，所以保留分支版（分支在 13 周期模式上预测得很好）。
         _ir_insert(fc, dbase + 1, OP_BINI, v, v, OP_ADD, step)
         _ir_insert(fc, dbase + 2, OP_JCMPI, 0x8C, v, dd, lskip)
         _ir_insert(fc, dbase + 3, OP_BINI, v, v, OP_SUB, dd)
@@ -5608,7 +5615,8 @@ fn _vec_has(v: vec[int], x: int) -> bool {
     return false
 }
 
-fn _opt_mod_ind(fc: FnCtx, use: vec[int], ndef: vec[int]) {
+fn _opt_mod_ind(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
+                ndef: vec[int]) {
     let ir = fc.ir
     let mut n = len(ir)
     let mut i = 0
@@ -5753,7 +5761,19 @@ fn _opt_mod_ind(fc: FnCtx, use: vec[int], ndef: vec[int]) {
         }
         if DBG_MODIND == 1 { eprint("[modind] 命中：D=" + dd.to_str() + " C=" + c.to_str() + " k0=" + k0.to_str() + " N=" + bound.to_str() + " guard=" + guard.to_str()) }
         let dstd = w.dst
+        let nv0 = len(fc.vloc)
         _mod_ind_apply(fc, h, hit, di, i0, c, dd, k0, step, guard, lim, dstd)
+        // 变换会 `_vnew` 出新临时值，而 `cok/cval/use/ndef` 是按**旧**的 vreg 数
+        // 开的 —— `_opt_copy` / `_opt_fuse` 里有几处 `use.get(d)` 没做上界检查，
+        // 不补齐就是 "vec index out of bounds"（v2.87 试无分支回绕时踩的）。
+        let mut q = nv0
+        while q < len(fc.vloc) {
+            cok.push(0)
+            cval.push(0)
+            use.push(0)
+            ndef.push(0)
+            q = q + 1
+        }
         done.push(lid)
         // 这一轮只处理一条：插入已经改了长度，重新扫
         i = 0
@@ -5905,7 +5925,7 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     // ---- v2.81 归纳削减：`(i*C) % D` → 递增计数器 + 条件回绕 ----
     // 它会插入新指令、改使用关系，所以放在最后，之后重算 use/ndef 再跑一次 DCE
     // （不然被替换掉的 `t = i*C` 会留在循环里当死代码）。
-    _opt_mod_ind(fc, use, ndef)
+    _opt_mod_ind(fc, cok, cval, use, ndef)
     _opt_ndef(ir, ndef)
     i = 0
     while i < len(use) {
