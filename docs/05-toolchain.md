@@ -1155,11 +1155,11 @@ build/qlm_interp.exe --repl
 int、str、bool、f64 字面量；`+ - * / %`、`== != < <= > >=`、`&& || !`；
 函数调用（含递归、多参数）；`vec[T].new(n)` / `.push` / `.get` / `.set` /
 `.len` / `.clear`、`v[i]` 读写、`s[i]` 取字节；`struct` 声明 / 字面量 /
-字段读写；内建 `print` / `eprint` / `len` / `assert`；`const` 全局常量；
+字段读写；`enum` 声明 / 变体构造 `E.V(载荷)` / `match`（含通配臂、载荷绑定、
+块臂里的 `return`）；内建 `print` / `eprint` / `len` / `assert`；`const` 全局常量；
 `module` / `import` 跳过。
 
-**还没做**：`match`（要先有 enum 值模型）、**闭包**（捕获语义是另一层）、
-map、泛型。这两个是下一版的正经活。
+**还没做**：**闭包**（捕获语义是另一层）、map、泛型、泛型 enum。
 
 **表示上的两个要点**：vec 是**引用**（对象号 + 全局元素池，别名共享同一个
 对象），struct 是**值**（绑定 / 赋值 / 进 vec / 传参都整段复制）。这两条与

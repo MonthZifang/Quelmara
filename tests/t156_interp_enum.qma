@@ -1,0 +1,89 @@
+// t156_interp_enum —— 解释器差分夹具：enum 值 / 构造 / match
+//
+// 解释器把枚举值表示成元素池里两格 [变体槽号, 载荷]，match 按槽号比。
+// 钉住这几条：
+//   1) 无载荷变体 / 带载荷变体（int、str）
+//   2) 载荷命名实参 `E.V(rate: 7)` 与裸实参 `E.V(7)` 等价
+//   3) match 作表达式（臂体是表达式）与作语句（臂体是块）
+//   4) 通配臂 `_`、载荷绑定
+//   5) 块臂里写 `return`（控制流要从表达式里带出去）
+enum Light {
+    Red
+    Yellow
+    Green
+    Flashing(rate: int)
+}
+
+enum Cmd {
+    Stop
+    Add(n: int)
+    Tag(s: str)
+}
+
+fn code(l: Light) -> int {
+    return match l {
+        Light.Red => 1
+        Light.Yellow => 2
+        Light.Green => 3
+        _ => 9
+    }
+}
+
+fn early(c: Cmd) -> int {
+    match c {
+        Cmd.Add(n) => {
+            if n > 100 {
+                return 1000 + n
+            }
+            return n
+        }
+        _ => {
+            return -1
+        }
+    }
+}
+
+fn main() {
+    print(code(Light.Red))
+    print(code(Light.Yellow))
+    print(code(Light.Green))
+    print(code(Light.Flashing(rate: 7)))
+    print(code(Light.Flashing(5)))
+
+    print(match Light.Flashing(rate: 7) {
+        Light.Flashing(rate) => rate * 3
+        _ => -1
+    })
+
+    let mut total = 0
+    for i in 0..5 {
+        let c = Light.Green
+        match c {
+            Light.Green => {
+                total = total + i
+            }
+            _ => {
+                total = total - 100
+            }
+        }
+    }
+    print(total)
+
+    print(match Cmd.Add(n: 41) {
+        Cmd.Add(x) => x + 1
+        _ => 0
+    })
+
+    match Cmd.Tag(s: "hey") {
+        Cmd.Tag(s) => {
+            print(len(s))
+        }
+        _ => {
+            print(-1)
+        }
+    }
+
+    print(early(Cmd.Add(n: 5)))
+    print(early(Cmd.Add(n: 500)))
+    print(early(Cmd.Stop))
+}

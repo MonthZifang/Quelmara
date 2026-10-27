@@ -37,6 +37,7 @@ FIXTURES = [
     "t153_interp_fn.qma",
     "t154_interp_vec.qma",
     "t155_interp_struct.qma",
+    "t156_interp_enum.qma",
 ]
 
 PASS = FAIL = 0

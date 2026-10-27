@@ -82,6 +82,7 @@ const K_BOOL = 3
 const K_F64 = 4
 const K_VEC = 5
 const K_STRUCT = 6
+const K_ENUM = 7
 
 /// 运行期的值。`i` 一槽多用：
 ///   K_INT → 整数；K_BOOL → 0/1；K_VEC → 元素在 `elems` 池里的起点；
@@ -173,6 +174,7 @@ const O_COLON = 22
 const O_DOT = 23
 const O_LBR = 24
 const O_DOTDOT = 26
+const O_FATARROW = 27
 const O_RBR = 25
 
 const K_FN = 1
@@ -192,6 +194,8 @@ const K_BREAK = 14
 const K_CONTINUE = 15
 const K_FOR = 16
 const K_IN = 17
+const K_MATCH = 18
+const K_ENUM = 19
 
 struct Tok {
     k: int
@@ -231,6 +235,8 @@ fn kw_id(w: str) -> int {
     if w == "continue" { return K_CONTINUE }
     if w == "for" { return K_FOR }
     if w == "in" { return K_IN }
+    if w == "match" { return K_MATCH }
+    if w == "enum" { return K_ENUM }
     return 0
 }
 
@@ -370,6 +376,7 @@ fn lex(src: str, tk: vec[Tok]) -> int {
             else if c == 124 && two == 124 { op = O_OR }
             else if c == 45 && two == 62 { op = O_ARROW }
             else if c == 46 && two == 46 { op = O_DOTDOT }
+            else if c == 61 && two == 62 { op = O_FATARROW }
             if op != 0 {
                 push_tok(tk, T_OP, op, 0.0, "", line)
                 i = i + 2
@@ -434,6 +441,8 @@ const E_FIELD = 29
 const E_INDEX = 30
 const E_VECNEW = 31
 const E_SLIT = 32
+const E_ECON = 33
+const E_MATCH = 34
 const N_SETFIELD = 12
 
 /// 节点。**刻意不放 f64 字段**：qlmc 目前把"第 5 个及以后的 f64 形参"
@@ -445,6 +454,14 @@ struct Nd {
     b: int
     c: int
     n: int
+}
+
+/// 一个 enum 的变体区间：变体在 `variants` 池里每 3 格一个
+/// （enum 号 / 变体名 / 载荷名，载荷名为 -1 表示无载荷）。
+struct Enum {
+    name: int
+    vs: int
+    nv: int
 }
 
 /// 一个 struct 的**布局**：字段名按声明顺序排进 `sfields` 池。
@@ -490,6 +507,10 @@ struct St {
     ecap: vec[int]       // vec 对象：容量
     structs: vec[Struct] // struct 布局表
     sfields: vec[int]    // 字段名下标池
+    enums: vec[Enum]     // enum 表
+    variants: vec[int]   // 变体池：每 3 格 (enum 号, 变体名, 载荷名|-1)
+    arms: vec[int]       // match 臂池：每 3 格 (变体号|-1, 绑定名|-1, 体节点)
+    flow: vec[int]       // 表达式里出现的控制流（match 块臂里的 return）：0/1
 }
 
 fn st_new() -> St {
@@ -519,7 +540,11 @@ fn st_new() -> St {
         elen: vec[int].new(8),
         ecap: vec[int].new(8),
         structs: vec[Struct].new(8),
-        sfields: vec[int].new(16)
+        sfields: vec[int].new(16),
+        enums: vec[Enum].new(4),
+        variants: vec[int].new(16),
+        arms: vec[int].new(16),
+        flow: vec[int].new(1)
     }
     // `vec[T].new(n)` 只给**容量**，长度是 0 —— 这些单槽状态必须 push 出第 0 格，
     // 否则后面 `set(0, ...)` 直接撞越界检查（die → exit 1，什么也不打印）。
@@ -531,6 +556,7 @@ fn st_new() -> St {
     st.bs.push(0)
     st.bc.push(0)
     st.gend.push(0)
+    st.flow.push(0)
     return st
 }
 
@@ -619,8 +645,69 @@ fn mkbin(st: St, op: int, a: int, b: int) -> int {
     return mknd(st, E_BIN, a, b, 0, op)
 }
 
+/// `match e { Pat => expr  Pat => { ... } }`
+/// 臂之间用换行分隔（也可以写逗号）：臂体是表达式时，遇到下一个模式的
+/// 标识符自然就停了 —— 标识符不可能接在表达式后面。
+fn p_match(st: St) -> int {
+    p_bump(st)                       // match
+    let scrut = p_expr(st)
+    p_op(st, O_LBR, "{")
+    let start = len(st.arms)
+    let mut cnt = 0
+    while !p_is_op(st, O_RBR) {
+        if p_cur(st).k == T_EOF {
+            p_err(st, "match 没有结束的 }")
+        }
+        let mut vid = 0 - 1
+        let mut bind = 0 - 1
+        let pt = p_cur(st)
+        if pt.k == T_ID && pt.s == "_" {
+            p_bump(st)               // 通配臂
+        } else if pt.k == T_ID {
+            let en = p_name(st)
+            let ei = find_enum(st, en)
+            if ei < 0 {
+                p_err(st, "match 模式里的 " + st.names.get(en) + " 不是 enum")
+            }
+            p_op(st, O_DOT, ".")
+            let vn = p_name(st)
+            vid = find_variant(st, ei, vn)
+            if vid < 0 {
+                p_err(st, "enum " + st.names.get(en) + " 没有变体 " + st.names.get(vn))
+            }
+            if p_is_op(st, O_LP) {
+                p_bump(st)
+                bind = p_name(st)
+                p_op(st, O_RP, ")")
+            }
+        } else {
+            p_err(st, "match 模式期望 枚举名.变体 或 _")
+        }
+        p_op(st, O_FATARROW, "=>")
+        let mut body = 0
+        if p_is_op(st, O_LBR) {
+            let s0 = p_block_body(st)
+            body = mknd(st, N_BLOCK, s0, st.bc.get(0), 0, 0)
+        } else {
+            body = p_expr(st)
+        }
+        st.arms.push(vid)
+        st.arms.push(bind)
+        st.arms.push(body)
+        cnt = cnt + 1
+        if p_is_op(st, O_COMMA) {
+            p_bump(st)
+        }
+    }
+    p_bump(st)                       // '}'
+    return mknd(st, E_MATCH, scrut, start, cnt, 0)
+}
+
 fn p_primary(st: St) -> int {
     let t = p_cur(st)
+    if t.k == T_KW && t.n == K_MATCH {
+        return p_match(st)
+    }
     if t.k == T_INT {
         p_bump(st)
         return mknd(st, E_INT, 0, 0, 0, t.n)
@@ -739,6 +826,34 @@ fn p_postfix(st: St) -> int {
         } else if p_is_op(st, O_DOT) {
             p_bump(st)
             let nm = p_name(st)
+            // `E.V` / `E.V(载荷)`：基址是 enum 名而不是值
+            let bnd = st.nd.get(e)
+            if bnd.k == E_VAR {
+                let ei = find_enum(st, bnd.n)
+                if ei >= 0 {
+                    let vid = find_variant(st, ei, nm)
+                    if vid < 0 {
+                        p_err(st, "enum " + st.names.get(bnd.n) + " 没有变体 " +
+                                  st.names.get(nm))
+                    }
+                    let mut pay = 0 - 1
+                    if p_is_op(st, O_LP) {
+                        p_bump(st)
+                        // 载荷实参可以写 `rate: 7`（与编译器同口径）或裸表达式
+                        if p_cur(st).k == T_ID && st.ip.get(0) + 1 < len(st.tk) {
+                            let nt = st.tk.get(st.ip.get(0) + 1)
+                            if nt.k == T_OP && nt.n == O_COLON {
+                                p_bump(st)
+                                p_bump(st)
+                            }
+                        }
+                        pay = p_expr(st)
+                        p_op(st, O_RP, ")")
+                    }
+                    e = mknd(st, E_ECON, pay, 0, 0, vid)
+                    continue
+                }
+            }
             if p_is_op(st, O_LP) {
                 p_bump(st)
                 let mut tmp = vec[int].new(4)
@@ -1378,6 +1493,56 @@ fn ev_agg(st: St, nd: Nd) -> Val {
         eprint("qlm_interp: vec 没有方法 ." + nm + "()")
         exit(2)
     }
+    if nd.k == E_ECON {
+        // 枚举值：元素池里两格 [变体槽号, 载荷]
+        let base = len(st.elems)
+        st.elems.push(v_int(nd.n))
+        if nd.a >= 0 {
+            st.elems.push(copy_val(st, ev(st, nd.a)))
+            return Val { k: K_ENUM, i: base, f: 0.0, s: "", n: 1, c: 0 }
+        }
+        st.elems.push(v_void())
+        return Val { k: K_ENUM, i: base, f: 0.0, s: "", n: 0, c: 0 }
+    }
+    if nd.k == E_MATCH {
+        let sv = ev(st, nd.a)
+        if sv.k != K_ENUM {
+            eprint("qlm_interp: match 的被匹配值不是枚举")
+            exit(2)
+        }
+        let vid = st.elems.get(sv.i).i
+        let mut k = 0
+        while k < nd.c {
+            let av = st.arms.get(nd.b + k * 3)
+            if av == vid || av < 0 {
+                let bn = st.arms.get(nd.b + k * 3 + 1)
+                let body = st.arms.get(nd.b + k * 3 + 2)
+                let save_b = st.blen.get(0)
+                let save_v = st.vlen.get(0)
+                if bn >= 0 {
+                    bind(st, bn, st.elems.get(sv.i + 1))
+                }
+                let bnd2 = st.nd.get(body)
+                if bnd2.k == N_BLOCK {
+                    // 块臂：语句体，值恒为 void；里面若 `return`，用 flow 带出去
+                    let r = ex(st, body)
+                    st.blen.set(0, save_b)
+                    st.vlen.set(0, save_v)
+                    if r != 0 {
+                        st.flow.set(0, r)
+                    }
+                    return v_void()
+                }
+                let rv = ev(st, body)
+                st.blen.set(0, save_b)
+                st.vlen.set(0, save_v)
+                return rv
+            }
+            k = k + 1
+        }
+        eprint("qlm_interp: match 没有匹配的臂（枚举值 " + vid.to_str() + "）")
+        exit(2)
+    }
     if nd.k == E_SLIT {
         let si = nd.n
         let ty = st.structs.get(si)
@@ -1476,7 +1641,7 @@ fn ev(st: St, n: int) -> Val {
         return ev_call(st, nd.n, nd.a, nd.b)
     }
     if nd.k == E_VECNEW || nd.k == E_INDEX || nd.k == E_MCALL ||
-       nd.k == E_SLIT || nd.k == E_FIELD {
+       nd.k == E_SLIT || nd.k == E_FIELD || nd.k == E_ECON || nd.k == E_MATCH {
         return ev_agg(st, nd)
     }
     eprint("qlm_interp: 内部错误：未知表达式节点 " + nd.k.to_str())
@@ -1611,6 +1776,12 @@ fn exec_range(st: St, start: int, cnt: int) -> int {
         if r != 0 {
             return r
         }
+        // 表达式里带出来的控制流（match 的块臂里写了 return）
+        if st.flow.get(0) != 0 {
+            let f = st.flow.get(0)
+            st.flow.set(0, 0)
+            return f
+        }
         i = i + 1
     }
     return 0
@@ -1652,6 +1823,67 @@ fn parse_struct(st: St) {
     }
     p_bump(st)                       // '}'
     st.structs.push(Struct { name: nm, fs: fs, nf: nf })
+}
+
+/// `enum Name { V1 \n V2(f: T) }` → 记进变体表。
+/// 变体之间用换行或逗号分隔；载荷只有一个字段（与编译器同口径）。
+fn parse_enum(st: St) {
+    p_bump(st)                       // enum
+    let nm = p_name(st)
+    p_op(st, O_LBR, "{")
+    let ei = len(st.enums)
+    let vs = len(st.variants)
+    let mut nv = 0
+    while !p_is_op(st, O_RBR) {
+        if p_cur(st).k == T_EOF {
+            p_err(st, "enum 没有结束的 }")
+        }
+        let vn = p_name(st)
+        let mut pn = 0 - 1
+        if p_is_op(st, O_LP) {
+            p_bump(st)
+            pn = p_name(st)
+            if p_is_op(st, O_COLON) {
+                p_bump(st)
+                skip_type(st)
+            }
+            p_op(st, O_RP, ")")
+        }
+        st.variants.push(ei)
+        st.variants.push(vn)
+        st.variants.push(pn)
+        nv = nv + 1
+        if p_is_op(st, O_COMMA) {
+            p_bump(st)
+        }
+    }
+    p_bump(st)                       // '}'
+    st.enums.push(Enum { name: nm, vs: vs, nv: nv })
+}
+
+fn find_enum(st: St, name: int) -> int {
+    let n = len(st.enums)
+    let mut i = 0
+    while i < n {
+        if st.enums.get(i).name == name {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/// 在 enum `ei` 里按名字找变体，返回**变体槽号**（= vs + i*3），-1 = 没有
+fn find_variant(st: St, ei: int, name: int) -> int {
+    let e = st.enums.get(ei)
+    let mut i = 0
+    while i < e.nv {
+        if st.variants.get(e.vs + i * 3 + 1) == name {
+            return e.vs + i * 3
+        }
+        i = i + 1
+    }
+    return -1
 }
 
 /// 按名字找 struct 布局号（-1 = 没有）
@@ -1716,6 +1948,8 @@ fn parse_program(st: St) {
             skip_line(st)
         } else if t.k == T_KW && t.n == K_STRUCT {
             parse_struct(st)
+        } else if t.k == T_KW && t.n == K_ENUM {
+            parse_enum(st)
         } else if t.k == T_KW && t.n == K_CONST {
             p_bump(st)
             let nm = p_name(st)
