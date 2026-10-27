@@ -1054,6 +1054,8 @@ def main():
     case_selfcheck("t148_f64_xmm", "tests/t148_f64_xmm.qma")
     # "算完再搬回变量"折成就地更新（v2.67）：别名/自反/循环携带/int64 两端
     case_selfcheck("t149_store_back", "tests/t149_store_back.qma")
+    # 标志位循环 → break（v2.69）：可改 / 不可改 各四种形态
+    case_selfcheck("t150_flag_loop", "tests/t150_flag_loop.qma")
     # UUID（v1.77）：v4 生成 / 校验 / 版本与变体位
     case_selfcheck("t115_uuid", "tests/t115_uuid.qma")
     # 所有权检查 v2（v1.84）：视图生命周期 / 写别名 / 跨线程的正例

@@ -1,0 +1,104 @@
+// t150_flag_loop —— `while go == 1 && p < n` 的标志位换成 break（v2.69）
+//
+// 形态：`_lower_cond` 把 `a && b` 降级成两条守卫共享出口，标志位 `go` 每轮
+// 都要过一次比较 + 一个分支。满足条件时把 `go = 0` 直接改成跳出。
+//
+// 这个改写的危险点在于**哪些情况不能改**：
+//   1. `go = 0` 之后还有别的语句（改成 break 会跳过它们）
+//   2. `go` 在循环外还被读（改成 break 后它永远是初值）
+//   3. 有多个 `go = 0`（多分支汇合时无法保证回边只被它到达）
+// 所以夹具里这几种都配上用例，并且**跟手工算出的期望值对拍**。
+fn main() {
+    // 1) 标准形态：可改。go=0 是该分支的最后一条语句。
+    //    i 从 0 走，i=3 时条件不成立 → go=0 退出；acc 累加了 0,1,2
+    let mut go = 1
+    let mut i = 0
+    let mut acc = 0
+    while go == 1 && i < 100 {
+        if i < 3 {
+            acc = acc + i
+            i = i + 1
+        } else {
+            go = 0
+        }
+    }
+    assert(acc == 3, "标准形态 acc")
+    assert(i == 3, "标准形态 i")
+
+    // 2) `while go != 0 && ...`（ne 版本）
+    let mut g2 = 1
+    let mut j = 0
+    let mut n2 = 0
+    while g2 != 0 && j < 50 {
+        if j < 7 {
+            n2 = n2 + 1
+            j = j + 1
+        } else {
+            g2 = 0
+        }
+    }
+    assert(n2 == 7, "ne 版本 n2")
+
+    // 3) **不能改**：`go = 0` 之后还有语句（acc 仍要加 1）
+    //    i 走到 5 时 go=0，但 acc 那一句仍执行 → acc == 5
+    let mut g3 = 1
+    let mut k = 0
+    let mut acc3 = 0
+    while g3 == 1 && k < 100 {
+        k = k + 1
+        if k == 5 {
+            g3 = 0
+        }
+        acc3 = acc3 + 1
+    }
+    assert(acc3 == 5, "go=0 之后还有语句")
+    assert(k == 5, "go=0 之后还有语句 k")
+
+    // 4) **不能改**：`go` 在循环外还被读
+    let mut g4 = 1
+    let mut m = 0
+    while g4 == 1 && m < 100 {
+        if m < 4 {
+            m = m + 1
+        } else {
+            g4 = 0
+        }
+    }
+    assert(g4 == 0, "循环外读 go")
+    assert(m == 4, "循环外读 go m")
+
+    // 5) 嵌套：内层也有标志位
+    let mut total = 0
+    let mut a = 0
+    while a < 3 {
+        let mut gi = 1
+        let mut b = 0
+        while gi == 1 && b < 10 {
+            if b < a {
+                total = total + 1
+                b = b + 1
+            } else {
+                gi = 0
+            }
+        }
+        a = a + 1
+    }
+    assert(total == 3, "嵌套标志位")   // a=0:0 次, a=1:1 次, a=2:2 次 → 3
+
+    // 6) 循环体里改 p（被守卫用的变量）—— 改完 break 后仍要看得到新值
+    let mut g5 = 1
+    let mut p = 0
+    let mut sum = 0
+    while g5 == 1 && p < 20 {
+        if p < 12 {
+            sum = sum + p
+            p = p + 2
+        } else {
+            g5 = 0
+        }
+    }
+    assert(p == 12, "p 终值")
+    assert(sum == 30, "0+2+4+6+8+10")   // 30
+
+    print("t150 ok")
+}

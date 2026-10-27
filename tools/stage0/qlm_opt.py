@@ -1192,6 +1192,107 @@ def opt_const_div(fn):
     return fn
 
 
+def opt_flag_loop(fn):
+    """`while go == 1 && p < n { ... else { go = 0 } }` → 标志位换成 `break`。
+
+    **形态**（`_lower_cond` 对 `a && b` 的降级，两条守卫共享出口 E）：
+
+        L:  jcc e  go, 1, L2
+            jmp E
+        L2: jcc cc a, b, B
+            jmp E
+        B:  ...body...  （其中把 go 置 0 的分支，紧接着就是回边 `jmp L`）
+
+    **为什么值得做**：每轮迭代都要过 `go == 1` 这次比较和一个分支 ——
+    b9_json 的 `jws`/`jstr`/`jnum` 三个扫描循环每字节都要付一次。
+
+    **前提（缺一不可）**：
+      1. `go` 在循环外**只定义一次**，且值是让守卫为真的立即数；
+      2. 循环内对 `go` 的每次定义都是 `mov go, 0`（让守卫为假）；
+      3. 每次这样的定义后面**紧跟回边** `jmp L`（否则把它改成 break 会跳过
+         后面本该执行的语句）；
+      4. `go` 除了这条守卫**没有别的读**（循环外读它就会看到恒为 1 的错值）。
+
+    满足时把每处 `mov go, 0` 换成 `jmp E`（并删掉后面那条回边），再把守卫
+    那两条指令删掉 —— 循环条件只剩真正的那一个。
+
+    **必须放在所有依赖循环结构的 pass 之后**：改完之后回边没了，
+    `loop_regions` 看不到这个循环，LICM / 展开 / 越界消除都会失效。
+    """
+    ins = fn.instrs
+    regions = loop_regions(fn)
+    if not regions:
+        return False
+    for (h, b, lab) in regions:
+        if h + 5 >= b or ins[h][0] != "label" or ins[h][1] != lab:
+            continue
+        g1 = ins[h + 1]
+        if g1[0] != "jcc" or len(g1) != 5:
+            continue
+        cc, g, spec, l2 = g1[1], g1[2], g1[3], g1[4]
+        if not isinstance(g, int) or not (isinstance(spec, tuple)
+                                          and spec[0] == "imm"):
+            continue
+        if cc == "e" and spec[1] == 1:
+            true_val = 1
+        elif cc == "ne" and spec[1] == 0:
+            true_val = 1
+        else:
+            continue
+        if ins[h + 2][0] != "jmp":
+            continue
+        E = ins[h + 2][1]
+        if ins[h + 3][0] != "label" or ins[h + 3][1] != l2:
+            continue
+        if ins[h + 4][0] != "jcc":
+            continue
+        # ---- 收集 go 的所有定义与使用 ----
+        defs_out, defs_in, uses = [], [], []
+        for i, p in enumerate(ins):
+            d, u = vreg_mentions(p)
+            if g in d:
+                (defs_in if h <= i <= b else defs_out).append(i)
+            if g in u:
+                uses.append(i)
+        if uses != [h + 1]:
+            continue                       # 还有别的读 → 不能删
+        if len(defs_out) != 1:
+            continue
+        j0 = defs_out[0]
+        if j0 >= h or ins[j0] != ("mov", g, ("imm", true_val)):
+            continue
+        bad = False
+        for i in defs_in:
+            if ins[i] != ("mov", g, ("imm", 0)):
+                bad = True
+                break
+            # `mov g,0` 与回边之间**只允许有 label**（分支汇合点会落在中间，
+            # 例如 `if ... { p+=1 } else { go=0 }` 的 iend）。别的路径跳到
+            # 那个 label 时不经过 go=0，落到回边上 —— 语义不变。
+            k = i + 1
+            while k < b and ins[k][0] == "label":
+                k += 1
+            if k != b or ins[b] != ("jmp", lab):
+                bad = True
+                break
+        # 只能有**一处** `go = 0`，否则多分支汇合时无法保证回边只被它到达
+        if bad or len(defs_in) != 1:
+            continue
+        # ---- 改写 ----
+        # 回边**不能删**：`if ... { p += 1 } else { go = 0 }` 的 then 分支
+        # 跳到汇合 label 之后仍然要回到循环头。只把 `go = 0` 换成 `jmp E`。
+        repl = {i: ("jmp", E) for i in defs_in}
+        drop = {h + 1, h + 2}
+        out = []
+        for i, p in enumerate(ins):
+            if i in drop:
+                continue
+            out.append(repl.get(i, p))
+        fn.instrs = out
+        return True                        # 一轮改一个循环，外层再收敛
+    return False
+
+
 def opt_drop_dead_jump(fn):
     """`jmp L` / `jcc .. L` 紧跟 `label L` → 这条跳转是白做的，删掉。
 
@@ -2187,6 +2288,12 @@ def opt_all(fn, unroll=True):
         opt_bounds_elim(fn)
     if not _skip_pass("opt_bounds_dedupe"):
         opt_bounds_dedupe(fn)
+    # 标志位循环 → break。**必须放在这里**（所有依赖循环结构的 pass 之后）：
+    # 改完回边就没了，loop_regions 看不到这个循环。
+    if not _skip_pass("opt_flag_loop"):
+        for _ in range(8):
+            if not opt_flag_loop(fn):
+                break
     if not _skip_pass("opt_drop_dead_jump"):
         opt_drop_dead_jump(fn)
     # 调度放最后：避免打乱内联/CSE/展开的形态匹配
