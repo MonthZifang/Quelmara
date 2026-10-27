@@ -2458,6 +2458,7 @@ const OP_NEG = 8       // dst = -a
 const OP_NOT = 9       // dst = (a == 0) ? 1 : 0（int 口径）
 const OP_NZ = 10       // dst = (a != 0) ? 1 : 0
 const OP_CMP = 11      // dst = a <cc> b ? 1 : 0；imm = cc（setcc 机器码）
+const DBG_MODIND = 0
 const OP_LAB = 12      // imm = 标签
 const OP_JMP = 13      // goto imm
 const OP_JZ = 14       // if a == 0 goto imm
@@ -5057,6 +5058,9 @@ fn _opt_pure(op: int) -> int {
     if op == OP_NEG || op == OP_NOT || op == OP_NZ || op == OP_BNOT { return 1 }
     if op == OP_CMP || op == OP_FCMP { return 1 }
     if op == OP_DIVC { return 1 }
+    // v2.81：`OP_BINI`（dst = a <sub> imm）也是纯运算。以前没列进来，导致
+    // 归纳削减把 `t = i*C` 变成死代码之后删不掉，热循环里白留一条 `imul`。
+    if op == OP_BINI { return 1 }
     return 0
 }
 
@@ -5408,6 +5412,233 @@ fn _opt_dce(fc: FnCtx, use: vec[int]) {
     }
 }
 
+/// 找 label id 对应的 `OP_LAB` 指令下标（-1 = 没有）。
+/// 分支指令的 `imm` 存的是**标签 id**（不是位置），所以回边检测要先换成下标。
+fn _lab_index(ir: vec[Ir], id: int) -> int {
+    let n = len(ir)
+    let mut i = 0
+    while i < n {
+        let ins = ir.get(i)
+        if ins.op == OP_LAB && ins.imm == id {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/// 在 `at` 处插入一条指令（把后面整体右移一格）。
+///
+/// 为什么可以直接移位：**分支的 `imm` 是标签 id，不是指令下标**，所以移动
+/// 指令不会破坏任何跳转。要修的是每个 vreg 的活跃区间（`vstart`/`vend`），
+/// 它们存的是下标，`>= at` 的都要 +1。
+fn _ir_insert(fc: FnCtx, at: int, op: int, dst: int, a: int, b: int, imm: int) {
+    let ir = fc.ir
+    ir.push(Ir { op: OP_NOP, dst: 0, a: 0, b: 0, imm: 0 })
+    let mut k = len(ir) - 1
+    while k > at {
+        ir.set(k, ir.get(k - 1))
+        k = k - 1
+    }
+    ir.set(at, Ir { op: op, dst: dst, a: a, b: b, imm: imm })
+    let mut v = 0
+    while v < len(fc.vstart) {
+        if fc.vstart.get(v) >= at {
+            fc.vstart.set(v, fc.vstart.get(v) + 1)
+        }
+        if fc.vend.get(v) >= at {
+            fc.vend.set(v, fc.vend.get(v) + 1)
+        }
+        v = v + 1
+    }
+}
+
+/// `v` 在 `h` 之前的**最后一次定义**如果是常量，返回该常量；否则返回 -1。
+/// 只认 `OP_CONST` —— `let n = 20000000` 这种变量在 IR 里就是一条 CONST。
+fn _const_before(ir: vec[Ir], v: int, h: int) -> int {
+    let mut at = 0 - 1
+    let mut k = 0
+    while k < h {
+        let x = ir.get(k)
+        if x.dst == v && _opt_writes(x.op) == 1 {
+            at = k
+        }
+        k = k + 1
+    }
+    if at < 0 {
+        return -1
+    }
+    let c = ir.get(at)
+    if c.op != OP_CONST {
+        return -1
+    }
+    return c.imm
+}
+
+/// 归纳削减（v2.81）：把循环里的 `(i * C) % D` 换成"递增计数器 + 条件回绕"。
+///
+/// 这是 qlmc 与 stage-0 最大的单点差距：stage-0 的 `opt_mod_inductive` 让
+/// b1_int 的热循环只有 9 条指令，qlmc 一直是 21 条（每轮一次 64 位 `mul` 的
+/// 魔数除法）。CI 上 b1_int / b8_threads1 对 stage-0 差 1.5×，就是这一条。
+///
+/// **为什么以前没搬**：stage-0 那版依赖"t 非负"的范围分析（`analyze_nonneg`），
+/// qlmc 没有。这里换成一个**窄得多但可判定**的证明：
+///
+///   `t = i * C`，`i` 在循环外被初始化为常量 `k >= 0`，循环内**唯一**定义是
+///   `i = i + s`（`s > 0`）→ 每一轮都有 `i >= k >= 0` → `t >= 0`（`C > 0`）。
+///
+/// 再要求循环守卫是 `i < N`（常量 `N`）且 `C * N < 2^62`，顺带排掉 `t` 溢出。
+/// 两个条件任一不成立就**原样不动** —— 宁可少优化，不能算错。
+///
+/// 变换（`D` 是模数，`0 < C < D` 保证一次条件减就够）：
+///
+///   前导（循环头之前）：`v = (k * C) % D`      ← 常量，编译期算好
+///   循环体：`r = v`（替换原来的 DIVC）；`i = i + s` 之后 `v += C`，
+///           若 `v >= D` 则 `v -= D`
+fn _opt_mod_ind(fc: FnCtx, use: vec[int], ndef: vec[int]) {
+    let ir = fc.ir
+    let mut n = len(ir)
+    let mut i = 0
+    while i < n {
+        let ins = ir.get(i)
+        if ins.op != OP_JMP && ins.op != OP_JCMP && ins.op != OP_JCMPI {
+            i = i + 1
+            continue
+        }
+        let h = _lab_index(ir, ins.imm)
+        let e = i
+        i = i + 1
+        if h < 0 || h >= e {
+            continue                     // 不是回边
+        }
+        if DBG_MODIND == 1 {
+            eprint("[modind] 回边 h=" + h.to_str() + " e=" + e.to_str())
+        }
+        // 这个循环里找 `t % D`（OP_DIVC，b 槽是 OP_MOD）
+        let mut d = h
+        let mut hit = 0 - 1
+        while d <= e {
+            let w = ir.get(d)
+            if w.op == OP_DIVC && w.b == OP_MOD && w.imm >= 2 && w.imm <= 2147483647 {
+                hit = d
+                d = e + 1
+            } else {
+                d = d + 1
+            }
+        }
+        if hit < 0 {
+            if DBG_MODIND == 1 { eprint("[modind] 循环内没有 DIVC-MOD") }
+            continue
+        }
+        let w = ir.get(hit)
+        let t = w.a
+        let dd = w.imm
+        // t 在循环内必须**只有一处**定义，且是 `t = i0 * C`
+        let mut dt = 0 - 1
+        let mut ndef_t = 0
+        let mut k = h
+        while k <= e {
+            let x = ir.get(k)
+            if x.dst == t && _opt_writes(x.op) == 1 {
+                ndef_t = ndef_t + 1
+                dt = k
+            }
+            k = k + 1
+        }
+        if ndef_t != 1 {
+            if DBG_MODIND == 1 { eprint("[modind] t 定义次数 " + ndef_t.to_str()) }
+            continue
+        }
+        let mt = ir.get(dt)
+        if mt.op != OP_BINI || mt.b != OP_MUL || mt.a <= 0 {
+            if DBG_MODIND == 1 { eprint("[modind] t 的定义 op=" + mt.op.to_str() + " b=" + mt.b.to_str() + " a=" + mt.a.to_str()) }
+            continue
+        }
+        let i0 = mt.a
+        let c = mt.imm
+        if c < 1 || c >= dd {
+            continue
+        }
+        // i0 在循环内必须只有一处定义，且是 `i0 = i0 + s`（s > 0），且在用之后
+        let mut di = 0 - 1
+        let mut ndef_i = 0
+        k = h
+        while k <= e {
+            let x = ir.get(k)
+            if x.dst == i0 && _opt_writes(x.op) == 1 {
+                ndef_i = ndef_i + 1
+                di = k
+            }
+            k = k + 1
+        }
+        if ndef_i != 1 || di <= hit {
+            if DBG_MODIND == 1 { eprint("[modind] i0 定义次数 " + ndef_i.to_str() + " di=" + di.to_str() + " hit=" + hit.to_str()) }
+            continue
+        }
+        let mi = ir.get(di)
+        if mi.op != OP_BINI || mi.b != OP_ADD || mi.a != i0 || mi.imm <= 0 {
+            if DBG_MODIND == 1 { eprint("[modind] i0 增量 op=" + mi.op.to_str() + " b=" + mi.b.to_str() + " a=" + mi.a.to_str() + " i0=" + i0.to_str() + " imm=" + mi.imm.to_str()) }
+            continue
+        }
+        // **步长要乘上去**：`i = i + s` 时 `t = i*C` 每轮涨 `C*s`，不是 `C`。
+        // 只看 `C` 会在 `s != 1` 的循环里算错（一次条件减也兜不住更大的步长）。
+        let step = c * mi.imm
+        if step <= 0 || step >= dd {
+            if DBG_MODIND == 1 { eprint("[modind] 步长 C*s=" + step.to_str() + " 不在 (0,D) 内") }
+            continue
+        }
+        // 循环外最后一次定义 i0 必须是常量 >= 0
+        let k0 = _const_before(ir, i0, h)
+        if k0 < 0 {
+            if DBG_MODIND == 1 { eprint("[modind] i0 循环外不是常量") }
+            continue
+        }
+        // 守卫 `i0 < N`：cc = jge（"到了上界就退出"）。两种形态都要认 ——
+        // `while i < 20000000` 折成立即数（JCMPI），`while i < n`（n 是变量）
+        // 是 JCMP 两个 vreg，这时去查 n 在循环前的常量值。
+        let mut bound = 0 - 1
+        k = h
+        while k <= e {
+            let x = ir.get(k)
+            if x.dst == 0x8D && x.a == i0 {
+                if x.op == OP_JCMPI && x.b >= 0 {
+                    bound = x.b
+                } else if x.op == OP_JCMP && x.b > 0 {
+                    let nb = _const_before(ir, x.b, h)
+                    if nb >= 0 {
+                        bound = nb
+                    }
+                }
+            }
+            k = k + 1
+        }
+        if bound < 0 {
+            if DBG_MODIND == 1 { eprint("[modind] 没有找到 i0 的常量上界守卫") }
+            continue
+        }
+        if DBG_MODIND == 1 { eprint("[modind] 命中：D=" + dd.to_str() + " C=" + c.to_str() + " k0=" + k0.to_str() + " N=" + bound.to_str()) }
+        if c * bound > 4611686018427387904 {
+            continue                     // t 可能溢出 → 非负前提不成立
+        }
+        // ---- 变换 ----
+        let r0 = (k0 * c) % dd
+        let v = _new_var(fc, -1, TY_INT)
+        let lskip = _newlab(fc.labs)
+        // 1) 先插循环体尾部的回绕（下标最大，先插不影响前面的下标）
+        _ir_insert(fc, di + 1, OP_BINI, v, v, OP_ADD, step)
+        _ir_insert(fc, di + 2, OP_JCMPI, 0x8C, v, dd, lskip)
+        _ir_insert(fc, di + 3, OP_BINI, v, v, OP_SUB, dd)
+        _ir_insert(fc, di + 4, OP_LAB, 0, 0, 0, lskip)
+        // 2) 再插循环头之前的常量初始化（h 在 di 之前，不受上面影响）
+        _ir_insert(fc, h, OP_CONST, v, 0, 0, r0)
+        // 3) 原 DIVC → `r = v`（h 插入后整体 +1）
+        ir.set(hit + 1, Ir { op: OP_MOV, dst: w.dst, a: v, b: 0, imm: 0 })
+        // 这一轮只处理一条：插入已经改了长度，重新扫
+        i = 0
+        n = len(ir)
+    }
+}
+
 /// 优化入口。三个缓冲由调用方（`_compile_range`）持有并复用 —— **别在这里
 /// `vec.new`**：s3_manyfns 那种 200 个小函数一次编译要开 800 个 vec，光分配
 /// 就让编译慢 7%（v2.44 实测）。
@@ -5549,6 +5780,24 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
         }
         i = i + 1
     }
+    // ---- v2.81 归纳削减：`(i*C) % D` → 递增计数器 + 条件回绕 ----
+    // 它会插入新指令、改使用关系，所以放在最后，之后重算 use/ndef 再跑一次 DCE
+    // （不然被替换掉的 `t = i*C` 会留在循环里当死代码）。
+    _opt_mod_ind(fc, use, ndef)
+    _opt_ndef(ir, ndef)
+    i = 0
+    while i < len(use) {
+        use.set(i, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < len(ir) {
+        _opt_mark(ir.get(i), use)
+        i = i + 1
+    }
+    // 再跑一次拷贝传播：归纳削减插的是 `r = v`，让 `add acc, r` 直接用 `v`
+    _opt_copy(fc, ir, use, ndef)
+    _opt_dce(fc, use)
 }
 
 // ---------------------------------------------------------------------------

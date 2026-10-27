@@ -1,0 +1,107 @@
+// s27_modind.qma —— 归纳削减（v2.81）的差分回归
+//
+// qlmc 把循环里的 `(i * C) % D` 换成"递增计数器 + 条件回绕"：
+//   `t = i*C` 非负 + `0 < C < D` + 守卫是 `i < 常量` → 才换。
+// 其余形状必须**原样不动**，而且结果要和 stage-0 逐字节相同。
+//
+// 这个夹具专门覆盖"边界那一圈"：
+//   1) 标准形状（i 从 0 起、C=7 < D=13）—— 会走归纳削减
+//   2) i 从非零常量起（5）、C=3 < D=10 —— 会走，且前导常量不是 0
+//   3) C >= D（20 % 13）—— **不能**换（一次条件减不够）
+//   4) i 从负数起 —— **不能**换（非负前提不成立）
+//   5) 上界是参数而不是常量 —— **不能**换（溢出不可证）
+//   6) 循环里既有 `%` 又有 `/` —— 只换 `%`，`/` 保持魔数除法
+//   7) 步长 != 1：`i = i + 2` 时 t 每轮涨 `C*s`，必须按 `C*s` 前进
+//   8) `C*s >= D` —— **不能**换（一次条件减兜不住）
+fn case_const() -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < 1000 {
+        acc = acc + (i * 7) % 13
+        i = i + 1
+    }
+    return acc
+}
+
+fn case_nonzero_start() -> int {
+    let mut acc = 0
+    let mut i = 5
+    while i < 1000 {
+        acc = acc + (i * 3) % 10
+        i = i + 1
+    }
+    return acc
+}
+
+fn case_c_ge_d() -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < 1000 {
+        acc = acc + (i * 20) % 13
+        i = i + 1
+    }
+    return acc
+}
+
+fn case_negative() -> int {
+    let mut acc = 0
+    let mut i = -1000
+    while i < 1000 {
+        acc = acc + (i * 7) % 13
+        i = i + 1
+    }
+    return acc
+}
+
+fn case_param(n: int) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + (i * 7) % 13
+        i = i + 1
+    }
+    return acc
+}
+
+// 步长 != 1：`t = i*3` 每轮涨 `3*2 = 6`（< 13，能换）
+fn case_step2() -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < 1000 {
+        acc = acc + (i * 3) % 13
+        i = i + 2
+    }
+    return acc
+}
+
+// 步长乘上系数之后 >= D（7*2 = 14 >= 13）—— 一次条件减兜不住，**不能**换
+fn case_step2_too_big() -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < 1000 {
+        acc = acc + (i * 7) % 13
+        i = i + 2
+    }
+    return acc
+}
+
+fn case_div_and_mod() -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < 1000 {
+        acc = acc + (i * 7) % 13 + (i * 7) / 13
+        i = i + 1
+    }
+    return acc
+}
+
+fn main() {
+    print(case_const())
+    print(case_nonzero_start())
+    print(case_c_ge_d())
+    print(case_negative())
+    print(case_param(1000))
+    print(case_div_and_mod())
+    print(case_step2())
+    print(case_step2_too_big())
+}
