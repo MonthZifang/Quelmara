@@ -1195,29 +1195,33 @@ def opt_const_div(fn):
 def opt_flag_loop(fn):
     """`while go == 1 && p < n { ... else { go = 0 } }` → 标志位换成 `break`。
 
-    **形态**（`_lower_cond` 对 `a && b` 的降级，两条守卫共享出口 E）：
+    **两种守卫形态都要认**（v2.74）：
 
-        L:  jcc e  go, 1, L2
-            jmp E
-        L2: jcc cc a, b, B
-            jmp E
-        B:  ...body...  （其中把 go 置 0 的分支，紧接着就是回边 `jmp L`）
+      形态 A（`_lower_cond` 的原始降级，两条守卫共享出口）：
+          L:  jcc <cc> go, k, L2      ← 条件为"继续"
+              jmp E
+          L2: jcc cc2 a, b, B
+              jmp E
 
-    **为什么值得做**：每轮迭代都要过 `go == 1` 这次比较和一个分支 ——
-    b9_json 的 `jws`/`jstr`/`jnum` 三个扫描循环每字节都要付一次。
+      形态 B（`opt_invert_branch` 反转之后 —— 现在这是常态）：
+          L:  jcc <cc> go, k, E       ← 条件为"退出"
+              jcc cc2 a, b, E
+          B:  ...
 
-    **前提（缺一不可）**：
-      1. `go` 在循环外**只定义一次**，且值是让守卫为真的立即数；
-      2. 循环内对 `go` 的每次定义都是 `mov go, 0`（让守卫为假）；
-      3. 每次这样的定义后面**紧跟回边** `jmp L`（否则把它改成 break 会跳过
-         后面本该执行的语句）；
-      4. `go` 除了这条守卫**没有别的读**（循环外读它就会看到恒为 1 的错值）。
+    v2.72 加了分支反转之后，标志位守卫被反过来了，而本 pass 仍按形态 A
+    匹配 —— 于是 b9_json 的 jws/jstr/jnum 三个循环每字节又白付一次
+    `cmp go,1` + 一个分支（反汇编里看得一清二楚）。
 
-    满足时把每处 `mov go, 0` 换成 `jmp E`（并删掉后面那条回边），再把守卫
-    那两条指令删掉 —— 循环条件只剩真正的那一个。
+    **为什么值得做**：`go` 只在"该退出"的分支里置 0，本质是 break 的笨写法。
 
-    **必须放在所有依赖循环结构的 pass 之后**：改完之后回边没了，
-    `loop_regions` 看不到这个循环，LICM / 展开 / 越界消除都会失效。
+    **前提（缺一不可，全部 fail-fast 拒绝）**：
+      1. `go` 在循环外只定义一次，值是"继续"那一侧；
+      2. 循环内对 `go` 的每次定义都是"退出"那一侧；
+      3. **只能有一处** `go = 退出值`，且它到回边之间只允许有 label；
+      4. `go` 除了这条守卫没有别的读。
+
+    **必须放在所有依赖循环结构的 pass 之后**：改完 `loop_regions` 就看不到
+    这个循环了。
     """
     ins = fn.instrs
     regions = loop_regions(fn)
@@ -1229,24 +1233,34 @@ def opt_flag_loop(fn):
         g1 = ins[h + 1]
         if g1[0] != "jcc" or len(g1) != 5:
             continue
-        cc, g, spec, l2 = g1[1], g1[2], g1[3], g1[4]
+        g, cc, spec = g1[2], g1[1], g1[3]
         if not isinstance(g, int) or not (isinstance(spec, tuple)
                                           and spec[0] == "imm"):
             continue
-        if cc == "e" and spec[1] == 1:
-            true_val = 1
-        elif cc == "ne" and spec[1] == 0:
-            true_val = 1
+        k = spec[1]
+        if k not in (0, 1):
+            continue
+        # jcc 被"触发"的那一侧：e → g == k；ne → g != k
+        taken_true = (cc == "e")
+        # 形态 A：触发 = 继续；形态 B：触发 = 退出
+        if (ins[h + 2][0] == "jmp" and ins[h + 3][0] == "label"
+                and ins[h + 3][1] == g1[4] and ins[h + 4][0] == "jcc"):
+            shape_a = True
+            E = ins[h + 2][1]
+            cont_val = (k if taken_true else 1 - k)
         else:
-            continue
-        if ins[h + 2][0] != "jmp":
-            continue
-        E = ins[h + 2][1]
-        if ins[h + 3][0] != "label" or ins[h + 3][1] != l2:
-            continue
-        if ins[h + 4][0] != "jcc":
-            continue
-        # ---- 收集 go 的所有定义与使用 ----
+            # 形态 B：h+2 之后可能先落一个 label（`while a && b` 的 and 汇合点）
+            kk2 = h + 2
+            while kk2 < b and ins[kk2][0] == "label":
+                kk2 += 1
+            if not (kk2 < b and ins[kk2][0] == "jcc"
+                    and ins[kk2][4] == g1[4]):
+                continue
+            shape_a = False
+            E = g1[4]
+            cont_val = (1 - k if taken_true else k)
+        exit_val = 1 - cont_val
+        # ---- 收集 go 的定义与使用 ----
         defs_out, defs_in, uses = [], [], []
         for i, p in enumerate(ins):
             d, u = vreg_mentions(p)
@@ -1259,37 +1273,34 @@ def opt_flag_loop(fn):
         if len(defs_out) != 1:
             continue
         j0 = defs_out[0]
-        if j0 >= h or ins[j0] != ("mov", g, ("imm", true_val)):
+        if j0 >= h or ins[j0] != ("mov", g, ("imm", cont_val)):
             continue
         bad = False
         for i in defs_in:
-            if ins[i] != ("mov", g, ("imm", 0)):
+            if ins[i] != ("mov", g, ("imm", exit_val)):
                 bad = True
                 break
-            # `mov g,0` 与回边之间**只允许有 label**（分支汇合点会落在中间，
-            # 例如 `if ... { p+=1 } else { go=0 }` 的 iend）。别的路径跳到
-            # 那个 label 时不经过 go=0，落到回边上 —— 语义不变。
-            k = i + 1
-            while k < b and ins[k][0] == "label":
-                k += 1
-            if k != b or ins[b] != ("jmp", lab):
+            kk = i + 1
+            while kk < b and ins[kk][0] == "label":
+                kk += 1
+            if kk != b or ins[b] != ("jmp", lab):
                 bad = True
                 break
-        # 只能有**一处** `go = 0`，否则多分支汇合时无法保证回边只被它到达
         if bad or len(defs_in) != 1:
             continue
-        # ---- 改写 ----
-        # 回边**不能删**：`if ... { p += 1 } else { go = 0 }` 的 then 分支
-        # 跳到汇合 label 之后仍然要回到循环头。只把 `go = 0` 换成 `jmp E`。
-        repl = {i: ("jmp", E) for i in defs_in}
-        drop = {h + 1, h + 2}
+        # ---- 改写：`go = 退出值` → `jmp E`；删掉标志位守卫 ----
+        # 回边**不能删**（then 分支跳到汇合 label 之后还要回循环头）
+        repl = {defs_in[0]: ("jmp", E)}
+        drop = {h + 1}
+        if shape_a:
+            drop.add(h + 2)                # 形态 A 还有一条 `jmp E`
         out = []
         for i, p in enumerate(ins):
             if i in drop:
                 continue
             out.append(repl.get(i, p))
         fn.instrs = out
-        return True                        # 一轮改一个循环，外层再收敛
+        return True
     return False
 
 
