@@ -9357,7 +9357,7 @@ class Lower:
         f.emit("neg", v, v)
         f.emit("label", l_pos)
         buf = f.new_v()
-        f.emit("call", buf, "__alloc", [("imm", 41)])
+        f.emit("call", buf, "__alloc", [("imm", 56)])
         # INT64_MIN 的取负会溢出回自身（-(-2^63) == -2^63），digit 循环里
         # mod/div 拿到负数，写出的是一串乱码字节（实测 20 个垃圾字符）。
         # 这是 int64 里唯一的溢出值，直接写定值走人（v1.29 修）。
@@ -9372,8 +9372,16 @@ class Lower:
         f.emit("bin", "add", _rm, buf, ("imm", 8))
         f.emit("ret", _rm)
         f.emit("label", l_notmin)
+        # v2.71：**不再把数字拷一遍**。旧实现把数字写到 [pos+1, 39]，再把它们
+        # 搬到 [8+neg, ...]（为了给 8 字节长度前缀腾位置）—— 那个拷贝循环
+        # 每个数字 ~19 条机器指令（含越界检查、load8/store8、下标运算），
+        # 6 位数就是 110+ 条，占 b5_string 一次迭代的 1/6。
+        #
+        # 新布局：数字从**缓冲区尾部**往左写，写完把 8 字节前缀写到数字正前方，
+        # 返回 `buf + 前缀偏移`。字符串不需要落在固定偏移上 —— `__str_len`
+        # 读的是 `[ptr-8]`，别处都只用 ptr/len。
         pos = f.new_v()
-        f.emit("mov", pos, ("imm", 39))
+        f.emit("mov", pos, ("imm", 47))
         l_d, l_de = f.label("idig"), f.label("idige")
         f.emit("label", l_d)
         q10, dd = _emit_divmod10(f, v)
@@ -9384,41 +9392,30 @@ class Lower:
         f.emit("mov", v, q10)
         f.emit("jnz", v, l_d)
         f.emit("label", l_de)
-        ln = f.new_v()
-        f.emit("mov", ln, ("imm", 39))
-        f.emit("bin", "sub", ln, ln, pos)            # ln = 39 - pos = 位数
-        src = f.new_v()
-        f.emit("bin", "add", src, pos, ("imm", 1))  # 数字串起点
-        i = f.new_v()
-        f.emit("mov", i, ("imm", 0))
-        l_c, l_ce = f.label("icp"), f.label("icpe")
-        f.emit("label", l_c)
-        f.emit("jcc", "ge", i, ln, l_ce)
-        ch = f.new_v()
-        f.emit("bin", "add", ch, src, i)
-        b1 = f.new_v()
-        # 注意：load8 语义是 [base + idx]，base 必须是 buf，idx 才是字节偏移
-        #（历史 bug：把偏移当基址，从绝对地址 ~31 读字节 -> 必然段错误）
-        f.emit("load8", b1, buf, ch)
-        dpos = f.new_v()
-        f.emit("bin", "add", dpos, neg, i)
-        f.emit("bin", "add", dpos, dpos, ("imm", 8))   # 目标 = 8 + neg + i
-        f.emit("store8", buf, dpos, b1)
-        f.emit("bin", "add", i, i, ("imm", 1))
-        f.emit("jmp", l_c)
-        f.emit("label", l_ce)
+        # 负号：写在第一个数字的前一个字节
         l_nn = f.label("ineg")
         f.emit("jz", neg, l_nn)
-        f.emit("store8", buf, ("imm", 8), ("imm", 45))    # '-'（前缀之后）
+        f.emit("store8", buf, pos, ("imm", 45))
+        f.emit("bin", "sub", pos, pos, ("imm", 1))
         f.emit("label", l_nn)
-        z = f.new_v()
-        f.emit("bin", "add", z, neg, ln)
-        f.emit("store", buf, ("imm", 0), z)              # 长度前缀
-        z8 = f.new_v()
-        f.emit("bin", "add", z8, z, ("imm", 8))
-        f.emit("store8", buf, z8, ("imm", 0))            # NUL
+        # len = 47 - pos（含负号）；前缀 8 字节落在 [pos-7, pos]，返回 pos-7
+        ln = f.new_v()
+        f.emit("mov", ln, ("imm", 47))
+        f.emit("bin", "sub", ln, ln, pos)
+        # NUL 落在固定字节 48（= pos + 1 + len 恒成立，与位数无关）
+        f.emit("store8", buf, ("imm", 48), ("imm", 0))
+        # 前缀 8 字节：高 7 字节清零，低字节是长度（len < 256）
+        pfx = f.new_v()
+        f.emit("mov", pfx, pos)
+        for _k in range(7):
+            f.emit("store8", buf, pfx, ("imm", 0))
+            f.emit("bin", "sub", pfx, pfx, ("imm", 1))
+        f.emit("store8", buf, pfx, ln)                   # pfx == pos - 7
+        # 返回**字符串起点** buf+pos+1 —— 长度前缀正好是它前面那 8 字节
+        # （[pos-7, pos]）。返回 buf+pfx 会早 8 字节，`__str_len` 读到垃圾。
         r8 = f.new_v()
-        f.emit("bin", "add", r8, buf, ("imm", 8))
+        f.emit("bin", "add", r8, buf, pos)
+        f.emit("bin", "add", r8, r8, ("imm", 1))
         f.emit("ret", r8)
         self.out.append(f)
 
