@@ -9,7 +9,7 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=290 FAIL=0 SKIP=1**（v2.26 口径：qlmc 差分 35 → 37 条（新增 `s13_closure`），主回归总数不变；v2.25 口径：新增 `s12_ffi`；v2.24 口径：新增 `s11_import`；v2.23 口径：新增 `s10_defer`；v2.22 口径：新增 `s9_slice`；v2.21 口径：新增 `s8_map`；v2.20 口径：新增 `s7_aggfn`；v2.19 口径：新增 `s6_vec`；v2.18 口径：新增 `s5_enum`；v2.17 口径：新增 `s4_agg`；v2.16 口径：新增 `t143_parshard`（分片并行写 / 工作线程读共享 vec / 8 参 spawn）；v2.14 口径：新增 `[9b]` stage-1 编译器差分（`tests/qlmc_test.py`，7 条）；v2.13 口径：新增 `t141_vecindex`（vec 下标六形态）+ `test_exitcode()` 三条（`exit(运行期值)` 的退出码）；v2.12 口径：新增负向夹具 `net_serve_builtin`——reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断；v2.11 那条 `.qla` 沙箱删除 FAIL 已随夹具改「就地覆盖」收口。以下为 v2.10 口径的历史记录：本版新增项 `[3j2]`：`t130_router_dispatch`（路由表 / 参数 / 404·405 / 表满）+ `http_router_test.py`（20 项真实 socket E2E）。**唯一 FAIL 是 `.qla` 目标文件用例撞沙箱的批量删除策略**（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`：一次删 `build/_qlatest` 里 62 个文件，超过 50 个的阈值），与被测逻辑无关；`cache_test` 的 `build/` 争用失败本次未复现。v2.07 记录的那条 LSP FAIL 已收口（`tests/lsp_test.py` 的容错索引段改成 `std/sse` / `std/ws`（仍解析失败）负向 + `std/http` / `std/timer`（已修好）正向，内部断言 38 → 42）。SKIP 为 WSL 交叉验证，本机被沙箱拦。此前新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
+| PE 回归（主回归） | **PASS=297 FAIL=0 SKIP=1**（v2.76 口径：qlmc 差分 63 条、LSP 42 条；数字增长来自 v2.27–v2.75 期间各轨新增夹具，本轮只跑不改。v2.26 口径：qlmc 差分 35 → 37 条（新增 `s13_closure`），主回归总数不变；v2.25 口径：新增 `s12_ffi`；v2.24 口径：新增 `s11_import`；v2.23 口径：新增 `s10_defer`；v2.22 口径：新增 `s9_slice`；v2.21 口径：新增 `s8_map`；v2.20 口径：新增 `s7_aggfn`；v2.19 口径：新增 `s6_vec`；v2.18 口径：新增 `s5_enum`；v2.17 口径：新增 `s4_agg`；v2.16 口径：新增 `t143_parshard`（分片并行写 / 工作线程读共享 vec / 8 参 spawn）；v2.14 口径：新增 `[9b]` stage-1 编译器差分（`tests/qlmc_test.py`，7 条）；v2.13 口径：新增 `t141_vecindex`（vec 下标六形态）+ `test_exitcode()` 三条（`exit(运行期值)` 的退出码）；v2.12 口径：新增负向夹具 `net_serve_builtin`——reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断；v2.11 那条 `.qla` 沙箱删除 FAIL 已随夹具改「就地覆盖」收口。以下为 v2.10 口径的历史记录：本版新增项 `[3j2]`：`t130_router_dispatch`（路由表 / 参数 / 404·405 / 表满）+ `http_router_test.py`（20 项真实 socket E2E）。**唯一 FAIL 是 `.qla` 目标文件用例撞沙箱的批量删除策略**（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`：一次删 `build/_qlatest` 里 62 个文件，超过 50 个的阈值），与被测逻辑无关；`cache_test` 的 `build/` 争用失败本次未复现。v2.07 记录的那条 LSP FAIL 已收口（`tests/lsp_test.py` 的容错索引段改成 `std/sse` / `std/ws`（仍解析失败）负向 + `std/http` / `std/timer`（已修好）正向，内部断言 38 → 42）。SKIP 为 WSL 交叉验证，本机被沙箱拦。此前新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
 | 词法器对拍 | **PASS=238 FAIL=0**（241 个源文件；SKIP 3 个含 `f"..."` 插值的文件——stage-1 词法器不认 `FSTR`，v1.61 插值未移植。**闭包不再进 SKIP 名单**：`fn(x: int) -> int { ... }` 用的全是既有记号，`t126_closure` 逐记号一致（v1.95）） | `python tests/lexdiff.py` |
 | 声明级 AST 对拍 | **PASS=149 FAIL=1**（150 个源文件；唯一 FAIL 是 `tests/t115_derive.qma`——并行轨的 enum 派生让声明顺序变了、自举 parser 还没跟上，**与并发改动无关**。跳过 17 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer` / `t99_generic_struct` / `t101_bounds` / `t102_generic_impl` / `t103_generic_enum` / `t104_generic_enum_impl` / `t116_iface_multi` / `iface_rc` / `iface_rc_a64` / `t118_iface_own` / `t119_drop` / `t123_derive_enum` / `t124_macro` / `t125_refl_dyn`——自举 parser 未做 interface/impl/泛型单态化、类型约束、泛型 impl 与泛型 enum，v1.96 的 enum 派生 / token 宏 / 运行时下标反射也未移植；v1.97 把 `iface_rc_a64` 与 `t118_iface_own` 按同一口径记账，`t120_ffi` / `t115_derive` / `dpub_*` 两侧逐行一致） | `python tests/parsediff.py` |
 | 函数体 dump 对拍 | **一致 1719 / 分叉 1608 / SKIP 同步 26 / SKIP 不同步 44**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |
@@ -1612,6 +1612,45 @@ b1/b8s1 3.4×（C 的 AVX2）、b3 1.94×（调用开销）。
 | b8_threads1 | 3.34 → **2.93** | 同上 |
 | b5_string | 0.63 → **0.44** | v2.73 的常量折叠 + 分配器溢出启发式 |
 | b9_json | 3.94 → **3.42** | v2.74 让 flag_loop 认反转后的守卫形态 |
+
+### 3.43 堆换成 VirtualAlloc 私有页（v2.76）：b4 −54%
+
+**发现过程**：b4_array 上 qlmc 比 stage-0 慢 2.2×，分段计时后差距**全在 push 循环**
+（34.8 vs 7.6 ms），而循环只有 17 条指令。用"同一循环跑两遍"的对照
+（`build/probe/pf.qma`）定位到**首次触碰**：
+
+| | 首次 push | 第二遍 |
+|---|---|---|
+| qlmc（.bss 堆） | 23.3 ms | 7.3 ms |
+| stage-0（HeapAlloc） | 7.4 ms | 3.8 ms |
+
+用 C 直接量三种内存来源写 16 MB（本机 VBS 开启）：
+
+| 来源 | 16 MB 顺序写 |
+|---|---|
+| `static int64_t a[2M]`（.bss） | **21 ~ 29 ms** |
+| `malloc(16 MB)` | 5.9 ~ 7.1 ms |
+| `VirtualAlloc(MEM_COMMIT)` | **5.7 ~ 6.4 ms** |
+
+`.bss` 是映像节（pagefile 后备 + 写时复制），每页 5.5 µs；私有页 1 µs。
+**提交本身不花钱**（`VirtualAlloc` 16 MB 0.01 ms，零页在首次写时才给）。
+
+**改法**：`__alloc` 首次调用时 `VirtualAlloc(0, 64 MB, MEM_COMMIT|MEM_RESERVE,
+PAGE_READWRITE)`，基址/上限写进 `.bss` 四个槽（游标/锁/基址/上限）。`.bss` 从
+64 MB 缩到 **32 字节**；越界检查顺带从三条指令收成 `cmp r8,[rip+bss+24]` 一条。
+
+**本机 min of 5，两轮交替**：
+
+| 基准 | 改前 | 改后 |
+|---|---|---|
+| b4_array | 31.3 ~ 32.7 | **13.7 ~ 15.9** |
+| b9_json | 29.2 ~ 30.7 | 27.1 ~ 31.2（噪声内） |
+
+同一版还修了 b9_json 的两条纯浪费（`jws` 每字节 22 → 18 条）：JCMP→JCMPI 折叠
+后没有退回使用计数（死 `mov r8d, imm`）、比较操作数被搬进 RCX 才能比。
+
+**本机这一轮整体偏慢**（b1 从 25 ms 涨到 42 ms，新旧产物一起变慢），所以绝对值
+只用于同轮横向比；跨版本比值看 CI 表。
 
 ## 4. 自举
 

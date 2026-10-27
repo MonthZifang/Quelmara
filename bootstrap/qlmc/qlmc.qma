@@ -2029,7 +2029,9 @@ const I_QPC = 8
 const I_QPF = 9
 // v2.38：f64 字面量解析用 msvcrt 的 strtod（正确舍入，与 stage-0 的 Python 解析一致）
 const I_STRTOD = 10
-const I_USER = 11       // 用户 @ffi 符号从第 11 个 IAT 槽开始
+// v2.76：堆从 .bss 改成 VirtualAlloc 私有页（首次触碰 5.5 µs/页 → 1 µs/页）
+const I_VALLOC = 11
+const I_USER = 12       // 用户 @ffi 符号从第 12 个 IAT 槽开始
 
 // ---------------------------------------------------------------------------
 // 字节发射
@@ -5507,6 +5509,11 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
                 let cv = cval.get(ins.b)
                 if cv >= -2147483648 && cv <= 2147483647 {
                     ir.set(i, Ir { op: OP_JCMPI, dst: ins.dst, a: ins.a, b: cv, imm: ins.imm })
+                    // **折完要把"用了一次"退回去**（v2.76）：上面的 `_opt_mark` 是按
+                    // JCMP 记的（b 是 vreg，算一次读），换成 JCMPI 之后 b 槽放的是
+                    // 立即数，那条 `OP_CONST` 就成了死代码。不退计数的话 DCE 不敢删，
+                    // 于是每个比较都白留一条 `mov r8d, 0x20`（b9_json 的 jws 每字节 4 条）。
+                    use.set(ins.b, use.get(ins.b) - 1)
                 }
             }
         }
@@ -5868,6 +5875,17 @@ fn _idx_reg(fc: FnCtx, v: int) -> int {
     }
     _to_reg(fc, RDX, v)
     return RDX
+}
+
+/// `v` 现在**已经**在哪个通用寄存器里？不在寄存器（帧槽 / XMM / 未分配）返回 -1。
+/// 只读操作数用它省掉一次 `mov`：`cmp r64, imm` 可以接受任意寄存器，
+/// 没必要为了"约定用 RCX"先搬一趟。
+fn _reg_hint(fc: FnCtx, v: int) -> int {
+    let loc = fc.vloc.get(v)
+    if loc > 0 {
+        return loc - 1
+    }
+    return -1
 }
 
 /// 把 v 搬进寄存器 r（r 不能是 v 自己已经待着的寄存器之外的分配结果）
@@ -6646,17 +6664,14 @@ fn _emit_ir(fc: FnCtx, i: int) {
             eprint("qlmc: 内部错误：OP_JCMPI 的条件码必须是 jcc（0x80..0x8F）")
             exit(2)
         }
-        _to_reg(fc, RCX, ins.a)
-        if ins.b >= -128 && ins.b <= 127 {
-            _b(code, 0x48)                     // cmp rcx, imm8（83 /7 ib）
-            _b(code, 0x83)
-            _b(code, 0xF9)
-            _b(code, ins.b & 0xFF)
+        // v2.76：值已经在寄存器里就直接比那个寄存器，别再为"约定 RCX"搬一趟。
+        // `cmp r64, imm` 是只读操作数，任意寄存器都行（b9_json 的 jws 每字节省 4 条 mov）。
+        let rr = _reg_hint(fc, ins.a)
+        if rr >= 0 {
+            _cmp_imm(code, rr, ins.b)
         } else {
-            _b(code, 0x48)                     // cmp rcx, imm32（81 /7 id）
-            _b(code, 0x81)
-            _b(code, 0xF9)
-            _w32(code, ins.b)
+            _to_reg(fc, RCX, ins.a)
+            _cmp_imm(code, RCX, ins.b)
         }
         let p = _jcc(code, ins.dst)
         _addfix(fc.fixes, p, ins.imm, FK_LAB)
@@ -8599,10 +8614,13 @@ const MAX_THREADS = 8
 // 16 MB 的 arena 让 stage-2 编自己时堆游标冲到 31.7 MB / 32 MB（耗尽 → AV）。
 // qlmc 自己产物的 .text 只有 440 KB，fixup/label 加起来约 1 MB，4 MB 足够。
 const ARENA_CAP = 4 * 1024 * 1024
-// 堆大小：**必须大于 ARENA_CAP（16 MB）**，否则 `mem_alloc(ARENA_CAP)` 会静默
-// 越过 .bss 末尾，之后所有分配都落在未映射页上（v2.34 实测：stage-2 崩在
-// 基址 +17.3 MB 处）。.bss 不占文件体积、按需提交，给足没有代价。
-const BSS_SIZE = 0x4000000       // 64 MB（v2.38：f64 让 qlmc 自己变大，32 MB 不够）
+// 堆大小：**必须大于 ARENA_CAP（4 MB）**，否则 `mem_alloc(ARENA_CAP)` 会静默
+// 越过堆末尾，之后所有分配都落在未映射页上（v2.34 实测：stage-2 崩在
+// 基址 +17.3 MB 处）。v2.38 起 f64 让 qlmc 自己变大，32 MB 不够，给 64 MB。
+// v2.76：这块内存改用 VirtualAlloc 拿（私有页首次触碰比 .bss 映像节快 5 倍），
+// BSS_SIZE 因此缩到 32 字节 —— .bss 只剩游标/锁/基址/上限四个槽。
+const HEAP_SIZE = 0x4000000      // 64 MB，VirtualAlloc(MEM_COMMIT|MEM_RESERVE)
+const BSS_SIZE = 32              // 游标 / 自旋锁 / 堆基址 / 堆上限
 
 fn _compile_range(hdr: int, wid: int, nodes: vec[Node], names: vec[str],
                   strs: vec[str], fns: vec[Fn], rt: vec[int], stt: vec[int]) -> int {
@@ -10146,13 +10164,22 @@ fn _gen_str_eq(ctx: Ctx) {
     _ret(code)
 }
 
-/// __alloc(rcx = 字节数) -> rax：.bss 里的 bump 分配器（8 字节对齐）
+/// __alloc(rcx = 字节数) -> rax：bump 分配器（8 字节对齐）
+///
+/// **堆内存用 VirtualAlloc 拿，不再放在 .bss 里**（v2.76）。同样是 64 MB 的
+/// 需求，两种来源的**首次触碰**成本差 5 倍：`.bss`（映像节、pagefile 后备、
+/// 写时复制）每页约 5.5 µs，`VirtualAlloc(MEM_COMMIT)` 的私有页每页约 1 µs。
+/// 本机实测 16 MB 顺序写：`.bss` 21~29 ms，`VirtualAlloc` 4.0 ms。
+/// b4_array 的 push 循环 2 M 次里有 16 ms 花在这上面（23.3 → 7.3 ms）。
+/// 副作用：产物不再带 64 MB 的 .bss 节（5.6 KB 的 exe 里 64 MB 是虚的）。
 fn _gen_alloc(ctx: Ctx) {
     let code: vec[int] = ctx.code
     let labs: vec[int] = ctx.labs
     ctx.rt_pos.set(RT_ALLOC, len(code))
     let lhave = _newlab(labs)
     let llock = _newlab(labs)
+    let linit = _newlab(labs)
+    let loom = _newlab(labs)
     // **自旋锁**（bss 偏移 8）：bump 游标是全局的，而函数体是**多线程并行编译**的，
     // 每个线程开头都要 `_new_fc`（十几个 vec）。不加锁就是"读游标 → 加长度 → 写回"
     // 的丢更新，两个线程拿到同一块内存。v2.34 实测：-j4 编自己时报
@@ -10174,7 +10201,7 @@ fn _gen_alloc(ctx: Ctx) {
     _b(code, 0xC0)
     let pz = _jcc(code, 0x85)              // jnz .lock（没抢到就自旋）
     _addfix(ctx.fixes, pz, llock, 1)
-    _b(code, 0x48)                         // mov rax, [rip+HEAP]
+    _b(code, 0x48)                         // mov rax, [rip+bss+0]（游标，0 = 未初始化）
     _b(code, 0x8B)
     _b(code, 0x05)
     let f1 = len(code)
@@ -10183,14 +10210,8 @@ fn _gen_alloc(ctx: Ctx) {
     _b(code, 0x48)                         // test rax, rax
     _b(code, 0x85)
     _b(code, 0xC0)
-    let p0 = _jcc(code, 0x85)              // jnz .have
-    _addfix(ctx.fixes, p0, lhave, 1)
-    _b(code, 0x48)                         // lea rax, [rip+bss+16]（堆起点）
-    _b(code, 0x8D)
-    _b(code, 0x05)
-    let f2 = len(code)
-    _w32(code, 0)
-    _addfix(ctx.fixes, f2, 16, 4)          // bss 偏移 16 = 堆起点
+    let p0 = _jcc(code, 0x84)              // jz .init（首次分配才去拿堆）
+    _addfix(ctx.fixes, p0, linit, 1)
     _setlab(labs, code, lhave)
     _b(code, 0x4C)                         // lea r8, [rax+rcx+7]
     _b(code, 0x8D)
@@ -10201,29 +10222,18 @@ fn _gen_alloc(ctx: Ctx) {
     _b(code, 0x83)
     _b(code, 0xE0)
     _b(code, 0xF8)
-    // 越界 fail-fast：新游标 > 堆起点 + 上限就退 3，绝不静默写到未映射页。
-    // **只能用 rcx 当临时**：原来的 __alloc 只破坏 rax/r8/rcx，而手写的运行库
-    // 例程（__str_cat 等）都是按这个假设写的 —— 早先用 r9/r10 直接把它们搞崩了。
-    // rcx 是入参（字节数），算完 r8 就没用了，正好拿来当草稿。
+    // 越界 fail-fast：新游标 > 堆上限就退 3，绝不静默写到未映射页。
+    // 上限在首次分配时算好存在 bss+24（= 基址 + HEAP_SIZE），这里只比一次。
     let lok = _newlab(labs)
-    _b(code, 0x48)                         // lea rcx, [rip+bss+16]（堆起点）
-    _b(code, 0x8D)
-    _b(code, 0x0D)
+    _b(code, 0x4C)                         // cmp r8, [rip+bss+24]
+    _b(code, 0x3B)
+    _b(code, 0x05)
     let f4 = len(code)
     _w32(code, 0)
-    _addfix(ctx.fixes, f4, 16, 4)
-    _b(code, 0x48)                         // add rcx, HEAP_LIMIT
-    _b(code, 0x81)
-    _b(code, 0xC1)
-    // 堆起点是 **bss+16**，所以上限要留出这 16 字节再扣一页余量。
-    // 早先写 `BSS_SIZE-64`（按 bss+0 算）→ 上限比 .bss 末尾还高 184 KB，
-    // 越界检查形同虚设，越界后照样 AV（v2.35 踩）。
-    _w32(code, BSS_SIZE - 4096)
-    _b(code, 0x49)                         // cmp r8, rcx
-    _b(code, 0x39)
-    _b(code, 0xC8)
+    _addfix(ctx.fixes, f4, 24, 4)
     let p9 = _jcc(code, 0x86)              // jbe .ok
     _addfix(ctx.fixes, p9, lok, 1)
+    _setlab(labs, code, loom)
     _b(code, 0xB9)                         // mov ecx, 3
     _w32(code, 3)
     let c9 = _call_rip(code)               // ExitProcess(3)
@@ -10248,6 +10258,74 @@ fn _gen_alloc(ctx: Ctx) {
     _w32(code, 0)
     _addfix(ctx.fixes, f5, 8, 4)
     _ret(code)
+
+    // ---- 冷路径：首次分配才走一次，向内核要 64 MB 私有页 ----
+    // 只在 rcx 上做文章是不够的：VirtualAlloc 会破坏 rdx/r9/r10/r11，
+    // 而 `__str_cat` 这类手写例程按"__alloc 只破坏 rax/r8/rcx"的约定写。
+    // 5 个 push = 40 字节 + 32 字节影子空间 → call 时 rsp ≡ 0 (mod 16)。
+    _setlab(labs, code, linit)
+    _b(code, 0x51)                         // push rcx（字节数）
+    _b(code, 0x52)                         // push rdx
+    _b(code, 0x41)
+    _b(code, 0x51)                         // push r9
+    _b(code, 0x41)
+    _b(code, 0x52)                         // push r10
+    _b(code, 0x41)
+    _b(code, 0x53)                         // push r11
+    _sub_rsp(code, 32)
+    _b(code, 0x31)                         // xor ecx, ecx（lpAddress = 0）
+    _b(code, 0xC9)
+    _b(code, 0xBA)                         // mov edx, HEAP_SIZE
+    _w32(code, HEAP_SIZE)
+    _b(code, 0x41)                         // mov r8d, 0x3000（MEM_COMMIT|MEM_RESERVE）
+    _b(code, 0xB8)
+    _w32(code, 0x3000)
+    _b(code, 0x41)                         // mov r9d, 4（PAGE_READWRITE）
+    _b(code, 0xB9)
+    _w32(code, 4)
+    let c0 = _call_rip(code)               // VirtualAlloc
+    _addfix(ctx.fixes, c0, I_VALLOC, 3)
+    _b(code, 0x48)                         // add rsp, 32
+    _b(code, 0x83)
+    _b(code, 0xC4)
+    _b(code, 32)
+    _b(code, 0x41)                         // pop r11
+    _b(code, 0x5B)
+    _b(code, 0x41)                         // pop r10
+    _b(code, 0x5A)
+    _b(code, 0x41)                         // pop r9
+    _b(code, 0x59)
+    _b(code, 0x5A)                         // pop rdx
+    _b(code, 0x59)                         // pop rcx
+    _b(code, 0x48)                         // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let p8 = _jcc(code, 0x84)              // jz .oom（拿不到堆就退 3）
+    _addfix(ctx.fixes, p8, loom, 1)
+    _b(code, 0x48)                         // mov [rip+bss+16], rax（堆基址）
+    _b(code, 0x89)
+    _b(code, 0x05)
+    let f6 = len(code)
+    _w32(code, 0)
+    _addfix(ctx.fixes, f6, 16, 4)
+    _b(code, 0x48)                         // mov [rip+bss+0], rax（游标 = 基址）
+    _b(code, 0x89)
+    _b(code, 0x05)
+    let f7 = len(code)
+    _w32(code, 0)
+    _addfix(ctx.fixes, f7, 0, 4)
+    _b(code, 0x4C)                         // lea r8, [rax+HEAP_SIZE]
+    _b(code, 0x8D)
+    _b(code, 0x80)
+    _w32(code, HEAP_SIZE)
+    _b(code, 0x4C)                         // mov [rip+bss+24], r8（上限）
+    _b(code, 0x89)
+    _b(code, 0x05)
+    let f8 = len(code)
+    _w32(code, 0)
+    _addfix(ctx.fixes, f8, 24, 4)
+    let p7 = _jmp(code)                    // jmp .have
+    _addfix(ctx.fixes, p7, lhave, 1)
 }
 
 /// 入口：sub rsp,0x28 -> call main -> ExitProcess(rax)
@@ -10321,6 +10399,9 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     dsym.push("QueryPerformanceCounter")
     ddll.push(0)
     dsym.push("QueryPerformanceFrequency")
+    ddll.push(0)
+    // v2.76：堆内存来源（私有页，首次触碰比 .bss 快 5 倍）
+    dsym.push("VirtualAlloc")
     ddll.push(0)
     // v2.38：f64 字面量解析
     dsym.push("strtod")
@@ -10453,6 +10534,7 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     iat.set(I_FILEATTR, rdata_rva + iatb.get(0) + 48)
     iat.set(I_QPC, rdata_rva + iatb.get(0) + 56)
     iat.set(I_QPF, rdata_rva + iatb.get(0) + 64)
+    iat.set(I_VALLOC, rdata_rva + iatb.get(0) + 72)
     iat.set(I_STRTOD, rdata_rva + iatb.get(2))
     iat.set(I_WSPRINTF, rdata_rva + iatb.get(1))
     k = 0
