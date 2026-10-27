@@ -2250,6 +2250,87 @@ def _skip_pass(name):
     return False
 
 
+# 各指令里"值操作数"的位置（可以安全换成立即数）。**基址/下标要分开看**：
+# load 的 ins[2] 是基址指针，换成立即数会让 `[imm + idx*8]` 变成绝对地址访问；
+# store 的 ins[1] 同理。所以基址一律不动，只折下标与值。
+_IMM_POS = {
+    "bin": (3, 4), "fbin": (4, 5), "jcc": (2, 3), "jz": (1,), "jnz": (1,),
+    "mov": (2,), "load": (3,), "load8": (3,), "load32": (3,),
+    "store": (3,), "store8": (3,), "ret": (1,), "cmpset": (3, 4),
+    "neg": (2,), "not": (2,), "cssub": (2, 3), "fcvt": (3,),
+    "fcmpset": (3, 4), "fneg": (3,), "trunc": (2,), "f2i": (2,),
+}
+
+
+def opt_const_imm(fn):
+    """`mov v, imm` 且 v **只用一次** → 把立即数折进那一处，删掉 mov。
+
+    **为什么要它**：`let n = 500000` 这种"循环上界常量"会占掉一个寄存器
+    整整一个循环。b5_string 的 main 里同时活着 i / acc / n / buf / pos +
+    itoa 的四个临时值 = 9 个，正好等于寄存器池大小 —— 于是四个临时值全被
+    溢出到栈上（反汇编里每位数 8 次内存往返）。
+
+    折掉常量后腾出一个寄存器，溢出链就断了；顺带 `cmp r12, 500000` 也省掉
+    一条 `mov`，`load d, base, ('imm',k)` 还能走 v2.70 的位移路径。
+
+    **只折"恰好两次出现"的 vreg**（这里定义一次、那里用一次），所以删掉
+    mov 不会让任何地方读到未定义的值。基址位置（load/store 的 base）不动。
+    """
+    ins = fn.instrs
+    defs, mentions = {}, {}
+    for i, p in enumerate(ins):
+        d, u = vreg_mentions(p)
+        for x in d:
+            defs.setdefault(x, []).append(i)
+            mentions[x] = mentions.get(x, 0) + 1
+        for x in u:
+            mentions[x] = mentions.get(x, 0) + 1
+
+    fold = {}
+    for v, idxs in defs.items():
+        if len(idxs) != 1 or mentions.get(v, 0) != 2:
+            continue
+        p = ins[idxs[0]]
+        if not (p[0] == "mov" and p[1] == v
+                and isinstance(p[2], tuple) and p[2][0] == "imm"):
+            continue
+        # 找到那唯一一处使用，确认位置可以换成立即数
+        use_i = None
+        for j, q in enumerate(ins):
+            if j == idxs[0]:
+                continue
+            if v in vreg_mentions(q)[1]:
+                use_i = j
+                break
+        if use_i is None:
+            continue
+        q = ins[use_i]
+        ok = any(isinstance(q[k], int) and q[k] == v
+                 for k in _IMM_POS.get(q[0], ()) if k < len(q))
+        if not ok:
+            continue
+        fold[v] = (idxs[0], p[2])
+    if not fold:
+        return False
+
+    drop = {i for (i, _) in fold.values()}
+    out = []
+    for i, p in enumerate(ins):
+        if i in drop:
+            continue
+        pos = _IMM_POS.get(p[0], ())
+        if any(k < len(p) and isinstance(p[k], int) and p[k] in fold
+               for k in pos):
+            p = list(p)
+            for k in pos:
+                if k < len(p) and isinstance(p[k], int) and p[k] in fold:
+                    p[k] = fold[p[k]][1]
+            p = tuple(p)
+        out.append(p)
+    fn.instrs = out
+    return True
+
+
 def opt_store_back(fn):
     """`t = a OP b;  a = t`  →  `a = a OP b`（把"算完再搬回变量"折成就地更新）。
 
@@ -2345,6 +2426,8 @@ def opt_all(fn, unroll=True, invert=True):
             opt_copy_prop(fn)
         # 模归纳削减要在强度削减 + 收缩 + 复制传播之后（干净的 4 条窗口），
         # 展开之前（展开复制的是已变换形态，每段各回绕一次，语义正确）。
+        if not _skip_pass("opt_const_imm"):
+            opt_const_imm(fn)
         if not _skip_pass("opt_store_back"):
             opt_store_back(fn)
         if not _skip_pass("opt_mod_inductive"):

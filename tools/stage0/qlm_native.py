@@ -182,6 +182,25 @@ def modrm_mem(reg, base, index, scale, disp):
     return modrm + sib + struct.pack("<i", disp)
 
 
+def _emit_divmod10c(f, v, base):
+    """非负 v -> (q, ch)：q = v/10、ch = v%10 + base（ASCII 字符）。
+
+    与 `_emit_divmod10` 的区别是**少一个临时值**：直接算
+    `ch = (v + base) - q*10`，而不是先算出余数再 `+base`。
+    取位循环里同时活着的临时值从 4 个降到 3 个 —— b5_string 的 main 正好
+    卡在寄存器池边界上（9 个池寄存器 vs 9 个活值），少一个就能少一次溢出。
+    """
+    q = f.new_v()
+    f.emit("bin", "umulhi", q, v, ("imm", 0xCCCCCCCCCCCCCCCD))
+    f.emit("bin", "shr", q, q, ("imm", 3))
+    t = f.new_v()
+    f.emit("bin", "mul", t, q, ("imm", 10))
+    c = f.new_v()
+    f.emit("bin", "add", c, v, ("imm", base))
+    f.emit("bin", "sub", c, c, t)
+    return q, c
+
+
 def _emit_divmod10(f, v):
     """非负 v -> (q, d)：q = v/10、d = v%10，**不用 idiv**。
 
@@ -6225,9 +6244,7 @@ class Lower:
         f.emit("mov", pos, ("imm", 29))
         l_dig, l_dige = f.label("dig"), f.label("dige")
         f.emit("label", l_dig)
-        q10, d = _emit_divmod10(f, v)
-        chv = f.new_v()
-        f.emit("bin", "add", chv, d, ("imm", ord("0")))
+        q10, chv = _emit_divmod10c(f, v, ord("0"))
         f.emit("store8", buf, pos, chv)
         f.emit("bin", "sub", pos, pos, ("imm", 1))
         f.emit("mov", v, q10)
@@ -9384,9 +9401,7 @@ class Lower:
         f.emit("mov", pos, ("imm", 47))
         l_d, l_de = f.label("idig"), f.label("idige")
         f.emit("label", l_d)
-        q10, dd = _emit_divmod10(f, v)
-        cc = f.new_v()
-        f.emit("bin", "add", cc, dd, ("imm", 48))
+        q10, cc = _emit_divmod10c(f, v, 48)
         f.emit("store8", buf, pos, cc)
         f.emit("bin", "sub", pos, pos, ("imm", 1))
         f.emit("mov", v, q10)
@@ -10401,8 +10416,32 @@ def allocate(fn, pool=POOL, callee_saved=CALLEE_SAVED, f64=()):
             if reg in callee_saved:
                 used_callee.add(reg)
         else:
-            alloc[v] = ("m", 8 * (nslots + 1))   # 溢出到栈槽：[rbp-8], [rbp-16], ...
-            nslots += 1
+            # v2.73：**没有空闲寄存器时，溢出"区间结束得最晚"的那个**，
+            # 把寄存器让给当前值（当前值的区间更短）。
+            #
+            # 以前是无条件溢出**当前值** —— 于是短命临时值（取位循环里的
+            # q、q*10、字符）反而被赶进栈，下一条指令立刻又读回来，每位数
+            # 8 次内存往返。经典线性扫描的溢出启发式就是"spill the interval
+            # with the furthest end"，这里补上。
+            #
+            # 安全性：`alloc` 是最终表，发射器按它取位置；把某个 vreg 从
+            # 寄存器改成栈槽后，`fetch` 会老老实实 `mov reg, [rbp-off]`。
+            victim = None
+            for t in active:
+                if t[0] > last[v] and (not span_call or t[2] in callee_saved):
+                    if victim is None or t[0] > victim[0]:
+                        victim = t
+            if victim is not None:
+                _e, _w, _r = victim
+                active.remove(victim)
+                alloc[_w] = ("m", 8 * (nslots + 1))
+                nslots += 1
+                alloc[v] = ("r", _r)
+                active.append((last[v], v, _r))
+                active.sort()
+            else:
+                alloc[v] = ("m", 8 * (nslots + 1))   # 溢出到栈槽：[rbp-8], ...
+                nslots += 1
 
     # ---- 第二遍：f64 走 XMM 寄存器文件（v2.65）----
     # 与 GPR 同一套线性扫描，只是换一个寄存器池。两条硬约束：
