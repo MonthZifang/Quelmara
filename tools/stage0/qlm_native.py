@@ -12191,7 +12191,9 @@ def lower_and_optimize(src_path, arch="x86_64", optimize=True, dump_ir=False,
             opt_inline(fns, only=None if not reused else
                        {fn.name for fn in fresh})
         for fn in fresh:
-            opt_all(fn, unroll=True)
+            # 调试/覆盖率构建（prog 非 None）不做分支反转：覆盖率靠 `jcc`
+            # 的目标记分支边，反转后 then 分支直落、边就观测不到了。
+            opt_all(fn, unroll=True, invert=(prog is None))
     # 编译期死循环体检（v1.16）：guard 变量不更新 → 警告 + 位置
     import qlm_opt as _qopt
     _qopt.check_suspicious_loops(fns)

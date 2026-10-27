@@ -1293,6 +1293,88 @@ def opt_flag_loop(fn):
     return False
 
 
+# 条件码取反（IR 名字级）。改 IR 条件码必须同步后端 COND / INV_COND
+# 与 tests/a64_emu.py 的两张表 —— 见 versions/v2.66/CHANGELOG.md 的教训。
+INV_CC = {"e": "ne", "ne": "e", "l": "ge", "ge": "l",
+          "g": "le", "le": "g", "b": "ae", "ae": "b",
+          "a": "be", "be": "a"}
+
+
+def opt_invert_branch(fn):
+    """`if 条件 { A } else { B }` 的分支反转，让**热路径直落**。
+
+    `_lower_cond` 的形态是
+
+        jcc cc, a, b, L_then
+        jmp L_else
+        L_then: ...
+
+    then 分支紧跟在跳转后面 —— 于是**每次条件为假**都要多走一条 `jmp`。
+    改成
+
+        jcc !cc, a, b, L_else
+        L_then: ...
+
+    条件为真时直落（0 条跳转），为假时一次条件跳转（和原来一样）。
+    `if` 的条件通常一边倒（`if i < n`、`if c == 34`），所以平均能省半条。
+
+    b3_recursion 的 fib 每次调用省 1 条；b9_json 的三个扫描循环每字节省 1 条。
+
+    **覆盖率/调试构建不跑这个 pass**（`opt_all(invert=False)`）：覆盖率靠
+    `jcc` 的目标记"分支边"，反转之后 then 分支变成直落、不再是跳转目标，
+    报告里就看不到"未覆盖分支 8->9"了（v2.72 实测挂掉 2 个用例）。
+    诊断构建以可观测性优先。
+    """
+    ins = fn.instrs
+    n = len(ins)
+    out = []
+    changed = False
+    i = 0
+    while i < n:
+        p = ins[i]
+        if (p[0] == "jcc" and i + 2 < n and ins[i + 1][0] == "jmp"
+                and ins[i + 2][0] == "label"
+                and ins[i + 2][1] == p[4]
+                and p[1] in INV_CC):
+            out.append(("jcc", INV_CC[p[1]], p[2], p[3], ins[i + 1][1]))
+            i += 1                     # 跳过原 jcc；jmp 与 label 由后续处理
+            # 直接吃掉 jmp，label 留在下一轮（它会成为新的落点）
+            i += 1
+            changed = True
+            continue
+        out.append(p)
+        i += 1
+    if changed:
+        fn.instrs = out
+    return fn
+
+
+def opt_dead_after_term(fn):
+    """`ret` / `jmp` 之后到下一个 label 之间的指令是死代码，删掉。
+
+    典型来源：`if 条件 { return x } else { ... }` —— then 分支的 `ret` 后面
+    还挂着一条跳去汇合点的 `jmp`，永远走不到。
+    """
+    ins = fn.instrs
+    out = []
+    changed = False
+    dead = False
+    for p in ins:
+        if p[0] == "label":
+            dead = False
+            out.append(p)
+            continue
+        if dead:
+            changed = True
+            continue
+        out.append(p)
+        if p[0] in ("ret", "jmp"):
+            dead = True
+    if changed:
+        fn.instrs = out
+    return fn
+
+
 def opt_drop_dead_jump(fn):
     """`jmp L` / `jcc .. L` 紧跟 `label L` → 这条跳转是白做的，删掉。
 
@@ -2232,7 +2314,7 @@ def opt_store_back(fn):
     return fn
 
 
-def opt_all(fn, unroll=True):
+def opt_all(fn, unroll=True, invert=True):
     """单函数收尾优化(内联之后调用)"""
     # 字符串求长外提（若调用方没在 inline 前跑过，这里兜一次）
     if not _skip_pass("opt_strlen_hoist"):
@@ -2241,6 +2323,10 @@ def opt_all(fn, unroll=True):
         before = len(fn.instrs)
         if not _skip_pass("opt_drop_dead_jump"):
             opt_drop_dead_jump(fn)
+        if invert and not _skip_pass("opt_invert_branch"):
+            opt_invert_branch(fn)
+        if not _skip_pass("opt_dead_after_term"):
+            opt_dead_after_term(fn)
         if not _skip_pass("opt_copy_prop"):
             opt_copy_prop(fn)
         if not _skip_pass("opt_cse"):
@@ -2296,6 +2382,10 @@ def opt_all(fn, unroll=True):
                 break
     if not _skip_pass("opt_drop_dead_jump"):
         opt_drop_dead_jump(fn)
+    if invert and not _skip_pass("opt_invert_branch"):
+        opt_invert_branch(fn)
+    if not _skip_pass("opt_dead_after_term"):
+        opt_dead_after_term(fn)
     # 调度放最后：避免打乱内联/CSE/展开的形态匹配
     if not _skip_pass("opt_schedule"):
         opt_schedule(fn)
