@@ -1,0 +1,55 @@
+// t152_interp_control —— 解释器差分夹具：while / if / else if / break / continue
+fn main() {
+    let mut i = 0
+    let mut s = 0
+    while i < 10 {
+        if i % 2 == 0 {
+            s = s + i
+        } else {
+            s = s + 1
+        }
+        i = i + 1
+    }
+    print(s)
+
+    let mut j = 0
+    while j < 100 {
+        if j == 5 {
+            break
+        }
+        j = j + 1
+    }
+    print(j)
+
+    let mut k = 0
+    let mut t = 0
+    while k < 10 {
+        k = k + 1
+        if k % 3 != 0 {
+            continue
+        }
+        t = t + k
+    }
+    print(t)
+
+    let n = 7
+    if n < 5 {
+        print("small")
+    } else if n < 10 {
+        print("mid")
+    } else {
+        print("big")
+    }
+
+    let mut x = 0
+    let mut y = 0
+    while x < 3 {
+        let mut z = 0
+        while z < 3 {
+            y = y + x * z
+            z = z + 1
+        }
+        x = x + 1
+    }
+    print(y)
+}

@@ -1113,6 +1113,58 @@ JSON，与工具输出逐 vreg diff。**工具的可信度靠这一步，不靠"
 base+index+src 全 < 8 且 src 落在 4..7（字节寄存器缺 REX 的触发条件）。
 v2.59 的 LICM 根修就是靠第三类定位到 `Enc.mov8_mr` 的。
 
+### 1.13 解释器 `qlm_interp`（v2.80，**用 Quelmara 写的树遍历**）
+
+不编译、直接跑 `.qma` 的第二条执行通道。**整个解释器是 Quelmara 源码**
+（`bootstrap/interp/qlm_interp.qma`，约 1400 行），由 `qlmc` 编成裸 PE ——
+没有 Python、没有第三方运行时。
+
+```bash
+# 1) 编解释器（qlmc 自举产物）
+build/qlmc.exe build bootstrap/interp/qlm_interp.qma --target win -o build/qlm_interp.exe
+
+# 2) 脚本模式
+build/qlm_interp.exe examples/hello.qma
+
+# 3) 交互模式（Ctrl-Z 或空行退出）
+build/qlm_interp.exe --repl
+> 6 * 7
+42
+> let s = "ab" + "cd"
+> len(s)
+4
+```
+
+**为什么要有它**：改完语义想立刻看结果时不必等编译；更重要的是它给了
+编译器一个**独立的语义参照** —— 同一份源码，解释执行与编译执行必须输出
+逐字节相同，这条判据能抓住后端/优化层的语义偏差（`tests/interp_test.py`
+就是钉这条的，8 条断言）。
+
+**设计取舍**：
+
+| 决定 | 理由 |
+|---|---|
+| 树遍历，不生成字节码 | 解释器本身要能被 qlmc 编译（子集 S20）；字节码 VM 多一层编解码，收益等有正确基线后再谈 |
+| 动态类型（`Val { k, i, f, s }`） | 只需对**类型正确的程序**给出正确结果，类型检查留给编译器，避免出现第二套类型口径 |
+| AST 用下标数组 + 连续区间 | 块 = (起点, 条数)、实参 = (起点, 个数)；解析时"整块一次追加"保证连续 |
+| 所有可变状态放 vec | qlmc 传结构体形参是"传指针 + 被调方按值拷贝"，标量字段改不回去，vec 字段是句柄能改回去 |
+| 名字解析用扁平绑定栈 | `binds` 存 (名字下标, 槽位)，从栈顶往下找 → 天然支持遮蔽；帧返回只回退**逻辑长度**，槽位复用 |
+
+**支持的子集（v1）**：`fn` / `let` / `let mut` / 赋值 / `while` / `if-else if-else` /
+`return` / `break` / `continue`；int、str、bool、f64 字面量；`+ - * / %`、
+`== != < <= > >=`、`&& || !`；函数调用（含递归、多参数）；内建 `print` /
+`eprint` / `len` / `assert`；`const` 全局常量；`module` / `import` / `struct`
+声明跳过。
+
+**还没做**：vec / map / struct 值 / enum / match / 闭包 / 下标 / 字段访问 / for。
+这些按"最常用"的顺序补，每补一个都要在 `tests/interp_test.py` 里加一条
+"解释 == 编译"的差分夹具。
+
+**口径细节（差分踩出来的）**：`print(bool)` 打的是 `1/0`，但 `&&` / `||` 的
+结果打的是 `true/false`；字符串比较（`==` / `<` …）打 `true/false`，整数比较
+打 `1/0`。这些不是设计，是**编译器现在的实际行为**，解释器必须照抄，
+否则差分永远差几行。
+
 ## 2. 配置文件 `Quelmara.toml`
 
 从源文件目录向上查找（以及 cwd），**最近的一份生效**；缺失则用默认值。

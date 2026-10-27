@@ -1,0 +1,48 @@
+// t153_interp_fn —— 解释器差分夹具：递归 / 多参数 / 早返回 / const
+const N = 10
+
+fn fact(n: int) -> int {
+    if n <= 1 {
+        return 1
+    }
+    return n * fact(n - 1)
+}
+
+fn add3(a: int, b: int, c: int) -> int {
+    return a + b + c
+}
+
+fn add5(a: int, b: int, c: int, d: int, e: int) -> int {
+    return a + b + c + d + e
+}
+
+fn fadd(a: f64, b: f64) -> f64 {
+    return a + b
+}
+
+fn classify(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return 1
+    }
+    if c == 95 {
+        return 2
+    }
+    return 0
+}
+
+fn main() {
+    print(fact(10))
+    print(add3(1, 2, 3))
+    print(add5(1, 2, 3, 4, 5))
+    print(fadd(1.5, 2.5))
+    print(classify(95))
+    print(classify(120))
+
+    let mut i = 0
+    let mut acc = 0
+    while i < N {
+        acc = acc + fact(i)
+        i = i + 1
+    }
+    print(acc)
+}

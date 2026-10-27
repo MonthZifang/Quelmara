@@ -1145,6 +1145,36 @@ return sorted((h, b, lab) for h, (b, lab) in best.items())
   之后 `t113_csv` 仍然红，第二个（loop_regions）才露出来。别急着宣布
   根修完成 —— **把回归跑到底**再说话。
 
+### 7.33 待修：qlmc 的"第 5 个及以后的 f64 形参"传错（v2.80 发现，qlmc 侧）
+
+写解释器时撞上的：一个七参数的函数，第 7 个形参是 `f64`，实参传的是结构体
+字段的值，函数里读出来是**垃圾位模式**（`2.017232e-316` 这种 denormal），
+不是崩溃也不是 0 —— 典型的"栈上实参没按 double 落位"。
+
+最小复现（`build/probe/v6.qma` 的形状）：
+
+```quelmara
+struct Tok { k: int, n: int, f: f64, s: str, line: int }
+struct Nd  { k: int, a: int, b: int, c: int, n: int, f: f64 }
+
+fn mknd(nd: vec[Nd], k: int, a: int, b: int, c: int, n: int, f: f64) -> int {
+    nd.push(Nd { k: k, a: a, b: b, c: c, n: n, f: f })
+    return len(nd) - 1
+}
+
+// main 里：let i = mknd(nd, 21, 0, 0, 0, 0, t.f)   → nd[i].f 是垃圾
+```
+
+Win64 前 4 个整型实参走 RCX/RDX/R8/R9，第 5 个起在栈上；`f64` 走 XMM0-3
+之后也在栈上。所以嫌疑集中在 **`_emit_call` 的栈实参布局**：按 8 字节槽
+顺序写，但 f64 是否按"双精度 8 字节"落位、以及混合整型/浮点时的槽位计数
+是否与 ABI 一致，需要对着 `t148_f64_xmm` 那套差分再加一条"7 参混合"夹具。
+
+**当前绕法**（解释器就是这么写的）：不让 f64 出现在第 5 个及以后的位置 ——
+`bootstrap/interp/qlm_interp.qma` 把浮点字面量放进 `fp: vec[f64]` 池，
+节点里只存下标。**绕法不是修复**：真实程序里七参函数并不罕见，这条要在
+qlmc 里修掉，并加一条差分夹具钉住。
+
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
 当前顺序：

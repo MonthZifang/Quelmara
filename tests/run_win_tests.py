@@ -632,7 +632,8 @@ def test_debug_chain():
                          ("模糊测试", "tests/fuzz_test.py"),
                          ("增量缓存", "tests/cache_test.py"),
                          ("持久化 KV", "tests/kv_test.py"),
-                         ("qla 目标文件", "tests/qla_test.py")):
+                         ("qla 目标文件", "tests/qla_test.py"),
+                         ("解释器差分", "tests/interp_test.py")):
         try:
             r = subprocess.run([sys.executable,
                                 os.path.join(ROOT, script)],

@@ -1,0 +1,24 @@
+// t151_interp_arith —— 解释器差分夹具：算术 / 类型 / 优先级 / 短路
+// 同一份源码要能被 qlmc 编译，也要能被 bootstrap/interp 解释，输出必须逐字节相同。
+fn main() {
+    print(2 + 3 * 4)
+    print((2 + 3) * 4)
+    print(7 / 2)
+    print(7 % 3)
+    print(-5 + 2)
+    print(1.5 + 2.25)
+    print(3.0 * 2.0)
+    print(1.0 / 4.0)
+    print("a" + "b" + "c")
+    print(len("hello"))
+    print(true)
+    print(false)
+    print(1 < 2)
+    print(2 <= 2)
+    print(3 > 4)
+    print(!false)
+    print(1 == 1 && 2 > 1)
+    print(1 == 2 || 3 > 2)
+    print("x" == "x")
+    print("x" != "y")
+}

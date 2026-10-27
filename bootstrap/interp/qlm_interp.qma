@@ -1,0 +1,1498 @@
+// qlm_interp.qma —— Quelmara 解释器：不编译，直接跑 .qma
+//
+// 全部用 Quelmara 自己写，由 qlmc 编译成裸 PE（无 CRT、无第三方运行时）。
+// 这条线的目标不是"再做一个编译器"，而是**让语言有一个不依赖后端的执行通道**：
+// 改完语义想立刻看结果时，不必等编译；也用来交叉验证编译产物（同一份源码，
+// 解释执行与编译执行必须输出一致）。
+//
+// 设计取舍
+// --------
+// 1. **树遍历**，不生成字节码。理由：解释器要能被 qlmc 编译（子集 S20），
+//    树遍历只要一个节点数组 + 递归求值；字节码 VM 要多一层编码/解码，
+//    收益（约 2~3×）等有了正确的基线再谈。
+// 2. **动态类型**。值统一是 `Val { k, i, f, s }`（k = 种类标签）。
+//    Quelmara 是静态类型语言，但解释器只需对**类型正确的程序**给出正确结果，
+//    类型检查留给编译器；这样省掉一整张类型表，也避免与编译器的类型系统
+//    出现第二套口径。
+// 3. **AST 用下标数组**，不用指针/链表：节点池 `nd`、语句池 `stm`、
+//    实参池 `argp`、形参名池 `pnp`。块与实参在池里是**连续区间**
+//    （解析顺序天然连续），所以一个块 = (起点, 个数)，一次调用 = (起点, 个数)。
+// 4. **所有可变状态都放在 vec 里**：qlmc 传结构体形参是"传指针 + 被调方按值
+//    拷贝"，标量字段的修改传不回去，但 vec 字段是句柄（拷贝后仍指向同一块
+//    数据），push/set 能传回去。这是写解释器时最容易踩的一脚。
+//
+// 支持的子集（v1）
+// ----------------
+//   fn / let / let mut / 赋值 / while / if-else if-else / return
+//   整数、字符串、布尔、f64 字面量；+ - * / %；== != < <= > >=；&& || !
+//   函数调用（含递归）、内建 print / eprint / len / assert
+//   `//` 行注释、`module x` 与 `import` 跳过
+//
+// 还没做：vec / map / struct / enum / match / 闭包 / 下标 / 字段访问 / for。
+// 这些等 v1 的语义基线稳定后按"最常用"的顺序补。
+
+// ---------------------------------------------------------------------------
+// 文件读取（Windows kernel32；qlmc 只产 PE，这里与 qlmc 自己的 _read_text 同源）
+// ---------------------------------------------------------------------------
+
+@ffi("kernel32.dll", "CreateFileA")
+fn _CreateFileA(name: int, access: int, share: int, sec: int, disp: int,
+                attr: int, tmpl: int) -> int
+
+@ffi("kernel32.dll", "ReadFile")
+fn _ReadFile(h: int, buf: int, n: int, got: int, ov: int) -> bool
+
+@ffi("kernel32.dll", "GetFileSize")
+fn _GetFileSize(h: int, hi: int) -> int
+
+@ffi("kernel32.dll", "CloseHandle")
+fn _CloseHandle(h: int) -> bool
+
+const GEN_READ = 0x80000000
+const OPEN_EXISTING = 3
+const ATTR_NORMAL = 0x80
+
+/// read_text(path) -> str：整文件读成串（失败直接 fail-fast，绝不返回空串）
+fn read_text(path: str) -> str {
+    let h = _CreateFileA(cstr(path), GEN_READ, 1, 0, OPEN_EXISTING, ATTR_NORMAL, 0)
+    if h == -1 {
+        eprint("qlm_interp: 打不开源文件 " + path)
+        exit(2)
+    }
+    let sz = _GetFileSize(h, 0)
+    let buf = mem_alloc(sz + 1)
+    let got = mem_alloc(8)
+    if !_ReadFile(h, buf, sz, got, 0) {
+        eprint("qlm_interp: 读文件失败 " + path)
+        exit(2)
+    }
+    _CloseHandle(h)
+    mem_store8(buf, sz, 0)
+    return mem_str(buf, sz)
+}
+
+// ---------------------------------------------------------------------------
+// 值
+// ---------------------------------------------------------------------------
+
+const K_VOID = 0
+const K_INT = 1
+const K_STR = 2
+const K_BOOL = 3
+const K_F64 = 4
+
+struct Val {
+    k: int
+    i: int
+    f: f64
+    s: str
+}
+
+fn v_void() -> Val {
+    return Val { k: K_VOID, i: 0, f: 0.0, s: "" }
+}
+
+fn v_int(x: int) -> Val {
+    return Val { k: K_INT, i: x, f: 0.0, s: "" }
+}
+
+fn v_str(x: str) -> Val {
+    return Val { k: K_STR, i: 0, f: 0.0, s: x }
+}
+
+/// 比较运算的结果：编译器把它当 int（打印 1/0），不是 bool。
+/// 只有 `&&` / `||` 才是真正的 bool（打印 true/false）—— 口径照抄编译器，
+/// 差分测试才逐字节对得上（`tests/t151_interp_arith.qma` 钉住这条）。
+fn v_cmp(x: bool) -> Val {
+    if x {
+        return v_int(1)
+    }
+    return v_int(0)
+}
+
+fn v_bool(x: bool) -> Val {
+    let mut iv = 0
+    if x { iv = 1 }
+    return Val { k: K_BOOL, i: iv, f: 0.0, s: "" }
+}
+
+fn v_f64(x: f64) -> Val {
+    return Val { k: K_F64, i: 0, f: x, s: "" }
+}
+
+fn v_true(v: Val) -> bool {
+    if v.k == K_BOOL { return v.i != 0 }
+    if v.k == K_INT { return v.i != 0 }
+    if v.k == K_F64 { return v.f != 0.0 }
+    if v.k == K_STR { return len(v.s) != 0 }
+    return false
+}
+
+// ---------------------------------------------------------------------------
+// 记号
+// ---------------------------------------------------------------------------
+
+const T_EOF = 0
+const T_INT = 1
+const T_F64 = 2
+const T_STR = 3
+const T_ID = 4
+const T_KW = 5
+const T_OP = 6
+
+const O_ADD = 1
+const O_SUB = 2
+const O_MUL = 3
+const O_DIV = 4
+const O_MOD = 5
+const O_EQ = 6
+const O_NE = 7
+const O_LT = 8
+const O_LE = 9
+const O_GT = 10
+const O_GE = 11
+const O_AND = 12
+const O_OR = 13
+const O_NOT = 14
+const O_ASSIGN = 15
+const O_LP = 16
+const O_RP = 17
+const O_LB = 18
+const O_RB = 19
+const O_COMMA = 20
+const O_ARROW = 21
+const O_COLON = 22
+const O_DOT = 23
+const O_LBR = 24
+const O_RBR = 25
+
+const K_FN = 1
+const K_LET = 2
+const K_MUT = 3
+const K_IF = 4
+const K_ELSE = 5
+const K_WHILE = 6
+const K_RETURN = 7
+const K_TRUE = 8
+const K_FALSE = 9
+const K_MODULE = 10
+const K_IMPORT = 11
+const K_CONST = 12
+const K_STRUCT = 13
+const K_BREAK = 14
+const K_CONTINUE = 15
+const K_FOR = 16
+const K_IN = 17
+
+struct Tok {
+    k: int
+    n: int
+    f: f64
+    s: str
+    line: int
+}
+
+fn is_digit(c: int) -> bool {
+    return c >= 48 && c <= 57
+}
+
+fn is_alpha(c: int) -> bool {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
+}
+
+fn is_alnum(c: int) -> bool {
+    return is_alpha(c) || is_digit(c)
+}
+
+fn kw_id(w: str) -> int {
+    if w == "fn" { return K_FN }
+    if w == "let" { return K_LET }
+    if w == "mut" { return K_MUT }
+    if w == "if" { return K_IF }
+    if w == "else" { return K_ELSE }
+    if w == "while" { return K_WHILE }
+    if w == "return" { return K_RETURN }
+    if w == "true" { return K_TRUE }
+    if w == "false" { return K_FALSE }
+    if w == "module" { return K_MODULE }
+    if w == "import" { return K_IMPORT }
+    if w == "const" { return K_CONST }
+    if w == "struct" { return K_STRUCT }
+    if w == "break" { return K_BREAK }
+    if w == "continue" { return K_CONTINUE }
+    if w == "for" { return K_FOR }
+    if w == "in" { return K_IN }
+    return 0
+}
+
+fn push_tok(tk: vec[Tok], k: int, n: int, f: f64, s: str, line: int) {
+    tk.push(Tok { k: k, n: n, f: f, s: s, line: line })
+}
+
+// ---------------------------------------------------------------------------
+// 词法
+// ---------------------------------------------------------------------------
+
+/// 十进制浮点文本 -> f64（只认 "123" / "1.5" / "1." 形态；指数留给 v2）
+fn text_to_f64(t: str) -> f64 {
+    let n = len(t)
+    let mut i = 0
+    let mut ip = 0.0
+    let mut frac = 0.0
+    let mut scale = 1.0
+    let mut seen_dot = 0
+    while i < n {
+        let c = t[i]
+        if c == 46 {
+            seen_dot = 1
+        } else if is_digit(c) {
+            if seen_dot == 0 {
+                ip = ip * 10.0 + (c - 48).to_f64()
+            } else {
+                frac = frac * 10.0 + (c - 48).to_f64()
+                scale = scale * 10.0
+            }
+        }
+        i = i + 1
+    }
+    return ip + frac / scale
+}
+
+/// 源码 -> 记号表。不认识的字符 fail-fast（静默跳过只会让后面的报错莫名其妙）
+fn lex(src: str, tk: vec[Tok]) -> int {
+    let n = len(src)
+    let mut i = 0
+    let mut line = 1
+    while i < n {
+        let c = src[i]
+        // 空白
+        if c == 10 {
+            line = line + 1
+            i = i + 1
+        } else if c == 32 || c == 9 || c == 13 {
+            i = i + 1
+        } else if c == 47 && i + 1 < n && src[i + 1] == 47 {
+            // 行注释
+            let mut j = i
+            while j < n && src[j] != 10 {
+                j = j + 1
+            }
+            i = j
+        } else if is_digit(c) {
+            let st = i
+            let mut is_f = 0
+            while i < n && (is_digit(src[i]) || src[i] == 46) {
+                if src[i] == 46 {
+                    is_f = 1
+                }
+                i = i + 1
+            }
+            let txt = substr(src, st, i - st)
+            if is_f == 1 {
+                push_tok(tk, T_F64, 0, text_to_f64(txt), "", line)
+            } else {
+                push_tok(tk, T_INT, txt.to_int(), 0.0, "", line)
+            }
+        } else if is_alpha(c) {
+            let st = i
+            while i < n && is_alnum(src[i]) {
+                i = i + 1
+            }
+            let w = substr(src, st, i - st)
+            let kw = kw_id(w)
+            if kw != 0 {
+                push_tok(tk, T_KW, kw, 0.0, w, line)
+            } else {
+                push_tok(tk, T_ID, 0, 0.0, w, line)
+            }
+        } else if c == 34 {
+            // 字符串字面量（支持 \n \t \r \\ \" \0）
+            i = i + 1
+            let mut out = ""
+            let mut go = 1
+            while go == 1 && i < n {
+                let d = src[i]
+                if d == 34 {
+                    i = i + 1
+                    go = 0
+                } else if d == 92 && i + 1 < n {
+                    let e = src[i + 1]
+                    if e == 110 {
+                        out = out + "\n"
+                    } else if e == 116 {
+                        out = out + "\t"
+                    } else if e == 114 {
+                        out = out + "\r"
+                    } else if e == 34 {
+                        out = out + "\""
+                    } else if e == 92 {
+                        out = out + "\\"
+                    } else if e == 48 {
+                        out = out + "\0"
+                    } else {
+                        out = out + substr(src, i, 2)
+                    }
+                    i = i + 2
+                } else {
+                    out = out + substr(src, i, 1)
+                    i = i + 1
+                }
+            }
+            if go == 1 {
+                eprint("qlm_interp: 行 " + line.to_str() + ": 字符串没有结束引号")
+                exit(2)
+            }
+            push_tok(tk, T_STR, 0, 0.0, out, line)
+        } else {
+            // 运算符：先试两字符，再单字符
+            let c2 = 0
+            let mut two = 0
+            if i + 1 < n {
+                two = src[i + 1]
+            }
+            let mut op = 0
+            if c == 61 && two == 61 { op = O_EQ }
+            else if c == 33 && two == 61 { op = O_NE }
+            else if c == 60 && two == 61 { op = O_LE }
+            else if c == 62 && two == 61 { op = O_GE }
+            else if c == 38 && two == 38 { op = O_AND }
+            else if c == 124 && two == 124 { op = O_OR }
+            else if c == 45 && two == 62 { op = O_ARROW }
+            if op != 0 {
+                push_tok(tk, T_OP, op, 0.0, "", line)
+                i = i + 2
+            } else {
+                if c == 43 { op = O_ADD }
+                else if c == 45 { op = O_SUB }
+                else if c == 42 { op = O_MUL }
+                else if c == 47 { op = O_DIV }
+                else if c == 37 { op = O_MOD }
+                else if c == 60 { op = O_LT }
+                else if c == 62 { op = O_GT }
+                else if c == 33 { op = O_NOT }
+                else if c == 61 { op = O_ASSIGN }
+                else if c == 40 { op = O_LP }
+                else if c == 41 { op = O_RP }
+                else if c == 91 { op = O_LB }
+                else if c == 93 { op = O_RB }
+                else if c == 44 { op = O_COMMA }
+                else if c == 58 { op = O_COLON }
+                else if c == 123 { op = O_LBR }
+                else if c == 125 { op = O_RBR }
+                else if c == 46 { op = O_DOT }
+                if op == 0 {
+                    eprint("qlm_interp: 行 " + line.to_str() + ": 不认识的字符 " + c.to_str())
+                    exit(2)
+                }
+                push_tok(tk, T_OP, op, 0.0, "", line)
+                i = i + 1
+            }
+        }
+    }
+    push_tok(tk, T_EOF, 0, 0.0, "", line)
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// AST
+// ---------------------------------------------------------------------------
+
+const N_LET = 1
+const N_SET = 2
+const N_WHILE = 3
+const N_IF = 4
+const N_RET = 5
+const N_EXPR = 6
+const N_BREAK = 7
+const N_CONTINUE = 8
+const N_BLOCK = 9
+
+const E_INT = 20
+const E_F64 = 21
+const E_STR = 22
+const E_BOOL = 23
+const E_VAR = 24
+const E_BIN = 25
+const E_UN = 26
+const E_CALL = 27
+
+/// 节点。**刻意不放 f64 字段**：qlmc 目前把"第 5 个及以后的 f64 形参"
+/// 走栈传递时传错（实测 `f(a,b,c,d,e,f64)` 的第 7 个实参是垃圾位模式），
+/// 所以浮点字面量改成放进 `fp` 池、节点里只存下标。
+struct Nd {
+    k: int
+    a: int
+    b: int
+    c: int
+    n: int
+}
+
+struct Fn {
+    name: int
+    ps: int      // 形参名在 pnp 池里的起点
+    np: int      // 形参个数
+    bs: int      // 函数体语句在 stm 池里的起点
+    bc: int      // 语句条数
+}
+
+struct St {
+    nd: vec[Nd]
+    stm: vec[int]
+    argp: vec[int]
+    pnp: vec[int]
+    strs: vec[str]
+    names: vec[str]
+    fns: vec[Fn]
+    tk: vec[Tok]
+    binds: vec[int]      // 扁平 (name_idx, slot) 对
+    vals: vec[Val]
+    ip: vec[int]         // 解析游标
+    blen: vec[int]       // binds 的逻辑长度（偶数）
+    vlen: vec[int]       // vals 的逻辑长度
+    base: vec[int]       // 当前帧在 binds 里的起点
+    ret: vec[Val]
+    bs: vec[int]         // parse_block 的出参：起点
+    bc: vec[int]         // parse_block 的出参：条数
+    gend: vec[int]       // 全局区（const）在 binds 里的结束位置
+    gp: vec[int]         // const 的 (初值节点, 槽位) 扁平对
+    fp: vec[f64]         // 浮点字面量池（节点里只存下标）
+}
+
+fn st_new() -> St {
+    let st = St {
+        nd: vec[Nd].new(256),
+        stm: vec[int].new(256),
+        argp: vec[int].new(16),
+        pnp: vec[int].new(16),
+        strs: vec[str].new(32),
+        names: vec[str].new(64),
+        fns: vec[Fn].new(16),
+        tk: vec[Tok].new(256),
+        binds: vec[int].new(64),
+        vals: vec[Val].new(64),
+        ip: vec[int].new(1),
+        blen: vec[int].new(1),
+        vlen: vec[int].new(1),
+        base: vec[int].new(1),
+        ret: vec[Val].new(1),
+        bs: vec[int].new(1),
+        bc: vec[int].new(1),
+        gend: vec[int].new(1),
+        gp: vec[int].new(8),
+        fp: vec[f64].new(8)
+    }
+    // `vec[T].new(n)` 只给**容量**，长度是 0 —— 这些单槽状态必须 push 出第 0 格，
+    // 否则后面 `set(0, ...)` 直接撞越界检查（die → exit 1，什么也不打印）。
+    st.ip.push(0)
+    st.blen.push(0)
+    st.vlen.push(0)
+    st.base.push(0)
+    st.ret.push(v_void())
+    st.bs.push(0)
+    st.bc.push(0)
+    st.gend.push(0)
+    return st
+}
+
+fn mknd(st: St, k: int, a: int, b: int, c: int, n: int) -> int {
+    st.nd.push(Nd { k: k, a: a, b: b, c: c, n: n })
+    return len(st.nd) - 1
+}
+
+// ---------------------------------------------------------------------------
+// 解析
+// ---------------------------------------------------------------------------
+
+fn p_cur(st: St) -> Tok {
+    return st.tk.get(st.ip.get(0))
+}
+
+fn p_bump(st: St) {
+    st.ip.set(0, st.ip.get(0) + 1)
+}
+
+fn p_is_op(st: St, o: int) -> bool {
+    let t = p_cur(st)
+    return t.k == T_OP && t.n == o
+}
+
+fn p_is_kw(st: St, k: int) -> bool {
+    let t = p_cur(st)
+    return t.k == T_KW && t.n == k
+}
+
+fn p_err(st: St, msg: str) {
+    let t = p_cur(st)
+    eprint("qlm_interp: 行 " + t.line.to_str() + ": " + msg)
+    exit(2)
+}
+
+fn p_op(st: St, o: int, what: str) {
+    if !p_is_op(st, o) {
+        p_err(st, "这里需要 " + what)
+    }
+    p_bump(st)
+}
+
+/// 名字池里查（没有就追加），返回下标
+fn intern(st: St, s: str) -> int {
+    let n = len(st.names)
+    let mut i = 0
+    while i < n {
+        if st.names.get(i) == s {
+            return i
+        }
+        i = i + 1
+    }
+    st.names.push(s)
+    return n
+}
+
+fn p_name(st: St) -> int {
+    let t = p_cur(st)
+    if t.k != T_ID {
+        p_err(st, "这里需要一个标识符")
+    }
+    p_bump(st)
+    return intern(st, t.s)
+}
+
+/// 跳过类型标注（v1 不查类型：`int` / `str` / `vec[int]` / `map[str]int` 一律吃掉）
+fn skip_type(st: St) {
+    let mut depth = 0
+    while 1 == 1 {
+        let t = p_cur(st)
+        if t.k == T_ID || (t.k == T_KW && t.n == K_FN) {
+            p_bump(st)
+        } else if t.k == T_OP && (t.n == O_LB || t.n == O_RB) {
+            if t.n == O_LB { depth = depth + 1 } else { depth = depth - 1 }
+            p_bump(st)
+        } else if t.k == T_OP && t.n == O_DOT {
+            p_bump(st)
+        } else {
+            return
+        }
+    }
+}
+
+fn mkbin(st: St, op: int, a: int, b: int) -> int {
+    return mknd(st, E_BIN, a, b, 0, op)
+}
+
+fn p_primary(st: St) -> int {
+    let t = p_cur(st)
+    if t.k == T_INT {
+        p_bump(st)
+        return mknd(st, E_INT, 0, 0, 0, t.n)
+    }
+    if t.k == T_F64 {
+        p_bump(st)
+        st.fp.push(t.f)
+        return mknd(st, E_F64, 0, 0, 0, len(st.fp) - 1)
+    }
+    if t.k == T_STR {
+        p_bump(st)
+        st.strs.push(t.s)
+        return mknd(st, E_STR, 0, 0, 0, len(st.strs) - 1)
+    }
+    if t.k == T_KW && (t.n == K_TRUE || t.n == K_FALSE) {
+        p_bump(st)
+        let mut bv = 0
+        if t.n == K_TRUE { bv = 1 }
+        return mknd(st, E_BOOL, 0, 0, 0, bv)
+    }
+    if t.k == T_ID {
+        p_bump(st)
+        let nm = intern(st, t.s)
+        if p_is_op(st, O_LP) {
+            p_bump(st)
+            let mut tmp = vec[int].new(4)
+            while !p_is_op(st, O_RP) {
+                tmp.push(p_expr(st))
+                if p_is_op(st, O_COMMA) { p_bump(st) }
+            }
+            p_bump(st)                       // ')'
+            let start = len(st.argp)
+            let mut i = 0
+            while i < len(tmp) {
+                st.argp.push(tmp.get(i))
+                i = i + 1
+            }
+            return mknd(st, E_CALL, start, len(tmp), 0, nm)
+        }
+        return mknd(st, E_VAR, 0, 0, 0, nm)
+    }
+    if t.k == T_OP && t.n == O_LP {
+        p_bump(st)
+        let e = p_expr(st)
+        p_op(st, O_RP, ")")
+        return e
+    }
+    p_err(st, "这里需要一个表达式")
+    return -1
+}
+
+fn p_unary(st: St) -> int {
+    if p_is_op(st, O_SUB) {
+        p_bump(st)
+        return mknd(st, E_UN, p_unary(st), 0, 0, O_SUB)
+    }
+    if p_is_op(st, O_NOT) {
+        p_bump(st)
+        return mknd(st, E_UN, p_unary(st), 0, 0, O_NOT)
+    }
+    return p_primary(st)
+}
+
+fn p_mul(st: St) -> int {
+    let mut l = p_unary(st)
+    while p_is_op(st, O_MUL) || p_is_op(st, O_DIV) || p_is_op(st, O_MOD) {
+        let op = p_cur(st).n
+        p_bump(st)
+        l = mkbin(st, op, l, p_unary(st))
+    }
+    return l
+}
+
+fn p_add(st: St) -> int {
+    let mut l = p_mul(st)
+    while p_is_op(st, O_ADD) || p_is_op(st, O_SUB) {
+        let op = p_cur(st).n
+        p_bump(st)
+        l = mkbin(st, op, l, p_mul(st))
+    }
+    return l
+}
+
+fn p_rel(st: St) -> int {
+    let mut l = p_add(st)
+    while p_is_op(st, O_LT) || p_is_op(st, O_LE) ||
+          p_is_op(st, O_GT) || p_is_op(st, O_GE) {
+        let op = p_cur(st).n
+        p_bump(st)
+        l = mkbin(st, op, l, p_add(st))
+    }
+    return l
+}
+
+fn p_eq(st: St) -> int {
+    let mut l = p_rel(st)
+    while p_is_op(st, O_EQ) || p_is_op(st, O_NE) {
+        let op = p_cur(st).n
+        p_bump(st)
+        l = mkbin(st, op, l, p_rel(st))
+    }
+    return l
+}
+
+fn p_and(st: St) -> int {
+    let mut l = p_eq(st)
+    while p_is_op(st, O_AND) {
+        p_bump(st)
+        l = mkbin(st, O_AND, l, p_eq(st))
+    }
+    return l
+}
+
+fn p_expr(st: St) -> int {
+    let mut l = p_and(st)
+    while p_is_op(st, O_OR) {
+        p_bump(st)
+        l = mkbin(st, O_OR, l, p_and(st))
+    }
+    return l
+}
+
+/// 块：`{ stmt* }`。语句先收进临时 vec 再整体追加 —— 嵌套块的语句会先落进
+/// stm 池，只有"整块一次追加"才能保证本块的语句在池里连续（求值按区间走）。
+fn p_block_body(st: St) -> int {
+    p_op(st, O_LBR, "{")
+    let mut tmp = vec[int].new(8)
+    while !p_is_op(st, O_RBR) {
+        if p_cur(st).k == T_EOF {
+            p_err(st, "块没有结束的 }")
+        }
+        tmp.push(p_stmt(st))
+    }
+    p_bump(st)                     // '}'
+    let start = len(st.stm)
+    let mut i = 0
+    while i < len(tmp) {
+        st.stm.push(tmp.get(i))
+        i = i + 1
+    }
+    st.bs.set(0, start)
+    st.bc.set(0, len(tmp))
+    return start
+}
+
+fn p_stmt(st: St) -> int {
+    let t = p_cur(st)
+    if t.k == T_KW && t.n == K_LET {
+        p_bump(st)
+        let mut mutf = 0
+        if p_is_kw(st, K_MUT) {
+            mutf = 1
+            p_bump(st)
+        }
+        let nm = p_name(st)
+        if p_is_op(st, O_COLON) {
+            p_bump(st)
+            skip_type(st)
+        }
+        p_op(st, O_ASSIGN, "=")
+        let e = p_expr(st)
+        return mknd(st, N_LET, e, mutf, 0, nm)
+    }
+    if t.k == T_KW && t.n == K_IF {
+        p_bump(st)
+        let c = p_expr(st)
+        let ts = p_block_body(st)
+        let tb = st.bc.get(0)
+        let mut es = 0 - 1
+        if p_is_kw(st, K_ELSE) {
+            p_bump(st)
+            if p_is_kw(st, K_IF) {
+                // else if：else 就是那条嵌套的 if 节点本身
+                es = p_stmt(st)
+            } else {
+                let s0 = p_block_body(st)
+                es = mknd(st, N_BLOCK, s0, st.bc.get(0), 0, 0)
+            }
+        }
+        return mknd(st, N_IF, c, ts, tb, es)
+    }
+    if t.k == T_KW && t.n == K_WHILE {
+        p_bump(st)
+        let c = p_expr(st)
+        let s0 = p_block_body(st)
+        return mknd(st, N_WHILE, c, s0, st.bc.get(0), 0)
+    }
+    if t.k == T_KW && t.n == K_RETURN {
+        p_bump(st)
+        let mut e = 0 - 1
+        if !p_is_op(st, O_RP) && p_cur(st).k != T_EOF {
+            let nt = p_cur(st)
+            let mut has = 1
+            if nt.k == T_OP && (nt.n == O_RP || nt.n == O_COMMA) { has = 0 }
+            if has == 1 {
+                e = p_expr(st)
+            }
+        }
+        return mknd(st, N_RET, e, 0, 0, 0)
+    }
+    if t.k == T_KW && t.n == K_BREAK {
+        p_bump(st)
+        return mknd(st, N_BREAK, 0, 0, 0, 0)
+    }
+    if t.k == T_KW && t.n == K_CONTINUE {
+        p_bump(st)
+        return mknd(st, N_CONTINUE, 0, 0, 0, 0)
+    }
+    // 赋值：ID `=` ...（先看一个记号，避免把 `x == y` 误判）
+    if t.k == T_ID {
+        let save = st.ip.get(0)
+        let nm = intern(st, t.s)
+        p_bump(st)
+        if p_is_op(st, O_ASSIGN) {
+            p_bump(st)
+            let e = p_expr(st)
+            return mknd(st, N_SET, e, 0, 0, nm)
+        }
+        st.ip.set(0, save)
+    }
+    let e = p_expr(st)
+    return mknd(st, N_EXPR, e, 0, 0, 0)
+}
+
+// ---------------------------------------------------------------------------
+// 求值
+// ---------------------------------------------------------------------------
+
+fn set_or_push(v: vec[int], i: int, x: int) {
+    if i < len(v) {
+        v.set(i, x)
+    } else {
+        v.push(x)
+    }
+}
+
+fn setv_or_push(v: vec[Val], i: int, x: Val) {
+    if i < len(v) {
+        v.set(i, x)
+    } else {
+        v.push(x)
+    }
+}
+
+/// 绑定一个名字：slot 复用（帧返回时只回退逻辑长度，不真的缩数组）
+fn bind(st: St, name: int, v: Val) {
+    let vi = st.vlen.get(0)
+    setv_or_push(st.vals, vi, v)
+    st.vlen.set(0, vi + 1)
+    let bi = st.blen.get(0)
+    set_or_push(st.binds, bi, name)
+    set_or_push(st.binds, bi + 1, vi)
+    st.blen.set(0, bi + 2)
+}
+
+/// 查名字 → 槽位下标；没找到返回 -1。从栈顶往下找，天然支持遮蔽。
+fn lookup(st: St, name: int) -> int {
+    let mut i = st.blen.get(0) - 2
+    let base = st.base.get(0)
+    while i >= base {
+        if st.binds.get(i) == name {
+            return st.binds.get(i + 1)
+        }
+        i = i - 2
+    }
+    // 局部没找到 → 落到全局区（const）
+    i = st.gend.get(0) - 2
+    while i >= 0 {
+        if st.binds.get(i) == name {
+            return st.binds.get(i + 1)
+        }
+        i = i - 2
+    }
+    return -1
+}
+
+fn str_cmp(a: str, b: str) -> int {
+    let na = len(a)
+    let nb = len(b)
+    let mut i = 0
+    while i < na && i < nb {
+        let ca = a[i]
+        let cb = b[i]
+        if ca != cb {
+            return ca - cb
+        }
+        i = i + 1
+    }
+    return na - nb
+}
+
+fn print_val(v: Val) {
+    if v.k == K_INT {
+        print(v.i)
+    } else if v.k == K_STR {
+        print(v.s)
+    } else if v.k == K_BOOL {
+        if v.i != 0 {
+            print("true")
+        } else {
+            print("false")
+        }
+    } else if v.k == K_F64 {
+        print(v.f)
+    }
+}
+
+fn eprint_val(v: Val) {
+    if v.k == K_INT {
+        eprint(v.i.to_str())
+    } else if v.k == K_STR {
+        eprint(v.s)
+    } else if v.k == K_BOOL {
+        if v.i != 0 { eprint("true") } else { eprint("false") }
+    } else if v.k == K_F64 {
+        eprint("f64")
+    }
+}
+
+fn as_int(v: Val) -> int {
+    if v.k == K_F64 {
+        return v.f.to_int()
+    }
+    return v.i
+}
+
+fn as_f64(v: Val) -> f64 {
+    if v.k == K_F64 {
+        return v.f
+    }
+    return v.i.to_f64()
+}
+
+fn is_num(v: Val) -> bool {
+    return v.k == K_INT || v.k == K_F64
+}
+
+fn find_fn(st: St, name: int) -> int {
+    let n = len(st.fns)
+    let mut i = 0
+    while i < n {
+        if st.fns.get(i).name == name {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn ev_bin(st: St, op: int, a: Val, b: Val) -> Val {
+    // 字符串拼接（`+` 同时是整数加与串接，与编译器同一条规则）
+    if op == O_ADD && a.k == K_STR && b.k == K_STR {
+        return v_str(a.s + b.s)
+    }
+    if op == O_ADD && (a.k == K_STR || b.k == K_STR) {
+        return v_str(to_text(a) + to_text(b))
+    }
+    if op == O_EQ {
+        if a.k == K_STR || b.k == K_STR {
+            // 字符串比较产出的是真 bool（打印 true/false），与 int 比较不同
+            return v_bool(str_cmp(to_text(a), to_text(b)) == 0)
+        }
+        if a.k == K_F64 || b.k == K_F64 {
+            return v_cmp(as_f64(a) == as_f64(b))
+        }
+        if a.k == K_BOOL || b.k == K_BOOL {
+            return v_cmp(as_int(a) == as_int(b))
+        }
+        return v_cmp(a.i == b.i)
+    }
+    if op == O_NE {
+        if a.k == K_STR || b.k == K_STR {
+            return v_bool(str_cmp(to_text(a), to_text(b)) != 0)
+        }
+        let eq = ev_bin(st, O_EQ, a, b)
+        return v_cmp(eq.i == 0)
+    }
+    if a.k == K_STR || b.k == K_STR {
+        let c = str_cmp(to_text(a), to_text(b))
+        if op == O_LT { return v_bool(c < 0) }
+        if op == O_LE { return v_bool(c <= 0) }
+        if op == O_GT { return v_bool(c > 0) }
+        if op == O_GE { return v_bool(c >= 0) }
+    }
+    if a.k == K_F64 || b.k == K_F64 {
+        let x = as_f64(a)
+        let y = as_f64(b)
+        if op == O_ADD { return v_f64(x + y) }
+        if op == O_SUB { return v_f64(x - y) }
+        if op == O_MUL { return v_f64(x * y) }
+        if op == O_DIV { return v_f64(x / y) }
+        if op == O_LT { return v_cmp(x < y) }
+        if op == O_LE { return v_cmp(x <= y) }
+        if op == O_GT { return v_cmp(x > y) }
+        if op == O_GE { return v_cmp(x >= y) }
+    }
+    let x2 = as_int(a)
+    let y2 = as_int(b)
+    if op == O_ADD { return v_int(x2 + y2) }
+    if op == O_SUB { return v_int(x2 - y2) }
+    if op == O_MUL { return v_int(x2 * y2) }
+    if op == O_DIV { return v_int(x2 / y2) }
+    if op == O_MOD { return v_int(x2 % y2) }
+    if op == O_LT { return v_cmp(x2 < y2) }
+    if op == O_LE { return v_cmp(x2 <= y2) }
+    if op == O_GT { return v_cmp(x2 > y2) }
+    if op == O_GE { return v_cmp(x2 >= y2) }
+    return v_void()
+}
+
+fn to_text(v: Val) -> str {
+    if v.k == K_STR {
+        return v.s
+    }
+    if v.k == K_INT {
+        return v.i.to_str()
+    }
+    if v.k == K_BOOL {
+        if v.i != 0 {
+            return "true"
+        }
+        return "false"
+    }
+    return "<f64>"
+}
+
+fn ev_call(st: St, name: int, astart: int, acnt: int) -> Val {
+    // 实参先全算出来（求值序：从左到右）
+    let args = vec[Val].new(acnt + 1)
+    let mut i = 0
+    while i < acnt {
+        args.push(ev(st, st.argp.get(astart + i)))
+        i = i + 1
+    }
+    let nm = st.names.get(name)
+    if nm == "print" {
+        if acnt >= 1 {
+            print_val(args.get(0))
+        }
+        return v_void()
+    }
+    if nm == "eprint" {
+        if acnt >= 1 {
+            eprint_val(args.get(0))
+        }
+        return v_void()
+    }
+    if nm == "len" {
+        if acnt >= 1 && args.get(0).k == K_STR {
+            return v_int(len(args.get(0).s))
+        }
+        return v_int(0)
+    }
+    if nm == "assert" {
+        if acnt >= 1 && !v_true(args.get(0)) {
+            let mut msg = "assert 失败"
+            if acnt >= 2 {
+                msg = to_text(args.get(1))
+            }
+            eprint("assert: " + msg)
+            exit(1)
+        }
+        return v_void()
+    }
+    let fi = find_fn(st, name)
+    if fi < 0 {
+        eprint("qlm_interp: 调用了未定义的函数 " + nm)
+        exit(2)
+    }
+    let f = st.fns.get(fi)
+    // 新帧：记录调用者的 binds/vals 逻辑长度与帧基址，返回时整段回退
+    let save_b = st.blen.get(0)
+    let save_v = st.vlen.get(0)
+    let save_base = st.base.get(0)
+    st.base.set(0, save_b)
+    let mut k = 0
+    while k < f.np {
+        let mut av = v_void()
+        if k < acnt {
+            av = args.get(k)
+        }
+        bind(st, st.pnp.get(f.ps + k), av)
+        k = k + 1
+    }
+    st.ret.set(0, v_void())
+    exec_range(st, f.bs, f.bc)
+    let rv = st.ret.get(0)
+    st.blen.set(0, save_b)
+    st.vlen.set(0, save_v)
+    st.base.set(0, save_base)
+    return rv
+}
+
+fn ev(st: St, n: int) -> Val {
+    let nd = st.nd.get(n)
+    if nd.k == E_INT {
+        return v_int(nd.n)
+    }
+    if nd.k == E_F64 {
+        return v_f64(st.fp.get(nd.n))
+    }
+    if nd.k == E_STR {
+        return v_str(st.strs.get(nd.n))
+    }
+    if nd.k == E_BOOL {
+        return v_int(nd.n)
+    }
+    if nd.k == E_VAR {
+        let sl = lookup(st, nd.n)
+        if sl < 0 {
+            eprint("qlm_interp: 未定义的变量 " + st.names.get(nd.n))
+            exit(2)
+        }
+        return st.vals.get(sl)
+    }
+    if nd.k == E_BIN {
+        // 短路：`&&` / `||` 不能先算右边
+        if nd.n == O_AND {
+            let l = ev(st, nd.a)
+            if !v_true(l) {
+                return v_bool(false)
+            }
+            return v_bool(v_true(ev(st, nd.b)))
+        }
+        if nd.n == O_OR {
+            let l = ev(st, nd.a)
+            if v_true(l) {
+                return v_bool(true)
+            }
+            return v_bool(v_true(ev(st, nd.b)))
+        }
+        let a = ev(st, nd.a)
+        let b = ev(st, nd.b)
+        return ev_bin(st, nd.n, a, b)
+    }
+    if nd.k == E_UN {
+        let v = ev(st, nd.a)
+        if nd.n == O_SUB {
+            if v.k == K_F64 {
+                return v_f64(0.0 - v.f)
+            }
+            return v_int(0 - v.i)
+        }
+        return v_cmp(!v_true(v))
+    }
+    if nd.k == E_CALL {
+        return ev_call(st, nd.n, nd.a, nd.b)
+    }
+    eprint("qlm_interp: 内部错误：未知表达式节点 " + nd.k.to_str())
+    exit(2)
+    return v_void()
+}
+
+/// 0 = 正常；1 = return；2 = break；3 = continue
+fn ex(st: St, n: int) -> int {
+    let nd = st.nd.get(n)
+    if nd.k == N_LET {
+        let v = ev(st, nd.a)
+        bind(st, nd.n, v)
+        return 0
+    }
+    if nd.k == N_SET {
+        let v = ev(st, nd.a)
+        let sl = lookup(st, nd.n)
+        if sl < 0 {
+            eprint("qlm_interp: 赋值给未定义的变量 " + st.names.get(nd.n))
+            exit(2)
+        }
+        st.vals.set(sl, v)
+        return 0
+    }
+    if nd.k == N_EXPR {
+        ev(st, nd.a)
+        return 0
+    }
+    if nd.k == N_RET {
+        if nd.a >= 0 {
+            st.ret.set(0, ev(st, nd.a))
+        } else {
+            st.ret.set(0, v_void())
+        }
+        return 1
+    }
+    if nd.k == N_BREAK {
+        return 2
+    }
+    if nd.k == N_CONTINUE {
+        return 3
+    }
+    if nd.k == N_IF {
+        let c = ev(st, nd.a)
+        if v_true(c) {
+            return exec_range(st, nd.b, nd.c)
+        }
+        if nd.n >= 0 {
+            return ex(st, nd.n)
+        }
+        return 0
+    }
+    if nd.k == N_BLOCK {
+        return exec_range(st, nd.a, nd.b)
+    }
+    if nd.k == N_WHILE {
+        while 1 == 1 {
+            let c = ev(st, nd.a)
+            if !v_true(c) {
+                return 0
+            }
+            let save_b = st.blen.get(0)
+            let save_v = st.vlen.get(0)
+            let r = exec_range(st, nd.b, nd.c)
+            st.blen.set(0, save_b)
+            st.vlen.set(0, save_v)
+            if r == 1 {
+                return 1
+            }
+            if r == 2 {
+                return 0
+            }
+        }
+    }
+    eprint("qlm_interp: 内部错误：未知语句节点 " + nd.k.to_str())
+    exit(2)
+    return 0
+}
+
+fn exec_range(st: St, start: int, cnt: int) -> int {
+    let mut i = 0
+    while i < cnt {
+        let r = ex(st, st.stm.get(start + i))
+        if r != 0 {
+            return r
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// 顶层
+// ---------------------------------------------------------------------------
+
+fn skip_line(st: St) {
+    let l = p_cur(st).line
+    while p_cur(st).k != T_EOF && p_cur(st).line == l {
+        p_bump(st)
+    }
+}
+
+/// `struct Name { ... }`：v1 不求值结构体，但**要能跳过**，
+/// 否则带 struct 声明的脚本连解析都过不去。
+fn skip_struct(st: St) {
+    p_bump(st)                       // struct
+    p_bump(st)                       // 名字
+    if !p_is_op(st, O_LBR) {
+        p_err(st, "struct 后面需要 {")
+    }
+    let mut depth = 0
+    while p_cur(st).k != T_EOF {
+        let t = p_cur(st)
+        if t.k == T_OP && t.n == O_LBR {
+            depth = depth + 1
+        }
+        if t.k == T_OP && t.n == O_RBR {
+            depth = depth - 1
+            p_bump(st)
+            if depth == 0 {
+                return
+            }
+        } else {
+            p_bump(st)
+        }
+    }
+}
+
+fn parse_fn(st: St) {
+    p_bump(st)                       // fn
+    let nm = p_name(st)
+    p_op(st, O_LP, "(")
+    let ps = len(st.pnp)
+    let mut np = 0
+    while !p_is_op(st, O_RP) {
+        let pn = p_name(st)
+        st.pnp.push(pn)
+        np = np + 1
+        if p_is_op(st, O_COLON) {
+            p_bump(st)
+            skip_type(st)
+        }
+        if p_is_op(st, O_COMMA) {
+            p_bump(st)
+        }
+    }
+    p_bump(st)                       // ')'
+    if p_is_op(st, O_ARROW) {
+        p_bump(st)
+        skip_type(st)
+    }
+    let bs = p_block_body(st)
+    st.fns.push(Fn { name: nm, ps: ps, np: np, bs: bs, bc: st.bc.get(0) })
+}
+
+/// 返回：const 的 (名字, 初值表达式节点)；没有 const 返回 -1
+fn parse_program(st: St) {
+    while p_cur(st).k != T_EOF {
+        let t = p_cur(st)
+        if t.k == T_KW && t.n == K_MODULE {
+            skip_line(st)
+        } else if t.k == T_KW && t.n == K_IMPORT {
+            skip_line(st)
+        } else if t.k == T_KW && t.n == K_STRUCT {
+            skip_struct(st)
+        } else if t.k == T_KW && t.n == K_CONST {
+            p_bump(st)
+            let nm = p_name(st)
+            if p_is_op(st, O_COLON) {
+                p_bump(st)
+                skip_type(st)
+            }
+            p_op(st, O_ASSIGN, "=")
+            let e = p_expr(st)
+            // 全局区：先占位，主流程启动前求值
+            let sl = st.vlen.get(0)
+            setv_or_push(st.vals, sl, v_void())
+            st.vlen.set(0, sl + 1)
+            let bi = st.blen.get(0)
+            set_or_push(st.binds, bi, nm)
+            set_or_push(st.binds, bi + 1, sl)
+            st.blen.set(0, bi + 2)
+            // 记下 (节点, 槽位) 供启动时求值
+            st.gp.push(e)
+            st.gp.push(sl)
+        } else if t.k == T_KW && t.n == K_FN {
+            parse_fn(st)
+        } else {
+            p_err(st, "顶层只认 fn / const / struct / module / import")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 命令行
+// ---------------------------------------------------------------------------
+
+@ffi("kernel32.dll", "GetCommandLineA")
+fn _cmdline() -> int
+
+@ffi("kernel32.dll", "GetStdHandle")
+fn _GetStdHandle(n: int) -> int
+
+@ffi("kernel32.dll", "WriteFile")
+fn _WriteFile(h: int, buf: int, n: int, got: int, ov: int) -> bool
+
+/// 打提示符**不带换行**（`print` / `eprint` 都会补一个 \n，REPL 里很难看）
+fn prompt() {
+    let h = _GetStdHandle(-11)
+    let buf = mem_alloc(4)
+    mem_store8(buf, 0, 62)          // '>'
+    mem_store8(buf, 1, 32)          // ' '
+    let got = mem_alloc(8)
+    _WriteFile(h, buf, 2, got, 0)
+}
+
+/// 从标准输入读一行（不含换行）。EOF 返回空串。
+/// 一次读 1 字节：REPL 的输入量是"人手打字"，不值得为吞吐做缓冲。
+fn read_line() -> str {
+    let h = _GetStdHandle(-10)
+    let one = mem_alloc(2)
+    let got = mem_alloc(8)
+    let buf = mem_alloc(4096)
+    let mut n = 0
+    while n < 4094 {
+        if !_ReadFile(h, one, 1, got, 0) {
+            break
+        }
+        if mem_load8(got, 0) == 0 {
+            break
+        }
+        let c = mem_load8(one, 0)
+        if c == 10 {
+            break
+        }
+        if c != 13 {
+            mem_store8(buf, n, c)
+            n = n + 1
+        }
+    }
+    mem_store8(buf, n, 0)
+    return mem_str(buf, n)
+}
+
+/// REPL：逐行读、逐行解析求值。表达式语句会把值打出来；
+/// `let` / 赋值 / `if` / `while` 照常执行。空行忽略。
+fn repl(st: St) {
+    while 1 == 1 {
+        prompt()
+        let line = read_line()
+        if len(line) == 0 {
+            return
+        }
+        st.tk.clear()
+        lex(line, st.tk)
+        st.ip.set(0, 0)
+        if p_cur(st).k == T_EOF {
+            continue
+        }
+        let t = p_cur(st)
+        if t.k == T_KW && (t.n == K_LET || t.n == K_IF || t.n == K_WHILE ||
+                           t.n == K_RETURN) {
+            let n = p_stmt(st)
+            ex(st, n)
+        } else {
+            let e = p_expr(st)
+            let v = ev(st, e)
+            if v.k != K_VOID {
+                print_val(v)
+            }
+        }
+    }
+}
+
+fn c_strlen(p: int) -> int {
+    let mut i = 0
+    while mem_load8(p, i) != 0 {
+        i = i + 1
+    }
+    return i
+}
+
+fn is_blank(c: int) -> bool {
+    return c == 32 || c == 9
+}
+
+/// 命令行参数（跳过 argv[0]；双引号内的空白不分隔，引号本身丢掉）
+fn cmd_args() -> vec[str] {
+    let p = _cmdline()
+    let n = c_strlen(p)
+    let out = vec[str].new(8)
+    let buf = mem_alloc(n + 1)
+    let mut i = 0
+    while i < n {
+        if is_blank(mem_load8(p, i)) {
+            break
+        }
+        i = i + 1
+    }
+    while i < n {
+        while i < n && is_blank(mem_load8(p, i)) {
+            i = i + 1
+        }
+        if i >= n {
+            break
+        }
+        let mut bl = 0
+        let mut q = 0
+        while i < n {
+            let c = mem_load8(p, i)
+            if c == 34 {
+                q = 1 - q
+                i = i + 1
+            } else if q == 0 && is_blank(c) {
+                break
+            } else {
+                mem_store8(buf, bl, c)
+                bl = bl + 1
+                i = i + 1
+            }
+        }
+        out.push(mem_str(buf, bl))
+    }
+    return out
+}
+
+fn main() {
+    let a = cmd_args()
+    let st = st_new()
+    st.ip.set(0, 0)
+    st.blen.set(0, 0)
+    st.vlen.set(0, 0)
+    st.base.set(0, 0)
+    st.gend.set(0, 0)
+    st.ret.set(0, v_void())
+    st.bs.set(0, 0)
+    st.bc.set(0, 0)
+    if len(a) < 1 {
+        eprint("用法: qlm_interp <file.qma>      # 脚本模式")
+        eprint("      qlm_interp --repl            # 交互模式（Ctrl-Z / 空行退出）")
+        exit(2)
+    }
+    if a.get(0) == "--repl" {
+        repl(st)
+        return
+    }
+    let path = a.get(0)
+    let src = read_text(path)
+    lex(src, st.tk)
+    parse_program(st)
+    // const 的初值在**解析完之后**求值：它们可以互相引用（只要没有环）
+    let gp = len(st.gp)
+    let mut gi = 0
+    while gi < gp {
+        let node = st.gp.get(gi)
+        let slot = st.gp.get(gi + 1)
+        st.vals.set(slot, ev(st, node))
+        gi = gi + 2
+    }
+    st.gend.set(0, st.blen.get(0))
+    let mi = intern(st, "main")
+    let fi = find_fn(st, mi)
+    if fi < 0 {
+        eprint("qlm_interp: " + path + " 里没有 main")
+        exit(2)
+    }
+    ev_call(st, mi, 0, 0)
+}
