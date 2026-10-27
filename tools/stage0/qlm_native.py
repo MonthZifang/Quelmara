@@ -11429,37 +11429,75 @@ class Codegen:
             self.emit_epilogue()
             enc.ret()
         elif op in ("load", "load8", "load32"):
+            # v2.70：**常量下标直接用位移**。以前是
+            #   mov r11, 1 ; mov r15, [r14 + r11*8]
+            # —— 每条带常量下标的访问都白付一条 `mov`。vec 句柄的
+            # data/len/cap、结构体字段全是常量下标，命中率很高。
+            ci = None
+            if isinstance(ins[3], tuple) and ins[3][0] == "imm":
+                scale0 = 3 if op == "load" else 0
+                d0 = ins[3][1] << scale0
+                if -2 ** 27 <= d0 < 2 ** 27:
+                    ci = d0
             if op == "load" and isinstance(ins[1], int) and ins[1] in self.f64v:
                 fb = self.fetch(SCRATCH2, ins[2])
-                fi = self.fetch(SCRATCH, ins[3])
-                enc.movsd_xm(XS0, fb, fi, 3, 0)
+                if ci is None:
+                    fi = self.fetch(SCRATCH, ins[3])
+                    enc.movsd_xm(XS0, fb, fi, 3, 0)
+                else:
+                    enc.movsd_xm(XS0, fb, 4, 0, ci)
                 self.fcommit(ins[1], XS0)
                 return
             rd = self.safe_dst_reg(ins[1], [ins[2], ins[3]])
             fb = self.fetch(SCRATCH2, ins[2])
-            fi = self.fetch(SCRATCH, ins[3])
             target = rd if rd is not None else ACC
-            if op == "load":
-                enc.mov_rm(target, fb, fi, 3, 0)
-            elif op == "load32":
-                # 字节偏移寻址（同 load8）：scale 0——不是 load64 的槽索引
-                enc.mov32_rm(target, fb, fi, 0, 0)
+            if ci is not None:
+                if op == "load":
+                    enc.mov_rm(target, fb, 4, 0, ci)
+                elif op == "load32":
+                    enc.mov32_rm(target, fb, 4, 0, ci)
+                else:
+                    enc.movzx8_rm(target, fb, 4, 0, ci)
             else:
-                enc.movzx8_rm(target, fb, fi, 0, 0)
+                fi = self.fetch(SCRATCH, ins[3])
+                if op == "load":
+                    enc.mov_rm(target, fb, fi, 3, 0)
+                elif op == "load32":
+                    # 字节偏移寻址（同 load8）：scale 0——不是 load64 的槽索引
+                    enc.mov32_rm(target, fb, fi, 0, 0)
+                else:
+                    enc.movzx8_rm(target, fb, fi, 0, 0)
             if rd is None:
                 self.commit(ins[1], ACC)
         elif op in ("store", "store8"):
+            # v2.70：常量下标直接用位移（同 load）
+            ci = None
+            if isinstance(ins[2], tuple) and ins[2][0] == "imm":
+                scale0 = 3 if op == "store" else 0
+                d0 = ins[2][1] << scale0
+                if -2 ** 27 <= d0 < 2 ** 27:
+                    ci = d0
             fb = self.fetch(SCRATCH2, ins[1])
-            fi = self.fetch(SCRATCH, ins[2])
             if op == "store" and isinstance(ins[3], int) and ins[3] in self.f64v:
                 self.fx(XS0, ins[3])
-                enc.movsd_mx(fb, fi, 3, 0, XS0)
+                if ci is None:
+                    fi = self.fetch(SCRATCH, ins[2])
+                    enc.movsd_mx(fb, fi, 3, 0, XS0)
+                else:
+                    enc.movsd_mx(fb, 4, 0, ci, XS0)
                 return
             fs = self.fetch(ACC, ins[3])
-            if op == "store":
-                enc.mov_mr(fb, fi, 3, 0, fs)
+            if ci is not None:
+                if op == "store":
+                    enc.mov_mr(fb, 4, 0, ci, fs)
+                else:
+                    enc.mov8_mr(fb, 4, 0, ci, fs)
             else:
-                enc.mov8_mr(fb, fi, 0, 0, fs)
+                fi = self.fetch(SCRATCH, ins[2])
+                if op == "store":
+                    enc.mov_mr(fb, fi, 3, 0, fs)
+                else:
+                    enc.mov8_mr(fb, fi, 0, 0, fs)
         elif op == "movaddr":
             kind, val = self.alloc[ins[1]]
             target = val if kind == "r" else SCRATCH
