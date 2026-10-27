@@ -1,0 +1,127 @@
+# ⚠ 这个文件要放到 `.github/workflows/build.yml` 才会生效。
+#
+# 为什么放在这里：本机 `git push` 走不通（代理只放行 api.github.com），
+# 只能用 GitHub REST API 推；而**通过 API 写 `.github/workflows/` 下的文件
+# 需要 token 带 `workflow` scope**，当前 token 只有 `gist, read:org, repo`
+# —— 写工作流会返回 404。
+#
+# 激活方式（二选一）：
+#   1. 给 token 加 scope：`gh auth refresh -s workflow`，之后即可直接推；
+#   2. 手动把本文件复制到 `.github/workflows/build.yml`。
+#
+# build —— 自动编译工作流：**编译这个语言本身**
+#
+# 与另外两个 workflow 的分工：
+#   ci.yml    —— 功能回归（门禁 / 自举对拍 / 五套测试）
+#   bench.yml —— **性能数字的唯一权威来源**（五语言 × 三平台，min of 5）
+#   build.yml —— 本文件：**编译**。自举不动点 + 全量产物 + 产物真能跑
+#
+# 判据（fail-fast，任何一步红就整体红）：
+#   1. 自举**不动点**：stage-2 与 stage-3 逐字节相同
+#      （拿 stage-1 和 stage-2 比是错的 —— 那是两个不同编译器编同一份源码，
+#       产物本来就不一样；真正的一致性判据是"同一个编译器再编一次自己"）
+#   2. 全部 10 个基准都能编过（qlmc 与 stage-0 各编一遍）
+#   3. `examples/` 全部能编过（stage-0 覆盖全集；qlmc 只到子集 S1）
+#   4. 编出来的产物**跑得起来**（校验退出码，不是只看文件存在）
+#
+# 产物：每个平台的 exe 打包成 artifact，可下载。
+
+name: build
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ------------------------------------------------------------------
+  # Windows：自举不动点 + qlmc 编全部基准 + stage-0 编全部基准与示例
+  # （qlmc 只有 PE 后端，所以自举只能在 Windows 上做）
+  # ------------------------------------------------------------------
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 机器信息
+        run: |
+          $cpu = (Get-CimInstance Win32_Processor).Name.Trim()
+          $os  = (Get-CimInstance Win32_OperatingSystem).Caption
+          Write-Output "CPU: $cpu / $os"
+          Add-Content $env:GITHUB_STEP_SUMMARY "> build 机器：$cpu / $os"
+
+      - name: 自举不动点 + qlmc 编译全部基准（并跑一遍）
+        run: |
+          python tools/dev/build_all.py --compiler qlmc --target win --selfhost --run --outdir build/ci-qlmc 2>&1 | Tee-Object -FilePath build-qlmc.log
+          if ($LASTEXITCODE -ne 0) { Write-Error "qlmc 编译失败 rc=$LASTEXITCODE"; exit 1 }
+
+      - name: stage-0 编译全部基准与示例
+        run: |
+          python tools/dev/build_all.py --compiler stage0 --target win --run --outdir build/ci-stage0 2>&1 | Tee-Object -FilePath build-stage0.log
+          if ($LASTEXITCODE -ne 0) { Write-Error "stage-0 编译失败 rc=$LASTEXITCODE"; exit 1 }
+
+      - name: 写 job summary
+        if: always()
+        run: |
+          Add-Content $env:GITHUB_STEP_SUMMARY "## build（windows）"
+          Add-Content $env:GITHUB_STEP_SUMMARY '```'
+          if (Test-Path build-qlmc.log) { Get-Content build-qlmc.log | Select-Object -Last 20 | Add-Content $env:GITHUB_STEP_SUMMARY }
+          if (Test-Path build-stage0.log) { Get-Content build-stage0.log | Select-Object -Last 12 | Add-Content $env:GITHUB_STEP_SUMMARY }
+          Add-Content $env:GITHUB_STEP_SUMMARY '```'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quelmara-win-x64
+          path: |
+            build/qlmc_stage2.exe
+            build/qlmc_stage3.exe
+            build/ci-qlmc/*.exe
+            build/ci-stage0/*.exe
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Linux：stage-0 编全部基准为 ELF（qlmc 没有 ELF 后端，见 06-status §3.27）
+  # ------------------------------------------------------------------
+  posix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 机器信息
+        run: |
+          echo "CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs) / $(nproc) 核"
+          echo "> build 机器：$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)" >> $GITHUB_STEP_SUMMARY
+
+      - name: stage-0 编译全部基准（ELF）并跑一遍
+        run: |
+          set -o pipefail
+          python tools/dev/build_all.py --compiler stage0 --target native --run --skip-examples --outdir build/ci-elf 2>&1 | tee build-elf.log
+
+      - name: 写 job summary
+        if: always()
+        run: |
+          echo '## build（ubuntu / ELF）' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -20 build-elf.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quelmara-linux-x64
+          path: build/ci-elf/*
+          if-no-files-found: error
