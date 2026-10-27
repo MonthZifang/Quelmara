@@ -2415,8 +2415,6 @@ def opt_all(fn, unroll=True, invert=True):
         before = len(fn.instrs)
         if not _skip_pass("opt_drop_dead_jump"):
             opt_drop_dead_jump(fn)
-        if invert and not _skip_pass("opt_invert_branch"):
-            opt_invert_branch(fn)
         if not _skip_pass("opt_dead_after_term"):
             opt_dead_after_term(fn)
         if not _skip_pass("opt_copy_prop"):
@@ -2476,6 +2474,11 @@ def opt_all(fn, unroll=True, invert=True):
                 break
     if not _skip_pass("opt_drop_dead_jump"):
         opt_drop_dead_jump(fn)
+    # 分支反转**放在这里**：它会反转 while 的守卫（`jcc l i,n,BODY` →
+    # `jcc ge i,n,END`），而 `opt_mod_inductive` / `_loop_shape` /
+    # `opt_loop_unroll` 都靠"守卫 + 回边"的规范形态识别循环 —— 早跑就会让
+    # 归纳削减整个失效（b1_int 的 `(i*7)%13` 退回每轮一次魔数除法，
+    # 循环 11 → 16 条，CI 上 b1 从 3.5× 掉到 4.9×）。
     if invert and not _skip_pass("opt_invert_branch"):
         opt_invert_branch(fn)
     if not _skip_pass("opt_dead_after_term"):
