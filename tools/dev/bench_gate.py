@@ -97,7 +97,19 @@ def run_once(exe, target):
         cmd = [sys.executable, os.path.join(ROOT, "tests", "a64_emu.py"), exe]
     else:
         cmd = [os.path.abspath(exe)]
-    r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
+    # 刚写出来的 exe 偶尔会**短暂不可执行**（WinError 2）：GitHub 的 Windows
+    # runner 上 Defender 会先扫一遍新文件，扫描期间 CreateProcess 报
+    # "系统找不到指定的文件"。这不是产物的问题 —— 同一个文件几毫秒后就能跑。
+    # 所以只对 FileNotFoundError 退避重试，别的错误照旧立刻抛。
+    for attempt in range(8):
+        try:
+            r = subprocess.run(cmd, capture_output=True, encoding="utf-8",
+                               errors="replace")
+            break
+        except FileNotFoundError:
+            if attempt == 7:
+                raise
+            time.sleep(0.15 * (attempt + 1))
     if r.returncode != 0:
         raise RuntimeError(f"运行失败（rc={r.returncode}）：{(r.stderr or '')[-400:]}")
     metrics, cal, digest = {}, None, None
@@ -224,6 +236,8 @@ def spread(runs_metrics):
 def measure_noise(src, target, repeats, tag):
     """为噪声闸多跑一遍，收集逐次数据（不计入 min-of-N 结果）。"""
     out = os.path.join(BUILD, f"gate_bench{tag}.{'exe' if target != 'native' else 'elf'}")
+    if not os.path.isfile(out):          # 前置 measure() 没跑过（例如单独调噪声闸）
+        build(src, target, out)
     series = {n: [] for n in METRICS}
     for _ in range(max(3, repeats)):
         metrics, _cal, _d = run_once(out, target)
