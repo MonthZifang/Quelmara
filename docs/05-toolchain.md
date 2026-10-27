@@ -1150,15 +1150,20 @@ build/qlm_interp.exe --repl
 | 所有可变状态放 vec | qlmc 传结构体形参是"传指针 + 被调方按值拷贝"，标量字段改不回去，vec 字段是句柄能改回去 |
 | 名字解析用扁平绑定栈 | `binds` 存 (名字下标, 槽位)，从栈顶往下找 → 天然支持遮蔽；帧返回只回退**逻辑长度**，槽位复用 |
 
-**支持的子集（v1）**：`fn` / `let` / `let mut` / 赋值 / `while` / `if-else if-else` /
-`return` / `break` / `continue`；int、str、bool、f64 字面量；`+ - * / %`、
-`== != < <= > >=`、`&& || !`；函数调用（含递归、多参数）；内建 `print` /
-`eprint` / `len` / `assert`；`const` 全局常量；`module` / `import` / `struct`
-声明跳过。
+**支持的子集（v2.82）**：`fn` / `let` / `let mut` / 赋值 / `while` /
+`if-else if-else` / `for i in lo..hi` / `return` / `break` / `continue`；
+int、str、bool、f64 字面量；`+ - * / %`、`== != < <= > >=`、`&& || !`；
+函数调用（含递归、多参数）；`vec[T].new(n)` / `.push` / `.get` / `.set` /
+`.len` / `.clear`、`v[i]` 读写、`s[i]` 取字节；`struct` 声明 / 字面量 /
+字段读写；内建 `print` / `eprint` / `len` / `assert`；`const` 全局常量；
+`module` / `import` 跳过。
 
-**还没做**：vec / map / struct 值 / enum / match / 闭包 / 下标 / 字段访问 / for。
-这些按"最常用"的顺序补，每补一个都要在 `tests/interp_test.py` 里加一条
-"解释 == 编译"的差分夹具。
+**还没做**：`match`（要先有 enum 值模型）、**闭包**（捕获语义是另一层）、
+map、泛型。这两个是下一版的正经活。
+
+**表示上的两个要点**：vec 是**引用**（对象号 + 全局元素池，别名共享同一个
+对象），struct 是**值**（绑定 / 赋值 / 进 vec / 传参都整段复制）。这两条与
+编译器一致，`tests/t154` / `t155` 各钉一条。
 
 **口径细节（差分踩出来的）**：`print(bool)` 打的是 `1/0`，但 `&&` / `||` 的
 结果打的是 `true/false`；字符串比较（`==` / `<` …）打 `true/false`，整数比较

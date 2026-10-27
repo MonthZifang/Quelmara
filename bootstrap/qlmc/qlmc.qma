@@ -252,7 +252,10 @@ const TY_MAP = 0x10000       // 0x10000+(K<<8)+V：map 句柄也是标量
 const TY_SLICE = 0x20000     // 0x20000+elem：切片 = (ptr, len) 两字聚合
 const TY_FN = 0x30000        // 闭包 = {code, env} 两字聚合（本版 env 恒为 0）
 const TY_ARRAY = 0x100000
-const MAX_FIELD = 24         // v2.31：8 → 24（qlmc 自己的 FnCtx 有 22 个字段）
+// v2.31：8 → 24（qlmc 自己的 FnCtx 有 22 个字段）
+// v2.82：24 → 32 —— 解释器 `qlm_interp.qma` 的 `St` 有 26 个字段，撞到了上限。
+// 这个上限是**自举约束**：qlmc 必须能编译它自己的源码，所以字段数上限只能往上抬。
+const MAX_FIELD = 32
 const ST_STRIDE = 2 + MAX_FIELD * 2   // 每个 struct 在 stt 里占 name, nf, MAX_FIELD*(fname, fty)
 const MAX_STRUCT = 64
 const EN_HDR = 1200          // stt[EN_HDR] = enum 个数，enum 区从 EN_HDR+1 起

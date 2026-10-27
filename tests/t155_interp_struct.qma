@@ -1,0 +1,60 @@
+// t155_interp_struct —— 解释器差分夹具：struct 值 / 字段读写 / 值语义
+//
+// 解释器里 struct 是**值类型**（字段存在全局元素池的一段连续槽里，
+// 绑定 / 赋值 / 进 vec 时整段复制），所以这几条必须钉住：
+//   1) 字段读写
+//   2) `let q = p` 之后改 q 不影响 p
+//   3) 传参也是按值：函数里改形参不影响调用方
+//   4) 进 vec 之后再取出来，是独立的一份
+//   5) str / f64 字段
+struct Point { x: int, y: int }
+struct Item { id: int, price: f64, name: str }
+
+fn bump(p: Point) -> int {
+    p.x = p.x + 1000
+    return p.x
+}
+
+fn total(items: vec[Item]) -> f64 {
+    let mut s = 0.0
+    let mut i = 0
+    while i < items.len() {
+        s = s + items.get(i).price
+        i = i + 1
+    }
+    return s
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 }
+    print(p.x)
+    print(p.y)
+    p.x = 10
+    print(p.x)
+    print(p.x + p.y)
+
+    let q = p
+    q.x = 99
+    print(p.x)
+    print(q.x)
+
+    print(bump(p))
+    print(p.x)
+
+    let v = vec[Point].new(2)
+    v.push(p)
+    v.push(q)
+    print(v.get(0).x)
+    print(v.get(1).x)
+    let t = v.get(0)
+    t.x = -1
+    print(v.get(0).x)
+    print(t.x)
+
+    let items = vec[Item].new(2)
+    items.push(Item { id: 1, price: 1.5, name: "a" })
+    items.push(Item { id: 2, price: 2.25, name: "b" })
+    print(items.get(0).name)
+    print(items.get(1).id)
+    print(total(items))
+}

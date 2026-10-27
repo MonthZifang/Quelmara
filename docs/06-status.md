@@ -35,7 +35,7 @@
 | 性能门禁自测（v1.88） | **PASS=12 FAIL=0**（建基线 / 同产物判 PASS / 伪造 2× 回归必须 FAIL / 校验和与体积必须拦住） | `python tests/bench_gate_test.py` |
 | 闭包 / 捕获（v1.95） | **t126 的 11 组断言全过**（无捕获 / 单捕获 / str+f64 / 逃逸 / 快照 / 嵌套 / 捕获 vec 句柄 / 循环建多个 / 聚合返回 + 聚合形参 / 6·8 参走栈）；负向 3 个编译期拦下（捕获 struct、体内写捕获变量、裸函数名当闭包传）；`--no-opt` 与 `--dbg-info` 构建输出一致；AArch64 构建通过（同一条 `callr`）；C 后端 fail-fast | `python tools/stage0/qlm_cli.py run tests/t126_closure.qma --target win` （主回归总数见 §1 主行；本版新增 1 正 + 3 负用例） |
 | 包管理 qpm（v1.99） | **PASS=61 FAIL=0**（确定性打包逐字节一致 / 打包跳过产物 / 恶意 tar 拒绝 / spec 十一种形态 / registry 索引与包体落盘 / 同版本不可覆盖 / 传递依赖选版本 / 区间交集合并 / 无交集与跨来源冲突的诊断文案 / yank 后回退 / `--locked` 不升级且检出清单漂移 / `verify` 检出磁盘被改 / 依赖环可安装 / HTTP PUT 发布与 GET 安装 / 401 拒发 / 装完能被编译器 import 并跑出依赖里的字符串） | `python tests/qpm_test.py` |
-| 解释器差分（v2.80） | **PASS=8 FAIL=0**（解释执行 vs 编译执行逐字节：算术 20 行 / 控制流 5 行 / 函数与递归 7 行；边界四条：语法错非零退出并带行号、无 main、文件不存在、无参数） | `python tests/interp_test.py` |
+| 解释器差分（v2.82） | **PASS=10 FAIL=0**（解释执行 vs 编译执行逐字节：算术 20 行 / 控制流 5 行 / 函数与递归 7 行 / vec+for 11 行 / struct 字段 15 行；边界五条：语法错非零退出并带行号、无 main、文件不存在、无参数） | `python tests/interp_test.py` |
 | 五道门禁 | check_names / check_origin / check_docs 全 PASS；`gen_stdlib_doc.py --check --require-doc` PASS（62 个模块 / 528 个公开函数） | `python tools/dev/check_*.py` + `python tools/dev/gen_stdlib_doc.py --check` |
 
 `run_win_tests.py` 的 10 组覆盖：PE 结构（MZ/PE32+/AMD64/无 CRT 符号）、基础语义、

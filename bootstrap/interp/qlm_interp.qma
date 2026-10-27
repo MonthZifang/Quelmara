@@ -80,24 +80,32 @@ const K_INT = 1
 const K_STR = 2
 const K_BOOL = 3
 const K_F64 = 4
+const K_VEC = 5
+const K_STRUCT = 6
 
+/// 运行期的值。`i` 一槽多用：
+///   K_INT → 整数；K_BOOL → 0/1；K_VEC → 元素在 `elems` 池里的起点；
+///   K_STRUCT → 字段在 `elems` 池里的起点。
+/// `n` = 长度（vec 的 len / struct 的字段数），`c` = 容量（vec）/ 类型号（struct）。
 struct Val {
     k: int
     i: int
     f: f64
     s: str
+    n: int
+    c: int
 }
 
 fn v_void() -> Val {
-    return Val { k: K_VOID, i: 0, f: 0.0, s: "" }
+    return Val { k: K_VOID, i: 0, f: 0.0, s: "", n: 0, c: 0 }
 }
 
 fn v_int(x: int) -> Val {
-    return Val { k: K_INT, i: x, f: 0.0, s: "" }
+    return Val { k: K_INT, i: x, f: 0.0, s: "", n: 0, c: 0 }
 }
 
 fn v_str(x: str) -> Val {
-    return Val { k: K_STR, i: 0, f: 0.0, s: x }
+    return Val { k: K_STR, i: 0, f: 0.0, s: x, n: 0, c: 0 }
 }
 
 /// 比较运算的结果：编译器把它当 int（打印 1/0），不是 bool。
@@ -113,11 +121,11 @@ fn v_cmp(x: bool) -> Val {
 fn v_bool(x: bool) -> Val {
     let mut iv = 0
     if x { iv = 1 }
-    return Val { k: K_BOOL, i: iv, f: 0.0, s: "" }
+    return Val { k: K_BOOL, i: iv, f: 0.0, s: "", n: 0, c: 0 }
 }
 
 fn v_f64(x: f64) -> Val {
-    return Val { k: K_F64, i: 0, f: x, s: "" }
+    return Val { k: K_F64, i: 0, f: x, s: "", n: 0, c: 0 }
 }
 
 fn v_true(v: Val) -> bool {
@@ -164,6 +172,7 @@ const O_ARROW = 21
 const O_COLON = 22
 const O_DOT = 23
 const O_LBR = 24
+const O_DOTDOT = 26
 const O_RBR = 25
 
 const K_FN = 1
@@ -281,7 +290,9 @@ fn lex(src: str, tk: vec[Tok]) -> int {
         } else if is_digit(c) {
             let st = i
             let mut is_f = 0
-            while i < n && (is_digit(src[i]) || src[i] == 46) {
+            while i < n && (is_digit(src[i]) ||
+                            (src[i] == 46 && i + 1 < n && src[i + 1] != 46 &&
+                             is_digit(src[i + 1]))) {
                 if src[i] == 46 {
                     is_f = 1
                 }
@@ -358,6 +369,7 @@ fn lex(src: str, tk: vec[Tok]) -> int {
             else if c == 38 && two == 38 { op = O_AND }
             else if c == 124 && two == 124 { op = O_OR }
             else if c == 45 && two == 62 { op = O_ARROW }
+            else if c == 46 && two == 46 { op = O_DOTDOT }
             if op != 0 {
                 push_tok(tk, T_OP, op, 0.0, "", line)
                 i = i + 2
@@ -406,6 +418,8 @@ const N_EXPR = 6
 const N_BREAK = 7
 const N_CONTINUE = 8
 const N_BLOCK = 9
+const N_FOR = 10
+const N_SETAT = 11
 
 const E_INT = 20
 const E_F64 = 21
@@ -415,6 +429,12 @@ const E_VAR = 24
 const E_BIN = 25
 const E_UN = 26
 const E_CALL = 27
+const E_MCALL = 28
+const E_FIELD = 29
+const E_INDEX = 30
+const E_VECNEW = 31
+const E_SLIT = 32
+const N_SETFIELD = 12
 
 /// 节点。**刻意不放 f64 字段**：qlmc 目前把"第 5 个及以后的 f64 形参"
 /// 走栈传递时传错（实测 `f(a,b,c,d,e,f64)` 的第 7 个实参是垃圾位模式），
@@ -425,6 +445,14 @@ struct Nd {
     b: int
     c: int
     n: int
+}
+
+/// 一个 struct 的**布局**：字段名按声明顺序排进 `sfields` 池。
+/// 字段下标 = 在池里的相对位置，所以 `p.x` 只是"起点 + 偏移"。
+struct Struct {
+    name: int
+    fs: int
+    nf: int
 }
 
 struct Fn {
@@ -456,6 +484,12 @@ struct St {
     gend: vec[int]       // 全局区（const）在 binds 里的结束位置
     gp: vec[int]         // const 的 (初值节点, 槽位) 扁平对
     fp: vec[f64]         // 浮点字面量池（节点里只存下标）
+    elems: vec[Val]      // 聚合值的元素池（vec 的元素 / struct 的字段）
+    ebase: vec[int]      // vec 对象：元素在 elems 里的起点
+    elen: vec[int]       // vec 对象：长度（**别叫 vlen** —— 那是值栈的逻辑长度）
+    ecap: vec[int]       // vec 对象：容量
+    structs: vec[Struct] // struct 布局表
+    sfields: vec[int]    // 字段名下标池
 }
 
 fn st_new() -> St {
@@ -479,7 +513,13 @@ fn st_new() -> St {
         bc: vec[int].new(1),
         gend: vec[int].new(1),
         gp: vec[int].new(8),
-        fp: vec[f64].new(8)
+        fp: vec[f64].new(8),
+        elems: vec[Val].new(64),
+        ebase: vec[int].new(8),
+        elen: vec[int].new(8),
+        ecap: vec[int].new(8),
+        structs: vec[Struct].new(8),
+        sfields: vec[int].new(16)
     }
     // `vec[T].new(n)` 只给**容量**，长度是 0 —— 这些单槽状态必须 push 出第 0 格，
     // 否则后面 `set(0, ...)` 直接撞越界检查（die → exit 1，什么也不打印）。
@@ -602,8 +642,63 @@ fn p_primary(st: St) -> int {
         return mknd(st, E_BOOL, 0, 0, 0, bv)
     }
     if t.k == T_ID {
+        // `vec[T].new(n)`：`vec` 不是普通标识符，类型参数要整段跳过
+        if t.s == "vec" && st.ip.get(0) + 1 < len(st.tk) {
+            let nx = st.tk.get(st.ip.get(0) + 1)
+            if nx.k == T_OP && nx.n == O_LB {
+                p_bump(st)                       // vec
+                let mut depth = 0
+                while p_cur(st).k != T_EOF {
+                    if p_is_op(st, O_LB) {
+                        depth = depth + 1
+                    } else if p_is_op(st, O_RB) {
+                        depth = depth - 1
+                    }
+                    p_bump(st)
+                    if depth == 0 {
+                        break
+                    }
+                }
+                p_op(st, O_DOT, ".")
+                p_name(st)                       // new
+                p_op(st, O_LP, "(")
+                let cnt = p_expr(st)
+                p_op(st, O_RP, ")")
+                return mknd(st, E_VECNEW, cnt, 0, 0, 0)
+            }
+        }
         p_bump(st)
         let nm = intern(st, t.s)
+        if p_is_op(st, O_LBR) {
+            let si = find_struct(st, nm)
+            if si >= 0 {
+                p_bump(st)                   // '{'
+                // **先收进临时 vec 再整段追加**：字段值本身可能是嵌套的结构体
+                // 字面量，它会在 `argp` 里push自己的 (名字, 表达式) 对 ——
+                // 边解析边 push 的话本层区间会被内层的对插进来，字段全串位。
+                let mut tmp = vec[int].new(8)
+                let mut cnt = 0
+                while !p_is_op(st, O_RBR) {
+                    let fid = p_name(st)       // 别叫 fn —— 那是关键字
+                    p_op(st, O_COLON, ":")
+                    let fe = p_expr(st)
+                    tmp.push(fid)
+                    tmp.push(fe)
+                    cnt = cnt + 1
+                    if p_is_op(st, O_COMMA) {
+                        p_bump(st)
+                    }
+                }
+                p_bump(st)                   // '}'
+                let start = len(st.argp)
+                let mut k2 = 0
+                while k2 < len(tmp) {
+                    st.argp.push(tmp.get(k2))
+                    k2 = k2 + 1
+                }
+                return mknd(st, E_SLIT, start, cnt, 0, si)
+            }
+        }
         if p_is_op(st, O_LP) {
             p_bump(st)
             let mut tmp = vec[int].new(4)
@@ -632,6 +727,45 @@ fn p_primary(st: St) -> int {
     return -1
 }
 
+/// 后缀链：`[i]` 下标、`.name` 字段、`.name(args)` 方法调用。
+fn p_postfix(st: St) -> int {
+    let mut e = p_primary(st)
+    while 1 == 1 {
+        if p_is_op(st, O_LB) {
+            p_bump(st)
+            let ix = p_expr(st)
+            p_op(st, O_RB, "]")
+            e = mknd(st, E_INDEX, e, ix, 0, 0)
+        } else if p_is_op(st, O_DOT) {
+            p_bump(st)
+            let nm = p_name(st)
+            if p_is_op(st, O_LP) {
+                p_bump(st)
+                let mut tmp = vec[int].new(4)
+                while !p_is_op(st, O_RP) {
+                    tmp.push(p_expr(st))
+                    if p_is_op(st, O_COMMA) {
+                        p_bump(st)
+                    }
+                }
+                p_bump(st)
+                let start = len(st.argp)
+                let mut i = 0
+                while i < len(tmp) {
+                    st.argp.push(tmp.get(i))
+                    i = i + 1
+                }
+                e = mknd(st, E_MCALL, e, start, len(tmp), nm)
+            } else {
+                e = mknd(st, E_FIELD, e, 0, 0, nm)
+            }
+        } else {
+            return e
+        }
+    }
+    return e
+}
+
 fn p_unary(st: St) -> int {
     if p_is_op(st, O_SUB) {
         p_bump(st)
@@ -641,7 +775,7 @@ fn p_unary(st: St) -> int {
         p_bump(st)
         return mknd(st, E_UN, p_unary(st), 0, 0, O_NOT)
     }
-    return p_primary(st)
+    return p_postfix(st)
 }
 
 fn p_mul(st: St) -> int {
@@ -762,6 +896,20 @@ fn p_stmt(st: St) -> int {
         }
         return mknd(st, N_IF, c, ts, tb, es)
     }
+    if t.k == T_KW && t.n == K_FOR {
+        p_bump(st)
+        let nm = p_name(st)
+        if !p_is_kw(st, K_IN) {
+            p_err(st, "for 变量后面需要 in")
+        }
+        p_bump(st)
+        let lo = p_expr(st)
+        p_op(st, O_DOTDOT, "..")
+        let hi = p_expr(st)
+        let s0 = p_block_body(st)
+        let blk = mknd(st, N_BLOCK, s0, st.bc.get(0), 0, 0)
+        return mknd(st, N_FOR, lo, hi, blk, nm)
+    }
     if t.k == T_KW && t.n == K_WHILE {
         p_bump(st)
         let c = p_expr(st)
@@ -789,19 +937,24 @@ fn p_stmt(st: St) -> int {
         p_bump(st)
         return mknd(st, N_CONTINUE, 0, 0, 0, 0)
     }
-    // 赋值：ID `=` ...（先看一个记号，避免把 `x == y` 误判）
-    if t.k == T_ID {
-        let save = st.ip.get(0)
-        let nm = intern(st, t.s)
-        p_bump(st)
-        if p_is_op(st, O_ASSIGN) {
-            p_bump(st)
-            let e = p_expr(st)
-            return mknd(st, N_SET, e, 0, 0, nm)
-        }
-        st.ip.set(0, save)
-    }
+    // 表达式语句，或者 `左值 = 表达式`。左值可以是变量或下标 ——
+    // **先解析完整表达式再看 `=`**，这样 `v[i] = x` 与 `x == y` 都不会误判。
     let e = p_expr(st)
+    if p_is_op(st, O_ASSIGN) {
+        p_bump(st)
+        let rhs = p_expr(st)
+        let lv = st.nd.get(e)
+        if lv.k == E_VAR {
+            return mknd(st, N_SET, rhs, 0, 0, lv.n)
+        }
+        if lv.k == E_INDEX {
+            return mknd(st, N_SETAT, lv.a, lv.b, rhs, 0)
+        }
+        if lv.k == E_FIELD {
+            return mknd(st, N_SETFIELD, lv.a, 0, rhs, lv.n)
+        }
+        p_err(st, "赋值左边只能是变量 / 下标 / 字段")
+    }
     return mknd(st, N_EXPR, e, 0, 0, 0)
 }
 
@@ -825,10 +978,26 @@ fn setv_or_push(v: vec[Val], i: int, x: Val) {
     }
 }
 
+/// 值的语义拷贝。**struct 是值类型**（与编译器一致：聚合形参传指针 +
+/// 被调方按值拷贝），所以绑定 / 赋值 / 进 vec 时都要复制字段；
+/// vec 是引用类型（句柄），不复制。
+fn copy_val(st: St, v: Val) -> Val {
+    if v.k != K_STRUCT {
+        return v
+    }
+    let base = len(st.elems)
+    let mut k = 0
+    while k < v.n {
+        st.elems.push(st.elems.get(v.i + k))
+        k = k + 1
+    }
+    return Val { k: K_STRUCT, i: base, f: 0.0, s: "", n: v.n, c: v.c }
+}
+
 /// 绑定一个名字：slot 复用（帧返回时只回退逻辑长度，不真的缩数组）
 fn bind(st: St, name: int, v: Val) {
     let vi = st.vlen.get(0)
-    setv_or_push(st.vals, vi, v)
+    setv_or_push(st.vals, vi, copy_val(st, v))
     st.vlen.set(0, vi + 1)
     let bi = st.blen.get(0)
     set_or_push(st.binds, bi, name)
@@ -1074,6 +1243,183 @@ fn ev_call(st: St, name: int, astart: int, acnt: int) -> Val {
     return rv
 }
 
+
+// ---------------------------------------------------------------------------
+// vec（v2.82）
+// ---------------------------------------------------------------------------
+//
+// 表示：一个 vec 值只存**对象号**（`Val.i`），元素在全局 `elems` 池里，
+// 起点/长度/容量存在 `vbase`/`vlen`/`vcap` 三个数组里。
+//
+// 为什么不把 (base,len,cap) 直接塞进 Val：Val 是**按值拷贝**的，而
+// `v.push(x)` 在语言里是"改句柄指向的对象"。扩容会换 base —— 若 base 存在
+// Val 里，调用方手里那份拷贝就指向旧区。存对象号则三数组是共享的，
+// 拷贝多少份都指向同一个对象。
+
+fn vec_new(st: St, n: int) -> Val {
+    let mut cap = n
+    if cap < 4 {
+        cap = 4
+    }
+    let id = len(st.ebase)
+    st.ebase.push(len(st.elems))
+    st.elen.push(0)
+    st.ecap.push(cap)
+    let mut i = 0
+    while i < cap {
+        st.elems.push(v_void())
+        i = i + 1
+    }
+    return Val { k: K_VEC, i: id, f: 0.0, s: "", n: 0, c: 0 }
+}
+
+fn vec_push(st: St, id: int, x: Val) {
+    let l = st.elen.get(id)
+    let c = st.ecap.get(id)
+    if l >= c {
+        let nc = c * 2 + 4
+        let nb = len(st.elems)
+        let ob = st.ebase.get(id)
+        let mut i = 0
+        while i < l {
+            st.elems.push(st.elems.get(ob + i))
+            i = i + 1
+        }
+        while i < nc {
+            st.elems.push(v_void())
+            i = i + 1
+        }
+        st.ebase.set(id, nb)
+        st.ecap.set(id, nc)
+    }
+    st.elems.set(st.ebase.get(id) + l, copy_val(st, x))
+    st.elen.set(id, l + 1)
+}
+
+/// 下标检查：越界 fail-fast（与编译器的越界 die 同一口径）
+fn vec_at(st: St, id: int, i: int, what: str) -> int {
+    let l = st.elen.get(id)
+    if i < 0 || i >= l {
+        eprint("qlm_interp: " + what + " 下标越界 " + i.to_str() + "（长度 " + l.to_str() + "）")
+        exit(2)
+    }
+    return st.ebase.get(id) + i
+}
+
+fn vec_len(st: St, id: int) -> int {
+    return st.elen.get(id)
+}
+
+/// 聚合值相关的一整组表达式（vec / 下标 / 方法 / struct 字面量 / 字段）。
+///
+/// **单独成一个函数不是洁癖**：`ev` 的帧槽已经贴到 qlmc 的 416 上限，
+/// 再往里塞这几段就直接"需要 417 个槽"编不过。抽出来各自开帧。
+fn ev_agg(st: St, nd: Nd) -> Val {
+    if nd.k == E_VECNEW {
+        return vec_new(st, as_int(ev(st, nd.a)))
+    }
+    if nd.k == E_INDEX {
+        let b = ev(st, nd.a)
+        let ix = as_int(ev(st, nd.b))
+        if b.k == K_VEC {
+            return st.elems.get(vec_at(st, b.i, ix, "vec"))
+        }
+        if b.k == K_STR {
+            if ix < 0 || ix >= len(b.s) {
+                eprint("qlm_interp: 字符串下标越界 " + ix.to_str())
+                exit(2)
+            }
+            return v_int(b.s[ix])
+        }
+        eprint("qlm_interp: 只有 vec / str 能下标")
+        exit(2)
+    }
+    if nd.k == E_MCALL {
+        let r = ev(st, nd.a)
+        let nm = st.names.get(nd.n)
+        if r.k != K_VEC {
+            eprint("qlm_interp: ." + nm + "() 只能用在 vec 上")
+            exit(2)
+        }
+        if nm == "len" {
+            return v_int(vec_len(st, r.i))
+        }
+        if nm == "push" {
+            if nd.c < 1 {
+                eprint("qlm_interp: push 需要一个实参")
+                exit(2)
+            }
+            let x = ev(st, st.argp.get(nd.b))
+            vec_push(st, r.i, x)
+            return v_void()
+        }
+        if nm == "get" {
+            if nd.c < 1 {
+                eprint("qlm_interp: get 需要一个实参")
+                exit(2)
+            }
+            let ix = as_int(ev(st, st.argp.get(nd.b)))
+            return st.elems.get(vec_at(st, r.i, ix, "vec"))
+        }
+        if nm == "set" {
+            if nd.c < 2 {
+                eprint("qlm_interp: set 需要两个实参")
+                exit(2)
+            }
+            let ix = as_int(ev(st, st.argp.get(nd.b)))
+            let x = ev(st, st.argp.get(nd.b + 1))
+            st.elems.set(vec_at(st, r.i, ix, "vec"), x)
+            return v_void()
+        }
+        if nm == "clear" {
+            st.elen.set(r.i, 0)
+            return v_void()
+        }
+        eprint("qlm_interp: vec 没有方法 ." + nm + "()")
+        exit(2)
+    }
+    if nd.k == E_SLIT {
+        let si = nd.n
+        let ty = st.structs.get(si)
+        let base = len(st.elems)
+        let mut k = 0
+        while k < ty.nf {
+            st.elems.push(v_void())
+            k = k + 1
+        }
+        k = 0
+        while k < nd.b {
+            let fname = st.argp.get(nd.a + k * 2)
+            let fex = st.argp.get(nd.a + k * 2 + 1)
+            let fi = field_index(st, ty, fname)
+            if fi < 0 {
+                eprint("qlm_interp: " + st.names.get(ty.name) + " 没有字段 " + st.names.get(fname))
+                exit(2)
+            }
+            st.elems.set(base + fi, copy_val(st, ev(st, fex)))
+            k = k + 1
+        }
+        return Val { k: K_STRUCT, i: base, f: 0.0, s: "", n: ty.nf, c: si }
+    }
+    if nd.k == E_FIELD {
+        let b = ev(st, nd.a)
+        if b.k != K_STRUCT {
+            eprint("qlm_interp: 只有 struct 值有字段")
+            exit(2)
+        }
+        let ty = st.structs.get(b.c)
+        let fi = field_index(st, ty, nd.n)
+        if fi < 0 {
+            eprint("qlm_interp: " + st.names.get(ty.name) + " 没有字段 " + st.names.get(nd.n))
+            exit(2)
+        }
+        return st.elems.get(b.i + fi)
+    }
+    eprint("qlm_interp: 内部错误：未知聚合表达式")
+    exit(2)
+    return v_void()
+}
+
 fn ev(st: St, n: int) -> Val {
     let nd = st.nd.get(n)
     if nd.k == E_INT {
@@ -1129,6 +1475,10 @@ fn ev(st: St, n: int) -> Val {
     if nd.k == E_CALL {
         return ev_call(st, nd.n, nd.a, nd.b)
     }
+    if nd.k == E_VECNEW || nd.k == E_INDEX || nd.k == E_MCALL ||
+       nd.k == E_SLIT || nd.k == E_FIELD {
+        return ev_agg(st, nd)
+    }
     eprint("qlm_interp: 内部错误：未知表达式节点 " + nd.k.to_str())
     exit(2)
     return v_void()
@@ -1149,7 +1499,7 @@ fn ex(st: St, n: int) -> int {
             eprint("qlm_interp: 赋值给未定义的变量 " + st.names.get(nd.n))
             exit(2)
         }
-        st.vals.set(sl, v)
+        st.vals.set(sl, copy_val(st, v))
         return 0
     }
     if nd.k == N_EXPR {
@@ -1182,6 +1532,53 @@ fn ex(st: St, n: int) -> int {
     }
     if nd.k == N_BLOCK {
         return exec_range(st, nd.a, nd.b)
+    }
+    if nd.k == N_SETFIELD {
+        let b = ev(st, nd.a)
+        if b.k != K_STRUCT {
+            eprint("qlm_interp: 只有 struct 值有字段")
+            exit(2)
+        }
+        let ty = st.structs.get(b.c)
+        let fi = field_index(st, ty, nd.n)
+        if fi < 0 {
+            eprint("qlm_interp: " + st.names.get(ty.name) + " 没有字段 " + st.names.get(nd.n))
+            exit(2)
+        }
+        st.elems.set(b.i + fi, copy_val(st, ev(st, nd.c)))
+        return 0
+    }
+    if nd.k == N_SETAT {
+        let b = ev(st, nd.a)
+        if b.k != K_VEC {
+            eprint("qlm_interp: 下标赋值只能用在 vec 上")
+            exit(2)
+        }
+        let ix = as_int(ev(st, nd.b))
+        let x = ev(st, nd.c)
+        st.elems.set(vec_at(st, b.i, ix, "vec"), x)
+        return 0
+    }
+    if nd.k == N_FOR {
+        let lo = as_int(ev(st, nd.a))
+        let hi = as_int(ev(st, nd.b))
+        let mut it = lo
+        while it < hi {
+            let save_b = st.blen.get(0)
+            let save_v = st.vlen.get(0)
+            bind(st, nd.n, v_int(it))
+            let r = ex(st, nd.c)
+            st.blen.set(0, save_b)
+            st.vlen.set(0, save_v)
+            if r == 1 {
+                return 1
+            }
+            if r == 2 {
+                return 0
+            }
+            it = it + 1
+        }
+        return 0
     }
     if nd.k == N_WHILE {
         while 1 == 1 {
@@ -1230,30 +1627,56 @@ fn skip_line(st: St) {
     }
 }
 
-/// `struct Name { ... }`：v1 不求值结构体，但**要能跳过**，
-/// 否则带 struct 声明的脚本连解析都过不去。
-fn skip_struct(st: St) {
+/// `struct Name { f: T, g: T }` → 记进布局表（字段名按声明顺序）。
+/// 字段下标 = 在 `sfields` 池里的相对位置，`p.g` 就是"起点 + 1"。
+fn parse_struct(st: St) {
     p_bump(st)                       // struct
-    p_bump(st)                       // 名字
-    if !p_is_op(st, O_LBR) {
-        p_err(st, "struct 后面需要 {")
-    }
-    let mut depth = 0
-    while p_cur(st).k != T_EOF {
-        let t = p_cur(st)
-        if t.k == T_OP && t.n == O_LBR {
-            depth = depth + 1
+    let nm = p_name(st)
+    p_op(st, O_LBR, "{")
+    let fs = len(st.sfields)
+    let mut nf = 0
+    while !p_is_op(st, O_RBR) {
+        if p_cur(st).k == T_EOF {
+            p_err(st, "struct 没有结束的 }")
         }
-        if t.k == T_OP && t.n == O_RBR {
-            depth = depth - 1
+        let f = p_name(st)
+        st.sfields.push(f)
+        nf = nf + 1
+        if p_is_op(st, O_COLON) {
             p_bump(st)
-            if depth == 0 {
-                return
-            }
-        } else {
+            skip_type(st)
+        }
+        if p_is_op(st, O_COMMA) {
             p_bump(st)
         }
     }
+    p_bump(st)                       // '}'
+    st.structs.push(Struct { name: nm, fs: fs, nf: nf })
+}
+
+/// 按名字找 struct 布局号（-1 = 没有）
+fn find_struct(st: St, name: int) -> int {
+    let n = len(st.structs)
+    let mut i = 0
+    while i < n {
+        if st.structs.get(i).name == name {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/// 按名字找字段下标（相对布局起点，-1 = 没有）
+fn field_index(st: St, ty: Struct, name: int) -> int {
+    let mut i = 0
+    while i < ty.nf {
+        if st.sfields.get(ty.fs + i) == name {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
 }
 
 fn parse_fn(st: St) {
@@ -1292,7 +1715,7 @@ fn parse_program(st: St) {
         } else if t.k == T_KW && t.n == K_IMPORT {
             skip_line(st)
         } else if t.k == T_KW && t.n == K_STRUCT {
-            skip_struct(st)
+            parse_struct(st)
         } else if t.k == T_KW && t.n == K_CONST {
             p_bump(st)
             let nm = p_name(st)

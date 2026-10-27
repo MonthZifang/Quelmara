@@ -1,0 +1,53 @@
+// t154_interp_vec —— 解释器差分夹具：vec + 下标 + for
+//
+// 解释器把 vec 表示成"对象号 + 全局元素池"，所以这几件事都要钉住：
+//   1) push 扩容（跨过初始容量）
+//   2) get / set / len / 下标读写是同一份数据
+//   3) vec 是**引用**：`let w = v` 之后 push 对两边都可见
+//   4) for 的上界只求值一次
+fn sum(v: vec[int]) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < v.len() {
+        s = s + v.get(i)
+        i = i + 1
+    }
+    return s
+}
+
+fn main() {
+    let v = vec[int].new(2)
+    for i in 0..10 {
+        v.push(i * i)
+    }
+    print(v.len())
+    print(sum(v))
+    print(v.get(3))
+    v.set(0, 100)
+    print(v.get(0))
+    print(v[5])
+    v[5] = 7
+    print(v[5])
+
+    let mut t = 0
+    for i in 0..v.len() {
+        t = t + v[i]
+    }
+    print(t)
+
+    // vec 是引用：别名看到同一个对象
+    let w = v
+    w.push(1234)
+    print(v.len())
+    print(v.get(10))
+
+    // for 的上界只求值一次：循环体里 push 不影响循环次数
+    let u = vec[int].new(2)
+    let n = 4
+    for i in 0..n {
+        u.push(i)
+        u.push(i * 10)
+    }
+    print(u.len())
+    print(sum(u))
+}
