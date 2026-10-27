@@ -1156,10 +1156,16 @@ int、str、bool、f64 字面量；`+ - * / %`、`== != < <= > >=`、`&& || !`�
 函数调用（含递归、多参数）；`vec[T].new(n)` / `.push` / `.get` / `.set` /
 `.len` / `.clear`、`v[i]` 读写、`s[i]` 取字节；`struct` 声明 / 字面量 /
 字段读写；`enum` 声明 / 变体构造 `E.V(载荷)` / `match`（含通配臂、载荷绑定、
-块臂里的 `return`）；内建 `print` / `eprint` / `len` / `assert`；`const` 全局常量；
-`module` / `import` 跳过。
+块臂里的 `return`）；闭包（`fn(x: int) -> int { 表达式 }`，捕获**按值快照**）、
+`closure` 类型的形参 / 返回值 / `vec[closure]`、"调用一个值" `f(x)(y)`；
+内建 `print` / `eprint` / `len` / `assert`；`const` 全局常量；`module` / `import` 跳过。
 
-**还没做**：**闭包**（捕获语义是另一层）、map、泛型、泛型 enum。
+**还没做**：map、泛型、泛型 enum、接口。
+
+> **闭包这条的参照编译器是 stage-0，不是 qlmc** —— `grep -c closure
+> bootstrap/qlmc/qlmc.qma` 是 **0**，自举编译器还没移植闭包。所以
+> `tests/interp_test.py` 里 `STAGE0_ONLY` 那组夹具用 stage-0 编来对拍。
+> 换句话说：**解释器现在覆盖的语言比 qlmc 多一点**，这是自举的已知阶段边界。
 
 **表示上的两个要点**：vec 是**引用**（对象号 + 全局元素池，别名共享同一个
 对象），struct 是**值**（绑定 / 赋值 / 进 vec / 传参都整段复制）。这两条与

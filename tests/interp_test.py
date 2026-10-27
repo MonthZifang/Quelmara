@@ -38,7 +38,13 @@ FIXTURES = [
     "t154_interp_vec.qma",
     "t155_interp_struct.qma",
     "t156_interp_enum.qma",
+    "t157_interp_closure.qma",
 ]
+
+# qlmc 还不支持的语言特性：这些夹具的"编译参照"用 stage-0（语言的参考实现）。
+# 目前只有闭包 —— qlmc 源码里 `closure` 出现 0 次，闭包/closure 类型是
+# stage-0 独有的能力。解释器支持它，所以对拍必须拿 stage-0 当基准。
+STAGE0_ONLY = {"t157_interp_closure.qma"}
 
 PASS = FAIL = 0
 
@@ -102,7 +108,12 @@ def diff_one(name):
     pi = run([INTERP, src])
     # 2) 编译执行
     exe = os.path.join(BUILD, name.replace(".qma", ".exe"))
-    pc = run([QLMC, "build", src, "--target", "win", "-o", exe])
+    if name in STAGE0_ONLY:
+        pc = run([sys.executable,
+                  os.path.join(ROOT, "tools", "stage0", "qlm_cli.py"),
+                  "build", src, "--target", "win", "-o", exe])
+    else:
+        pc = run([QLMC, "build", src, "--target", "win", "-o", exe])
     if pc.returncode != 0:
         bad(f"{name}: 编译失败（夹具必须两个通道都能过）")
         return

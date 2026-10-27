@@ -1,0 +1,47 @@
+// t157_interp_closure —— 解释器差分夹具：闭包 / 捕获
+//
+// 解释器的闭包 = (体节点, 形参区间, 捕获快照)。捕获是**按值快照**：
+// 创建时把当前可见绑定逐个复制进元素池（元素池只增不减，所以闭包逃逸后仍有效）。
+// 钉住这几条：
+//   1) 无捕获 / 单捕获 / 逃逸（返回出去）
+//   2) 快照语义：创建之后改外层变量，闭包读到的还是旧值
+//   3) 闭包作形参、闭包进 vec、`v.get(0)(5)` 这种"调用一个值"
+fn apply(f: closure, x: int) -> int {
+    return f(x)
+}
+
+fn make_adder(n: int) -> closure {
+    return fn(x: int) -> int { x + n }
+}
+
+fn make_counter(start: int) -> closure {
+    let base = start
+    return fn(step: int) -> int { base + step }
+}
+
+fn main() {
+    let twice = fn(x: int) -> int { x * 2 }
+    print(twice(21))
+    print(apply(twice, 10))
+
+    let add5 = make_adder(5)
+    print(add5(3))
+    print(add5(100))
+
+    let c = make_counter(7)
+    print(c(1))
+
+    // 快照：创建之后改 k，闭包读到的仍是 0
+    let mut k = 0
+    let snap = fn(x: int) -> int { x + k }
+    k = 100
+    print(snap(1))
+
+    let v = vec[closure].new(2)
+    v.push(twice)
+    v.push(add5)
+    let g0 = v.get(0)
+    let g1 = v.get(1)
+    print(g0(5))
+    print(g1(5))
+}

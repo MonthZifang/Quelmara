@@ -83,6 +83,7 @@ const K_F64 = 4
 const K_VEC = 5
 const K_STRUCT = 6
 const K_ENUM = 7
+const K_CLOSURE = 8
 
 /// 运行期的值。`i` 一槽多用：
 ///   K_INT → 整数；K_BOOL → 0/1；K_VEC → 元素在 `elems` 池里的起点；
@@ -175,6 +176,11 @@ const O_DOT = 23
 const O_LBR = 24
 const O_DOTDOT = 26
 const O_FATARROW = 27
+const O_ADDEQ = 28
+const O_SUBEQ = 29
+const O_MULEQ = 30
+const O_DIVEQ = 31
+const O_MODEQ = 32
 const O_RBR = 25
 
 const K_FN = 1
@@ -377,6 +383,11 @@ fn lex(src: str, tk: vec[Tok]) -> int {
             else if c == 45 && two == 62 { op = O_ARROW }
             else if c == 46 && two == 46 { op = O_DOTDOT }
             else if c == 61 && two == 62 { op = O_FATARROW }
+            else if c == 43 && two == 61 { op = O_ADDEQ }
+            else if c == 45 && two == 61 { op = O_SUBEQ }
+            else if c == 42 && two == 61 { op = O_MULEQ }
+            else if c == 47 && two == 61 { op = O_DIVEQ }
+            else if c == 37 && two == 61 { op = O_MODEQ }
             if op != 0 {
                 push_tok(tk, T_OP, op, 0.0, "", line)
                 i = i + 2
@@ -443,6 +454,8 @@ const E_VECNEW = 31
 const E_SLIT = 32
 const E_ECON = 33
 const E_MATCH = 34
+const E_CLO = 35
+const E_CCALL = 36
 const N_SETFIELD = 12
 
 /// 节点。**刻意不放 f64 字段**：qlmc 目前把"第 5 个及以后的 f64 形参"
@@ -511,6 +524,7 @@ struct St {
     variants: vec[int]   // 变体池：每 3 格 (enum 号, 变体名, 载荷名|-1)
     arms: vec[int]       // match 臂池：每 3 格 (变体号|-1, 绑定名|-1, 体节点)
     flow: vec[int]       // 表达式里出现的控制流（match 块臂里的 return）：0/1
+    cpool: vec[int]      // 闭包捕获池：每 2 格 (名字下标, 元素池下标)
 }
 
 fn st_new() -> St {
@@ -544,7 +558,8 @@ fn st_new() -> St {
         enums: vec[Enum].new(4),
         variants: vec[int].new(16),
         arms: vec[int].new(16),
-        flow: vec[int].new(1)
+        flow: vec[int].new(1),
+        cpool: vec[int].new(16)
     }
     // `vec[T].new(n)` 只给**容量**，长度是 0 —— 这些单槽状态必须 push 出第 0 格，
     // 否则后面 `set(0, ...)` 直接撞越界检查（die → exit 1，什么也不打印）。
@@ -708,6 +723,35 @@ fn p_primary(st: St) -> int {
     if t.k == T_KW && t.n == K_MATCH {
         return p_match(st)
     }
+    // 闭包字面量：`fn(x: int) -> int { 表达式 }`。体是**一个表达式**
+    // （与编译器同口径：闭包体不写 return，值就是表达式本身）。
+    if t.k == T_KW && t.n == K_FN {
+        p_bump(st)
+        p_op(st, O_LP, "(")
+        let ps = len(st.pnp)
+        let mut np = 0
+        while !p_is_op(st, O_RP) {
+            let pn = p_name(st)
+            st.pnp.push(pn)
+            np = np + 1
+            if p_is_op(st, O_COLON) {
+                p_bump(st)
+                skip_type(st)
+            }
+            if p_is_op(st, O_COMMA) {
+                p_bump(st)
+            }
+        }
+        p_bump(st)                   // ')'
+        if p_is_op(st, O_ARROW) {
+            p_bump(st)
+            skip_type(st)
+        }
+        p_op(st, O_LBR, "{")
+        let body = p_expr(st)
+        p_op(st, O_RBR, "}")
+        return mknd(st, E_CLO, body, ps, np, 0)
+    }
     if t.k == T_INT {
         p_bump(st)
         return mknd(st, E_INT, 0, 0, 0, t.n)
@@ -818,7 +862,25 @@ fn p_primary(st: St) -> int {
 fn p_postfix(st: St) -> int {
     let mut e = p_primary(st)
     while 1 == 1 {
-        if p_is_op(st, O_LB) {
+        if p_is_op(st, O_LP) {
+            // `f(x)` 里 f 不是标识符（字段 / 下标 / 方法结果）→ 调用"值"
+            p_bump(st)
+            let mut tmp = vec[int].new(4)
+            while !p_is_op(st, O_RP) {
+                tmp.push(p_expr(st))
+                if p_is_op(st, O_COMMA) {
+                    p_bump(st)
+                }
+            }
+            p_bump(st)
+            let start = len(st.argp)
+            let mut i2 = 0
+            while i2 < len(tmp) {
+                st.argp.push(tmp.get(i2))
+                i2 = i2 + 1
+            }
+            e = mknd(st, E_CCALL, e, start, len(tmp), 0)
+        } else if p_is_op(st, O_LB) {
             p_bump(st)
             let ix = p_expr(st)
             p_op(st, O_RB, "]")
@@ -1055,6 +1117,33 @@ fn p_stmt(st: St) -> int {
     // 表达式语句，或者 `左值 = 表达式`。左值可以是变量或下标 ——
     // **先解析完整表达式再看 `=`**，这样 `v[i] = x` 与 `x == y` 都不会误判。
     let e = p_expr(st)
+    // 复合赋值 `+= -= *= /= %=`：展开成 `lv = lv <op> rhs`。
+    // 左值会求值两次（`v[f()] += 1` 里 f 会被调两次）—— 变量/下标是幂等的，
+    // 这种写法在实际代码里几乎不出现，先按简单来。
+    let ct = p_cur(st)
+    if ct.k == T_OP && (ct.n == O_ADDEQ || ct.n == O_SUBEQ || ct.n == O_MULEQ ||
+                        ct.n == O_DIVEQ || ct.n == O_MODEQ) {
+        let cop = ct.n
+        p_bump(st)
+        let rhs = p_expr(st)
+        let mut bop = O_ADD
+        if cop == O_SUBEQ { bop = O_SUB }
+        if cop == O_MULEQ { bop = O_MUL }
+        if cop == O_DIVEQ { bop = O_DIV }
+        if cop == O_MODEQ { bop = O_MOD }
+        let val = mkbin(st, bop, e, rhs)
+        let lv = st.nd.get(e)
+        if lv.k == E_VAR {
+            return mknd(st, N_SET, val, 0, 0, lv.n)
+        }
+        if lv.k == E_INDEX {
+            return mknd(st, N_SETAT, lv.a, lv.b, val, 0)
+        }
+        if lv.k == E_FIELD {
+            return mknd(st, N_SETFIELD, lv.a, 0, val, lv.n)
+        }
+        p_err(st, "复合赋值的左边只能是变量 / 下标 / 字段")
+    }
     if p_is_op(st, O_ASSIGN) {
         p_bump(st)
         let rhs = p_expr(st)
@@ -1169,6 +1258,8 @@ fn print_val(v: Val) {
         }
     } else if v.k == K_F64 {
         print(v.f)
+    } else if v.k == K_CLOSURE {
+        print("<closure>")
     }
 }
 
@@ -1291,6 +1382,36 @@ fn to_text(v: Val) -> str {
     return "<f64>"
 }
 
+/// 调一个闭包：先把**捕获**绑进新帧（创建时已经复制进元素池，这里再复制一次
+/// 到值栈），再绑形参，然后求值体表达式。
+fn call_closure(st: St, cv: Val, args: vec[Val]) -> Val {
+    let nd = st.nd.get(cv.c)
+    let save_b = st.blen.get(0)
+    let save_v = st.vlen.get(0)
+    let save_base = st.base.get(0)
+    st.base.set(0, save_b)
+    let mut k = 0
+    while k < cv.n {
+        bind(st, st.cpool.get(cv.i + k * 2),
+             st.elems.get(st.cpool.get(cv.i + k * 2 + 1)))
+        k = k + 1
+    }
+    k = 0
+    while k < nd.c {
+        let mut av = v_void()
+        if k < len(args) {
+            av = args.get(k)
+        }
+        bind(st, st.pnp.get(nd.b + k), av)
+        k = k + 1
+    }
+    let rv = ev(st, nd.a)
+    st.blen.set(0, save_b)
+    st.vlen.set(0, save_v)
+    st.base.set(0, save_base)
+    return rv
+}
+
 fn ev_call(st: St, name: int, astart: int, acnt: int) -> Val {
     // 实参先全算出来（求值序：从左到右）
     let args = vec[Val].new(acnt + 1)
@@ -1312,6 +1433,13 @@ fn ev_call(st: St, name: int, astart: int, acnt: int) -> Val {
         }
         return v_void()
     }
+    if nm == "cores" {
+        // 解释器是单线程的：报 1，免得程序按多核去分片
+        return v_int(1)
+    }
+    if nm == "now_ns" {
+        return v_int(now_ns())
+    }
     if nm == "len" {
         if acnt >= 1 && args.get(0).k == K_STR {
             return v_int(len(args.get(0).s))
@@ -1331,6 +1459,14 @@ fn ev_call(st: St, name: int, astart: int, acnt: int) -> Val {
     }
     let fi = find_fn(st, name)
     if fi < 0 {
+        // 不是函数 —— 可能是持有闭包的变量（形参、let、字段都走这条）
+        let sl = lookup(st, name)
+        if sl >= 0 {
+            let cv = st.vals.get(sl)
+            if cv.k == K_CLOSURE {
+                return call_closure(st, cv, args)
+            }
+        }
         eprint("qlm_interp: 调用了未定义的函数 " + nm)
         exit(2)
     }
@@ -1429,7 +1565,50 @@ fn vec_len(st: St, id: int) -> int {
 ///
 /// **单独成一个函数不是洁癖**：`ev` 的帧槽已经贴到 qlmc 的 416 上限，
 /// 再往里塞这几段就直接"需要 417 个槽"编不过。抽出来各自开帧。
-fn ev_agg(st: St, nd: Nd) -> Val {
+/// 闭包相关：创建（捕获快照）与调用（捕获 + 形参绑进新帧）。
+/// 与 `ev_agg` 分开是为了压住帧槽 —— 合在一起 ev_agg 要 421 个槽，上限是 416。
+fn ev_clo(st: St, ni: int) -> Val {
+    let nd = st.nd.get(ni)
+    if nd.k == E_CCALL {
+        let cv = ev(st, nd.a)
+        if cv.k != K_CLOSURE {
+            eprint("qlm_interp: 只能调用闭包值")
+            exit(2)
+        }
+        let args = vec[Val].new(nd.c + 1)
+        let mut i3 = 0
+        while i3 < nd.c {
+            args.push(ev(st, st.argp.get(nd.b + i3)))
+            i3 = i3 + 1
+        }
+        return call_closure(st, cv, args)
+    }
+    if nd.k == E_CLO {
+        // 捕获**按值快照**：把当前可见的绑定逐个复制进元素池（元素池只增不减，
+        // 所以闭包逃逸出去之后仍然有效；值栈的槽位会被后续帧复用，不能存那儿）。
+        let capstart = len(st.cpool)
+        let base = st.base.get(0)
+        let end = st.blen.get(0)
+        let mut i = base
+        let mut cnt = 0
+        while i + 1 < end {
+            let nm = st.binds.get(i)
+            let sl = st.binds.get(i + 1)
+            st.elems.push(copy_val(st, st.vals.get(sl)))
+            st.cpool.push(nm)
+            st.cpool.push(len(st.elems) - 1)
+            cnt = cnt + 1
+            i = i + 2
+        }
+        return Val { k: K_CLOSURE, i: capstart, f: 0.0, s: "", n: cnt, c: ni }
+    }
+    eprint("qlm_interp: 内部错误：未知闭包表达式")
+    exit(2)
+    return v_void()
+}
+
+fn ev_agg(st: St, ni: int) -> Val {
+    let nd = st.nd.get(ni)
     if nd.k == E_VECNEW {
         return vec_new(st, as_int(ev(st, nd.a)))
     }
@@ -1453,7 +1632,27 @@ fn ev_agg(st: St, nd: Nd) -> Val {
         let r = ev(st, nd.a)
         let nm = st.names.get(nd.n)
         if r.k != K_VEC {
-            eprint("qlm_interp: ." + nm + "() 只能用在 vec 上")
+            if nm == "to_str" && nd.c == 0 {
+                return v_str(to_text(r))
+            }
+            // `.字段(实参)`：字段里放的是闭包就直接调它
+            if r.k == K_STRUCT {
+                let ty = st.structs.get(r.c)
+                let fi = field_index(st, ty, nd.n)
+                if fi >= 0 {
+                    let fv = st.elems.get(r.i + fi)
+                    if fv.k == K_CLOSURE {
+                        let aa = vec[Val].new(nd.c + 1)
+                        let mut i4 = 0
+                        while i4 < nd.c {
+                            aa.push(ev(st, st.argp.get(nd.b + i4)))
+                            i4 = i4 + 1
+                        }
+                        return call_closure(st, fv, aa)
+                    }
+                }
+            }
+            eprint("qlm_interp: ." + nm + "() 只能用在 vec / 闭包字段上")
             exit(2)
         }
         if nm == "len" {
@@ -1492,6 +1691,9 @@ fn ev_agg(st: St, nd: Nd) -> Val {
         }
         eprint("qlm_interp: vec 没有方法 ." + nm + "()")
         exit(2)
+    }
+    if nd.k == E_CCALL || nd.k == E_CLO {
+        return ev_clo(st, ni)
     }
     if nd.k == E_ECON {
         // 枚举值：元素池里两格 [变体槽号, 载荷]
@@ -1641,8 +1843,9 @@ fn ev(st: St, n: int) -> Val {
         return ev_call(st, nd.n, nd.a, nd.b)
     }
     if nd.k == E_VECNEW || nd.k == E_INDEX || nd.k == E_MCALL ||
-       nd.k == E_SLIT || nd.k == E_FIELD || nd.k == E_ECON || nd.k == E_MATCH {
-        return ev_agg(st, nd)
+       nd.k == E_SLIT || nd.k == E_FIELD || nd.k == E_ECON || nd.k == E_MATCH ||
+       nd.k == E_CLO || nd.k == E_CCALL {
+        return ev_agg(st, n)
     }
     eprint("qlm_interp: 内部错误：未知表达式节点 " + nd.k.to_str())
     exit(2)
@@ -1981,6 +2184,23 @@ fn parse_program(st: St) {
 // ---------------------------------------------------------------------------
 // 命令行
 // ---------------------------------------------------------------------------
+
+@ffi("kernel32.dll", "QueryPerformanceCounter")
+fn _QPC(p: int) -> bool
+
+@ffi("kernel32.dll", "QueryPerformanceFrequency")
+fn _QPF(p: int) -> bool
+
+/// 单调纳秒（与编译版的 now_ns 同口径：绝对值，调用方自己相减）
+fn now_ns() -> int {
+    let a = mem_alloc(8)
+    let b = mem_alloc(8)
+    _QPC(a)
+    _QPF(b)
+    let c = mem_load8(a, 0)
+    let f = mem_load8(b, 0)
+    return (c / f) * 1000000000 + ((c % f) * 1000000000) / f
+}
 
 @ffi("kernel32.dll", "GetCommandLineA")
 fn _cmdline() -> int
