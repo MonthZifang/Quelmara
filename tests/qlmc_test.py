@@ -62,6 +62,7 @@ CASES = [
     ("s25_divmod", "tests/selfhost/s25_divmod.qma"),
     ("s26_alias", "tests/selfhost/s26_alias.qma"),
     ("s27_modind", "tests/selfhost/s27_modind.qma"),
+    ("s28_compound", "tests/selfhost/s28_compound.qma"),
 ]
 
 npass = 0

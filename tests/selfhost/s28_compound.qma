@@ -1,0 +1,48 @@
+// s28_compound.qma —— 复合赋值 `+= -= *= /= %=`（v2.86）的差分回归
+//
+// 展开成 `lv = lv <op> rhs`，左值可以是变量 / 字段 / 下标。
+// 三种左值 × 五种运算符都要和 stage-0 逐字节一致。
+struct Acc { n: int, f: int }
+
+fn main() {
+    let mut a = 10
+    a += 5
+    print(a)
+    a -= 3
+    print(a)
+    a *= 4
+    print(a)
+    a /= 5
+    print(a)
+    a %= 7
+    print(a)
+
+    // 下标形态只测定长数组（stage-0 的 `v[i] = x` 不支持 vec，只支持数组/切片）
+    let mut arr = [1, 2, 3]
+    arr[0] += 10
+    arr[1] *= 5
+    arr[2] -= 1
+    print(arr[0])
+    print(arr[1])
+    print(arr[2])
+
+    let mut s = Acc { n: 7, f: 3 }
+    s.n += 100
+    s.f *= 2
+    print(s.n)
+    print(s.f)
+
+    // 循环里的复合赋值（collatz.qma 的形状）
+    let mut steps = 0
+    let mut x = 27
+    while x != 1 {
+        steps += 1
+        if x % 2 == 0 {
+            x = x / 2
+            continue
+        }
+        x = 3 * x + 1
+    }
+    print(steps)
+    print(x)
+}

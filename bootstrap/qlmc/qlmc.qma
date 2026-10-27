@@ -146,6 +146,16 @@ const P_DOTDOT = 25
 const P_LBRACK = 26
 const P_RBRACK = 27
 const P_FATARROW = 28
+// v2.86：复合赋值。**必须排在单字符 `+ - * / %` 之后判**（两字符优先），
+// 否则 `x += 1` 会被切成 `+` 和 `=`。
+// **id 从 37 起**：30..36 已经被 `& | ^ << >> >>> ~` 占了（那张表不连续，
+// 只看前 28 个会以为 29 之后是空的 —— 第一版就是这么撞的：`-=` 被当成
+// 位与 `&` 吃掉，语句变成 `z & 3` 的表达式语句，赋值静默消失）。
+const P_PLUSEQ = 37
+const P_MINUSEQ = 38
+const P_STAREQ = 39
+const P_SLASHEQ = 40
+const P_PERCENTEQ = 41
 const P_AT = 29
 // 位运算与移位（v2.28）。优先级照 stage-0（Quelmara 自己的定义，见 SPEC §2.4）：
 //   ||  <  &&  <  |  <  ^  <  &  <  == !=  <  < <= > >=  <  << >> >>>  <  + -  <  * / %
@@ -525,6 +535,11 @@ fn lex(src: str, toks: vec[Tok]) -> int {
             else if c == 45 && d2 == 62 { pid = P_ARROW }
             else if c == 46 && d2 == 46 { pid = P_DOTDOT }
             else if c == 61 && d2 == 62 { pid = P_FATARROW }
+            else if c == 43 && d2 == 61 { pid = P_PLUSEQ }
+            else if c == 45 && d2 == 61 { pid = P_MINUSEQ }
+            else if c == 42 && d2 == 61 { pid = P_STAREQ }
+            else if c == 47 && d2 == 61 { pid = P_SLASHEQ }
+            else if c == 37 && d2 == 61 { pid = P_PERCENTEQ }
             else if c == 60 && d2 == 60 { pid = P_SHL }
             else if c == 62 && d2 == 62 { pid = P_SHR }
             if pid != 0 {
@@ -1683,6 +1698,34 @@ fn _stmt(p: P, pos: vec[int]) -> int {
     }
     // 表达式语句，或 `左值 = 表达式`（左值可以是 变量 / 字段 / 下标）
     let v = _expr(p, pos)
+    // 复合赋值 `+= -= *= /= %=`：展开成 `lv = lv <op> rhs`。
+    // 左值会求值两次（`v[f()] += 1` 里 f 调两次）—— 变量/下标是幂等的，
+    // 这种写法在实际代码里几乎不出现，先按简单来（与解释器同一口径）。
+    let ct = _cur(p, pos)
+    if ct.k == T_PUNCT && (ct.n == P_PLUSEQ || ct.n == P_MINUSEQ ||
+                           ct.n == P_STAREQ || ct.n == P_SLASHEQ ||
+                           ct.n == P_PERCENTEQ) {
+        let cop = ct.n
+        _adv(pos)
+        let rhs0 = _expr(p, pos)
+        let mut bop = P_PLUS
+        if cop == P_MINUSEQ { bop = P_MINUS }
+        if cop == P_STAREQ { bop = P_STAR }
+        if cop == P_SLASHEQ { bop = P_SLASH }
+        if cop == P_PERCENTEQ { bop = P_PERCENT }
+        let bin = _node(p, E_BIN, bop, v, rhs0)
+        let lv0 = p.nodes.get(v)
+        if lv0.op == E_VAR {
+            return _node(p, S_ASSIGN, lv0.a, bin, -1)
+        }
+        if lv0.op == E_FIELD {
+            return _node(p, S_ASG_FIELD, lv0.a, lv0.b, bin)
+        }
+        if lv0.op == E_INDEX {
+            return _node(p, S_ASG_INDEX, lv0.a, lv0.b, bin)
+        }
+        _fail(p, pos, "复合赋值的左边不是变量 / 字段 / 下标")
+    }
     if _is_p(p, pos, P_ASSIGN) {
         _adv(pos)
         let rhs = _expr(p, pos)
