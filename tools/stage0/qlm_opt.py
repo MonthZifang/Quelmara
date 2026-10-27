@@ -1192,6 +1192,36 @@ def opt_const_div(fn):
     return fn
 
 
+def opt_drop_dead_jump(fn):
+    """`jmp L` / `jcc .. L` 紧跟 `label L` → 这条跳转是白做的，删掉。
+
+    **为什么常见**：`_lower_cond` 把 `a || b || c` 降级成
+    `jcc true; jmp next; next: jcc true; jmp next2; ...` —— 每个 `jmp next`
+    的目标就是紧邻的下一条 label，跳过去和不跳走的是同一条路。
+
+    b9_json 的 `c == 32 || c == 9 || c == 10 || c == 13` 因此是
+    **12 条指令、8 个分支**，其中 4 条 `jmp` 全是废的（占 1/3 的指令、
+    3/8 的分支）。删掉后同一个判断变成 9 条指令、5 个分支。
+
+    `jcc` 版同样处理：条件真/假都落到 L，条件本身就没有意义。
+    纯控制流改写，不碰任何数据。
+    """
+    ins = fn.instrs
+    n = len(ins)
+    out = []
+    changed = False
+    for i, p in enumerate(ins):
+        if (p[0] in ("jmp", "jz", "jnz", "jcc")
+                and i + 1 < n and ins[i + 1][0] == "label"
+                and p[-1] == ins[i + 1][1]):
+            changed = True
+            continue
+        out.append(p)
+    if changed:
+        fn.instrs = out
+    return fn
+
+
 def opt_schedule(fn):
     """全函数：按基本块调度"""
     out = []
@@ -2108,6 +2138,8 @@ def opt_all(fn, unroll=True):
         opt_strlen_hoist(fn)
     for _ in range(3):
         before = len(fn.instrs)
+        if not _skip_pass("opt_drop_dead_jump"):
+            opt_drop_dead_jump(fn)
         if not _skip_pass("opt_copy_prop"):
             opt_copy_prop(fn)
         if not _skip_pass("opt_cse"):
@@ -2155,6 +2187,8 @@ def opt_all(fn, unroll=True):
         opt_bounds_elim(fn)
     if not _skip_pass("opt_bounds_dedupe"):
         opt_bounds_dedupe(fn)
+    if not _skip_pass("opt_drop_dead_jump"):
+        opt_drop_dead_jump(fn)
     # 调度放最后：避免打乱内联/CSE/展开的形态匹配
     if not _skip_pass("opt_schedule"):
         opt_schedule(fn)
