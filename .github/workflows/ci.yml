@@ -90,6 +90,19 @@ jobs:
       - name: Windows PE 回归（无 CRT / 多核 / chan / vec / fail-fast）
         run: python tests/run_win_tests.py
 
+      # run_win_tests.py 失败时，把逐条 FAIL 清单贴进 step summary ——
+      # job 日志下载要 admin 权限（外部拿不到），summary 是唯一免费通道。（v2.93）
+      - name: 失败清单进 summary（仅失败时）
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path build/win_failures.log) {
+            "### ❌ Windows PE 回归失败清单" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "```" | Add-Content $env:GITHUB_STEP_SUMMARY
+            Get-Content build/win_failures.log | Add-Content $env:GITHUB_STEP_SUMMARY
+            "```" | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
+
       - name: gzip 解码互操作（zlib 9 种编码组合 → Quelmara 解压）
         run: python tests/gzip_inflate_test.py
 
