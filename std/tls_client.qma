@@ -469,7 +469,9 @@ pub fn tls_client_handshake(priv: str, ch_record: str, server_bytes: str) -> Tls
 
 
 // 用给定信任锚验证服务器证书链（host 非空时校验 SAN，now 是 Unix 秒）。
-// 返回 1 = 通过；0 = 失败。锚证书由调用方提供（当前没有内置根证书库）。
+// 返回 1 = 通过；0 = 失败。锚由调用方提供——v2.97 起内置根库在
+// std/x509roots（`x509_trusted_anchor` / `x509_verify_stored`），tls_client
+// 不 import 它：本层保持在 x509 之下，"信哪些根"是调用方的策略不是握手的策略。
 fn tls_verify_chain(r: TlsClientResult, anchor: str, host: str, now: int) -> int {
     let certs = _tls_cert_list(r.cert_msg)
     let n = len(certs)

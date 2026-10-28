@@ -44,6 +44,7 @@ DESC = {
     "std/hex.qma": "十六进制编解码",
     "std/http.qma": "HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商 / chunked 请求体 v2.95）",
     "std/http_chunk.qma": "Transfer-Encoding: chunked 的扫描与就地解包（纯内存，零 socket 依赖；v2.95）",
+    "std/x509roots.qma": "内置 TLS 根证书库（12 个主流根 + 按 DN 配锚 + 一键验证到表内锚；v2.97）",
     "std/httpc.qma": "HTTP/1.1 客户端核心：URL 拆分 / 请求构造 / 响应解析（content-length / chunked）/ 重定向判定（纯函数，零 socket 依赖）",
     "std/httpc_net.qma": "HTTP 客户端传输层：httpc_get / httpc_get_tls / httpc_get_follow（Windows；TLS 走 std/tls_net）",
     "std/mime.qma": "扩展名 ↔ Content-Type（内置 30 项表，大小写不敏感，带 charset 参数反查）",
