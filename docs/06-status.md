@@ -2009,6 +2009,37 @@ qlmc 的变量解析是 `_try_var` / `_var_id`：先在 `fc.bind`（作用域栈
 `[3d]`），而 `lower_args` 恰恰按平台分叉。同一个"两条路径实现不一致"的
 根因，`docs/07-gaps.md` §7.2 已记过一次（v1.19 浮点比较）。
 
+### 3.55 C 后端第一次真正全绿（v2.91）：两个后端共用的 DCE 缺陷
+
+`tests/run_tests.sh`（C 后端回归）第一次在本机跑通——为此把一个独立 gcc-12
+解进工具链（`--sysroot` 指向它，不需要 root）。跑通后暴露的不是一个 bug，
+是三个叠在一起的：
+
+| 缺陷 | 症状 | 根因 |
+|---|---|---|
+| **全局 DCE 漏扫结构体字面量** | 回调函数被当死代码删掉 | `walk()` 只认 `tuple`/`list`，而 `("structlit", path, {字段: 表达式})` 的第三项是 **`dict`** |
+| 用户函数与 libc 撞名 | `error: conflicting types for 'send'` | 函数名原样写进 C，`std/net` 的 `pub fn send` 与 `<unistd.h>` 同名同形冲突 |
+| 函数值三处缺口 | `undeclared` / `called object is not a function` | 裸函数名当值、变量间接调用、`spawn` 目标名都没走符号映射 |
+
+第一条最要紧：**两个后端共用这份 DCE**。`let s = S { cb: handler }` 里
+`handler` 只以裸名出现在 dict 中，DCE 看不见 → 删掉 → 下游报"未定义"。
+自研后端也吃这个亏，只是报错更早、更像"名字写错"。
+
+修复后：
+
+| 项 | 修复前 | 修复后 |
+|---|---|---|
+| `run_tests.sh`（C 后端） | PASS=15 **FAIL=2** | **PASS=15 FAIL=0** |
+| `run_native_tests.sh` | PASS=67 **FAIL=34**（缺 cc） | **PASS=101 FAIL=0** |
+| `lexdiff` / `parsediff` | 307/211 全绿 | 307/211 全绿（无回归） |
+
+`run_native_tests.sh` 涨的 34 条正是以前因缺 `cc` 而红的 C 侧交叉验证项。
+
+另外 `examples/echo_server.qma` 从 v0.1 起用的是 `net.TcpServer { ... }` 这套
+**从未实现的 SPEC 模型**（`std/net.qma` 第二行就写着"仍是目标模型"）——
+已改写为真实可用的 `serve(port, backlog, cb...)` 形式。`run_tests.sh` 的网络段
+同时改成按能力探测：C 后端没有 `tcp_listen` 就记 SKIP，而不是天天红着。
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |

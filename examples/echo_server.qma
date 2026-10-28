@@ -1,35 +1,36 @@
-// echo_server.qma — 原生网络：epoll/io_uring 非阻塞百万连接 echo 服务器
-// 资源上限由根目录 Quelmara.toml [net] 节声明，超限 fail-fast。
+// echo_server.qma — 高并发 echo 服务器（IOCP reactor）
+//
+// **v2.91 重写**：这个文件从 v0.1 起就是一个"设计模型"示例——它用
+// `net.TcpServer { on_connect: ... }` 这套**结构体 + 回调字段**的写法，而
+// 那套 API 从来没有实现过（`std/net.qma` 开头那句"SPEC 的 net.TcpServer
+// reactor 仍是目标模型"就是它的墓志铭）。`tests/run_tests.sh` 的 `[4]` 段
+// 一直在编这个文件，所以 **C 后端回归从那时起就没绿过**。
+//
+// 实际可用的是 `std/net/reactor.qma` 的 `serve(port, backlog, cb...)`：
+// 回调传**裸函数名**，签名是 `(fd: int)` / `(fd: int, data: str) -> int`，
+// 直接拿 fd 操作，没有 `net.Conn` 包装类型（那是 SPEC 里的富对象模型）。
+//
+// 资源上限由根目录 Quelmara.toml [net] 节声明，超限直接关连接。
+// 仅 Windows PE（IOCP + @ffi）；Linux 侧 epoll reactor 尚未实现，见 07-gaps。
 module echo_server
 
 import std.net
-import std.core
+import std.net.reactor
 
-fn on_connect(c: net.Conn) {
-    print("peer connected: " + c.peer_addr())
+fn on_connect(fd: int) {
+    print("peer connected")
 }
 
-fn on_data(c: net.Conn, data: []byte) -> net.Action {
-    c.write(data)?                 // 零拷贝回写，buffer 用后归还池
-    return net.Action.Keep
+fn on_data(fd: int, data: str) -> int {
+    send(fd, data)          // 回显；返回 1 = 保持连接继续收
+    return 1
 }
 
-fn on_close(c: net.Conn) {
+fn on_close(fd: int) {
     print("peer closed")
 }
 
 fn main() {
-    let server = net.TcpServer {
-        addr:         "0.0.0.0:9000"
-        backlog:      65535
-        max_conns:    1000000
-        io_threads:   0              // 0 = 自动（按 [core] 线程数）
-        nodelay:      true
-        reuse_port:   true
-        on_connect:   on_connect
-        on_data:      on_data
-        on_close:     on_close
-    }
     print("echo server listening on :9000")
-    server.serve()
+    serve(9000, 65535, on_connect, on_data, on_close)
 }
