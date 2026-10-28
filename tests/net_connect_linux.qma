@@ -1,0 +1,13 @@
+// net_connect_linux.qma — tcp_connect 的 POSIX 路径（v2.92）
+// 连 127.0.0.1:19560（由测试脚本里的 Python 服务端提供），发一行、收一行。
+module net_connect_linux
+
+import std.net
+
+fn main() {
+    let fd = connect("127.0.0.1", 19560)
+    send(fd, "ping-from-quelmara\n")
+    let r = recv(fd, 1024)
+    print(r)
+    close_conn(fd)
+}

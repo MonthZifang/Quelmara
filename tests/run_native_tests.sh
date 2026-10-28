@@ -282,6 +282,60 @@ out=$(./build/nat_args alpha beta "two words" 2>&1); rc=$?
 timeout 30 ./build/nat_args 2>/dev/null >/dev/null; rc=$?
 [ $rc -ne 0 ] && ok "args 零参数 fail-fast（不静默返回垃圾）" || bad "args 零参数未失败"
 
+echo "[24] POSIX 原生 socket（v2.92）：listen/accept/send/recv/connect 全链路"
+# v2.91 及以前 `tcp_connect` 的**派发**里有一句无条件的 windows 检查，
+# Linux 上一编 `import std.net` 就死在 "无法发射指令 ('winapi', … 'WSAStartup')"；
+# 运行库那边 `__tcp_connect` 之前还用 `return` 提前退出了整个运行库生成。
+# 下面把服务端（listen/accept）与客户端（connect）都跑一遍真连接。
+$NAT build tests/net_echo_linux.qma -o build/net_echo_linux >/dev/null 2>&1 \
+  && ok "POSIX 网络：echo 服务端编译通过" || bad "POSIX 网络：echo 服务端编译失败"
+if [ -x build/net_echo_linux ]; then
+  (./build/net_echo_linux > build/.netecho.out 2>&1 &)
+  sleep 0.6
+  python3 - <<'PYEOF'
+import socket, sys, threading
+res = []
+def cli(i):
+    try:
+        s = socket.create_connection(("127.0.0.1", 19559), timeout=3)
+        m = f"posix-{i}\n".encode()
+        s.sendall(m)
+        d = s.recv(64)
+        res.append(d == m)
+        s.close()
+    except Exception:
+        res.append(False)
+ts = [threading.Thread(target=cli, args=(i,)) for i in range(3)]
+[t.start() for t in ts]
+[t.join() for t in ts]
+sys.exit(0 if len(res) == 3 and all(res) else 1)
+PYEOF
+  [ $? -eq 0 ] && ok "POSIX 网络：3 连接 echo 全部正确（raw syscall）" \
+               || bad "POSIX 网络：echo 回显失败"
+  pkill -f net_echo_linux 2>/dev/null
+fi
+
+$NAT build tests/net_connect_linux.qma -o build/net_connect_linux >/dev/null 2>&1 \
+  && ok "POSIX 网络：客户端编译通过" || bad "POSIX 网络：客户端编译失败"
+if [ -x build/net_connect_linux ]; then
+  python3 - >/dev/null 2>&1 <<'PYEOF' &
+import socket
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 19560)); s.listen(1)
+c, _ = s.accept()
+d = c.recv(64)
+c.sendall(b"pong:" + d)
+c.close(); s.close()
+PYEOF
+  SRVPID=$!
+  sleep 0.7
+  out=$(timeout 30 ./build/net_connect_linux 2>&1); rc=$?
+  wait $SRVPID 2>/dev/null
+  [ $rc -eq 0 ] && ok "POSIX 网络：connect 退出码 0" || bad "POSIX 网络：connect rc=$rc"
+  echo "$out" | grep -q "pong:ping-from-quelmara" \
+    && ok "POSIX 网络：connect 收发明文正确" || bad "POSIX 网络：connect 输出 [$out]"
+fi
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

@@ -3702,14 +3702,13 @@ class Lower:
                 return self._mark_str(fn, d)
             return d
         if name == "tcp_connect" and name not in self.fns_ast:
-            # 客户端连接（v1.25）：tcp_connect(host, port) -> fd。
-            # Windows 走 getaddrinfo（系统 DNS + hosts）；v2.07 起 family 放宽
+            # 客户端连接：tcp_connect(host, port) -> fd。
+            # Windows 走 getaddrinfo（系统 DNS + hosts），v2.07 起 family 放宽
             # 到 AF_UNSPEC，IPv6 字面量与 AAAA 记录直接可用，并按 ai_next
             # 逐个尝试（"localhost" 先返回 ::1 时 v4-only 服务端仍能连上）。
-            # Linux 仍只支持 IPv4 字面量（见运行时分支）。失败 fail-fast。
-            if self.platform != "windows":
-                raise SyntaxError(
-                    "tcp_connect() 目前只在 Windows PE 后端实现（Linux DNS 未实现）")
+            # POSIX（v2.92）走 raw syscall：只支持 **IPv4 点分字面量** 直连，
+            # 域名 fail-fast（Linux resolver 要 dlopen nsswitch 插件，抄一遍
+            # 等于把 glibc 的 resolver 内联进来，与本后端定位冲突）。
             if len(e[2]) != 2:
                 raise SyntaxError("tcp_connect(host, port) 需要两个实参")
             self.uses_net = True
@@ -7968,172 +7967,279 @@ class Lower:
             f.emit("args", [host, port])
             b = f.new_v()
             l_fail = f.label("netfc")
-            gid_wsa2 = self.intern_array(8)
-            wsa2 = f.new_v()
-            f.emit("movaddr", wsa2, gid_wsa2)
-            sw2 = f.new_v()
-            f.emit("winapi", sw2, "WSAStartup", [("imm", 0x202), wsa2])
-            f.emit("jnz", sw2, l_fail)
-            # hints（48B）：family=AF_UNSPEC(0)@4、socktype=SOCK_STREAM(1)@8、
-            # protocol=IPPROTO_TCP(6)@12，其余 0
-            hints = f.new_v()
-            f.emit("call", hints, "__alloc", [("imm", 48)])
-            for slot in range(6):
-                f.emit("store", hints, ("imm", slot), ("imm", 0))
-            f.emit("store8", hints, ("imm", 4), ("imm", 0))
-            f.emit("store8", hints, ("imm", 8), ("imm", 1))
-            f.emit("store8", hints, ("imm", 12), ("imm", 6))
-            # PADDRINFOA *res = NULL
-            res = f.new_v()
-            f.emit("call", res, "__alloc", [("imm", 8)])
-            f.emit("store", res, ("imm", 0), ("imm", 0))
-            gr = f.new_v()
-            f.emit("winapi", gr, "getaddrinfo", [host, ("imm", 0), hints, res])
-            f.emit("jnz", gr, l_fail)
-            # head 留给 freeaddrinfo（链表中间节点不能直接 free）
-            head = f.new_v()
-            f.emit("load", head, res, ("imm", 0))
-            f.emit("jz", head, l_fail)
-            ai = f.new_v()
-            f.emit("mov", ai, head)
-            s = f.new_v()
-            f.emit("mov", s, ("imm", 0))
-            # 端口高/低字节（网络序）：sockaddr_in 与 sockaddr_in6 的端口
-            # 都在字节 2/3，算一次两个家族共用
-            hi = f.new_v()
-            f.emit("bin", "shr", hi, port, ("imm", 8))
-            f.emit("bin", "and", hi, hi, ("imm", 0xFF))
-            lo = f.new_v()
-            f.emit("bin", "and", lo, port, ("imm", 0xFF))
-            l_try = f.label("netct")
-            l_retry = f.label("netcr")
-            l_ok = f.label("netco")
-            f.emit("label", l_try)
-            f.emit("jz", ai, l_fail)                   # 链表走完仍失败
-            fam = f.new_v()
-            f.emit("load8", fam, ai, ("imm", 4))       # ai_family（低字节即可）
-            sty = f.new_v()
-            f.emit("load8", sty, ai, ("imm", 8))       # ai_socktype
-            pro = f.new_v()
-            f.emit("load8", pro, ai, ("imm", 12))      # ai_protocol
-            alen = f.new_v()
-            f.emit("load", alen, ai, ("imm", 2))       # ai_addrlen（字节 16）
-            # sockaddr 缓冲 32B（v6 28B 够用；多给 4B 留 scope_id 余量）
-            sin = f.new_v()
-            f.emit("call", sin, "__alloc", [("imm", 32)])
-            addr = f.new_v()
-            f.emit("load", addr, ai, ("imm", 4))       # ai_addr 在字节 32
-            f.emit("call", None, "__memcpy", [sin, addr, alen])
-            f.emit("store8", sin, ("imm", 2), hi)
-            f.emit("store8", sin, ("imm", 3), lo)
-            cs = f.new_v()
-            f.emit("winapi", cs, "socket", [fam, sty, pro])
-            cs32 = f.new_v()
-            f.emit("bin", "shl", cs32, cs, ("imm", 32))
-            cs322 = f.new_v()
-            f.emit("bin", "sar", cs322, cs32, ("imm", 32))
-            f.emit("cmpset", "e", b, cs322, ("imm", -1))
-            f.emit("jnz", b, l_retry)
-            cr = f.new_v()
-            f.emit("winapi", cr, "connect", [cs, sin, alen])
-            cr32 = f.new_v()
-            f.emit("bin", "shl", cr32, cr, ("imm", 32))
-            cr322 = f.new_v()
-            f.emit("bin", "sar", cr322, cr32, ("imm", 32))
-            f.emit("cmpset", "e", b, cr322, ("imm", -1))
-            f.emit("jnz", b, l_retry)
-            f.emit("mov", s, cs)
-            f.emit("jmp", l_ok)
-            f.emit("label", l_retry)
-            f.emit("winapi", None, "closesocket", [cs])   # socket 失败时 -1 无害
-            nxt = f.new_v()
-            f.emit("load", nxt, ai, ("imm", 5))        # ai_next 在字节 40
-            f.emit("mov", ai, nxt)
-            f.emit("jmp", l_try)
-            f.emit("label", l_ok)
-            f.emit("winapi", None, "freeaddrinfo", [head])
-            f.emit("ret", s)
-            f.emit("label", l_fail)
-            f.emit("call", None, "__net_fail_connect", [])
-            f.emit("ret", ("imm", 0))
-            self.out.append(f)
+            if self.platform != "windows":
+                # ---- POSIX 分支（v2.92）----
+                # 以前这里是**无条件**的 WSAStartup/getaddrinfo：Linux 上一编
+                # `import std.net` 就死在 "无法发射指令 ('winapi', … 'WSAStartup')"。
+                # 现在走 raw syscall：只做 **IPv4 点分字面量** 直连。
+                #
+                # 为什么不做 DNS：Linux 的解析要走 nsswitch → dlopen 插件 →
+                # /etc/resolv.conf 状态机，手写一遍等于把 glibc 的 resolver 抄进来。
+                # 本后端的定位是"无 libc 的静态可执行文件"，DNS 交给调用方传字面量
+                # （服务端侧本来也只需要 listen，不需要 connect 域名）。
+                # 域名会 fail-fast 而不是静默连错地址。
+                si = f.new_v()
+                f.emit("syscall", si, self.sc["socket"],
+                       [("imm", 2), ("imm", 1), ("imm", 0)])      # AF_INET/SOCK_STREAM
+                l_ok4 = f.label("netc4ok")
+                f.emit("jcc", "ge", si, ("imm", 0), l_ok4)
+                f.emit("jmp", l_fail)
+                f.emit("label", l_ok4)
+                # sockaddr_in（16B）：[0]=family|htons(port)<<16  [1]=IPv4 网络序
+                sin4 = f.new_v()
+                f.emit("call", sin4, "__alloc", [("imm", 16)])
+                # 端口：port_be = ((port&0xFF)<<8) | ((port>>8)&0xFF)
+                ph = f.new_v()
+                f.emit("bin", "and", ph, port, ("imm", 0xFF))
+                ph2 = f.new_v()
+                f.emit("bin", "shl", ph2, ph, ("imm", 8))
+                pl = f.new_v()
+                f.emit("bin", "shr", pl, port, ("imm", 8))
+                pl2 = f.new_v()
+                f.emit("bin", "and", pl2, pl, ("imm", 0xFF))
+                pbe = f.new_v()
+                f.emit("bin", "or", pbe, ph2, pl2)
+                psh = f.new_v()
+                f.emit("bin", "shl", psh, pbe, ("imm", 16))
+                w0 = f.new_v()
+                f.emit("bin", "or", w0, psh, ("imm", 2))
+                f.emit("store", sin4, ("imm", 0), w0)
+                # IPv4：把点分字面量解析成 32 位网络序（4 段，每段 0..255）
+                # 状态：acc = 已收好的段（大端累积）；oct_v = 当前段值；i = 下标
+                acc = f.new_v()
+                f.emit("mov", acc, ("imm", 0))
+                oct_v = f.new_v()
+                f.emit("mov", oct_v, ("imm", 0))
+                nseg = f.new_v()
+                f.emit("mov", nseg, ("imm", 0))
+                i = f.new_v()
+                f.emit("mov", i, ("imm", 0))
+                l_loop = f.label("netc4lp")
+                l_done = f.label("netc4dn")
+                l_seg = f.label("netc4sg")
+                l_next = f.label("netc4nx")
+                l_dig = f.label("netc4dg")
+                f.emit("label", l_loop)
+                ch = f.new_v()
+                f.emit("load8", ch, host, i)
+                f.emit("jz", ch, l_done)
+                isdot = f.new_v()
+                f.emit("cmpset", "e", isdot, ch, ("imm", 46))
+                f.emit("jnz", isdot, l_seg)
+                # 数字判定用无符号区间：48 <= ch <= 57
+                f.emit("jcc", "b", ch, ("imm", 48), l_fail)    # < '0'
+                f.emit("jcc", "b", ch, ("imm", 58), l_dig)     # < ':' -> 是数字
+                f.emit("jmp", l_fail)                          # > '9'
+                f.emit("label", l_dig)
+                # oct_v = oct_v*10 + (ch - 48)
+                t10 = f.new_v()
+                f.emit("bin", "mul", t10, oct_v, ("imm", 10))
+                dv = f.new_v()
+                f.emit("bin", "sub", dv, ch, ("imm", 48))
+                ov = f.new_v()
+                f.emit("bin", "add", ov, t10, dv)
+                f.emit("mov", oct_v, ov)
+                f.emit("label", l_next)
+                f.emit("bin", "add", i, i, ("imm", 1))
+                f.emit("jmp", l_loop)
+                f.emit("label", l_seg)
+                seg = f.new_v()
+                f.emit("bin", "shl", seg, acc, ("imm", 8))
+                f.emit("bin", "or", seg, seg, oct_v)
+                f.emit("mov", acc, seg)
+                f.emit("mov", oct_v, ("imm", 0))
+                f.emit("bin", "add", nseg, nseg, ("imm", 1))
+                f.emit("bin", "add", i, i, ("imm", 1))
+                f.emit("jmp", l_loop)
+                f.emit("label", l_done)
+                # 必须正好 4 段，否则不是合法 IPv4 字面量
+                f.emit("cmpset", "e", b, nseg, ("imm", 3))
+                f.emit("jz", b, l_fail)
+                # 最后一段收尾
+                seg2 = f.new_v()
+                f.emit("bin", "shl", seg2, acc, ("imm", 8))
+                f.emit("bin", "or", seg2, seg2, oct_v)
+                f.emit("store", sin4, ("imm", 1), seg2)
+                cr = f.new_v()
+                f.emit("syscall", cr, self.sc["connect"], [si, sin4, ("imm", 16)])
+                l_crok = f.label("netc4cr")
+                f.emit("jcc", "ge", cr, ("imm", 0), l_crok)
+                f.emit("syscall", None, self.sc["close"], [si])
+                f.emit("jmp", l_fail)
+                f.emit("label", l_crok)
+                f.emit("ret", si)
+                f.emit("label", l_fail)
+                f.emit("call", None, "__net_fail_connect", [])
+                f.emit("ret", ("imm", 0))
+                self.out.append(f)
+            else:
+                gid_wsa2 = self.intern_array(8)
+                wsa2 = f.new_v()
+                f.emit("movaddr", wsa2, gid_wsa2)
+                sw2 = f.new_v()
+                f.emit("winapi", sw2, "WSAStartup", [("imm", 0x202), wsa2])
+                f.emit("jnz", sw2, l_fail)
+                # hints（48B）：family=AF_UNSPEC(0)@4、socktype=SOCK_STREAM(1)@8、
+                # protocol=IPPROTO_TCP(6)@12，其余 0
+                hints = f.new_v()
+                f.emit("call", hints, "__alloc", [("imm", 48)])
+                for slot in range(6):
+                    f.emit("store", hints, ("imm", slot), ("imm", 0))
+                f.emit("store8", hints, ("imm", 4), ("imm", 0))
+                f.emit("store8", hints, ("imm", 8), ("imm", 1))
+                f.emit("store8", hints, ("imm", 12), ("imm", 6))
+                # PADDRINFOA *res = NULL
+                res = f.new_v()
+                f.emit("call", res, "__alloc", [("imm", 8)])
+                f.emit("store", res, ("imm", 0), ("imm", 0))
+                gr = f.new_v()
+                f.emit("winapi", gr, "getaddrinfo", [host, ("imm", 0), hints, res])
+                f.emit("jnz", gr, l_fail)
+                # head 留给 freeaddrinfo（链表中间节点不能直接 free）
+                head = f.new_v()
+                f.emit("load", head, res, ("imm", 0))
+                f.emit("jz", head, l_fail)
+                ai = f.new_v()
+                f.emit("mov", ai, head)
+                s = f.new_v()
+                f.emit("mov", s, ("imm", 0))
+                # 端口高/低字节（网络序）：sockaddr_in 与 sockaddr_in6 的端口
+                # 都在字节 2/3，算一次两个家族共用
+                hi = f.new_v()
+                f.emit("bin", "shr", hi, port, ("imm", 8))
+                f.emit("bin", "and", hi, hi, ("imm", 0xFF))
+                lo = f.new_v()
+                f.emit("bin", "and", lo, port, ("imm", 0xFF))
+                l_try = f.label("netct")
+                l_retry = f.label("netcr")
+                l_ok = f.label("netco")
+                f.emit("label", l_try)
+                f.emit("jz", ai, l_fail)                   # 链表走完仍失败
+                fam = f.new_v()
+                f.emit("load8", fam, ai, ("imm", 4))       # ai_family（低字节即可）
+                sty = f.new_v()
+                f.emit("load8", sty, ai, ("imm", 8))       # ai_socktype
+                pro = f.new_v()
+                f.emit("load8", pro, ai, ("imm", 12))      # ai_protocol
+                alen = f.new_v()
+                f.emit("load", alen, ai, ("imm", 2))       # ai_addrlen（字节 16）
+                # sockaddr 缓冲 32B（v6 28B 够用；多给 4B 留 scope_id 余量）
+                sin = f.new_v()
+                f.emit("call", sin, "__alloc", [("imm", 32)])
+                addr = f.new_v()
+                f.emit("load", addr, ai, ("imm", 4))       # ai_addr 在字节 32
+                f.emit("call", None, "__memcpy", [sin, addr, alen])
+                f.emit("store8", sin, ("imm", 2), hi)
+                f.emit("store8", sin, ("imm", 3), lo)
+                cs = f.new_v()
+                f.emit("winapi", cs, "socket", [fam, sty, pro])
+                cs32 = f.new_v()
+                f.emit("bin", "shl", cs32, cs, ("imm", 32))
+                cs322 = f.new_v()
+                f.emit("bin", "sar", cs322, cs32, ("imm", 32))
+                f.emit("cmpset", "e", b, cs322, ("imm", -1))
+                f.emit("jnz", b, l_retry)
+                cr = f.new_v()
+                f.emit("winapi", cr, "connect", [cs, sin, alen])
+                cr32 = f.new_v()
+                f.emit("bin", "shl", cr32, cr, ("imm", 32))
+                cr322 = f.new_v()
+                f.emit("bin", "sar", cr322, cr32, ("imm", 32))
+                f.emit("cmpset", "e", b, cr322, ("imm", -1))
+                f.emit("jnz", b, l_retry)
+                f.emit("mov", s, cs)
+                f.emit("jmp", l_ok)
+                f.emit("label", l_retry)
+                f.emit("winapi", None, "closesocket", [cs])   # socket 失败时 -1 无害
+                nxt = f.new_v()
+                f.emit("load", nxt, ai, ("imm", 5))        # ai_next 在字节 40
+                f.emit("mov", ai, nxt)
+                f.emit("jmp", l_try)
+                f.emit("label", l_ok)
+                f.emit("winapi", None, "freeaddrinfo", [head])
+                f.emit("ret", s)
+                f.emit("label", l_fail)
+                f.emit("call", None, "__net_fail_connect", [])
+                f.emit("ret", ("imm", 0))
+                self.out.append(f)
 
             # __tcp_listen6(port) -> fd（v2.07，AF_INET6 + 双栈）
             # sockaddr_in6（28B）：family(u16) port(u16) flowinfo(u32)
             #                     addr(16B, :: = 全 0) scope_id(u32)
             # 只写 w0（family | htons(port)<<16）与 w1..w3 = 0，即绑 ::。
-            f = Fn("__tcp_listen6")
-            p6 = f.new_v()
-            f.emit("args", [p6])
-            b6 = f.new_v()
-            l6_fs = f.label("net6fs")
-            l6_fb = f.label("net6fb")
-            l6_fl = f.label("net6fl")
-            gid_wsa6 = self.intern_array(8)
-            wsa6 = f.new_v()
-            f.emit("movaddr", wsa6, gid_wsa6)
-            sw6 = f.new_v()
-            f.emit("winapi", sw6, "WSAStartup", [("imm", 0x202), wsa6])
-            f.emit("jnz", sw6, l6_fs)
-            s6 = f.new_v()
-            f.emit("winapi", s6, "socket",
-                   [("imm", 23), ("imm", 1), ("imm", 0)])   # AF_INET6, SOCK_STREAM
-            s632 = f.new_v()
-            f.emit("bin", "shl", s632, s6, ("imm", 32))
-            s6322 = f.new_v()
-            f.emit("bin", "sar", s6322, s632, ("imm", 32))
-            f.emit("cmpset", "e", b6, s6322, ("imm", -1))
-            f.emit("jnz", b6, l6_fs)
-            # IPV6_V6ONLY=0：Windows 默认 1，不开就等于"只接 v6"，
-            # 双栈部署要的是同一个端口同时接 v4（映射地址）。
-            f.emit("store", ("ga", gid_wsa6), ("imm", 0), ("imm", 0))
-            f.emit("winapi", None, "setsockopt",
-                   [s6, ("imm", 41), ("imm", 27), ("ga", gid_wsa6), ("imm", 4)])
-            sin6 = f.new_v()
-            f.emit("call", sin6, "__alloc", [("imm", 32)])
-            for slot in range(4):
-                f.emit("store", sin6, ("imm", slot), ("imm", 0))
-            if isinstance(p6, tuple) and p6[0] == "imm":
-                port_v = p6[1]
-                port_be = ((port_v & 0xFF) << 8) | ((port_v >> 8) & 0xFF)
-                f.emit("store", sin6, ("imm", 0), ("imm", 23 | (port_be << 16)))
-            else:
-                hp6 = f.new_v()
-                f.emit("bin", "and", hp6, p6, ("imm", 0xFF))
-                hp62 = f.new_v()
-                f.emit("bin", "shl", hp62, hp6, ("imm", 8))
-                hb6 = f.new_v()
-                f.emit("bin", "shr", hb6, p6, ("imm", 8))
-                hb62 = f.new_v()
-                f.emit("bin", "and", hb62, hb6, ("imm", 0xFF))
-                hp63 = f.new_v()
-                f.emit("bin", "or", hp63, hp62, hb62)
-                sh6 = f.new_v()
-                f.emit("bin", "shl", sh6, hp63, ("imm", 16))
-                w60 = f.new_v()
-                f.emit("bin", "or", w60, sh6, ("imm", 23))
-                f.emit("store", sin6, ("imm", 0), w60)
-            br6 = f.new_v()
-            f.emit("winapi", br6, "bind", [s6, sin6, ("imm", 28)])
-            br632 = f.new_v()
-            f.emit("bin", "shl", br632, br6, ("imm", 32))
-            br6322 = f.new_v()
-            f.emit("bin", "sar", br6322, br632, ("imm", 32))
-            f.emit("cmpset", "e", b6, br6322, ("imm", -1))
-            f.emit("jnz", b6, l6_fb)
-            lr6 = f.new_v()
-            f.emit("winapi", lr6, "listen", [s6, ("imm", 16)])
-            lr632 = f.new_v()
-            f.emit("bin", "shl", lr632, lr6, ("imm", 32))
-            lr6322 = f.new_v()
-            f.emit("bin", "sar", lr6322, lr632, ("imm", 32))
-            f.emit("cmpset", "e", b6, lr6322, ("imm", -1))
-            f.emit("jnz", b6, l6_fl)
-            f.emit("ret", s6)
-            net_fail(f, l6_fs, "socket")
-            net_fail(f, l6_fb, "bind")
-            net_fail(f, l6_fl, "listen")
-            self.out.append(f)
+            if self.platform == "windows":
+                f = Fn("__tcp_listen6")
+                p6 = f.new_v()
+                f.emit("args", [p6])
+                b6 = f.new_v()
+                l6_fs = f.label("net6fs")
+                l6_fb = f.label("net6fb")
+                l6_fl = f.label("net6fl")
+                gid_wsa6 = self.intern_array(8)
+                wsa6 = f.new_v()
+                f.emit("movaddr", wsa6, gid_wsa6)
+                sw6 = f.new_v()
+                f.emit("winapi", sw6, "WSAStartup", [("imm", 0x202), wsa6])
+                f.emit("jnz", sw6, l6_fs)
+                s6 = f.new_v()
+                f.emit("winapi", s6, "socket",
+                       [("imm", 23), ("imm", 1), ("imm", 0)])   # AF_INET6, SOCK_STREAM
+                s632 = f.new_v()
+                f.emit("bin", "shl", s632, s6, ("imm", 32))
+                s6322 = f.new_v()
+                f.emit("bin", "sar", s6322, s632, ("imm", 32))
+                f.emit("cmpset", "e", b6, s6322, ("imm", -1))
+                f.emit("jnz", b6, l6_fs)
+                # IPV6_V6ONLY=0：Windows 默认 1，不开就等于"只接 v6"，
+                # 双栈部署要的是同一个端口同时接 v4（映射地址）。
+                f.emit("store", ("ga", gid_wsa6), ("imm", 0), ("imm", 0))
+                f.emit("winapi", None, "setsockopt",
+                       [s6, ("imm", 41), ("imm", 27), ("ga", gid_wsa6), ("imm", 4)])
+                sin6 = f.new_v()
+                f.emit("call", sin6, "__alloc", [("imm", 32)])
+                for slot in range(4):
+                    f.emit("store", sin6, ("imm", slot), ("imm", 0))
+                if isinstance(p6, tuple) and p6[0] == "imm":
+                    port_v = p6[1]
+                    port_be = ((port_v & 0xFF) << 8) | ((port_v >> 8) & 0xFF)
+                    f.emit("store", sin6, ("imm", 0), ("imm", 23 | (port_be << 16)))
+                else:
+                    hp6 = f.new_v()
+                    f.emit("bin", "and", hp6, p6, ("imm", 0xFF))
+                    hp62 = f.new_v()
+                    f.emit("bin", "shl", hp62, hp6, ("imm", 8))
+                    hb6 = f.new_v()
+                    f.emit("bin", "shr", hb6, p6, ("imm", 8))
+                    hb62 = f.new_v()
+                    f.emit("bin", "and", hb62, hb6, ("imm", 0xFF))
+                    hp63 = f.new_v()
+                    f.emit("bin", "or", hp63, hp62, hb62)
+                    sh6 = f.new_v()
+                    f.emit("bin", "shl", sh6, hp63, ("imm", 16))
+                    w60 = f.new_v()
+                    f.emit("bin", "or", w60, sh6, ("imm", 23))
+                    f.emit("store", sin6, ("imm", 0), w60)
+                br6 = f.new_v()
+                f.emit("winapi", br6, "bind", [s6, sin6, ("imm", 28)])
+                br632 = f.new_v()
+                f.emit("bin", "shl", br632, br6, ("imm", 32))
+                br6322 = f.new_v()
+                f.emit("bin", "sar", br6322, br632, ("imm", 32))
+                f.emit("cmpset", "e", b6, br6322, ("imm", -1))
+                f.emit("jnz", b6, l6_fb)
+                lr6 = f.new_v()
+                f.emit("winapi", lr6, "listen", [s6, ("imm", 16)])
+                lr632 = f.new_v()
+                f.emit("bin", "shl", lr632, lr6, ("imm", 32))
+                lr6322 = f.new_v()
+                f.emit("bin", "sar", lr6322, lr632, ("imm", 32))
+                f.emit("cmpset", "e", b6, lr6322, ("imm", -1))
+                f.emit("jnz", b6, l6_fl)
+                f.emit("ret", s6)
+                net_fail(f, l6_fs, "socket")
+                net_fail(f, l6_fb, "bind")
+                net_fail(f, l6_fl, "listen")
+                self.out.append(f)
 
             if self.uses_peer:
                 # __tcp_peer_raw(fd) -> str（v2.07，getpeername 的字节视图）
@@ -10510,13 +10616,17 @@ SYSCALLS = {
     "x86_64": {"write": 1, "exit": 60, "mmap": 9, "clone": 56, "wait4": 61,
                "yield": 24, "read": 0, "close": 3, "openat": 257,
                "socket": 41, "bind": 49, "listen": 50, "accept": 43,
-               "sendto": 44, "recvfrom": 45, "clock_gettime": 228,
+               "sendto": 44, "recvfrom": 45, "connect": 42,
+               "getsockname": 51, "setsockopt": 54,
+               "clock_gettime": 228,
                "mkdir": 83, "unlink": 87, "access": 21, "lseek": 8,
                "nanosleep": 35, "getpid": 39},
     "aarch64": {"write": 64, "exit": 93, "mmap": 222, "clone": 220, "wait4": 260,
                 "yield": 124, "read": 63, "close": 57, "openat": 56,
                 "socket": 198, "bind": 200, "listen": 201, "accept": 202,
-                "sendto": 206, "recvfrom": 207, "clock_gettime": 113,
+                "sendto": 206, "recvfrom": 207, "connect": 203,
+                "getsockname": 204, "setsockopt": 208,
+                "clock_gettime": 113,
                 "mkdir": 34, "unlink": 35, "access": 48, "lseek": 62,
                 "nanosleep": 101, "getpid": 172},
 }

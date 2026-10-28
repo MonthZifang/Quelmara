@@ -2040,6 +2040,31 @@ qlmc 的变量解析是 `_try_var` / `_var_id`：先在 `fc.bind`（作用域栈
 已改写为真实可用的 `serve(port, backlog, cb...)` 形式。`run_tests.sh` 的网络段
 同时改成按能力探测：C 后端没有 `tcp_listen` 就记 SKIP，而不是天天红着。
 
+### 3.56 Linux 原生 socket（v2.92）：缺的其实是五分之一，被两道闸门挡住
+
+`docs/07-gaps.md` 一直写着"`tcp_*` 内建没有 Linux 实现"。逐个看运行库，
+**五分之四早就有了**（`listen`/`accept`/`send`/`recv`/`close` 全是 raw syscall），
+缺的只有 `tcp_connect`，而它被两道闸门挡着：
+
+| 闸门 | 症状 | 真因 |
+|---|---|---|
+| 派发层无条件拒绝 | `tcp_connect() 目前只在 Windows PE 后端实现（Linux DNS 未实现）` | 报错理由是 DNS，但点分字面量不需要解析器——把整条路径连字面量一起拒了 |
+| 运行库里的 `return` | 补完第一道后报 `KeyError: '__tcp_recv'` | `lower_runtime()` 是个巨大的顺序函数，`__tcp_connect` 分支末尾的 `return` 把后面的 `__tcp_listen6`/`__tcp_accept`/`__tcp_send`/`__tcp_recv` **全跳过**了 |
+
+第二道尤其值得记：报错点（`KeyError: '__tcp_recv'`）离病因（几十行前的
+一个 `return`）很远，很容易往"函数没定义"的方向错查。
+
+修复后真 socket 自环跑通（非 mock）：
+
+| 场景 | 结果 |
+|---|---|
+| Quelmara 服务端 × 3 条 Python 并发连接 | 3/3 回显正确 |
+| Quelmara 客户端 × Python 服务端 | `pong:ping-from-quelmara` |
+| `run_native_tests.sh` | PASS=101 → **PASS=106 FAIL=0**（+5 条 POSIX 网络） |
+
+顺带修掉 `__tcp_listen6`（纯 Win32）没有平台守卫、在 Linux 上也会发
+`WSAStartup` 的问题。边界：只支持 IPv4 点分字面量，域名显式 fail-fast。
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |

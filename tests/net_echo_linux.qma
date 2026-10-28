@@ -1,0 +1,27 @@
+// net_echo_linux.qma — POSIX 原生 socket 自环（v2.92）
+// 由 tests/run_native_tests.sh 的 [24] 段驱动：先起服务端，再由
+// Python 侧连进来验证回显；本文件只做服务端。
+module net_echo_linux
+
+import std.net
+
+fn handle(conn: int) {
+    while true {
+        let data = recv(conn, 4096)
+        if len(data) == 0 { break }
+        send(conn, data)
+    }
+    close_conn(conn)
+}
+
+fn main() {
+    let srv = listen(19559)
+    print("ready")
+    let mut n = 0
+    while n < 3 {
+        let conn = accept(srv)
+        handle(conn)
+        n = n + 1
+    }
+    print("serve done")
+}
