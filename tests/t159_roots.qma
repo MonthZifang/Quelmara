@@ -60,7 +60,10 @@ fn main() {
     interb.push(hex_decode(pypi.get(1)))
     assert(x509_verify_stored(tampered, interb, "pypi.org", NOW) == 0, "tampered leaf rejected")
 
-    // 4. 根自验证计数：当前栈支持 5 个（P-384/SHA-1 那 7 个返回 0，边界见模块头）
+    // 4. 根自验证计数。v2.97 时是 5/12（只支持 RSA-SHA256 与 P-256-SHA256）；
+    // v2.99 补上 ECDSA P-384 与 RSA-SHA384 后升到 **11/12**——唯一剩下的
+    // 是 Certum Trusted Network CA（SHA-1 自签，RFC 9155 已弃用，不实现）。
+    // 这个数字随算法覆盖变化，是"能信多少公网"的直观温度计。
     let mut pass = 0
     let mut i = 0
     while i < 12 {
@@ -73,7 +76,7 @@ fn main() {
         i = i + 1
     }
     print("selfcheck pass=" + pass.to_str())
-    assert(pass == 5, "5 self-verifiable roots")
+    assert(pass == 11, "11 self-verifiable roots (P-384 + RSA-SHA384)")
 
     // 5. 越界与缺失
     assert(len(x509_root_at(99)) == 0, "oob empty")

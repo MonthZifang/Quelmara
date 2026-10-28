@@ -231,7 +231,26 @@ fn _rsa_powm(base: vec[int], e: int, n: vec[int], l: int) -> vec[int] {
 /// n：模数（大端、无前导 0）；e：指数；sig：签名字节；hash：32 字节摘要。
 /// 返回 1 = 有效，0 = 无效。
 pub fn rsa_verify_pkcs1_sha256(n: str, e: int, sig: str, hash: str) -> int {
-    if len(hash) != 32 || len(sig) == 0 || len(n) == 0 || e <= 0 {
+    // DigestInfo 前缀（RFC 8017 §9.2 note 1）：
+    //   SHA-256: 30 31 30 0d 06 09 60 86 48 01 65 03 04 02 01 05 00 04 20
+    //   SHA-384: 30 41 30 0d 06 09 60 86 48 01 65 03 04 02 02 05 00 04 30
+    // 只有第 15 字节（摘要算法序号）与第 18 字节（摘要长度）不同。
+    let di = "\x30\x31\x30\x0d\x06\x09\x60\x86\x48\x01\x65\x03\x04\x02\x01\x05\x00\x04\x20"
+    return _rsa_pkcs1_verify(n, e, sig, hash, di, 32)
+}
+
+/// PKCS#1 v1.5 + SHA-384 验签（v2.99）。
+/// 为什么需要：Amazon Root CA 1 的自签、microsoft.com 全链、大量企业 CA
+/// 都用 sha384WithRSAEncryption——只有 SHA-256 时这些根验不了自签、
+/// 这些链验不过。hash 是 48 字节摘要。
+pub fn rsa_verify_pkcs1_sha384(n: str, e: int, sig: str, hash: str) -> int {
+    let di = "\x30\x41\x30\x0d\x06\x09\x60\x86\x48\x01\x65\x03\x04\x02\x02\x05\x00\x04\x30"
+    return _rsa_pkcs1_verify(n, e, sig, hash, di, 48)
+}
+
+// 通用 PKCS#1 v1.5 验签主体：di 是 DigestInfo 前缀，hlen 是摘要长度
+fn _rsa_pkcs1_verify(n: str, e: int, sig: str, hash: str, di: str, hlen: int) -> int {
+    if len(hash) != hlen || len(sig) == 0 || len(n) == 0 || e <= 0 {
         return 0
     }
     let l = (len(n) + 3) / 4
@@ -243,7 +262,8 @@ pub fn rsa_verify_pkcs1_sha256(n: str, e: int, sig: str, hash: str) -> int {
     let m = _rsa_powm(s, e, nn, l)
     let em = _rsa_to_bytes(m, l)
     let k = len(em)
-    let tlen = 19 + 32
+    let dlen = len(di)
+    let tlen = dlen + hlen
     if k < tlen + 11 {
         return 0
     }
@@ -260,17 +280,16 @@ pub fn rsa_verify_pkcs1_sha256(n: str, e: int, sig: str, hash: str) -> int {
     if em[k - tlen - 1] != 0 {
         return 0
     }
-    let di = "\x30\x31\x30\x0d\x06\x09\x60\x86\x48\x01\x65\x03\x04\x02\x01\x05\x00\x04\x20"
     let mut j = 0
-    while j < 19 {
+    while j < dlen {
         if em[k - tlen + j] != di[j] {
             return 0
         }
         j = j + 1
     }
     let mut q = 0
-    while q < 32 {
-        if em[k - 32 + q] != hash[q] {
+    while q < hlen {
+        if em[k - hlen + q] != hash[q] {
             return 0
         }
         q = q + 1

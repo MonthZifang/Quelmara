@@ -302,6 +302,13 @@ pub fn sha512_hex(s: str) -> str {
     return hex
 }
 
+/// SHA-384 原始摘要（48 字节，mem_alloc 分配，调用方 mem_free(dig, 48)）。
+/// v2.99 起提供：ECDSA P-384 验签要的是**字节**而不是十六进制串
+/// （sha384_hex 只给串，从串转回字节是绕路且会掩盖长度口径）。
+pub fn sha384_str(s: str) -> int {
+    return _sha512_core(s, len(s), 1)
+}
+
 /// SHA-384（FIPS 180-4 变体：不同的 IV，输出截断到前 48 字节）
 pub fn sha384_hex(s: str) -> str {
     // SHA-384 = SHA-512 换 IV + 截断；复用同一压缩函数（variant=1）
