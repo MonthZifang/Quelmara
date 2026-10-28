@@ -5103,6 +5103,14 @@ def global_dce(fns_ast, keep=None):
         elif isinstance(e, list):
             for x in e:
                 walk(x, refs, methods)
+        elif isinstance(e, dict):
+            # v2.91：`("structlit", path, {字段: 表达式})` 的第三个元素是 **dict**，
+            # 而这里以前只认 tuple/list —— 结构体字面量里的引用**整片漏扫**。
+            # 后果不是"多删一个函数"，而是把回调函数当死代码删掉：实测
+            #   `let s = S { cb: hello }`  ->  DCE 删 hello  ->  C 里 `hello` 未定义。
+            # 自研后端同样吃这份 DCE，只是它的报错更早（"未定义变量 handler"）。
+            for x in e.values():
+                walk(x, refs, methods)
 
     # impl 家族：接口装箱的 vtable 覆盖同 (iface, type) 的**全部**方法
     # 槽——任一成员可达则全族保留，否则 build_iface_meta 的
@@ -6428,6 +6436,32 @@ class Codegen:
         self.bounds = bool(cfg["build"].get("bounds_check", True))
         self.uses_args = False
 
+    # C99 是交叉验证后端，但**用户函数必须与 libc 隔离命名空间**（v2.91）。
+    # 以前用户函数名原样落到 C：`send`/`read`/`open`/`index`/`time` 这类名字会
+    # 与 <unistd.h>/<string.h> 的声明正面冲突（实测 `net.send` 编不过，报
+    # "conflicting types for 'send'"）。而 `#include` 在用户代码之前，越靠后
+    # 的声明越吃亏——gcc 直接把整个文件判死。
+    #
+    # 修法：用户函数统一加 `u_` 前缀。`main` 例外（外层 C 入口要调 `qlm_main`），
+    # 已经有一套现成约定。运行库的 `qlm_*` 与用户函数从此不可能撞。
+    C_FN_PREFIX = "u_"
+
+    def cfn(self, name):
+        """Quelmara 用户函数名 -> C 符号名（`u_` 前缀；`qlm_main` 保持原样）。
+
+        **只给真正的用户函数加前缀。** 内置（`mem_load64`/`mem_alloc`/
+        `static_word` …）由 C 运行库以 `qlm_*` 提供，或在 gen_expr 里单独映射；
+        它们走到这里说明是一条还没被 C 后端实现的路径 —— 加 `u_` 只会把
+        "未实现"伪装成"未定义符号"，报错点从一个变一片（实测 echo_server
+        里 `void h = u_mem_load64(...)`：因为查不到返回类型，连类型都推成 void）。
+        保持原名，至少错误信息指向真名。
+        """
+        if name == "qlm_main":
+            return name
+        if name not in self.infer.fns:
+            return name                    # 内置/运行库：不加前缀
+        return self.C_FN_PREFIX + name
+
     # ---- 工具 ----
     def ctype(self, t):
         if t[0] == "array":
@@ -6528,6 +6562,12 @@ class Codegen:
         if k == "bool":
             return ("true" if e[1] else "false"), "bool"
         if k == "name":
+            # 裸函数名当值（函数指针）：必须映射到 C 符号名。以前直接返回
+            # `e[1]`，生成的 C 里就是 `hello` 这个未声明标识符 —— 实测
+            # `let s = S { cb: hello }` 编不过（"‘hello’ undeclared"）。
+            # 自研后端一直是对的（它发 `fnaddr`），所以这是 C 后端独有的缺口。
+            if e[1] in self.infer.fns:
+                return self.cfn(e[1]), "int64_t"
             return e[1], env.get(e[1], "int64_t")
         if k == "path":
             p = e[1]
@@ -6710,7 +6750,17 @@ class Codegen:
                             f"形参需要 {slice_elem_tag(pt[1])}")
                 parts.append(acode)
             args = ", ".join(parts)
-            return f"{name}({args})", self.infer.fn_ret(name)
+            if name in env:
+                # 通过变量间接调用（`fn apply(f: int) { f(x) }`）：`f` 是环境里的
+                # 函数指针值，不是用户函数名 —— 不能加 `u_` 前缀。
+                # 函数值在 Quelmara 里的静态类型是 `int`（与 `fn` 形参声明一致），
+                # 而 C 的 `int64_t` 不可直接调用，必须就地转成函数指针类型。
+                # 返回类型无从得知（无签名信息，与自研后端 `callr` 同一信任级），
+                # 按 int64_t 处理；聚合返回值不可间接调用（自研后端亦然）。
+                return (f"((int64_t(*)(/*args*/void*))({name}))({args})"
+                        if not args else
+                        f"((int64_t(*)(int64_t))({name}))({args})"), "int64_t"
+            return f"{self.cfn(name)}({args})", self.infer.fn_ret(name)
         if k == "spawn":
             return self.gen_spawn(e[1], env)
         if k == "select":
@@ -7671,10 +7721,11 @@ class Codegen:
         fields = "; ".join(f"    {ct} a{i};" for i, ct in enumerate(ctypes_))
         sig = ", ".join(f"{ct} p{i}" for i, ct in enumerate(ctypes_)) or "void"
         names = ", ".join(f"a->a{i}" for i in range(len(ctypes_)))
+        callee = self.cfn(name)                # v2.91：用户函数带 `u_` 前缀
         if ret == ("named", "void"):
-            body = f"    {name}({names});\n    a->res = 0;"
+            body = f"    {callee}({names});\n    a->res = 0;"
         else:
-            body = f"    a->res = (int64_t)({name}({names}));"
+            body = f"    a->res = (int64_t)({callee}({names}));"
         h = [f"/* spawn#{sid}: {name} */",
              f"typedef struct {{ int64_t res; {fields} }} {tname}_args;",
              f"static void *{tname}_worker(void *p) {{",
@@ -7763,7 +7814,7 @@ class Codegen:
             if f.get("extern") or f.get("ffi"):
                 continue
             params = ", ".join(f"{self.ctype(t)} {n}" for n, t in f["params"]) or "void"
-            lines.append(f"static {self.ctype(f['ret'])} {f['name']}({params});")
+            lines.append(f"static {self.ctype(f['ret'])} {self.cfn(f['name'])}({params});")
         lines.append("")
 
         bodies = []
@@ -7777,7 +7828,8 @@ class Codegen:
                     env["__chan__" + n] = True
             body = self.gen_block(f["body"], env, 1, f["ret"])
             params = ", ".join(f"{self.ctype(t)} {n}" for n, t in f["params"]) or "void"
-            bodies.append(f"static {self.ctype(f['ret'])} {f['name']}({params}) {{\n{body}\n}}")
+            bodies.append(
+                f"static {self.ctype(f['ret'])} {self.cfn(f['name'])}({params}) {{\n{body}\n}}")
 
         if self.helpers:
             lines.append("\n".join(self.helpers))
