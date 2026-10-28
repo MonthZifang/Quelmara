@@ -1,0 +1,173 @@
+// std/http_chunk.qma —— Transfer-Encoding: chunked 的扫描与就地解包（v2.95）
+//
+// 两个纯函数、零网络依赖：输入只是"一段字节缓冲区 + 区间"，不碰 socket、
+// 不碰连接槽。所以这一层能编进任何后端——Linux/ELF 上跑执行级回归
+// （tests/t158_chunk.qma），Windows 上由 std/http 的 reactor 派发路径调用。
+// v2.94 以前 std/http 对 chunked 请求一律回 501（`docs/07-gaps.md` §2 的
+// "chunked 请求体"一行），本版把它换成真实解码。
+//
+// 语法口径（RFC 7230 §4.1）：
+//   chunk     = size [ chunk-ext ] CRLF data CRLF
+//   chunk-ext = *( ";" *( HTCP / VCHAR ) )      —— 一律忽略
+//   最后一个 chunk 的 size 为 0，其后要么直接空行，要么 trailer 行直到空行 ——
+//   trailer 扫过即弃，不转发给 handler。
+//   size 为 1..8 位十六进制（超过 8 位按病态处理，防 int64 溢出）。
+//
+// 为什么解包可以安全地**就地向前压缩**：
+//   写游标 dst = start + Σ(已解出的 size)，读游标 src = 当前 chunk 数据起点。
+//   每个 chunk 在流里占 `hex行长 + 2 + size + 2`，所以恒有
+//   src - (dst + size) ≥ (前序 chunk 的 hex行长+4) + (本 chunk 的 hex行长+2) ≥ 6，
+//   写区永远追不上读区，mem_copy 的前向拷贝不会与源重叠。
+//   头块 [0, start) 全程不碰：http_method / http_header 照常工作。
+
+/// 扫描 [start, n) 的 chunked 流。返回：
+///   >= 0  完整流的**原始结束偏移**（`0\r\n` + 空行/trailer 之后的位置）——
+///         注意它不是"解包后的长度"；keep-alive 搬余包要按它截断。
+///   -1    流还没收全（size 行截断 / 数据不足 / 终止行不完整），等下一段。
+///   -2    病态流：非 hex 的 size、空 size 行、超过 8 位 hex、数据后缺 CRLF、
+///         终止块后缺 \r\n\r\n —— 调用方应拒绝请求（std/http 回 400）。
+pub fn chunk_scan(buf: int, start: int, n: int) -> int {
+    let mut c = start
+    while true {
+        // ---- size 行：hex 累积；';' 起丢弃 chunk-ext，直到行尾 ----
+        let mut has = 0
+        let mut size = 0
+        let mut ndig = 0
+        let mut stop = 0
+        let mut bad = 0
+        while c < n && stop == 0 && bad == 0 {
+            let b = mem_load8(buf, c)
+            if b == 59 {
+                // ';' = chunk-ext 起点：整段丢到行尾
+                while c < n && mem_load8(buf, c) != 13 {
+                    c += 1
+                }
+            } else {
+                if b == 13 {
+                    if c + 1 >= n {
+                        return -1
+                    }
+                    if mem_load8(buf, c + 1) != 10 {
+                        bad = 1
+                    } else {
+                        stop = 1
+                    }
+                } else {
+                    let mut d = -1
+                    if b >= 48 && b <= 57 {
+                        d = b - 48
+                    } else {
+                        if (b | 32) >= 97 && (b | 32) <= 102 {
+                            d = (b | 32) - 87
+                        }
+                    }
+                    if d < 0 {
+                        bad = 1
+                    } else {
+                        if has == 0 {
+                            has = 1
+                        }
+                        ndig += 1
+                        if ndig > 8 {
+                            bad = 1
+                        } else {
+                            size = size * 16 + d
+                            c += 1
+                        }
+                    }
+                }
+            }
+        }
+        if bad == 1 {
+            return -2
+        }
+        if stop == 0 {
+            return -1                           // 流在 size 行中间断掉
+        }
+        if has == 0 {
+            return -2                           // 空 size 行
+        }
+        c += 2                                  // 过 CRLF
+        if size == 0 {
+            // ---- 终止块之后：空行收；trailer 行逐行丢弃直到空行 ----
+            // 注意 c 此时已经**越过 `0\r\n`**，指向空行或第一条 trailer 行。
+            while true {
+                if c + 1 >= n {
+                    return -1                   // 连 \r\n 都没收全
+                }
+                if mem_load8(buf, c) == 13 {
+                    if mem_load8(buf, c + 1) != 10 {
+                        return -2               // CR 后不跟 LF
+                    }
+                    return c + 2                // 空行 = 流尾
+                }
+                // trailer 行：扫到它的 CRLF
+                let mut e = c
+                while e < n && mem_load8(buf, e) != 13 {
+                    e += 1
+                }
+                if e + 1 >= n {
+                    return -1
+                }
+                if mem_load8(buf, e + 1) != 10 {
+                    return -2
+                }
+                c = e + 2
+            }
+        }
+        // ---- 数据段 [c, c+size) + 尾 CRLF ----
+        let end = c + size + 2
+        if end > n {
+            return -1
+        }
+        if mem_load8(buf, c + size) != 13 || mem_load8(buf, c + size + 1) != 10 {
+            return -2
+        }
+        c = end
+    }
+    return -2
+}
+
+/// 就地解包：把 [start, end) 的**完整合法** chunked 流（必须先用 chunk_scan
+/// 验过、end 就是它返回的偏移）解包压到 [start, start+len)。返回解出的字节数。
+/// trailer 与 chunk-ext 被丢弃；数据段里的 CRLF 序列按 size 原样保留。
+/// 契约：end 不来自 chunk_scan 时行为未定义 —— 配对调用由调用方（std/http）保证。
+pub fn chunk_pack(buf: int, start: int, end: int) -> int {
+    let mut c = start
+    let mut d = 0
+    while c < end {
+        // size 行：scan 已保证合法。';' 之后是 chunk-ext，**必须停止累加**
+        // （ext 里常带数字，`3;ext=1` 若继续累会算成 0x31；实测踩过）。
+        let mut size = 0
+        let mut ext = 0
+        while c < end && mem_load8(buf, c) != 13 {
+            let b = mem_load8(buf, c)
+            if b == 59 {
+                ext = 1
+            } else {
+                if ext == 0 {
+                    let mut dv = -1
+                    if b >= 48 && b <= 57 {
+                        dv = b - 48
+                    } else {
+                        if (b | 32) >= 97 && (b | 32) <= 102 {
+                            dv = (b | 32) - 87
+                        }
+                    }
+                    if dv >= 0 {
+                        size = size * 16 + dv
+                    }
+                }
+            }
+            c += 1
+        }
+        c += 2                                  // 过 CRLF
+        if size == 0 {
+            return d                            // 终止块：trailer 不用碰
+        }
+        mem_copy(buf + start + d, buf + c, size)
+        d += size
+        c += size + 2                           // 过数据尾 CRLF
+    }
+    return d
+}

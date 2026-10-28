@@ -6532,7 +6532,7 @@ class Codegen:
         return "0"
 
     def cstr(self, s):
-        out = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
+        out = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
         return f'"{out}"'
 
     # ---- 表达式 ----

@@ -1,0 +1,129 @@
+// t158_chunk.qma —— std/http_chunk 的执行级回归（v2.95）
+// 纯内存用例：在裸缓冲上装配 chunked 流，chunk_scan / chunk_pack 逐条断言。
+// 完整流的不变量：scan 返回**流自身的长度**（end == n），pack 返回解包长度。
+// 全部自校验，退出码 0 = 通过。native/arm64/win 三后端同一份夹具。
+module t158_chunk
+
+import std.http_chunk
+
+// 把 str 写入 buf 的 at 偏移，返回写入后的下一个偏移
+fn put(buf: int, at: int, s: str) -> int {
+    let n = len(s)
+    if n > 0 {
+        mem_copy(buf + at, mem_ptr(s, 0), n)
+    }
+    return at + n
+}
+
+// 装载一条流：清空缓冲、写入、返回流长
+fn load(buf: int, s: str) -> int {
+    mem_zero(buf, 4096)
+    return put(buf, 0, s)
+}
+
+// 校验 [0, n) 与期望串逐字节一致
+fn check_bytes(buf: int, want: str, n: int, msg: str) {
+    assert(len(want) == n, msg)
+    let mut i = 0
+    while i < n {
+        assert(mem_load8(buf, i) == want[i], msg)
+        i += 1
+    }
+}
+
+fn main() {
+    let buf = mem_alloc(4096)
+
+    // ---- 1. 基本两块 ----
+    let n = load(buf, "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
+    assert(chunk_scan(buf, 0, n) == n, "s1 end")
+    assert(chunk_pack(buf, 0, n) == 11, "s1 pack")
+    check_bytes(buf, "hello world", 11, "s1 bytes")
+
+    // ---- 2. chunk-ext（';' 之后整段丢）----
+    n = load(buf, "3;ext=1;x\r\nabc\r\n0\r\n\r\n")
+    assert(chunk_scan(buf, 0, n) == n, "s2 end")
+    assert(chunk_pack(buf, 0, n) == 3, "s2 pack")
+    check_bytes(buf, "abc", 3, "s2 bytes")
+
+    // ---- 3. trailer 扫过即弃 ----
+    n = load(buf, "1\r\nA\r\n0\r\nX-T: 1\r\nY: 2\r\n\r\n")
+    assert(chunk_scan(buf, 0, n) == n, "s3 end")
+    assert(chunk_pack(buf, 0, n) == 1, "s3 pack")
+    check_bytes(buf, "A", 1, "s3 bytes")
+
+    // ---- 4. 大写十六进制 + 多位（A=10）----
+    n = load(buf, "A\r\n0123456789\r\n0\r\n\r\n")
+    assert(chunk_scan(buf, 0, n) == n, "s4 end")
+    assert(chunk_pack(buf, 0, n) == 10, "s4 pack")
+    check_bytes(buf, "0123456789", 10, "s4 bytes")
+
+    // ---- 5. 零块直接结束 ----
+    n = load(buf, "0\r\n\r\n")
+    assert(chunk_scan(buf, 0, n) == n, "s5 end")
+    assert(chunk_pack(buf, 0, n) == 0, "s5 pack")
+
+    // ---- 6. 数据里含 CRLF（size 说了算，不提前停）----
+    n = load(buf, "3\r\na\r\n\r\n0\r\n\r\n")
+    assert(chunk_scan(buf, 0, n) == n, "s6 end")
+    assert(chunk_pack(buf, 0, n) == 3, "s6 pack")
+    check_bytes(buf, "a\r\n", 3, "s6 bytes")
+
+    // ---- 7. 保留头部不碰（std/http 在 HP_BOFF 之后就地解包）----
+    n = load(buf, "GET / HTTP\r\n")
+    let start = n
+    n = put(buf, n, "2\r\nhi\r\n0\r\n\r\n")
+    assert(chunk_scan(buf, start, n) == n, "s7 end")
+    assert(chunk_pack(buf, start, n) == 2, "s7 pack")
+    check_bytes(buf + start, "hi", 2, "s7 bytes")
+    assert(mem_load8(buf, 0) == 71, "s7 head kept")   // 'G'
+
+    // ---- 8. 不完整：-1 等下一段 ----
+    n = load(buf, "5\r\nhel")
+    assert(chunk_scan(buf, 0, n) == -1, "s8a trunc data")
+    n = load(buf, "5\r\n")
+    assert(chunk_scan(buf, 0, n) == -1, "s8b after size")
+    n = load(buf, "5")
+    assert(chunk_scan(buf, 0, n) == -1, "s8c mid size line")
+    n = load(buf, "5\r\nhello\r\n")
+    assert(chunk_scan(buf, 0, n) == -1, "s8d need next chunk")
+    n = load(buf, "1\r\nA\r\n0\r\n")
+    assert(chunk_scan(buf, 0, n) == -1, "s8e trunc after 0 size")
+    n = load(buf, "1\r\nA\r\n0\r\nX-T")
+    assert(chunk_scan(buf, 0, n) == -1, "s8f trunc trailer line")
+
+    // ---- 9. 病态：-2 ----
+    n = load(buf, "z\r\nhello\r\n0\r\n\r\n")
+    assert(chunk_scan(buf, 0, n) == -2, "s9a non hex")
+    n = load(buf, "\r\nx")
+    assert(chunk_scan(buf, 0, n) == -2, "s9b empty size line")
+    n = load(buf, "100000001\r\n")
+    assert(chunk_scan(buf, 0, n) == -2, "s9c too many hex digits (9)")
+    n = load(buf, "6\r\nhelloXY\r\n")
+    assert(chunk_scan(buf, 0, n) == -2, "s9d missing CRLF after data")
+    n = load(buf, "1\r\nA\r\n0X")
+    assert(chunk_scan(buf, 0, n) == -2, "s9e junk after 0 size")
+
+    // ---- 10. 就地解包的"写追读"压力：三块连续压缩 ----
+    n = load(buf, "4\r\ndata\r\n3\r\n_12\r\n2\r\n34\r\n0\r\n\r\n")
+    assert(chunk_scan(buf, 0, n) == n, "s10 end")
+    assert(chunk_pack(buf, 0, n) == 9, "s10 pack")
+    check_bytes(buf, "data_1234", 9, "s10 bytes")
+
+    // ---- 11. 恰界：8 位 hex 收、16MB 不溢出 ----
+    n = load(buf, "80000000\r\n")                 // 2^31 size，行合法
+    assert(chunk_scan(buf, 0, n) == -1, "s11 big size waits for data")
+    n = load(buf, "FFFFFFFF\r\n")                // 8 个 F = 上限内
+    assert(chunk_scan(buf, 0, n) == -1, "s11b max size waits")
+
+    // ---- 12. 分片重放：半条流 -1，补全后 == 完整流结果 ----
+    n = load(buf, "5\r\nhe")
+    assert(chunk_scan(buf, 0, n) == -1, "s12a half")
+    n = put(buf, 0, "5\r\nhe")
+    n = load(buf, "5\r\nhello\r\n0\r\n\r\n")
+    assert(chunk_scan(buf, 0, n) == n, "s12b full")
+    assert(chunk_pack(buf, 0, n) == 5, "s12b pack")
+    check_bytes(buf, "hello", 5, "s12b bytes")
+
+    print("chunk ok")
+}

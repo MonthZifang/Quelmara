@@ -2103,6 +2103,29 @@ token 就要调一次的 `jws`（43 条）、`jstr`（35 条）**永远进不了
 4 元组重建指令，标记被悄悄丢掉。改用调用方身上的集合才生效。**指令元组的形状
 是下游共同依赖的契约，不要往上加字段。**
 
+### 3.58 chunked 请求体（v2.95）：`std/http` 不再回 501
+
+gaps §2 的 "chunked 请求体 | 回 501" 收口。解码抽成**纯内存模块**
+`std/http_chunk`（`chunk_scan` / `chunk_pack`，输入只是"缓冲区 + 区间"），
+所以 Linux CI 第一次能真跑 chunked 语义（`tests/t158_chunk.qma` native 执行
+全过；win 由 `case_selfcheck` 跑同一份夹具；arm64 编译级）。
+
+就地向前压缩的安全性：每个 chunk 占 `hex行+2+size+2` 而写游标只前进 `size`，
+恒有 `src − (dst+size) ≥ 6`——写区永远追不上读区，头块不碰。
+
+口径（RFC 7230）：chunk-ext 与 trailer 丢弃；**TE 与 Content-Length 同时
+出现以 TE 为准**（守卫双向——CL 行排在 TE 之后也会把刚清的 `HP_BLEN` 写回去，
+E2E 正反两种头序都覆盖）；病态流 400，绝不"尽力解一半"。handler 零感知：
+`http_body_len` 读到的是解包后的真实体长。
+
+顺带修 C 后端 `cstr()` **漏转义 ``**：任何含 CR 的字符串字面量生成的 C
+直接非法（`missing terminating " character`）——与 v2.90 `args()`、v2.91
+`structlit` 同族："两条实现路径各写一份，一份跟上、一份没跟上"。
+
+回归：`run_native_tests.sh` **PASS=108 FAIL=0**；lexdiff 310/313、
+parsediff 214/214（新夹具全过自举前端）；E2E `http_router_test.py` 20→26 条
+（Windows-only 通道，待真机）。
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |

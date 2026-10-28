@@ -1073,6 +1073,8 @@ def main():
     # 所有权检查 v2（v1.84）：视图生命周期 / 写别名 / 跨线程的正例
     case_selfcheck("t116_ownview", "tests/t116_ownview.qma")
     case_selfcheck("t99_regex", "tests/t99_regex.qma")
+    # chunked 解码（v2.95）：纯内存夹具，native / win 同一份断言
+    case_selfcheck("t158_chunk", "tests/t158_chunk.qma")
 
     print("== [3i2] FFI：@ffi 调用系统库（v1.87） ==")
     test_ffi()
