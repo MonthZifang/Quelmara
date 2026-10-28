@@ -31,6 +31,11 @@ import qlm_pe  # noqa: E402
 
 PASS = FAIL = SKIP = 0
 IS_WIN = os.name == "nt"
+# v2.93：把每条 FAIL 单独落到 build/win_failures.log。CI 的日志下载需要
+# admin 权限（403），step summary 是免费的可见通道 —— 有了这份文件，
+# workflow 就能在失败时把清单贴进 summary，不用再去猜哪条红了。
+FAILLOG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "..", "build", "win_failures.log")
 
 
 def ok(msg):
@@ -43,6 +48,12 @@ def bad(msg):
     global FAIL
     FAIL += 1
     print(f"  [FAIL] {msg}")
+    try:
+        os.makedirs(os.path.dirname(FAILLOG), exist_ok=True)
+        with open(FAILLOG, "a", encoding="utf-8") as fh:
+            fh.write(msg + "\n")
+    except OSError:
+        pass
 
 
 def skip(msg):
@@ -1077,14 +1088,20 @@ def main():
                 else bad(f"{nm} 报错但信息不符（期望含 {needles!r}）：{ex}")
         else:
             bad(f"{nm} 应当编译失败却通过了")
-    # gzip 的唯一权威证明：Python zlib 逐字节解压
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "tests/gzip_interop.py")],
-                       cwd=ROOT, capture_output=True, text=True, errors="replace")
-    if r.returncode == 0:
-        ok("gzip：zlib 解压逐字节一致（%d 个样本）"
-           % sum(1 for ln in r.stdout.splitlines() if "[PASS]" in ln))
+    # gzip 的唯一权威证明：Python zlib 逐字节解压。
+    # v2.93：样本 build/gz_*.bin 由 t47_gzip **在 Windows 上执行**产出；
+    # 非 Windows 上 t47 被 SKIP、样本不存在，这里必须跟着 SKIP ——
+    # 以前无条件跑，把"没样本"记成了 FAIL。
+    if not IS_WIN:
+        skip("gzip zlib 互操作：非 Windows 平台（样本来自 PE 执行）")
     else:
-        bad(f"gzip zlib 互操作失败：{r.stdout[-300:]}{r.stderr[-200:]}")
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "tests/gzip_interop.py")],
+                           cwd=ROOT, capture_output=True, text=True, errors="replace")
+        if r.returncode == 0:
+            ok("gzip：zlib 解压逐字节一致（%d 个样本）"
+               % sum(1 for ln in r.stdout.splitlines() if "[PASS]" in ln))
+        else:
+            bad(f"gzip zlib 互操作失败：{r.stdout[-300:]}{r.stderr[-200:]}")
 
     print("== [3i3] 持久化：std/fs + std/kv（v1.102） ==")
     # t127 在单进程内校验 API 语义；t128 钉住"void 早退不能污染退出码"
