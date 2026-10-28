@@ -2151,6 +2151,33 @@ b4 的 20% 全部跟着 grow 列走；memcpy 列基本无关（b9 的 3.7% 只�
 都必须带生效探针（查 `main.inlined_from`）才算数。
 详见 `versions/v2.96/CHANGELOG.md`。
 
+### 3.60 内置 TLS 根证书库（v2.97）：能验链之后，第一次"知道该信谁"
+
+`x509_verify_chain` 的锚参数一直留给调用方——对真实 HTTPS 客户端这是结构性
+缺口：tls_client 握手路径里没有任何东西能提供锚。`std/x509roots` 把 12 个
+主流根 DER 内联（Debian bookworm ca-certificates 同源提取，2026-10-28），
+DN 逐字节配对 + `x509_verify_stored` 一键验证；配套把 `x509_subject/issuer/is_ca`
+转 pub。`tests/t159_roots.qma` 在 native 上真验两条当天抓的公网链：
+
+| 项 | 结果 |
+|---|---|
+| pypi.org / www.apple.com 两链验到表内锚 | **通过**（全程 RSA-SHA256） |
+| 域名不符 / 篡改叶证书 | 拒绝 |
+| 12 根自验证 | **5/12 通过**，其余 7 个是 P-384/SHA-384/SHA-1，现有栈验不动 |
+
+写库前的五站点普查钉死了覆盖面（这是 v2.98 的验收清单）：
+
+| 站点 | 每一环签名 | 现有栈 |
+|---|---|---|
+| pypi.org / apple.com | RSA-SHA256 | **通** |
+| deno.com（Let's Encrypt YE2→Root YE→X2）、cloudflare（GTS WE1→R4） | **ECDSA-SHA384/P-384** | ✗ |
+| microsoft.com | RSA **SHA-384** | ✗ |
+
+所以本版不吹"HTTPS 全自动"：锚的问题收了，**SHA-384/P-384 是下一个结构性
+缺口**，登记在 gaps §2 TLS 行。`examples/https_get.qma` 暂不接根库——
+example.com 链的桥锚（AAA Certificate Services）不在表内，硬接会造出一个
+"验不过的示例"。
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |

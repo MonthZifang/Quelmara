@@ -1075,6 +1075,8 @@ def main():
     case_selfcheck("t99_regex", "tests/t99_regex.qma")
     # chunked 解码（v2.95）：纯内存夹具，native / win 同一份断言
     case_selfcheck("t158_chunk", "tests/t158_chunk.qma")
+    # 内置 TLS 根证书库（v2.97）：两条真实公网链验到表内锚 + 篡改负向
+    case_selfcheck("t159_roots", "tests/t159_roots.qma")
 
     print("== [3i2] FFI：@ffi 调用系统库（v1.87） ==")
     test_ffi()

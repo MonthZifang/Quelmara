@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-64 个模块，**534 个公开函数**（另有 521 个内部函数）
+65 个模块，**543 个公开函数**（另有 519 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -76,7 +76,8 @@
 | `std/uuid` | UUID v4 生成 + nil + 校验/版本/变体位（随机源为 std/rand，非密码学） | 5 / 9 |
 | `std/ws` | WebSocket 服务端（RFC 6455） | 0 / 24 |
 | `std/x25519` | Curve25519 上的 X25519 密钥交换（RFC 7748，TLS ECDHE 地基） | 3 / 21 |
-| `std/x509` | X.509 解析 + P-256 验签 + 证书链/有效期/域名校验 | 13 / 34 |
+| `std/x509` | X.509 解析 + P-256 验签 + 证书链/有效期/域名校验 | 16 / 34 |
+| `std/x509roots` | 内置 TLS 根证书库（12 个主流根 + 按 DN 配锚 + 一键验证到表内锚；v2.97） | 6 / 7 |
 <!-- overview:end -->
 
 ## 2. 用法约定
@@ -1810,11 +1811,22 @@ fn x509_sig(cert: str) -> str
 /// 用证书自己的公钥验证它自己的签名（根证书 / 自签测试）。
 /// 返回 1 = 签名有效且是 P-256 证书。
 fn x509_verify_self_p256(cert: str) -> int
+/// 颁发者 DN 的原始 DER 字节（v2.97 起公开：std/x509roots 建链按 DN 配对，
+/// 与 x509_verify_chain 内部同口径——**逐字节比较，不做 RFC 4514 规范化**。
+/// 代价是"同一实体不同 DN 编码"（如打印串大小写、UTF8String vs PrintableString）
+/// 会配对失败；主流 CA 的跨签名链（USERTrust→AAA 那种）不受影响，因为比较的
+/// 两侧本来就是逐字抄写的同一串。无扩展返回 ""。
+fn x509_issuer(cert: str) -> str
+/// 主题 DN 的原始 DER 字节（公开理由同 x509_issuer）。无扩展返回 ""。
+fn x509_subject(cert: str) -> str
 /// 证书有效期：[not_before, not_after]（Unix 秒）；解析失败返回空 vec。
 /// 时间按 UTCTime/GeneralizedTime 都支持，调用方自己做区间判断。
 fn x509_validity(cert: str) -> vec[int]
 /// 在 [not_before, not_after] 内返回 1
 fn x509_time_valid(cert: str, now: int) -> int
+/// basicConstraints（2.5.29.19）→ CA 位。无扩展/解析失败返回 0。
+/// v2.97 起公开：std/x509roots 的根自验证与调用方筛选都要用。
+fn x509_is_ca(cert: str) -> int
 /// subjectAltName（2.5.29.17）里的 DNS 名列表；没有扩展返回空 vec。
 /// 通配符（`*.example.com`）原样返回，匹配规则由调用方决定。
 fn x509_san(cert: str) -> vec[str]
@@ -1829,6 +1841,31 @@ fn x509_verify_chain(leaf: str, inter: vec[str], anchor: str, host: str, now: in
 fn x509_rsa_pub(cert: str) -> str
 /// RSA 公钥指数（通常 65537）
 fn x509_rsa_exp(cert: str) -> int
+```
+
+### `std/x509roots.qma`
+
+内置 TLS 根证书库（12 个主流根 + 按 DN 配锚 + 一键验证到表内锚；v2.97）
+
+```quelmara
+/// 表内根证书数量。
+fn x509_roots_count() -> int
+/// 第 i 个根的 DER（原始字节）。越界返回 ""。
+fn x509_root_at(i: int) -> str
+/// 按主题 DN（`x509_subject` 的原始 DER）查根；没有返回 -1。
+fn x509_root_find(subject_dn: str) -> int
+/// 离 `cert` 最近的受信锚：按 issuer DN 查表命中（跨签名桥不在这里找，
+/// 桥证书应由调用方放进 intermediates）。没有返回 ""。
+fn x509_trusted_anchor(cert: str) -> str
+/// 一键验证：leaf + intermediates（leaf→根方向排序，不含根），锚**自动查表**
+/// ——查"链尾证书的 issuer"：表里没有链上中间 CA 的根时，链尾的 issuer 才是
+/// 真锚。host/now 语义同 x509_verify_chain。
+/// 返回 1 = 通过；0 = 不通过（含"锚在表里但签名算法当前栈验不动"）。
+fn x509_verify_stored(leaf: str, inter: vec[str], host: str, now: int) -> int
+/// 根自验证：用**自己的公钥验自己的签名**。信任锚的"可信"本质是人工契约
+/// （这张表被审过），密码学上能做的只有自证签名闭合——这就是那个闭合检查。
+/// 1 = 通过；0 = 失败或当前栈不支持该根的签名算法（见文件头边界）。
+fn x509_root_selfcheck(i: int) -> int
 ```
 <!-- api:end -->
 

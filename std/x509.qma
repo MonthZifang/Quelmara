@@ -394,11 +394,17 @@ fn _x509_der(cert: str, t: vec[int]) -> str {
     return substr(cert, start, t.get(4) - start)
 }
 
-fn x509_issuer(cert: str) -> str {
+/// 颁发者 DN 的原始 DER 字节（v2.97 起公开：std/x509roots 建链按 DN 配对，
+/// 与 x509_verify_chain 内部同口径——**逐字节比较，不做 RFC 4514 规范化**。
+/// 代价是"同一实体不同 DN 编码"（如打印串大小写、UTF8String vs PrintableString）
+/// 会配对失败；主流 CA 的跨签名链（USERTrust→AAA 那种）不受影响，因为比较的
+/// 两侧本来就是逐字抄写的同一串。无扩展返回 ""。
+pub fn x509_issuer(cert: str) -> str {
     return _x509_der(cert, _x509_skip(cert, 1))
 }
 
-fn x509_subject(cert: str) -> str {
+/// 主题 DN 的原始 DER 字节（公开理由同 x509_issuer）。无扩展返回 ""。
+pub fn x509_subject(cert: str) -> str {
     return _x509_der(cert, _x509_skip(cert, 3))
 }
 
@@ -543,8 +549,9 @@ fn _x509_ext_value(cert: str, oid: str) -> str {
     return ""
 }
 
-// basicConstraints（2.5.29.19）→ CA 位
-fn x509_is_ca(cert: str) -> int {
+/// basicConstraints（2.5.29.19）→ CA 位。无扩展/解析失败返回 0。
+/// v2.97 起公开：std/x509roots 的根自验证与调用方筛选都要用。
+pub fn x509_is_ca(cert: str) -> int {
     let v = _x509_ext_value(cert, "\x55\x1d\x13")
     if len(v) == 0 {
         return 0
