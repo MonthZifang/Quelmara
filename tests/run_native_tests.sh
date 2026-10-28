@@ -36,6 +36,16 @@ $NAT build examples/parfor_sum.qma -o build/nat_par >/dev/null 2>&1
 out=$(./build/nat_par); rc=$?
 [ $rc -eq 0 ] && ok "退出码 0" || bad "退出码 $rc"
 [ "$out" = "11519999978" ] && ok "clone 多核归约 == pthread 后端结果" || bad "输出 [$out]"
+# v2.98：这个归约曾是**概率性**错的（clone 分流前写共享 pid 表，被子线程晚到的
+# 0 覆盖 -> join 提前放行 -> 少一个分片）。旧二进制实测 22/300 = 7.3% 出错，
+# 而单次回归只有 7% 检出率 —— 单跑一次判绿等于 93% 的把握放过它。
+# 10 连跑把检出率抬到 ~20%（代价约 20 s）；根治后同形状压测 0/500。
+pf_bad=0
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  o=$(./build/nat_par); [ "$o" = "11519999978" ] || pf_bad=$((pf_bad+1))
+done
+[ $pf_bad -eq 0 ] && ok "parfor 10 连跑结果全对（竞态哨兵）" \
+  || bad "parfor 10 连跑 $pf_bad 次结果错（pid 登记竞态复发？）"
 
 echo "[5] 单核降级（tests/single_core/Quelmara.toml: multicore=false）"
 cp examples/parfor_sum.qma tests/single_core/
@@ -346,6 +356,18 @@ out=$(timeout 60 ./build/nat_chunk 2>&1); rc=$?
 [ $rc -eq 0 ] && [ "$out" = "chunk ok" ] \
   && ok "chunked：夹具自校验全过（两块/ext/trailer/分片/病态 -1/-2）" \
   || bad "chunked 执行 rc=$rc [$out]"
+
+echo "[26] 内置根证书库 std/x509roots（v2.97）：真实链验到表内锚"
+# 纯内存 + 纯计算（不联网）：锚按主题 DN 配对；两条 2026-10-28 抓的真实公网链
+# （pypi.org / www.apple.com，全程 sha256-RSA）经 x509_verify_stored 验到表内锚；
+# 篡改叶证书拒绝；12 根中当前栈（SHA-256 两条路）可自验的 5 个计数。
+# 夹具时间冻结在四条证书公共有效期内——测的是路径构造与密码学闭合。
+$NAT build tests/t159_roots.qma -o build/nat_roots >/dev/null 2>&1 \
+  && ok "根库：native 编译通过" || bad "根库：native 编译失败"
+out=$(timeout 120 ./build/nat_roots 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$out" = "$(printf 'selfcheck pass=5\nroots ok')" ] \
+  && ok "根库：两链验证 + 负向 + 自检计数全过" \
+  || bad "根库执行 rc=$rc [$out]"
 
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
