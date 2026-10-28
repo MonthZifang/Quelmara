@@ -7288,6 +7288,17 @@ class Lower:
 
             # __vec_grow(h)：len==cap 时容量翻倍并搬旧数据（返回 data 指针）
             f = Fn("__vec_grow")
+            # v2.96：**冷路径 helper，禁止内联**（同 parfor worker 的机制）。
+            # grow 只在扩容那一瞬间执行（预分配的 vec 一次都不进），但内联
+            # 会把它的 realloc+memcpy 大块体塞进每个 push 调用点的**热循环**里
+            # ——`ln==cp` 冷分支摊薄了热循环的代码密度，i-cache/分支预测双亏。
+            # 实测（本机 x86-64，阈值 60 全量内联 vs 只 ban grow，min of 2）：
+            #   b4_array 82.1 -> 65.5 ms（阈值 28 基线 64.9，完全恢复）
+            #   b9_json  79.7 -> 76.0 ms（还更好）
+            #   b1/b2/b3/b5/b6/b7 全在噪声内（±2%）
+            # v2.93 登记的"b4_array +23%"就是它；按热度分档不是必要，
+            # **按冷热分档**才是：一个标记解决，不用启发式引擎。
+            f.no_inline = True
             h = f.new_v()
             f.emit("args", [h])
             ln, cp, ew = f.new_v(), f.new_v(), f.new_v()
