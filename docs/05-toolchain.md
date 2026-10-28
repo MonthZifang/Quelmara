@@ -1401,7 +1401,7 @@ alpha = "registry|path:../qreg|1.2.0|<sha256>|<1.2.0>|<tree>|beta@^1.0;gamma@~2.
 
 | 目录 | 内容 |
 |---|---|
-| `tests/*.qma` | 150 个正向夹具，多数用 `assert` 自校验（v2.13 口径；含 `t130_router_dispatch` / `t132_timer` / `t140_net6` / `t141_vecindex` / `t142_exitcode`） |
+| `tests/*.qma` | 168 个顶层夹具（v2.95 口径，`ls tests/*.qma | wc -l`；另有 121 个子目录夹具（`tests/bad/` 负向 82 个 + selftest/lowheap 等执行级子套件）），多数用 `assert` 自校验（含 `t130_router_dispatch` / `t141_vecindex` / `t158_chunk`（chunked 解码，三后端同一份）/ `net_echo_linux` + `net_connect_linux`（POSIX 真 socket 自环）） |
 | `tests/bad/*.qma` | 68 个负向夹具，**必须编译失败**（v2.12 新增 `net_serve_builtin`：reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断） |
 | `examples/*.qma` | 19 个可运行示例 |
 | `bench/*.qma` | 32 个基准（v2.10 `http_router_bench`；v2.12 新增 `echo_bench`（无日志的 reactor echo 服务端）与 `net_cpu_bench`（handler 烧固定 CPU，用于多核标定）） |
@@ -1446,7 +1446,7 @@ alpha = "registry|path:../qreg|1.2.0|<sha256>|<1.2.0>|<tree>|beta@^1.0;gamma@~2.
 | `tests/kv_test.py` | **KV 进程级恢复**：跨进程重开、撕裂尾（砍半条记录）、垃圾尾（追加 200 B）、Python 独立解析器逐条对拍磁盘格式 + FNV-1a 64 标准向量 | Windows |
 | `tests/qla_test.py` | **`.qla` 目标文件**（v2.11）：往返逐字节（直编 vs 档案→链接）、函数级增量四种形态（无改动/改小函数/改大函数/加函数/改布局）、二进制库无源码链接、7 条失败路径、CLI | Windows |
 | `tests/qlmc_test.py` | **stage-1 编译器差分**（v2.14）：先用 stage-0 编出 `bootstrap/qlmc/qlmc.qma`，再对 3 组用例分别用两个编译器编，比较 stdout 与退出码**逐字节相同** + 产物 PE 结构（PE32+/AMD64/节数）；`--time` 追加两侧编译墙钟 | Windows |
-| `tests/http_router_test.py` | **HTTP 服务端路由 / 中间件端到端**：编译并启动 `examples/http_router.qma`，真实 socket 断言 20 项（命中 / 归一化 / 404 / 405 / 鉴权中间件 / 请求体 / gzip 协商 / keep-alive / 流水线）；`--bench` 追加吞吐与服务端 CPU | Windows |
+| `tests/http_router_test.py` | **HTTP 服务端路由 / 中间件端到端**：编译并启动 `examples/http_router.qma`，真实 socket 断言 26 项（命中 / 归一化 / 404 / 405 / 鉴权中间件 / 请求体 / gzip 协商 / keep-alive / 流水线 / **chunked 请求体 R9–R12（v2.95：两块 / 分片 / ext+trailer / TE 覆盖 CL 两种头序 / 病态流 400）**）；`--bench` 追加吞吐与服务端 CPU | Windows |
 | `tools/dev/net_bench.py` | **服务端网络探针**（v2.12）：echo / http / cpu 三种模式，`--conns`/`--reqs`/`--threads`，报告 req/s 与 RTT p50/p99（min-of-reps）；服务端由调用方先起（手动） | 全平台 |
 | `tools/dev/incr_bench.py` | 增量/并行编译性能探针（单单元冷/热、多源 `-j`、`test -j`、进程创建基线，手动） | 全平台 |
 | `tools/dev/qla_bench.py` | `.qla` 性能探针（冷编译 / 无改动增量 / 改一个函数 / link，附"解析占增量下限"的分离测量，手动） | 全平台 |

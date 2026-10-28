@@ -18,6 +18,11 @@ socket 发真实 HTTP 请求，逐条断言状态行 / 头 / 体。覆盖：
   R6 gzip 协商：Accept-Encoding: gzip 时压、解压后与原体逐字节相同
   R7 keep-alive：同一连接连续两个请求都有响应
   R8 流水线：一次 send 两个请求，两个响应都回来
+  R9 chunked 请求体（v2.95）：两块解包后 handler 读到的长度 = 真实体长
+  R10 chunked 分片：流跨两次 send 投递，服务端等齐才派发
+  R11 chunked ext/trailer：`;ext` 与 trailer 行丢弃，不计入体长
+  R12 TE 覆盖 Content-Length（RFC 7230 §3.3.3，**两种头序都测**）；
+      病态流（非 hex size）-> 400
 """
 import os
 import socket
@@ -221,6 +226,91 @@ def main() -> int:
         finally:
             s.close()
 
+        # R9–R12（v2.95）：Transfer-Encoding: chunked 请求体。POST /users 的
+        # handler 回显 http_body_len —— 服务端必须把 chunked 解包后的**真实
+        # 长度**交给 handler，而不是含 hex 行/CRLF 的原始字节数。
+        print("== R9 chunked 请求体 ==")
+        s = connect()
+        try:
+            s.sendall(b"POST /users HTTP/1.1\r\nHost: x\r\n"
+                      b"Transfer-Encoding: chunked\r\n\r\n"
+                      b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")   # 11 字节
+            st, _, b1, _ = read_response(s)
+            if b1 == b'{"created":true,"len":11}':
+                ok("chunked: 两块解包后 body len=11")
+            else:
+                bad(f"chunked: {st!r} {b1!r}")
+        finally:
+            s.close()
+
+        print("== R10 chunked 分片 ==")
+        s = connect()
+        try:
+            s.sendall(b"POST /users HTTP/1.1\r\nHost: x\r\n"
+                      b"Transfer-Encoding: chunked\r\n\r\n"
+                      b"7\r\nQuelm")                        # 声明 7，只给 5
+            time.sleep(0.3)
+            s.sendall(b"ara\r\n0\r\n\r\n")                  # 补齐 2 + 终止块
+            st, _, b1, _ = read_response(s)
+            if b1 == b'{"created":true,"len":7}':
+                ok("chunked 分片: 补齐后 body len=7")
+            else:
+                bad(f"chunked 分片: {st!r} {b1!r}")
+        finally:
+            s.close()
+
+        print("== R11 chunked ext/trailer ==")
+        s = connect()
+        try:
+            s.sendall(b"POST /users HTTP/1.1\r\nHost: x\r\n"
+                      b"Transfer-Encoding: chunked\r\n\r\n"
+                      b"4;a=1\r\nabcd\r\n0\r\nX-T: v\r\n\r\n")   # ext + trailer
+            st, _, b1, _ = read_response(s)
+            if b1 == b'{"created":true,"len":4}':
+                ok("chunked ext/trailer: 丢弃后 body len=4")
+            else:
+                bad(f"chunked ext/trailer: {st!r} {b1!r}")
+        finally:
+            s.close()
+
+        print("== R12 TE 覆盖 CL / 病态流 ==")
+        s = connect()
+        try:
+            s.sendall(b"POST /users HTTP/1.1\r\nHost: x\r\n"
+                      b"Content-Length: 999\r\nTransfer-Encoding: chunked\r\n\r\n"
+                      b"3\r\nabc\r\n0\r\n\r\n")
+            st, _, b1, _ = read_response(s)
+            if b1 == b'{"created":true,"len":3}':
+                ok("TE 覆盖 CL: 按 chunked 解出 len=3")
+            else:
+                bad(f"TE 覆盖 CL: {st!r} {b1!r}")
+        finally:
+            s.close()
+        # 反序：TE 先、CL 后——CL 行不得把已清的 HP_BLEN 写回去
+        s = connect()
+        try:
+            s.sendall(b"POST /users HTTP/1.1\r\nHost: x\r\n"
+                      b"Transfer-Encoding: chunked\r\nContent-Length: 999\r\n\r\n"
+                      b"3\r\nabc\r\n0\r\n\r\n")
+            st, _, b1, _ = read_response(s)
+            if b1 == b'{"created":true,"len":3}':
+                ok("TE 覆盖 CL（CL 在后的顺序）: len=3")
+            else:
+                bad(f"TE 覆盖 CL（CL 在后）: {st!r} {b1!r}")
+        finally:
+            s.close()
+        s = connect()
+        try:
+            s.sendall(b"POST /users HTTP/1.1\r\nHost: x\r\n"
+                      b"Transfer-Encoding: chunked\r\n\r\nz\r\nbad\r\n")
+            st, _, _b, _ = read_response(s)
+            if " 400 " in st:
+                ok("病态 chunked（非 hex size）: 400")
+            else:
+                bad(f"病态 chunked: {st!r}")
+        finally:
+            s.close()
+
         if "--bench" in sys.argv:
             bench()
 
@@ -231,7 +321,7 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             proc.kill()
 
-    total = 20
+    total = 26
     if fails:
         print(f"\nhttp_router FAIL（{len(fails)} 项）")
         for f in fails:

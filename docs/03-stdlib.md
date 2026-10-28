@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-63 个模块，**532 个公开函数**（另有 520 个内部函数）
+64 个模块，**534 个公开函数**（另有 521 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -29,7 +29,8 @@
 | `std/gzip` | DEFLATE 编码 + gzip 包装 + CRC-32；v1.19 起含 inflate 解码 | 6 / 33 |
 | `std/hash` | FNV-1a 32/64 非密码学哈希（缓存键 / 分片） | 4 / 4 |
 | `std/hex` | 十六进制编解码 | 4 / 5 |
-| `std/http` | HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商） | 39 / 54 |
+| `std/http` | HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商 / chunked 请求体 v2.95） | 39 / 55 |
+| `std/http_chunk` | Transfer-Encoding: chunked 的扫描与就地解包（纯内存，零 socket 依赖；v2.95） | 2 / 2 |
 | `std/httpc` | HTTP/1.1 客户端核心：URL 拆分 / 请求构造 / 响应解析（content-length / chunked）/ 重定向判定（纯函数，零 socket 依赖） | 6 / 11 |
 | `std/httpc_net` | HTTP 客户端传输层：httpc_get / httpc_get_tls / httpc_get_follow（Windows；TLS 走 std/tls_net） | 3 / 4 |
 | `std/httpdate` | HTTP 日期（RFC 7231 IMF-fixdate）格式化与解析 + If-Modified-Since 判定 | 3 / 13 |
@@ -462,7 +463,7 @@ fn hex_decode(s: str) -> str
 
 ### `std/http.qma`
 
-HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商）
+HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商 / chunked 请求体 v2.95）
 
 ```quelmara
 /// 阻塞运行 HTTP 服务：`backlog` 是监听队列长度，`on_request` 是
@@ -491,7 +492,9 @@ fn http_path(fd: int) -> str
 fn http_query(fd: int) -> str
 /// 零拷贝体访问（大请求体：拿到指针直接读，不构造 str）
 fn http_body_ptr(fd: int) -> int
-/// 请求体长度（= Content-Length；无体为 0）
+/// 请求体长度。Content-Length 请求 = 头里声明的字节数；**chunked 请求
+/// （v2.95）= 解包后的真实体长**（不含 hex 行/CRLF，ext 与 trailer 已丢弃）；
+/// 无体为 0。
 fn http_body_len(fd: int) -> int
 /// 请求体（拷成一个 str；大请求体用 http_body_ptr + http_body_len）
 fn http_body(fd: int) -> str
@@ -555,6 +558,25 @@ fn http_param_count(fd: int) -> int
 /// 永远返回 1（连接按 keep-alive 走），要关连接在 handler/中间件里调
 /// http_set_close。
 fn http_dispatch(fd: int) -> int
+```
+
+### `std/http_chunk.qma`
+
+Transfer-Encoding: chunked 的扫描与就地解包（纯内存，零 socket 依赖；v2.95）
+
+```quelmara
+/// 扫描 [start, n) 的 chunked 流。返回：
+///   >= 0  完整流的**原始结束偏移**（`0\r\n` + 空行/trailer 之后的位置）——
+///         注意它不是"解包后的长度"；keep-alive 搬余包要按它截断。
+///   -1    流还没收全（size 行截断 / 数据不足 / 终止行不完整），等下一段。
+///   -2    病态流：非 hex 的 size、空 size 行、超过 8 位 hex、数据后缺 CRLF、
+///         终止块后缺 \r\n\r\n —— 调用方应拒绝请求（std/http 回 400）。
+fn chunk_scan(buf: int, start: int, n: int) -> int
+/// 就地解包：把 [start, end) 的**完整合法** chunked 流（必须先用 chunk_scan
+/// 验过、end 就是它返回的偏移）解包压到 [start, start+len)。返回解出的字节数。
+/// trailer 与 chunk-ext 被丢弃；数据段里的 CRLF 序列按 size 原样保留。
+/// 契约：end 不来自 chunk_scan 时行为未定义 —— 配对调用由调用方（std/http）保证。
+fn chunk_pack(buf: int, start: int, end: int) -> int
 ```
 
 ### `std/httpc.qma`

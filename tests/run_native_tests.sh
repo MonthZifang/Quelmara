@@ -336,6 +336,17 @@ PYEOF
     && ok "POSIX 网络：connect 收发明文正确" || bad "POSIX 网络：connect 输出 [$out]"
 fi
 
+echo "[25] chunked 解码 std/http_chunk（v2.95）：执行级自校验"
+# std/http_chunk 是纯内存模块（不碰 socket），所以这份夹具在 native 上
+# 能真跑到 assert 全过——Linux CI 第一次覆盖 chunked 语义；win 侧由
+# run_win_tests.py 的 case_selfcheck 执行同一份夹具。
+$NAT build tests/t158_chunk.qma -o build/nat_chunk >/dev/null 2>&1 \
+  && ok "chunked：native 编译通过" || bad "chunked：native 编译失败"
+out=$(timeout 60 ./build/nat_chunk 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$out" = "chunk ok" ] \
+  && ok "chunked：夹具自校验全过（两块/ext/trailer/分片/病态 -1/-2）" \
+  || bad "chunked 执行 rc=$rc [$out]"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]
