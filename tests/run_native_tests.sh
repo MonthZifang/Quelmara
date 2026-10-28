@@ -268,6 +268,20 @@ else
       || bad "@extern 诊断内容不符：$(head -1 build/.ext_err)"
 fi
 
+echo "[23] args() 在自研后端（Linux/AArch64 入口口径，v2.90）"
+# v2.89 及以前这条**只在 Windows 上被覆盖**（run_win_tests.py 带三个参数跑
+# t29_args.qma），Linux/AArch64 的 lower_args 走的是另一条路径，于是
+# "双重偏移"这个 bug 活了整整一年：args() 少一个参数、args()[0] 越界读。
+# 下面三条把 Linux 侧口径钉死：个数 / 顺序 / 首元素，以及零参数不静默。
+$NAT build tests/t29_args.qma -o build/nat_args >/dev/null 2>&1
+out=$(./build/nat_args alpha beta "two words" 2>&1); rc=$?
+[ $rc -eq 0 ] && ok "args 退出码 0（无越界 SIGSEGV）" || bad "args 退出码 $rc"
+[ "$out" = "$(printf '3\nalpha\nbeta\ntwo words\nalpha')" ] \
+  && ok "args 个数/顺序/首元素正确（3 个参数，不含程序名）" || bad "args 输出 [$out]"
+# 零参数：夹具里 assert(len(a)==3) 必须失败，且 arg(0) 越界 fail-fast 而不是读到垃圾
+timeout 30 ./build/nat_args 2>/dev/null >/dev/null; rc=$?
+[ $rc -ne 0 ] && ok "args 零参数 fail-fast（不静默返回垃圾）" || bad "args 零参数未失败"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

@@ -1110,10 +1110,18 @@ class Lower:
         return n
 
     def lower_args(self, fn):
-        """args() -> []str：{argv+8, argc-1}，排除程序名。
+        """args() -> []str：程序参数，不含程序名。
 
-        Linux/AArch64：入口 _start 把内核栈上的 argc/argv 存进全局字（零拷贝）。
-        Windows：加载器不传 argv，只能 GetCommandLineA + 自写拆分，惰性执行一次。
+        两条路径产出的 argv 表**含义不同**，这里必须分开取基址（v2.90 修）：
+
+        Linux/AArch64：`__unix_args_copy` 把内核栈上的原始 argv **原地改写**成
+          "已排除程序名"的长度前缀表——`arr0[i]` 就是第 i 个参数（i 从 0 起），
+          同时把 `argc` 覆写成 `argc-1`。所以基址**不加 8**、长度**不再减 1**。
+        Windows：`__win_args_init` 把完整命令行（含程序名）拆成 `argc` 个 token，
+          `argv[0]` 仍是程序名。所以基址 `+8`、长度 `argc-1`。
+
+        v2.89 及以前两条路径共用 `argv+8` / `argc-1`，Linux 上于是**双重偏移**：
+        `args()` 少一个参数、`args()[0]` 读到表尾之后（越界读，实测 SIGSEGV）。
         """
         if self.platform == "windows":
             cur = fn.new_v()
@@ -1122,9 +1130,23 @@ class Lower:
             fn.emit("jnz", cur, l_ready)
             fn.emit("call", None, "__win_args_init", [])
             fn.emit("label", l_ready)
-        else:
-            # 内核 argv 是原始串；首次 args() 统一拷贝为长度前缀 str（once）
-            fn.emit("call", None, "__unix_args_copy", [])
+            argc = fn.new_v()
+            argv = fn.new_v()
+            fn.emit("load", argc, ("ga", self.argc_gid), ("imm", 0))
+            fn.emit("load", argv, ("ga", self.argv_gid), ("imm", 0))
+            cnt = fn.new_v()
+            fn.emit("bin", "sub", cnt, argc, ("imm", 1))
+            l_ok = fn.label("argcok")
+            fn.emit("jcc", "ge", cnt, ("imm", 0), l_ok)
+            fn.emit("mov", cnt, ("imm", 0))
+            fn.emit("label", l_ok)
+            ptr = fn.new_v()
+            fn.emit("bin", "add", ptr, argv, ("imm", 8))
+            return self.make_slice(fn, ptr, cnt, elem="str")
+        # 内核 argv 是原始串；首次 args() 统一拷贝为长度前缀 str（once）。
+        # 拷贝后：argv_gid 指向"已排除程序名"的新表（长度 argc-1），
+        # 但 argc_gid **仍是内核口径**（含程序名），所以长度还要减 1、基址不加 8。
+        fn.emit("call", None, "__unix_args_copy", [])
         argc = fn.new_v()
         argv = fn.new_v()
         fn.emit("load", argc, ("ga", self.argc_gid), ("imm", 0))
@@ -1135,9 +1157,7 @@ class Lower:
         fn.emit("jcc", "ge", cnt, ("imm", 0), l_ok)
         fn.emit("mov", cnt, ("imm", 0))
         fn.emit("label", l_ok)
-        ptr = fn.new_v()
-        fn.emit("bin", "add", ptr, argv, ("imm", 8))
-        return self.make_slice(fn, ptr, cnt, elem="str")
+        return self.make_slice(fn, argv, cnt, elem="str")
 
     # ---- 定长数组（v0.6）：帧槽 N 字 + 值语义拷贝 ----
     @staticmethod
