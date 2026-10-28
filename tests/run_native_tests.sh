@@ -360,14 +360,33 @@ out=$(timeout 60 ./build/nat_chunk 2>&1); rc=$?
 echo "[26] 内置根证书库 std/x509roots（v2.97）：真实链验到表内锚"
 # 纯内存 + 纯计算（不联网）：锚按主题 DN 配对；两条 2026-10-28 抓的真实公网链
 # （pypi.org / www.apple.com，全程 sha256-RSA）经 x509_verify_stored 验到表内锚；
-# 篡改叶证书拒绝；12 根中当前栈（SHA-256 两条路）可自验的 5 个计数。
+# 篡改叶证书拒绝；12 根中当前栈（v2.99 起含 P-384 与 RSA-SHA384）可自验的 11 个计数。
 # 夹具时间冻结在四条证书公共有效期内——测的是路径构造与密码学闭合。
 $NAT build tests/t159_roots.qma -o build/nat_roots >/dev/null 2>&1 \
   && ok "根库：native 编译通过" || bad "根库：native 编译失败"
 out=$(timeout 120 ./build/nat_roots 2>&1); rc=$?
-[ $rc -eq 0 ] && [ "$out" = "$(printf 'selfcheck pass=5\nroots ok')" ] \
+[ $rc -eq 0 ] && [ "$out" = "$(printf 'selfcheck pass=11\nroots ok')" ] \
   && ok "根库：两链验证 + 负向 + 自检计数全过" \
   || bad "根库执行 rc=$rc [$out]"
+
+echo "[27] ECDSA P-384 验签 + 真实 P-384 链（v2.99）"
+# t160：Python 纯 bigint 独立算出的自洽向量（两侧走完全不同的代码路径），
+#       含 6 类负向（篡改 hash/r/s/公钥、r=0、s=0）。
+# t161：2026-10-28 抓的真实链——deno.com 三层（YE2/Root YE 是 P-384，
+#       叶证书是 P-256 密钥 + SHA-384 摘要）与 cloudflare（P-256 + SHA-384）。
+#       两条链都用链尾自签根做锚，含"缺中间证书"与域名不符负向。
+$NAT build tests/t160_p384.qma -o build/nat_p384 >/dev/null 2>&1 \
+  && ok "P-384：native 编译通过" || bad "P-384：native 编译失败"
+out=$(timeout 180 ./build/nat_p384 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$out" = "p384 ok" ] \
+  && ok "P-384：验签 + 6 类负向全过" || bad "P-384 执行 rc=$rc [$out]"
+
+$NAT build tests/t161_p384chain.qma -o build/nat_p384c >/dev/null 2>&1 \
+  && ok "P-384 链：native 编译通过" || bad "P-384 链：native 编译失败"
+out=$(timeout 180 ./build/nat_p384c 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$out" = "p384chain ok" ] \
+  && ok "P-384 链：deno/cloudflare 两链验到自签根 + 负向全过" \
+  || bad "P-384 链执行 rc=$rc [$out]"
 
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"

@@ -15,7 +15,9 @@
 // 压缩点；不校验有效期/域名/用途/链；不做 CRL/OCSP。
 
 import std.sha256
+import std.sha512
 import std.p256
+import std.p384
 import std.rsa
 
 // DER 标签
@@ -230,6 +232,122 @@ pub fn x509_pubkey(cert: str) -> str {
     return substr(cert, v + 2, 64)
 }
 
+/// P-384 公钥：返回 96 字节 X||Y；非 P-384 或格式不对返回 ""。
+/// secp384r1 的 OID 是 1.3.132.0.34（v2.99：Let's Encrypt 现役链、
+/// Google Trust Services、Sectigo E 系列都用它）。
+pub fn x509_pubkey384(cert: str) -> str {
+    let spki = x509_spki_tlv(cert)
+    if len(spki) == 0 {
+        return ""
+    }
+    let alg = x509_tlv(cert, spki.get(2))
+    if x509_ok(alg) == 0 {
+        return ""
+    }
+    let bits = x509_tlv(cert, alg.get(4))
+    if x509_ok(bits) == 0 || bits.get(0) != X509_TAG_BIT_STRING {
+        return ""
+    }
+    if bits.get(3) < 98 {
+        return ""
+    }
+    let v = bits.get(2)
+    if cert[v] != 0 {
+        return ""
+    }
+    if cert[v + 1] != 0x04 {
+        return ""                      // 只支持未压缩点
+    }
+    if x509_curve_oid(cert) != "\x2b\x81\x04\x00\x22" {
+        return ""                      // 只认 secp384r1
+    }
+    return substr(cert, v + 2, 96)
+}
+
+/// 签名值：返回 96 字节 r||s（各左补到 48 字节，P-384 用）；格式不对返回 ""。
+/// 与 x509_sig 的区别只是宽度——DER 里的 INTEGER 长度本来就是变长的。
+pub fn x509_sig384(cert: str) -> str {
+    let root = x509_root(cert)
+    if len(root) == 0 {
+        return ""
+    }
+    let bits = x509_sig_bits(cert)
+    if len(bits) == 0 {
+        return ""
+    }
+    let seq = x509_tlv(bits, 0)
+    if x509_ok(seq) == 0 || seq.get(0) != X509_TAG_SEQUENCE {
+        return ""
+    }
+    let r = x509_tlv(bits, seq.get(2))
+    if x509_ok(r) == 0 {
+        return ""
+    }
+    let s2 = x509_tlv(bits, r.get(4))
+    if x509_ok(s2) == 0 {
+        return ""
+    }
+    let rv = _x509_int_pad(bits, r, 48)
+    if len(rv) != 48 {
+        return ""
+    }
+    let sv = _x509_int_pad(bits, s2, 48)
+    if len(sv) != 48 {
+        return ""
+    }
+    return rv + sv
+}
+
+// DER INTEGER -> 定宽大端（去前导 0，再左补到 n 字节）；超宽返回 ""
+fn _x509_int_pad(buf: str, t: vec[int], n: int) -> str {
+    if x509_ok(t) == 0 || t.get(0) != X509_TAG_INTEGER {
+        return ""
+    }
+    let start = t.get(2)
+    let mut ln = t.get(3)
+    while ln > 0 && buf[start] == 0 {
+        start = start + 1
+        ln = ln - 1
+    }
+    if ln > n {
+        return ""
+    }
+    let mut pad = ""
+    let mut k = ln
+    while k < n {
+        pad = pad + "\x00"
+        k = k + 1
+    }
+    return pad + substr(buf, start, ln)
+}
+
+/// 用 P-384 公钥验证证书签名（issuer_pub 是 96 字节 X||Y，摘要 SHA-384）
+fn x509_verify_with_p384(cert: str, issuer_pub: str, hash_len: int) -> int {
+    if len(issuer_pub) != 96 {
+        return 0
+    }
+    let tbs = x509_tbs(cert)
+    let sig = x509_sig384(cert)
+    if len(sig) != 96 || len(tbs) == 0 {
+        return 0
+    }
+    if hash_len != 48 {
+        return 0                      // P-384 只配 SHA-384（本栈口径）
+    }
+    let h = mem_str(sha384_str(tbs), 48)
+    return ecdsa_p384_verify(substr(issuer_pub, 0, 48), substr(issuer_pub, 48, 48), h,
+                             substr(sig, 0, 48), substr(sig, 48, 48))
+}
+
+/// P-384 证书自验证（自签根）
+pub fn x509_verify_self_p384(cert: str) -> int {
+    let pub = x509_pubkey384(cert)
+    if len(pub) == 0 {
+        return 0
+    }
+    return x509_verify_with_p384(cert, pub, 48)
+}
+
 /// 签名值：返回 64 字节 r||s（各左补到 32 字节）；格式不对返回 ""
 pub fn x509_sig(cert: str) -> str {
     let root = x509_root(cert)
@@ -334,6 +452,44 @@ fn x509_verify_with_p256(cert: str, issuer_pub: str) -> int {
         return 0
     }
     let h = mem_str(sha256_str(tbs), 32)
+    return ecdsa_p256_verify(substr(issuer_pub, 0, 32), substr(issuer_pub, 32, 32), h,
+                             substr(sig, 0, 32), substr(sig, 32, 32))
+}
+
+// sha384WithRSAEncryption = 1.2.840.113549.1.1.12
+fn _x509_is_rsa384(cert: str) -> int {
+    if x509_sig_alg_oid(cert) == "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0c" {
+        return 1
+    }
+    return 0
+}
+
+// ecdsa-with-SHA384 = 1.2.840.10045.4.3.3
+fn _x509_is_ecdsa384(cert: str) -> int {
+    if x509_sig_alg_oid(cert) == "\x2a\x86\x48\xce\x3d\x04\x03\x03" {
+        return 1
+    }
+    return 0
+}
+
+// P-256 公钥 + SHA-384 签名（v2.99：真实链上很常见的组合，
+// 早期按密钥宽度硬绑摘要的实现会在这种链上失败）
+fn x509_verify_with_p256_h384(cert: str, issuer_pub: str) -> int {
+    if len(issuer_pub) != 64 {
+        return 0
+    }
+    let tbs = x509_tbs(cert)
+    let sig = x509_sig(cert)
+    if len(sig) != 64 || len(tbs) == 0 {
+        return 0
+    }
+    // FIPS 186-4 §6.4：e = 摘要的**最左 n 位**（n = 曲线阶位数）。
+    // P-256 的 n 是 256 位 = 32 字节，所以 48 字节 SHA-384 摘要要取左 32 字节，
+    // 不是"报错"也不是"用右 32 字节"。真实链上这个组合很常见（deno.com 叶证书、
+    // cloudflare WE1 都是 P-256 密钥 + ecdsa-with-SHA384）。
+    let h48 = mem_str(sha384_str(tbs), 48)
+    let h = substr(h48, 0, 32)
+    mem_free(h48, 48)
     return ecdsa_p256_verify(substr(issuer_pub, 0, 32), substr(issuer_pub, 32, 32), h,
                              substr(sig, 0, 32), substr(sig, 32, 32))
 }
@@ -672,9 +828,24 @@ fn _x509_link(child: str, issuer: str, now: int) -> int {
     if x509_time_valid(child, now) == 0 {
         return 0
     }
+    // v2.99：**摘要算法与密钥曲线解耦**。两者是独立的：
+    //   deno.com 叶证书 = P-256 密钥 + ecdsa-with-SHA384 签名
+    //   cloudflare WE1  = P-256 密钥 + ecdsa-with-SHA384 签名
+    // 早期实现按"签发者密钥宽度"硬绑 SHA-256，这类链全部验不过。
+    // 正确口径：摘要由**子证书的 signatureAlgorithm** 决定，曲线由签发者密钥决定。
+    let ecdsa384 = _x509_is_ecdsa384(child)
     let pub = x509_pubkey(issuer)
     if len(pub) == 64 {
+        if ecdsa384 == 1 {
+            return x509_verify_with_p256_h384(child, pub)
+        }
         return x509_verify_with_p256(child, pub)
+    }
+    // ECDSA P-384 密钥：Let's Encrypt 现役链、Google Trust Services、
+    // Sectigo E 系列的主流。摘要仍是看子证书 OID（本栈只配 SHA-384）。
+    let pub3 = x509_pubkey384(issuer)
+    if len(pub3) == 96 {
+        return x509_verify_with_p384(child, pub3, 48)
     }
     // RSA 颁发者：PKCS#1 v1.5（证书链签名主流）
     let n = x509_rsa_pub(issuer)
@@ -683,7 +854,15 @@ fn _x509_link(child: str, issuer: str, now: int) -> int {
         if len(sig) == 0 {
             return 0
         }
-        let h = mem_str(sha256_str(x509_tbs(child)), 32)
+        // v2.99：摘要同样看**子证书的 signatureAlgorithm**，不是硬绑 SHA-256。
+        // sha384WithRSAEncryption = 1.2.840.113549.1.1.12 —— Amazon Root CA 1
+        // 的自签、microsoft.com 全链、大量企业 CA 都是它。
+        let tbs = x509_tbs(child)
+        if _x509_is_rsa384(child) == 1 {
+            let h3 = mem_str(sha384_str(tbs), 48)
+            return rsa_verify_pkcs1_sha384(n, x509_rsa_exp(issuer), sig, h3)
+        }
+        let h = mem_str(sha256_str(tbs), 32)
         return rsa_verify_pkcs1_sha256(n, x509_rsa_exp(issuer), sig, h)
     }
     return 0

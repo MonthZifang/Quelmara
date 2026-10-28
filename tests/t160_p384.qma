@@ -1,0 +1,53 @@
+// t160_p384.qma —— NIST P-384 ECDSA 验签执行级回归（v2.99）
+//
+// 向量来源：Python 纯 bigint 自造（d/k 固定、消息固定），Python 侧独立验证
+// 通过后写死在这里——**两侧用完全不同的代码路径算同一条曲线**，这是自研
+// 实现最需要的交叉验证。SHA-384 摘要来自 std/sha512 的 sha384（另有 t-sha 覆盖）。
+module t160_p384
+
+import std.hex
+import std.p384
+import std.str
+
+fn hx(s: str) -> str { return hex_decode(s) }
+
+fn main() {
+    let pubx = hx("197a3ebb496e62f2cbf9d3bb860561fbc54307fbb234163a07206cc7284fc482052e57dbeed651429dd3c4688965dd83")
+    let puby = hx("2411de3367400adc19dd151d5feaeb74942a63641665e24ca3ec40d028214caf829f8f0e097388eb7cffa7d4aabee3c1")
+    let hash = hx("35d5c8c45175695e90c171bd10a8a4d86e1aa9975c1971c9ad706a636ffa96b8138ce86f0a2abb87ea255d49b2123b2d")
+    let r    = hx("cbd16c5c648af833b8bc2e0a751bb60d345218f91b7fedde26d4be9efd66c4a8bb2f97fe3fed397dc5fa11941bb6cb73")
+    let s    = hx("91a1ceb9f808c3bd87a4fb3b087a6f3140fb3590182162eb769c9a5a214a63d0873ee12bd70eeee1b23e99c08b54cd85")
+
+    // 1. 公钥在曲线上
+    assert(p384_on_curve(pubx, puby) == 1, "pubkey on curve")
+
+    // 2. 正常验签通过
+    assert(ecdsa_p384_verify(pubx, puby, hash, r, s) == 1, "valid signature")
+
+    // 3. 负向：篡改摘要 / 篡改 r / 篡改 s / 换公钥 / 全零
+    let badh = _flip(hash)
+    assert(ecdsa_p384_verify(pubx, puby, badh, r, s) == 0, "bad hash rejected")
+    let badr = _flip(r)
+    assert(ecdsa_p384_verify(pubx, puby, hash, badr, s) == 0, "bad r rejected")
+    let bads = _flip(s)
+    assert(ecdsa_p384_verify(pubx, puby, hash, r, bads) == 0, "bad s rejected")
+    let badx = _flip(pubx)
+    assert(ecdsa_p384_verify(badx, puby, hash, r, s) == 0, "bad pubkey rejected")
+    let zero = hx("000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+    assert(ecdsa_p384_verify(pubx, puby, hash, zero, s) == 0, "r=0 rejected")
+    assert(ecdsa_p384_verify(pubx, puby, hash, r, zero) == 0, "s=0 rejected")
+
+    // 4. 长度守卫（返回 0 而不是崩溃）
+    assert(p384_on_curve("short", puby) == 0, "short pubx")
+    assert(p384_on_curve(pubx, "short") == 0, "short puby")
+
+    print("p384 ok")
+}
+
+// 翻转最后一个字节的最低 nibble
+fn _flip(b: str) -> str {
+    let n = len(b)
+    let last = b[n - 1]
+    let mut nb = last ^ 1
+    return substr(b, 0, n - 1) + chr(nb)
+}

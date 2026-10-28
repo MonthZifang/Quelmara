@@ -1077,6 +1077,9 @@ def main():
     case_selfcheck("t158_chunk", "tests/t158_chunk.qma")
     # 内置 TLS 根证书库（v2.97）：两条真实公网链验到表内锚 + 篡改负向
     case_selfcheck("t159_roots", "tests/t159_roots.qma")
+    # ECDSA P-384（v2.99）：自洽向量 + 真实 P-384 链（P-256 密钥配 SHA-384 摘要）
+    case_selfcheck("t160_p384", "tests/t160_p384.qma")
+    case_selfcheck("t161_p384chain", "tests/t161_p384chain.qma")
 
     print("== [3i2] FFI：@ffi 调用系统库（v1.87） ==")
     test_ffi()

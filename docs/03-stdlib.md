@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-65 个模块，**543 个公开函数**（另有 519 个内部函数）
+66 个模块，**550 个公开函数**（另有 570 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -50,17 +50,18 @@
 | `std/net/reactor` | 高并发 reactor：IOCP 事件循环（Quelmara 实现，仅 Windows PE） | 2 / 22 |
 | `std/net/udp` | UDP 封装与地址解析 | 1 / 3 |
 | `std/p256` | NIST P-256 域运算 + ECDSA 验签（TLS 证书签名） | 2 / 45 |
+| `std/p384` | NIST P-384（secp384r1）ECDSA 验签（12 limb Montgomery + Jacobian，SHA-384 摘要；v2.99） | 2 / 47 |
 | `std/path` | 路径处理（join / clean / dir / base / ext / stem；'/' 与 '\' 都认） | 7 / 9 |
 | `std/rand` | xorshift64* 伪随机 | 4 / 5 |
 | `std/regex` | 正则引擎（回溯 VM）：字面/./字符类/转义类/量词 *+?{n,m}/交替/分组(?:)/锚点 ^$；compile+match/full/exec/find/replace[_all]，步数上限防病态回溯 | 7 / 24 |
 | `std/router` | 路径模板匹配（/users/:id、尾部 * 通配、query/尾斜杠归一化、方法白名单） | 11 / 14 |
-| `std/rsa` | RSA PKCS#1 v1.5 / PSS 验签（SHA-256，证书链与 TLS 用） | 2 / 12 |
+| `std/rsa` | RSA PKCS#1 v1.5 / PSS 验签（SHA-256，证书链与 TLS 用） | 3 / 14 |
 | `std/serialize` | LEB128 varint / 定长整数 / 长度前缀帧 | 0 / 10 |
 | `std/session` | 内存会话存储（sid 生成 / TTL 惰性过期 / 滑动续期 / 墓碑销毁） | 8 / 9 |
 | `std/set` | 集合 set[int] / set[str]（map 支撑，含交并差） | 14 / 17 |
 | `std/sha1` | SHA-1 | 1 / 5 |
 | `std/sha256` | SHA-256 + HMAC-SHA256 | 4 / 13 |
-| `std/sha512` | SHA-512 / SHA-384（变体 IV 复用压缩函数）+ HMAC-SHA512 | 5 / 11 |
+| `std/sha512` | SHA-512 / SHA-384（变体 IV 复用压缩函数）+ HMAC-SHA512 | 6 / 12 |
 | `std/sort` | 快速排序与有序性检查 | 2 / 5 |
 | `std/sse` | Server-Sent Events 服务端 | 0 / 20 |
 | `std/staticfile` | 静态文件服务的安全解析层（URL 解码 / 目录穿越防护 / index 补全 / Cache-Control / ETag / Range 解析） | 9 / 14 |
@@ -76,7 +77,7 @@
 | `std/uuid` | UUID v4 生成 + nil + 校验/版本/变体位（随机源为 std/rand，非密码学） | 5 / 9 |
 | `std/ws` | WebSocket 服务端（RFC 6455） | 0 / 24 |
 | `std/x25519` | Curve25519 上的 X25519 密钥交换（RFC 7748，TLS ECDHE 地基） | 3 / 21 |
-| `std/x509` | X.509 解析 + P-256 验签 + 证书链/有效期/域名校验 | 16 / 34 |
+| `std/x509` | X.509 解析 + P-256 验签 + 证书链/有效期/域名校验 | 19 / 42 |
 | `std/x509roots` | 内置 TLS 根证书库（12 个主流根 + 按 DN 配锚 + 一键验证到表内锚；v2.97） | 6 / 7 |
 <!-- overview:end -->
 
@@ -1198,6 +1199,18 @@ fn p256_on_curve(pub_x: str, pub_y: str) -> int
 fn ecdsa_p256_verify(pub_x: str, pub_y: str, hash: str, r_sig: str, s_sig: str) -> int
 ```
 
+### `std/p384.qma`
+
+NIST P-384（secp384r1）ECDSA 验签（12 limb Montgomery + Jacobian，SHA-384 摘要；v2.99）
+
+```quelmara
+/// 公钥是否在曲线上：y^2 == x^3 - 3x + b。pub_x/pub_y 各 48 字节大端。
+fn p384_on_curve(pub_x: str, pub_y: str) -> int
+/// ECDSA P-384 验签：pub_x/pub_y/r/s 各 48 字节大端，hash 为 48 字节 SHA-384 摘要。
+/// 返回 1 = 有效，0 = 无效。参数长度不对是调用方 bug（assert，同 p256 口径）。
+fn ecdsa_p384_verify(pub_x: str, pub_y: str, hash: str, r_sig: str, s_sig: str) -> int
+```
+
 ### `std/path.qma`
 
 路径处理（join / clean / dir / base / ext / stem；'/' 与 '\' 都认）
@@ -1299,6 +1312,11 @@ RSA PKCS#1 v1.5 / PSS 验签（SHA-256，证书链与 TLS 用）
 /// n：模数（大端、无前导 0）；e：指数；sig：签名字节；hash：32 字节摘要。
 /// 返回 1 = 有效，0 = 无效。
 fn rsa_verify_pkcs1_sha256(n: str, e: int, sig: str, hash: str) -> int
+/// PKCS#1 v1.5 + SHA-384 验签（v2.99）。
+/// 为什么需要：Amazon Root CA 1 的自签、microsoft.com 全链、大量企业 CA
+/// 都用 sha384WithRSAEncryption——只有 SHA-256 时这些根验不了自签、
+/// 这些链验不过。hash 是 48 字节摘要。
+fn rsa_verify_pkcs1_sha384(n: str, e: int, sig: str, hash: str) -> int
 /// RSASSA-PSS + SHA-256 验签（TLS 1.3 CertificateVerify 用，0x0804）
 fn rsa_verify_pss_sha256(n: str, e: int, sig: str, hash: str, salt_len: int) -> int
 ```
@@ -1407,6 +1425,10 @@ SHA-512 / SHA-384（变体 IV 复用压缩函数）+ HMAC-SHA512
 fn sha512_str(s: str) -> int
 /// SHA-512 十六进制（128 位小写）
 fn sha512_hex(s: str) -> str
+/// SHA-384 原始摘要（48 字节，mem_alloc 分配，调用方 mem_free(dig, 48)）。
+/// v2.99 起提供：ECDSA P-384 验签要的是**字节**而不是十六进制串
+/// （sha384_hex 只给串，从串转回字节是绕路且会掩盖长度口径）。
+fn sha384_str(s: str) -> int
 /// SHA-384（FIPS 180-4 变体：不同的 IV，输出截断到前 48 字节）
 fn sha384_hex(s: str) -> str
 /// HMAC-SHA512 摘要缓冲区（64 字节；用完 mem_free(d, 64)）
@@ -1806,6 +1828,15 @@ fn x509_sig_alg_oid(cert: str) -> str
 fn x509_curve_oid(cert: str) -> str
 /// P-256 公钥：返回 64 字节 X||Y；非 P-256 或格式不对返回 ""
 fn x509_pubkey(cert: str) -> str
+/// P-384 公钥：返回 96 字节 X||Y；非 P-384 或格式不对返回 ""。
+/// secp384r1 的 OID 是 1.3.132.0.34（v2.99：Let's Encrypt 现役链、
+/// Google Trust Services、Sectigo E 系列都用它）。
+fn x509_pubkey384(cert: str) -> str
+/// 签名值：返回 96 字节 r||s（各左补到 48 字节，P-384 用）；格式不对返回 ""。
+/// 与 x509_sig 的区别只是宽度——DER 里的 INTEGER 长度本来就是变长的。
+fn x509_sig384(cert: str) -> str
+/// P-384 证书自验证（自签根）
+fn x509_verify_self_p384(cert: str) -> int
 /// 签名值：返回 64 字节 r||s（各左补到 32 字节）；格式不对返回 ""
 fn x509_sig(cert: str) -> str
 /// 用证书自己的公钥验证它自己的签名（根证书 / 自签测试）。

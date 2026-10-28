@@ -1,0 +1,598 @@
+// std/p384.qma —— NIST P-384（secp384r1）ECDSA 验签 —— v2.99
+//
+// 为什么需要它：v2.97 建好根证书库后做五站点普查，暴露了覆盖面的真相——
+// pypi.org / apple.com 是 RSA-SHA256（能验），但 Let's Encrypt 现役链
+// （YE2 -> Root YE -> ISRG X2）、Google Trust Services（WE1 -> GTS R4）、
+// Sectigo E 系列**每一环都是 ecdsa-with-SHA384 / P-384**。12 个内置根里
+// 7 个的自我签名也是它。没有 P-384，这些链整体不可用。
+//
+// 表示：12×32 位 limb（小端），结构照抄 std/p256——同一套 Montgomery SOS、
+// 同一套 Jacobian 点公式，只把 8 limb 扩到 12、模数换成 P-384 的。
+// 刻意**不**把 p256 泛化成带参数的通用曲线实现：两份直白的手写常量表比一份
+// 带分支的元实现更容易逐行核对，且 p256 已在生产路径上验证了一年多。
+//
+//   p = 2^384 - 2^128 - 2^96 + 2^32 - 1
+//   n = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF
+//       581A0DB248B0A77AECEC196ACCC52973
+//
+// 点表示：扁平 vec[int]（36 limb）：X=0..11，Y=12..23，Z=24..35（Jacobian）。
+//
+// 边界：只做验签（不做签名/密钥生成）；只支持 SHA-384 摘要；未压缩点。
+
+// ---------------------------------------------------------------------------
+// 常量
+// ---------------------------------------------------------------------------
+
+const P384_NL = 12
+const P384_N0INV = 0x00000001              // -p^-1 mod 2^32
+const P384_N0INV_N = 0xE88FDC45            // -n^-1 mod 2^32
+
+fn _q_limb_p(i: int) -> int {
+    if i == 0 { return 0xFFFFFFFF }
+    if i == 1 { return 0x00000000 }
+    if i == 2 { return 0x00000000 }
+    if i == 3 { return 0xFFFFFFFF }
+    if i == 4 { return 0xFFFFFFFE }
+    if i == 5 { return 0xFFFFFFFF }
+    if i == 6 { return 0xFFFFFFFF }
+    if i == 7 { return 0xFFFFFFFF }
+    if i == 8 { return 0xFFFFFFFF }
+    if i == 9 { return 0xFFFFFFFF }
+    if i == 10 { return 0xFFFFFFFF }
+    if i == 11 { return 0xFFFFFFFF }
+    return 0
+}
+
+fn _q_limb_n(i: int) -> int {
+    if i == 0 { return 0xCCC52973 }
+    if i == 1 { return 0xECEC196A }
+    if i == 2 { return 0x48B0A77A }
+    if i == 3 { return 0x581A0DB2 }
+    if i == 4 { return 0xF4372DDF }
+    if i == 5 { return 0xC7634D81 }
+    if i == 6 { return 0xFFFFFFFF }
+    if i == 7 { return 0xFFFFFFFF }
+    if i == 8 { return 0xFFFFFFFF }
+    if i == 9 { return 0xFFFFFFFF }
+    if i == 10 { return 0xFFFFFFFF }
+    if i == 11 { return 0xFFFFFFFF }
+    return 0
+}
+
+fn _q_limb_b(i: int) -> int {
+    if i == 0 { return 0xD3EC2AEF }
+    if i == 1 { return 0x2A85C8ED }
+    if i == 2 { return 0x8A2ED19D }
+    if i == 3 { return 0xC656398D }
+    if i == 4 { return 0x5013875A }
+    if i == 5 { return 0x0314088F }
+    if i == 6 { return 0xFE814112 }
+    if i == 7 { return 0x181D9C6E }
+    if i == 8 { return 0xE3F82D19 }
+    if i == 9 { return 0x988E056B }
+    if i == 10 { return 0xE23EE7E4 }
+    if i == 11 { return 0xB3312FA7 }
+    return 0
+}
+
+fn _q_limb_gx(i: int) -> int {
+    if i == 0 { return 0x72760AB7 }
+    if i == 1 { return 0x3A545E38 }
+    if i == 2 { return 0xBF55296C }
+    if i == 3 { return 0x5502F25D }
+    if i == 4 { return 0x82542A38 }
+    if i == 5 { return 0x59F741E0 }
+    if i == 6 { return 0x8BA79B98 }
+    if i == 7 { return 0x6E1D3B62 }
+    if i == 8 { return 0xF320AD74 }
+    if i == 9 { return 0x8EB1C71E }
+    if i == 10 { return 0xBE8B0537 }
+    if i == 11 { return 0xAA87CA22 }
+    return 0
+}
+
+fn _q_limb_gy(i: int) -> int {
+    if i == 0 { return 0x90EA0E5F }
+    if i == 1 { return 0x7A431D7C }
+    if i == 2 { return 0x1D7E819D }
+    if i == 3 { return 0x0A60B1CE }
+    if i == 4 { return 0xB5F0B8C0 }
+    if i == 5 { return 0xE9DA3113 }
+    if i == 6 { return 0x289A147C }
+    if i == 7 { return 0xF8F41DBD }
+    if i == 8 { return 0x9292DC29 }
+    if i == 9 { return 0x5D9E98BF }
+    if i == 10 { return 0x96262C6F }
+    if i == 11 { return 0x3617DE4A }
+    return 0
+}
+
+fn _q_limb_r2(i: int) -> int {
+    if i == 0 { return 0x00000001 }
+    if i == 1 { return 0xFFFFFFFE }
+    if i == 2 { return 0x00000000 }
+    if i == 3 { return 0x00000002 }
+    if i == 4 { return 0x00000000 }
+    if i == 5 { return 0xFFFFFFFE }
+    if i == 6 { return 0x00000000 }
+    if i == 7 { return 0x00000002 }
+    if i == 8 { return 0x00000001 }
+    if i == 9 { return 0x00000000 }
+    if i == 10 { return 0x00000000 }
+    if i == 11 { return 0x00000000 }
+    return 0
+}
+
+fn _q_limb_r2n(i: int) -> int {
+    if i == 0 { return 0x19B409A9 }
+    if i == 1 { return 0x2D319B24 }
+    if i == 2 { return 0xDF1AA419 }
+    if i == 3 { return 0xFF3D81E5 }
+    if i == 4 { return 0xFCB82947 }
+    if i == 5 { return 0xBC3E483A }
+    if i == 6 { return 0x4AAB1CC5 }
+    if i == 7 { return 0xD40D4917 }
+    if i == 8 { return 0x28266895 }
+    if i == 9 { return 0x3FB05B7A }
+    if i == 10 { return 0x2B39BF21 }
+    if i == 11 { return 0x0C84EE01 }
+    return 0
+}
+
+fn _q_vec(tbl: int) -> vec[int] {
+    let v = _q_zeros(P384_NL)
+    let mut i = 0
+    while i < P384_NL {
+        let mut x = 0
+        if tbl == 0 { x = _q_limb_p(i) }
+        if tbl == 1 { x = _q_limb_n(i) }
+        if tbl == 2 { x = _q_limb_b(i) }
+        if tbl == 3 { x = _q_limb_gx(i) }
+        if tbl == 4 { x = _q_limb_gy(i) }
+        if tbl == 5 { x = _q_limb_r2(i) }
+        if tbl == 6 { x = _q_limb_r2n(i) }
+        v.set(i, x)
+        i = i + 1
+    }
+    return v
+}
+
+fn _q_vec_p() -> vec[int] { return _q_vec(0) }
+fn _q_vec_n() -> vec[int] { return _q_vec(1) }
+fn _q_vec_b() -> vec[int] { return _q_vec(2) }
+fn _q_vec_gx() -> vec[int] { return _q_vec(3) }
+fn _q_vec_gy() -> vec[int] { return _q_vec(4) }
+
+fn _q_zeros(n: int) -> vec[int] {
+    let v = vec[int].new(n)
+    let mut i = 0
+    while i < n {
+        v.push(0)
+        i = i + 1
+    }
+    return v
+}
+
+fn _q_copy(a: vec[int]) -> vec[int] {
+    let r = _q_zeros(P384_NL)
+    let mut i = 0
+    while i < P384_NL {
+        r.set(i, a.get(i))
+        i = i + 1
+    }
+    return r
+}
+
+fn _q_is_zero(a: vec[int]) -> int {
+    let mut i = 0
+    while i < P384_NL {
+        if a.get(i) != 0 { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+fn _q_cmp(a: vec[int], b: vec[int]) -> int {
+    let mut i = P384_NL - 1
+    while i >= 0 {
+        if a.get(i) > b.get(i) { return 1 }
+        if a.get(i) < b.get(i) { return -1 }
+        i = i - 1
+    }
+    return 0
+}
+
+fn _q_mac(t: vec[int], a: vec[int], bi: int, start: int) -> int {
+    let mut carry = 0
+    let mut j = 0
+    while j < P384_NL {
+        let prod = a.get(j) * bi
+        let lo = prod & 0xFFFFFFFF
+        let hi = (prod >>> 32) & 0xFFFFFFFF
+        let idx = start + j
+        let s1 = t.get(idx) + lo
+        let c1 = s1 >>> 32
+        let s2 = (s1 & 0xFFFFFFFF) + carry
+        let c2 = s2 >>> 32
+        t.set(idx, s2 & 0xFFFFFFFF)
+        carry = hi + c1 + c2
+        j = j + 1
+    }
+    return carry
+}
+
+fn _q_addcarry(t: vec[int], start: int, c0: int) {
+    let mut c = c0
+    let mut k = start
+    while c != 0 {
+        let s = t.get(k) + c
+        t.set(k, s & 0xFFFFFFFF)
+        c = s >>> 32
+        k = k + 1
+    }
+}
+
+fn _q_cond_sub(t: vec[int], start: int, m: vec[int]) {
+    let d = _q_zeros(P384_NL)
+    let mut borrow = 0
+    let mut j = 0
+    while j < P384_NL {
+        let mut x = t.get(start + j) - m.get(j) - borrow
+        if x < 0 {
+            x = x + 0x100000000
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        d.set(j, x)
+        j = j + 1
+    }
+    let hi = t.get(start + P384_NL) - borrow
+    if hi < 0 {
+        return
+    }
+    j = 0
+    while j < P384_NL {
+        t.set(start + j, d.get(j))
+        j = j + 1
+    }
+    t.set(start + P384_NL, hi)
+}
+
+fn _q_mont(a: vec[int], b: vec[int], m: vec[int], n0inv: int) -> vec[int] {
+    let t = _q_zeros(2 * P384_NL + 2)
+    let mut i = 0
+    while i < P384_NL {
+        let c = _q_mac(t, a, b.get(i), i)
+        _q_addcarry(t, i + P384_NL, c)
+        i = i + 1
+    }
+    i = 0
+    while i < P384_NL {
+        let mm = (t.get(i) * n0inv) & 0xFFFFFFFF
+        if mm != 0 {
+            let c = _q_mac(t, m, mm, i)
+            _q_addcarry(t, i + P384_NL, c)
+        }
+        i = i + 1
+    }
+    _q_cond_sub(t, P384_NL, m)
+    let r = _q_zeros(P384_NL)
+    i = 0
+    while i < P384_NL {
+        r.set(i, t.get(P384_NL + i))
+        i = i + 1
+    }
+    return r
+}
+
+fn _q_add(a: vec[int], b: vec[int], m: vec[int]) -> vec[int] {
+    let t = _q_zeros(P384_NL + 1)
+    let mut carry = 0
+    let mut i = 0
+    while i < P384_NL {
+        let s = a.get(i) + b.get(i) + carry
+        t.set(i, s & 0xFFFFFFFF)
+        carry = s >>> 32
+        i = i + 1
+    }
+    t.set(P384_NL, carry)
+    _q_cond_sub(t, 0, m)
+    let r = _q_zeros(P384_NL)
+    i = 0
+    while i < P384_NL {
+        r.set(i, t.get(i))
+        i = i + 1
+    }
+    return r
+}
+
+fn _q_sub(a: vec[int], b: vec[int], m: vec[int]) -> vec[int] {
+    let r = _q_zeros(P384_NL)
+    let mut borrow = 0
+    let mut i = 0
+    while i < P384_NL {
+        let mut x = a.get(i) - b.get(i) - borrow
+        if x < 0 {
+            x = x + 0x100000000
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        r.set(i, x)
+        i = i + 1
+    }
+    if borrow == 1 {
+        let mut carry = 0
+        i = 0
+        while i < P384_NL {
+            let s = r.get(i) + m.get(i) + carry
+            r.set(i, s & 0xFFFFFFFF)
+            carry = s >>> 32
+            i = i + 1
+        }
+    }
+    return r
+}
+
+fn _q_mul2(a: vec[int], m: vec[int]) -> vec[int] { return _q_add(a, a, m) }
+fn _q_mul4(a: vec[int], m: vec[int]) -> vec[int] { return _q_mul2(_q_mul2(a, m), m) }
+fn _q_mul8(a: vec[int], m: vec[int]) -> vec[int] { return _q_mul2(_q_mul4(a, m), m) }
+fn _q_mul3(a: vec[int], m: vec[int]) -> vec[int] { return _q_add(_q_mul2(a, m), a, m) }
+
+fn _q_one_raw() -> vec[int] {
+    let v = _q_zeros(P384_NL)
+    v.set(0, 1)
+    return v
+}
+
+fn _q_to_mont(x: vec[int], is_n: int, m: vec[int], n0inv: int) -> vec[int] {
+    let mut r2 = _q_vec(5)
+    if is_n == 1 { r2 = _q_vec(6) }
+    return _q_mont(x, r2, m, n0inv)
+}
+
+fn _q_from_mont(x: vec[int], m: vec[int], n0inv: int) -> vec[int] {
+    return _q_mont(x, _q_one_raw(), m, n0inv)
+}
+
+fn _q_inv(a: vec[int], is_n: int, m: vec[int], n0inv: int) -> vec[int] {
+    let e = _q_copy(m)
+    let mut d0 = e.get(0) - 2
+    if d0 < 0 {
+        d0 = d0 + 0x100000000
+        let mut k = 1
+        let mut borrow = 1
+        while borrow == 1 && k < P384_NL {
+            let mut x = e.get(k) - borrow
+            if x < 0 {
+                x = x + 0x100000000
+                borrow = 1
+            } else {
+                borrow = 0
+            }
+            e.set(k, x)
+            k = k + 1
+        }
+    }
+    e.set(0, d0)
+    let mut r = _q_to_mont(_q_one_raw(), is_n, m, n0inv)
+    let mut t = 383
+    while t >= 0 {
+        r = _q_mont(r, r, m, n0inv)
+        if ((e.get(t >> 5) >> (t & 31)) & 1) == 1 {
+            r = _q_mont(r, a, m, n0inv)
+        }
+        t = t - 1
+    }
+    return r
+}
+
+// 48 字节大端 <-> limb
+fn _q_from_bytes(s: str) -> vec[int] {
+    let r = _q_zeros(P384_NL)
+    let mut i = 0
+    while i < P384_NL {
+        let base = 44 - i * 4
+        let mut v = 0
+        let mut j = 0
+        while j < 4 {
+            v = (v << 8) | s[base + j]
+            j = j + 1
+        }
+        r.set(i, v)
+        i = i + 1
+    }
+    return r
+}
+
+fn _q_to_bytes(a: vec[int]) -> str {
+    let out = vec[int].new(49)
+    let mut i = P384_NL - 1
+    while i >= 0 {
+        let v = a.get(i)
+        out.push((v >>> 24) & 0xFF)
+        out.push((v >>> 16) & 0xFF)
+        out.push((v >>> 8) & 0xFF)
+        out.push(v & 0xFF)
+        i = i - 1
+    }
+    return str_from_bytes(out)
+}
+
+// ---------------------------------------------------------------------------
+// 曲线点（扁平 36 limb：X 0..11, Y 12..23, Z 24..35）
+// ---------------------------------------------------------------------------
+
+fn _q_pt_new() -> vec[int] { return _q_zeros(3 * P384_NL) }
+fn _q_pt_inf() -> vec[int] { return _q_zeros(3 * P384_NL) }
+
+fn _q_pt_get(p: vec[int], off: int) -> vec[int] {
+    let r = _q_zeros(P384_NL)
+    let mut i = 0
+    while i < P384_NL {
+        r.set(i, p.get(off + i))
+        i = i + 1
+    }
+    return r
+}
+
+fn _q_pt_x(p: vec[int]) -> vec[int] { return _q_pt_get(p, 0) }
+fn _q_pt_y(p: vec[int]) -> vec[int] { return _q_pt_get(p, P384_NL) }
+fn _q_pt_z(p: vec[int]) -> vec[int] { return _q_pt_get(p, 2 * P384_NL) }
+
+fn _q_pt_set(p: vec[int], off: int, v: vec[int]) {
+    let mut i = 0
+    while i < P384_NL {
+        p.set(off + i, v.get(i))
+        i = i + 1
+    }
+}
+
+fn _q_pt_is_inf(p: vec[int]) -> int {
+    return _q_is_zero(_q_pt_z(p))
+}
+
+fn _q_double(p: vec[int], m: vec[int], n0inv: int) -> vec[int] {
+    if _q_pt_is_inf(p) == 1 { return _q_pt_inf() }
+    let x = _q_pt_x(p)
+    let y = _q_pt_y(p)
+    let z = _q_pt_z(p)
+    if _q_is_zero(y) == 1 { return _q_pt_inf() }
+    let delta = _q_mont(z, z, m, n0inv)
+    let gamma = _q_mont(y, y, m, n0inv)
+    let beta = _q_mont(x, gamma, m, n0inv)
+    let alpha = _q_mul3(_q_mont(_q_sub(x, delta, m), _q_add(x, delta, m), m, n0inv), m)
+    let x3 = _q_sub(_q_mont(alpha, alpha, m, n0inv), _q_mul8(beta, m), m)
+    let z3 = _q_sub(_q_sub(_q_mont(_q_add(y, z, m), _q_add(y, z, m), m, n0inv), gamma, m), delta, m)
+    let y3 = _q_sub(_q_mont(alpha, _q_sub(_q_mul4(beta, m), x3, m), m, n0inv),
+                    _q_mul8(_q_mont(gamma, gamma, m, n0inv), m), m)
+    let r = _q_pt_new()
+    _q_pt_set(r, 0, x3)
+    _q_pt_set(r, P384_NL, y3)
+    _q_pt_set(r, 2 * P384_NL, z3)
+    return r
+}
+
+fn _q_add_pt(p: vec[int], q: vec[int], m: vec[int], n0inv: int) -> vec[int] {
+    if _q_pt_is_inf(p) == 1 { return _q_copy_pt(q) }
+    if _q_pt_is_inf(q) == 1 { return _q_copy_pt(p) }
+    let x1 = _q_pt_x(p)
+    let y1 = _q_pt_y(p)
+    let z1 = _q_pt_z(p)
+    let x2 = _q_pt_x(q)
+    let y2 = _q_pt_y(q)
+    let z2 = _q_pt_z(q)
+    let z1z1 = _q_mont(z1, z1, m, n0inv)
+    let z2z2 = _q_mont(z2, z2, m, n0inv)
+    let u1 = _q_mont(x1, z2z2, m, n0inv)
+    let u2 = _q_mont(x2, z1z1, m, n0inv)
+    let s1 = _q_mont(y1, _q_mont(z2, z2z2, m, n0inv), m, n0inv)
+    let s2 = _q_mont(y2, _q_mont(z1, z1z1, m, n0inv), m, n0inv)
+    if _q_cmp(u1, u2) == 0 {
+        if _q_cmp(s1, s2) == 0 { return _q_double(p, m, n0inv) }
+        return _q_pt_inf()
+    }
+    let h = _q_sub(u2, u1, m)
+    let i2 = _q_mul2(h, m)
+    let i = _q_mont(i2, i2, m, n0inv)
+    let j = _q_mont(h, i, m, n0inv)
+    let r = _q_mul2(_q_sub(s2, s1, m), m)
+    let v = _q_mont(u1, i, m, n0inv)
+    let x3 = _q_sub(_q_sub(_q_mont(r, r, m, n0inv), j, m), _q_mul2(v, m), m)
+    let y3 = _q_sub(_q_mont(r, _q_sub(v, x3, m), m, n0inv), _q_mul2(_q_mont(s1, j, m, n0inv), m), m)
+    let z3 = _q_mont(_q_sub(_q_sub(_q_mont(_q_add(z1, z2, m), _q_add(z1, z2, m), m, n0inv),
+                                   z1z1, m), z2z2, m), h, m, n0inv)
+    let out = _q_pt_new()
+    _q_pt_set(out, 0, x3)
+    _q_pt_set(out, P384_NL, y3)
+    _q_pt_set(out, 2 * P384_NL, z3)
+    return out
+}
+
+fn _q_copy_pt(p: vec[int]) -> vec[int] {
+    let r = _q_pt_new()
+    let mut i = 0
+    while i < 3 * P384_NL {
+        r.set(i, p.get(i))
+        i = i + 1
+    }
+    return r
+}
+
+fn _q_mul_pt(p: vec[int], k: vec[int], m: vec[int], n0inv: int) -> vec[int] {
+    let mut r = _q_pt_inf()
+    let mut t = 383
+    while t >= 0 {
+        r = _q_double(r, m, n0inv)
+        if ((k.get(t >> 5) >> (t & 31)) & 1) == 1 {
+            r = _q_add_pt(r, p, m, n0inv)
+        }
+        t = t - 1
+    }
+    return r
+}
+
+// ---------------------------------------------------------------------------
+// 公开 API
+// ---------------------------------------------------------------------------
+
+/// 公钥是否在曲线上：y^2 == x^3 - 3x + b。pub_x/pub_y 各 48 字节大端。
+pub fn p384_on_curve(pub_x: str, pub_y: str) -> int {
+    if len(pub_x) != 48 || len(pub_y) != 48 {
+        return 0
+    }
+    let m = _q_vec_p()
+    let x = _q_to_mont(_q_from_bytes(pub_x), 0, m, P384_N0INV)
+    let y = _q_to_mont(_q_from_bytes(pub_y), 0, m, P384_N0INV)
+    let b = _q_to_mont(_q_vec_b(), 0, m, P384_N0INV)
+    let lhs = _q_mont(y, y, m, P384_N0INV)
+    let x3 = _q_mont(_q_mont(x, x, m, P384_N0INV), x, m, P384_N0INV)
+    let rhs = _q_add(_q_sub(x3, _q_mul3(x, m), m), b, m)
+    if _q_cmp(lhs, rhs) == 0 { return 1 }
+    return 0
+}
+
+/// ECDSA P-384 验签：pub_x/pub_y/r/s 各 48 字节大端，hash 为 48 字节 SHA-384 摘要。
+/// 返回 1 = 有效，0 = 无效。参数长度不对是调用方 bug（assert，同 p256 口径）。
+pub fn ecdsa_p384_verify(pub_x: str, pub_y: str, hash: str, r_sig: str, s_sig: str) -> int {
+    if len(pub_x) != 48 || len(pub_y) != 48 || len(hash) != 48 ||
+       len(r_sig) != 48 || len(s_sig) != 48 {
+        assert(false, "ecdsa_p384_verify: 参数必须都是 48 字节")
+    }
+    let m = _q_vec_p()
+    let mn = _q_vec_n()
+    let r_raw = _q_from_bytes(r_sig)
+    let s_raw = _q_from_bytes(s_sig)
+    if _q_is_zero(r_raw) == 1 || _q_is_zero(s_raw) == 1 { return 0 }
+    if _q_cmp(r_raw, mn) >= 0 || _q_cmp(s_raw, mn) >= 0 { return 0 }
+    if p384_on_curve(pub_x, pub_y) == 0 { return 0 }
+    let qx = _q_to_mont(_q_from_bytes(pub_x), 0, m, P384_N0INV)
+    let qy = _q_to_mont(_q_from_bytes(pub_y), 0, m, P384_N0INV)
+    let s_m = _q_to_mont(s_raw, 1, mn, P384_N0INV_N)
+    let w = _q_inv(s_m, 1, mn, P384_N0INV_N)
+    let e_m = _q_to_mont(_q_from_bytes(hash), 1, mn, P384_N0INV_N)
+    let r_m = _q_to_mont(r_raw, 1, mn, P384_N0INV_N)
+    let u1 = _q_from_mont(_q_mont(e_m, w, mn, P384_N0INV_N), mn, P384_N0INV_N)
+    let u2 = _q_from_mont(_q_mont(r_m, w, mn, P384_N0INV_N), mn, P384_N0INV_N)
+    let g = _q_pt_new()
+    _q_pt_set(g, 0, _q_to_mont(_q_vec_gx(), 0, m, P384_N0INV))
+    _q_pt_set(g, P384_NL, _q_to_mont(_q_vec_gy(), 0, m, P384_N0INV))
+    _q_pt_set(g, 2 * P384_NL, _q_to_mont(_q_one_raw(), 0, m, P384_N0INV))
+    let q = _q_pt_new()
+    _q_pt_set(q, 0, qx)
+    _q_pt_set(q, P384_NL, qy)
+    _q_pt_set(q, 2 * P384_NL, _q_to_mont(_q_one_raw(), 0, m, P384_N0INV))
+    let p1 = _q_mul_pt(g, u1, m, P384_N0INV)
+    let p2 = _q_mul_pt(q, u2, m, P384_N0INV)
+    let rr = _q_add_pt(p1, p2, m, P384_N0INV)
+    if _q_pt_is_inf(rr) == 1 { return 0 }
+    let z2 = _q_mont(_q_pt_z(rr), _q_pt_z(rr), m, P384_N0INV)
+    let z2i = _q_inv(z2, 0, m, P384_N0INV)
+    let xa = _q_from_mont(_q_mont(_q_pt_x(rr), z2i, m, P384_N0INV), m, P384_N0INV)
+    let mut xm = _q_copy(xa)
+    if _q_cmp(xm, mn) >= 0 { xm = _q_sub(xm, mn, mn) }
+    if _q_cmp(xm, r_raw) == 0 { return 1 }
+    return 0
+}
+
