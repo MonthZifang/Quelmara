@@ -6036,7 +6036,14 @@ class Lower:
                 pid = fn.new_v()
                 fn.emit("syscall", pid, self.sc["clone"], [("imm", CLONE_FLAGS), top, ("imm", 0),
                                              ("imm", 0), ("imm", 0), ("imm", 0)])
-                fn.emit("store", ("ga", pid_gid), ("imm", t), pid)
+                # v2.98：**pid 的登记必须在父子分流之后、只在父路径上**。
+                # clone 返回后父子从同一条指令流继续跑——分流前的任何 store
+                # 子线程也会执行一份，而它的 pid 是 0。CLONE_VM 下 pid_gid 是
+                # 共享内存：子线程晚到的 `store pid_gid[t]=0` 会抹掉父写的真 pid。
+                # 之后 join 对该槽 wait4(0)（通配）收走的是**先退的那个别的 worker**，
+                # 轮到它自己的槽时已无人在等——归并读到一个还在跑的 worker 的
+                # out 槽（0），结果正好少一个分片。实测 parfor_sum 复现 ~2/60，
+                # 缺的值 = 恰好一个 chunk 的和；与内联阈值无关（th28 同复现率）。
                 l_child, l_after = fn.label("child"), fn.label("after")
                 fn.emit("jz", pid, l_child)
                 fn.emit("jmp", l_after)
@@ -6048,6 +6055,7 @@ class Lower:
                 fn.emit("syscall", None, self.sc["exit"], [("imm", 0), ("imm", 0), ("imm", 0),
                                               ("imm", 0), ("imm", 0), ("imm", 0)])
                 fn.emit("label", l_after)
+                fn.emit("store", ("ga", pid_gid), ("imm", t), pid)
             # join
             for t in range(T):
                 pidv = fn.new_v()
