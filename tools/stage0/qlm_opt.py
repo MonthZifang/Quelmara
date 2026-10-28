@@ -611,7 +611,13 @@ def _find_guard(fn, h, b):
     """
     ins = fn.instrs
     g1 = ins[h + 1] if h + 1 < b else None
-    if g1 is not None and g1[0] == "jcc" and len(g1) > 4 and not _is_imm(g1[3]):
+    # v2.93：**`hi` 是立即数也要认**。
+    # `while j < 200000` 直接降级成 `jcc l j, imm 200000` —— 这是最规整的循环
+    # 形状，但旧代码用 `not _is_imm(g1[3])` 把立即数上界**排除在外**，理由是
+    # "标志位位的 jcc 不带上界"。结果：字面量上界的循环反而拿不到上界证明，
+    # `v[j]` 的越界检查一条都消不掉（实测 /tmp/v7.qma 265 ms，去掉检查后 108 ms）。
+    # 立即数上界比 vreg 上界**更容易**证明，没有理由拒。
+    if g1 is not None and g1[0] == "jcc" and len(g1) > 4:
         return g1
     if h + 4 < b:
         g2 = ins[h + 4]
