@@ -426,10 +426,19 @@ def opt_strlen_hoist(fn, rounds=6):
 LICM_SAFE = {"mov", "neg", "not", "cmpset", "movaddr"}
 
 
-def _licm_safe(ins, readonly=False):
+def _licm_safe(ins, readonly=False, fn=None):
     if ins[0] in LICM_SAFE:
         return True
     if ins[0] == "load":
+        # v2.93：**内联副本里的 load 一律不外提**。
+        # 内联会重编号 vreg，使 LICM 的"base 在本循环没变"这一判断偶然成立，
+        # 把 load 提到不属于它的循环外 —— 实测让 tests/t22_map.qma 在
+        # 内联阈值 60 下 SIGSEGV。见 `_inline_one` 里 `load` 分支的长注释。
+        # 判定用调用方身上的 `inline_loads` 集合（(dst,base,off) 三元组），
+        # 不用指令元组的附加字段：那会被中间 pass 悄悄丢掉。
+        marks = getattr(fn, "inline_loads", None) if fn is not None else None
+        if marks and (ins[1], ins[2], ins[3]) in marks:
+            return False
         # v2.60：**纯读循环里的 load 也能外提**。
         # 这是 vec/str 的热路径大头：`a[i]` 内联成
         #   load len, h, 1 / cmpset+jz / load data, h, 0 / load d, data, i
@@ -479,7 +488,7 @@ def opt_licm(fn, rounds=3):
             hoist_offs = []
             for off in range(1, len(region) - 1):     # 跳过循环头标签与回边
                 ins = region[off]
-                if not _licm_safe(ins, readonly):
+                if not _licm_safe(ins, readonly, fn):
                     continue
                 d, u = vreg_mentions(ins)
                 if not d:

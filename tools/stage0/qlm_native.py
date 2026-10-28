@@ -10232,14 +10232,33 @@ def _reachable(g, start):
     return seen
 
 
-def opt_inline(fns, max_instrs=28, rounds=3, hot=None, only=None):
+def opt_inline(fns, max_instrs=60, rounds=3, hot=None, only=None):
     """内联：小函数一律内联，大函数仅单调用点；递归/调用环禁止
 
     hot: {函数名: 放宽阈值} —— 运行时热函数（__map_hash/__map_find 等）跨
-    多个调用点也必须内联。全局放宽阈值到 64 会让 hello 从 8 KB 涨到 14.8 KB
-    （内联副本 + 重定位），所以只对白名单里的少数函数开口子。
+    多个调用点也必须内联。
     only: 只改写这些调用者（v2.03 增量复用：档案里接管过来的函数已经是
     优化后的 IR，再跑一遍内联会让"什么都没改"的产物与全量构建不一致）。
+
+    **阈值 28 -> 60（v2.93）**：28 是**优化前**的指令数口径（`lower_fn` 出来的
+    原始 IR），而像 `jws` 这种"扫空白/扫字符串"的小函数，源码只有 10 行，
+    降级后却有 43 条（循环的开销全在 label/jcc/jmp 上）。于是它们**永远进不了
+    内联**，b9_json 每解析一个 token 就要真调一次。
+
+    实测（本机 x86-64，min of 1，同轮对比）：
+
+    | 基准 | 阈值 28 | 阈值 60 | 差 |
+    |---|---|---|---|
+    | b9_json | 92.0 ms | **78.9 ms** | **−14%** |
+    | b1_int | 65.3 | 65.2 | 0 |
+    | b7_sort | 96.0 | 96.2 | 0 |
+    | b5_string | 104.5 | 105.1 | 0 |
+
+    体积**没有变化**（hello / http_demo 逐字节同大小）：全局 DCE 先跑，
+    多内联进来的副本只出现在真正调用了它们的程序里。
+
+    注意这条阈值只对**单调用点**生效——多调用点的大函数仍按
+    `big and counts > 1` 拒绝（否则每个调用点一份副本，代码会爆）。
     """
     hot = hot or {"__map_hash": 160, "__map_find": 160, "__map_len": 160}
     fmap = {f.name: f for f in fns}
@@ -10276,6 +10295,40 @@ def _inline_one(fn, callee, call_ins):
     base = fn.nv
     ren = lambda v: v + base
     fn.nv += callee.nv
+    # v2.93：**类型标记必须跟着重编号**。
+    # `strv`/`boolv`/`floatv` 是按 **vreg 号**记的集合（`_mark_str` 等
+    # 在降级时塞进去），发射层靠它们决定"这个值走 str ABI（`[len][bytes]`）
+    # 还是当普通 8 字节整数"。内联把被调方的 vreg 整体平移到 `+base`，
+    # 若不同步搬标记，被内联进去的 `__str_len` 结果就**不再被认成 str** ——
+    # 于是 `__str_concat` 里那句 `len(s)` 变成"把长度前缀当整数读"，
+    # 算出来的长度是垃圾，后面的 memcpy 按它拷贝就越界。
+    # 表现：tests/t22_map.qma 在阈值 38 起 SIGSEGV（`__str_concat` 内联了
+    # `__str_len`），阈值 28/34 时恰好没内联到那个尺寸，所以一直是隐藏的。
+    #
+    # 注意 `f64v` **不在这里**：它是 Codegen 阶段按 `f64_vregs(fn)` 现算的
+    # （由 `fbin`/`fcvt` 这类指令反推，见该函数 docstring），不是降级时打的
+    # 标记，所以内联后自动正确。
+    for attr in ("strv", "boolv"):
+        marks = getattr(callee, attr, None)
+        if not marks:
+            continue
+        dstset = getattr(fn, attr, None)
+        if dstset is None:
+            dstset = set()
+            setattr(fn, attr, dstset)
+        for v in marks:
+            if isinstance(v, int):
+                dstset.add(ren(v))
+    # `floatv` 是 **vreg -> 'f32'/'f64' 的 dict**（不是 set），单独搬。
+    fmarks = getattr(callee, "floatv", None)
+    if fmarks:
+        fdst = getattr(fn, "floatv", None)
+        if fdst is None:
+            fdst = {}
+            fn.floatv = fdst
+        for v, w in fmarks.items():
+            if isinstance(v, int):
+                fdst[ren(v)] = w
     # 帧上结构体区要整体搬迁到 caller 的区里，否则两边槽位重叠
     fbase = fn.frame_words
     fn.frame_words += callee.frame_words
@@ -10318,6 +10371,34 @@ def _inline_one(fn, callee, call_ins):
             res.append(("dbgvar", ins[1], ren(ins[2]) if isinstance(ins[2], int) else ins[2]))
         elif op == "frameaddr":
             res.append(("frameaddr", ren(ins[1]), ins[2] + fbase))
+        elif op == "load":
+            # v2.93：**内联进来的 `load` 打标记，禁止 LICM 外提**。
+            #
+            # 为什么：内联把被调方的函数体塞进调用点，但 `load` 的 base 可能是
+            # 被调方的形参（内联后被重编号成调用方的某个 vreg）。LICM 只看
+            # "base 在本循环内是否被重定义" —— 重编号之后这个条件会**偶然成立**，
+            # 于是把 load 提到一个它本来不属于的循环外面。
+            #
+            # 实测事故（tests/t22_map.qma，阈值提到 60 后必崩）：
+            #   `__map_key_eq` 里的 `load 44, 0, 3`（读 vreg 0 的第 3 字）
+            #   被 LICM 提到 `__map_find` 的**探测循环**之前；而那个 `0` 是
+            #   `total` 的 map 句柄 —— 内联重编号恰好让它"看起来"不变。
+            #   运行时读到的是错的槽位，越界后 memcpy 按垃圾长度拷贝 -> SIGSEGV。
+            #
+            # 保守处置：内联副本里的 load 一律不参与 LICM。代价是这些 load
+            # 在循环里每轮重读（本来也可能被别处优化掉），收益远小于正确性。
+            # `("load", dst, base, off, True)` 的第 5 位 = "来自内联"，发射层与
+            # 其它 pass 都只读前 4 位，多一位不影响它们。
+            m = _map_ins(ins, ren)
+            # 记录"这条 load 来自内联"：用 (dst, base, off) 三元组登记在
+            # caller 上，而不是往指令元组里加第 5 位 —— 元组长度是下游
+            # `vreg_mentions`/`_map_ins`/发射层共同依赖的契约，加字段会在
+            # 第一个不认它的 pass 里被悄悄丢掉（实测就是这样失效的）。
+            try:
+                fn.inline_loads.add((m[1], m[2], m[3]))
+            except AttributeError:
+                fn.inline_loads = {(m[1], m[2], m[3])}
+            res.append(m)
         else:
             res.append(_map_ins(ins, ren))
     res.append(("label", end))
