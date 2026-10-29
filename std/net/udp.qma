@@ -6,7 +6,8 @@
 
 // udp_parse_ip("1.2.3.4") -> int：点分 IPv4 -> 网络序 u32
 // （a.b.c.d -> a | b<<8 | c<<16 | d<<24——网络字节序即大端存放）
-fn udp_parse_ip(ip: str) -> int {
+/// udp_parse_ip("1.2.3.4") -> int：点分 IPv4 -> 网络序 u32（非法返回 0）
+pub fn udp_parse_ip(ip: str) -> int {
     let n = len(ip)
     let mut v = 0
     let mut cur = 0
