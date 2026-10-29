@@ -115,6 +115,9 @@ jobs:
       - name: X.509 证书链 / 有效期 / 域名验证（三级链）
         run: python tests/x509_chain_test.py
 
+      - name: DNS 解析器差分（Python 独立拼/解报文对拍，v3.03）
+        run: python tests/dns_test.py
+
       - name: 包管理 qpm（确定性打包 / registry 发布 / 传递依赖 / 锁 / 编译链路）
         run: |
           python tests/qpm_semver_test.py
