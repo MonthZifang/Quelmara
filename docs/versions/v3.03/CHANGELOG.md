@@ -99,7 +99,7 @@ dns_resolve("")              -> （空串）
 |---|---|
 | `python tests/dns_test.py` | **PASS=31 FAIL=0** |
 | `dns_resolve("example.com")`（真实公网） | `104.20.23.154` |
-| `python tools/stage0/qlm_cli.py doc std --missing` | 见下 |
+| `python tools/stage0/qlm_cli.py doc std --missing` | PASS（67 模块 / 559 公开声明） |
 | `python tools/dev/check_docs.py` | PASS |
 
 ## 已知边界 / 遗留
