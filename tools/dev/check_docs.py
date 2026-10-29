@@ -92,7 +92,10 @@ def git_files():
                 rel = os.path.relpath(os.path.join(base, n), ROOT).replace(os.sep, "/")
                 if rel not in files:
                     files.append(rel)
-    return sorted(set(files))
+    # `.workbuddy/` 是 agent 的工作区数据（记忆 / 会话日志），不是项目文档：
+    # 00-convention 规定文档只放 `docs/`，而记忆文件里必然出现实测数字
+    # （那正是它存在的意义）。纳入扫描只会逼着记忆"不敢记数字"。
+    return sorted(p for p in set(files) if not p.startswith(".workbuddy/"))
 
 
 def read(rel):

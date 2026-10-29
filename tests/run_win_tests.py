@@ -19,6 +19,7 @@ Quelmara Windows PE/COFF 后端回归（自研，无 CRT）
 
 import os
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -188,6 +189,68 @@ def case_selfcheck(name, src):
     rc, stdout, stderr = r
     ok(f"{name} 自校验通过（assert 全过）") if rc == 0 \
         else bad(f"{name} 失败 rc={rc} stderr={stderr[-200:]!r}")
+
+
+def case_selfcheck_to(name, src, seconds):
+    """同 case_selfcheck，但给一个**短超时**。
+
+    网络用例自己有内部超时（半开连接、零窗口），正常情况下 3–7 s 结束；
+    真挂住时 600 s 的默认上限会把 CI 拖死，所以单独给一个上限。
+    """
+    out = os.path.join(ROOT, "build", f"win_{name}.exe")
+    build(os.path.join(ROOT, src), out)
+    r = run(out, timeout=seconds)
+    if r is None:
+        skip(f"{name}: 非 Windows 平台，跳过执行")
+        return
+    rc, stdout, stderr = r
+    ok(f"{name} 自校验通过（assert 全过）") if rc == 0 \
+        else bad(f"{name} 失败 rc={rc} stderr={stderr[-200:]!r}")
+
+
+def test_tcp_batch():
+    """TCP 批量收发与两端超时（v3.06–v3.10）。
+
+    这一段以前只在 `tests/run_native_tests.sh`（Linux/CI linux job）里跑，
+    Windows 主回归完全没覆盖 —— 而三个缺陷（O(n²) 堆爆、半开连接挂死、
+    零窗口挂死）都是**在 Windows 上**用探针挖出来的。夹具端口是
+    18073–18097，与 `http_router.qma`（8092）不冲突。
+    """
+    case_selfcheck_to("recv_batch", "tests/t163_recvbatch.qma", 120)
+    case_selfcheck_to("send_all", "tests/t164_sendall.qma", 120)
+    case_selfcheck_to("recv_to", "tests/t165_recvtimeout.qma", 120)
+    case_selfcheck_to("recv_bulk", "tests/t166_recvbulk.qma", 180)
+    case_selfcheck_to("send_to", "tests/t167_sendtimeout.qma", 120)
+
+
+def test_http_e2e():
+    """HTTP 端到端：路由 / 中间件 / chunked / gzip 协商（26 项断言）。
+
+    v3.11 才接进主回归。此前只在手工跑，于是 R10 用例的数据错误
+    （声明 7 字节实发 8）从 v2.95 红到 v3.09 都没人发现 —— 见 `07-gaps.md` §3。
+    端口占用记 SKIP 不记 FAIL：那说明环境里已有别的进程占了 8092，不是回归。
+    """
+    if not IS_WIN:
+        skip("http_router E2E：非 Windows 平台（服务端运行时仅 PE）")
+        return
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", 8092))
+    except OSError as e:
+        skip(f"http_router E2E：8092 已被占用（{e}），跳过")
+        return
+    finally:
+        probe.close()
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/http_router_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=300)
+    if r.returncode == 0 and "http_router ok" in r.stdout:
+        # 用脚本自己数出来的数（v3.11 起它不再打印手写常量）
+        line = [ln for ln in r.stdout.splitlines() if ln.startswith("http_router ok")]
+        ok(f"HTTP E2E：{line[-1] if line else 'ok'}")
+    else:
+        bad(f"HTTP E2E 失败 rc={r.returncode} {r.stdout[-400:]}{r.stderr[-300:]}")
 
 
 def test_log_streams():
@@ -1124,6 +1187,9 @@ def main():
     print("== [3j] 高并发网络：IOCP reactor + 回调（v1.4） ==")
     test_net_reactor()
 
+    print("== [3k] TCP 批量收发与两端超时（v3.06–v3.10） ==")
+    test_tcp_batch()
+
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])
     case_selfcheck("prime_parallel", "examples/prime_parallel.qma")
@@ -1169,6 +1235,9 @@ def main():
 
     print("== [10] 语言服务器（索引对拍 / 补全 / 跳转 / 重命名 / 协议） ==")
     test_lsp()
+
+    print("== [11] HTTP 端到端（路由 / 中间件 / chunked / gzip） ==")
+    test_http_e2e()
 
     print("-" * 52)
     print(f"PASS={PASS} FAIL={FAIL} SKIP={SKIP}")
