@@ -397,6 +397,15 @@ out=$(timeout 60 ./build/nat_recvbatch 2>&1); rc=$?
   && ok "TCP 批量收发：recv_all/recv_all_max/recv_exact 4 场景全过" \
   || bad "TCP 批量收发 rc=$rc [$out]"
 
+# v3.07：TCP 批量发送（send_all 短写循环 + str_ptr 零拷贝）。
+# 4 MB 负载是关键回归：第一版用 substr 切尾巴，O(n^2) 堆爆 512 MB 上限。
+$NAT build tests/t164_sendall.qma -o build/nat_sendall >/dev/null 2>&1 \
+  && ok "TCP 批量发送：native 编译通过" || bad "TCP 批量发送：native 编译失败"
+out=$(timeout 120 ./build/nat_sendall 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$out" = "send batch ok" ] \
+  && ok "TCP 批量发送：send_all 4MB 零拷贝 + str_ptr 语义全过" \
+  || bad "TCP 批量发送 rc=$rc [$out]"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

@@ -1,0 +1,65 @@
+// t164 —— TCP 批量发送（v3.07）
+// send_all 的短写处理 + str_ptr 的零拷贝语义。
+// 关键回归：4 MB 负载必须零拷贝发全（第一版用 substr 切尾巴，O(n^2) 堆爆）。
+import std.net
+
+fn worker(port: int, n: int) -> int {
+    let c = connect("127.0.0.1", port)
+    // vec[int] 批量构造，避免 s = s + ... 的 O(n^2)
+    let v = vec[int].new(n)
+    let mut i = 0
+    while i < n {
+        v.push(65 + (i % 26))
+        i = i + 1
+    }
+    let s = str_from_bytes(v)
+    let w = send_all(c, s)
+    print(w)
+    close_conn(c)
+    return 0
+}
+
+fn main() {
+    // [1] 小负载：逐字节正确
+    let small = "hello-send-all"
+    let l1 = listen(18094)
+    let h1 = spawn small_worker(18094, small)
+    let c1 = accept(l1)
+    let g1 = recv_exact(c1, len(small), 4)
+    assert(g1 == small, "small payload")
+    close_conn(c1)
+    join(h1)
+    close_conn(l1)
+
+    // [2] 4 MB：必须零拷贝发全（短写循环）
+    let n = 4 * 1024 * 1024
+    let l2 = listen(18095)
+    let h2 = spawn worker(18095, n)
+    let c2 = accept(l2)
+    let g2 = recv_exact(c2, n, 65536)
+    assert(len(g2) == n, "4MB received fully")
+    close_conn(c2)
+    join(h2)
+    close_conn(l2)
+
+    // [3] str_ptr 语义：返回 int（可比较），且不破坏原 str
+    let s3 = "hello"
+    let p3 = str_ptr(s3)
+    assert(p3 != 0, "ptr nonzero")
+    assert(len(s3) == 5, "original str intact")
+    assert(mem_load8(p3, 0) == 104, "first byte 'h'")
+    assert(mem_load64(mem_ptr(p3, 0 - 8), 0) == 5, "length prefix")
+    // 空串
+    let e3 = ""
+    assert(len(e3) == 0, "empty len")
+
+    print("send batch ok")
+}
+
+fn small_worker(port: int, payload: str) -> int {
+    let c = connect("127.0.0.1", port)
+    let w = send_all(c, payload)
+    print(w)
+    close_conn(c)
+    return 0
+}

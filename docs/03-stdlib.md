@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-67 个模块，**562 个公开函数**（另有 570 个内部函数）
+67 个模块，**563 个公开函数**（另有 570 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -44,7 +44,7 @@
 | `std/mem` | slab 分配 / fd 表 / 缓冲 / 对象池 | 21 / 30 |
 | `std/mime` | 扩展名 ↔ Content-Type（内置 30 项表，大小写不敏感，带 charset 参数反查） | 4 / 5 |
 | `std/multipart` | multipart/form-data 解析（boundary 提取 / 表单字段与文件部分 / 头字段大小写不敏感） | 4 / 6 |
-| `std/net` | 阻塞 TCP 便捷层 | 10 / 10 |
+| `std/net` | 阻塞 TCP 便捷层 | 11 / 11 |
 | `std/net/addr` | 地址文本层：IPv4/IPv6 字面量解析与 RFC 5952 格式化 + fd 对端地址 | 11 / 15 |
 | `std/net/core` | 连接槽位层（IOCP reactor 的底座） | 22 / 22 |
 | `std/net/dns` | 自研 DNS 解析器（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf） | 8 / 9 |
@@ -1066,6 +1066,21 @@ fn accept(fd: int) -> int
 fn connect(host: str, port: int) -> int
 /// 把 str 的全部字节写到连接上，返回写入字节数（短写要自己续写）。
 fn send(conn: int, data: str) -> int
+/// 把 `data` **全部**写出，返回实际写出的字节数（v3.07）。
+/// 为什么需要它：`send(conn, data)` 是**一次** `send()` 系统调用，返回值是
+/// "这次写进去多少"，**可能小于 `len(data)`**（短写）。短写不是错误，是 TCP
+/// 的正常行为：内核发送缓冲区快满时只接受一部分；大块数据（> 64 KB）几乎
+/// 一定分多次。拿 `send` 当"发完了"用，会在高吞吐或大包场景丢尾巴。
+/// **实现：零拷贝指针推进**。第一版用 `substr(data, sent, ...)` 切尾巴，
+/// 每轮把剩余数据**复制一遍** —— 4 MB 负载直接 O(n²)、堆爆 512 MB 上限
+/// （实测 `heap_limit_mb exceeded`）。现在改用 `tcp_send_n(fd, ptr+off, n)`：
+/// 裸指针 + 长度，不构造新 str、不扫 strlen。`str_ptr` 取数据指针是零成本的
+/// （str 的值本身就是数据指针，长度在 ptr-8）。
+/// **返回值语义**：成功返回 `len(data)`；中途出错返回已写出的字节数。
+/// 调用方用 `== len(data)` 判断是否发全。
+/// 边界：无超时（`tcp_send_n` 阻塞）；对端一直不收且缓冲区满时会一直等
+/// （这是 TCP 的背压语义，不是 bug）。
+fn send_all(conn: int, data: str) -> int
 /// 从连接读最多 cap 字节并返回 str；对端关闭时返回空串。
 fn recv(conn: int, cap: int) -> str
 /// 读到**对端关闭**为止，返回全部字节（v3.06）。
