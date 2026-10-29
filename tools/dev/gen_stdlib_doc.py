@@ -93,6 +93,7 @@ DESC = {
     "std/net/reactor.qma": "高并发 reactor：IOCP 事件循环（Quelmara 实现，仅 Windows PE）",
     "std/net/addr.qma": "地址文本层：IPv4/IPv6 字面量解析与 RFC 5952 格式化 + fd 对端地址",
     "std/net/udp.qma": "UDP 封装与地址解析",
+    "std/net/dns.qma": "自研 DNS 解析器（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf）",
 }
 
 

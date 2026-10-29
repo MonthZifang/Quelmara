@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-66 个模块，**550 个公开函数**（另有 570 个内部函数）
+67 个模块，**556 个公开函数**（另有 570 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -47,9 +47,9 @@
 | `std/net` | 阻塞 TCP 便捷层 | 7 / 7 |
 | `std/net/addr` | 地址文本层：IPv4/IPv6 字面量解析与 RFC 5952 格式化 + fd 对端地址 | 11 / 15 |
 | `std/net/core` | 连接槽位层（IOCP reactor 的底座） | 22 / 22 |
-| `std/net/dns` | **自研 DNS 解析器**（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf；纯 Quelmara，跑在 UDP 内建上；v3.03） | 5 / 8 |
+| `std/net/dns` | 自研 DNS 解析器（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf） | 5 / 6 |
 | `std/net/reactor` | 高并发 reactor：IOCP 事件循环（Quelmara 实现，仅 Windows PE） | 2 / 22 |
-| `std/net/udp` | UDP 封装与地址解析 | 1 / 3 |
+| `std/net/udp` | UDP 封装与地址解析 | 2 / 3 |
 | `std/p256` | NIST P-256 域运算 + ECDSA 验签（TLS 证书签名） | 2 / 45 |
 | `std/p384` | NIST P-384（secp384r1）ECDSA 验签（12 limb Montgomery + Jacobian，SHA-384 摘要；v2.99） | 2 / 47 |
 | `std/path` | 路径处理（join / clean / dir / base / ext / stem；'/' 与 '\' 都认） | 7 / 9 |
@@ -1160,6 +1160,42 @@ fn conn_send(st: int, fd: int, ptr: int, n: int) -> int
 fn conn_send_str(st: int, fd: int, s: str) -> int
 ```
 
+### `std/net/dns.qma`
+
+自研 DNS 解析器（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf）
+
+```quelmara
+/// dns_build_query(name) -> str：拼一个 A 记录的查询报文（12 字节头 + QNAME
+/// + 4 字节 QTYPE/QCLASS）。name 必须是 FQDN（如 "example.com"）。
+/// 头：id=0x1234 | flags=0x0100（RD） | qd=1 | an=0 | ns=0 | ar=0
+/// QNAME 用标签格式：每段前置长度字节，以 0 结尾。
+/// 返回空串表示名字非法（空段 / 段长 > 63 / 总长 > 255 / 非法字符）。
+fn dns_build_query(name: str) -> str
+/// dns_parse_a(msg) -> int：从应答里取出**第一条 A 记录**的 IPv4 地址，
+/// 返回网络序 u32（与 udp_parse_ip 同口径）；没有 A 记录 / 报文非法返回 0。
+/// 校验：ID 必须回显 0x1234、QR 必须为 1（应答）、RCODE 必须为 0（NOERROR）、
+/// ANCOUNT > 0。任何长度越界都返回 0，不信任报文里的长度字段。
+fn dns_parse_a(msg: str) -> int
+/// dns_ip4_str(ip) -> str：网络序 u32 -> 点分字符串（A 记录的可读形式）。
+fn dns_ip4_str(ip: int) -> str
+/// dns_resolv_ns(text) -> str：从 resolv.conf 的**内容**里取出第一个
+/// `nameserver` 的 IPv4 地址；没有则返回空串。
+/// 做成"吃文本"而不是"自己读文件"，是为了能在测试里喂固定夹具
+/// （文件读取在 ELF 后端要走 openat+read，属于调用方的事）。
+fn dns_resolv_ns(text: str) -> str
+/// dns_resolve(name) -> str：把域名解析成点分 IPv4 字符串；失败返回空串。
+/// 这是调用方真正要用的入口。流程：
+///   1. 先当 IPv4 字面量试（"1.2.3.4" 直接返回，不查网）；
+///   2. 读 /etc/resolv.conf 取第一个 nameserver（没有则用 8.8.8.8 兜底）；
+///   3. 拼 A 查询、UDP 发到 53、收回、解析。
+/// 失败一律返回空串（不 exit）——DNS 不可用是可恢复错误，调用方可以选择
+/// 回退到字面量或报自己的错。这与库里"能返回就返回、不能返回才 fail-fast"
+/// 的口径一致。
+/// 边界：单 nameserver、单次尝试、无超时控制（udp_recvfrom 是阻塞的）。
+/// 要加超时得先给 udp_recvfrom 一个带超时的变体，见 docs/07-gaps.md。
+fn dns_resolve(name: str) -> str
+```
+
 ### `std/net/reactor.qma`
 
 高并发 reactor：IOCP 事件循环（Quelmara 实现，仅 Windows PE）
@@ -1184,6 +1220,8 @@ fn serve(port: int, backlog: int, on_connect: int, on_data: int, on_close: int) 
 UDP 封装与地址解析
 
 ```quelmara
+/// udp_parse_ip("1.2.3.4") -> int：点分 IPv4 -> 网络序 u32（非法返回 0）
+fn udp_parse_ip(ip: str) -> int
 /// udp_send_str(fd, ip, port, data) -> int：字符串地址便捷层
 /// （解析失败返回 -1）
 fn udp_send_str(fd: int, ip: str, port: int, data: str) -> int
