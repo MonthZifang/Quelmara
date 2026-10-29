@@ -47,6 +47,7 @@
 | `std/net` | 阻塞 TCP 便捷层 | 7 / 7 |
 | `std/net/addr` | 地址文本层：IPv4/IPv6 字面量解析与 RFC 5952 格式化 + fd 对端地址 | 11 / 15 |
 | `std/net/core` | 连接槽位层（IOCP reactor 的底座） | 22 / 22 |
+| `std/net/dns` | **自研 DNS 解析器**（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf；纯 Quelmara，跑在 UDP 内建上；v3.03） | 5 / 8 |
 | `std/net/reactor` | 高并发 reactor：IOCP 事件循环（Quelmara 实现，仅 Windows PE） | 2 / 22 |
 | `std/net/udp` | UDP 封装与地址解析 | 1 / 3 |
 | `std/p256` | NIST P-256 域运算 + ECDSA 验签（TLS 证书签名） | 2 / 45 |
