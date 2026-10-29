@@ -420,6 +420,18 @@ last=$(printf '%s\n' "$out" | tail -1)
   && ok "TCP 接收超时：recv_all_to/recv_exact_to 3 场景全过" \
   || bad "TCP 接收超时 rc=$rc [$out]"
 
+# v3.09：批量接收的累积方式（O(n²) -> O(n)）。
+# 关键回归：4 MB 按 4 KB 分块收，旧实现每轮 `out = out + part` 累计复制约
+# 2 GB，撞 512 MB 堆上限（实测 heap_limit_mb exceeded）；新实现走缓冲区，
+# 总拷贝 O(n)。t166 同时覆盖 recv_all / recv_all_max 截断 / 带超时路径。
+$NAT build tests/t166_recvbulk.qma -o build/nat_recvbulk >/dev/null 2>&1 \
+  && ok "TCP 批量接收：native 编译通过" || bad "TCP 批量接收：native 编译失败"
+out=$(timeout 180 ./build/nat_recvbulk 2>&1); rc=$?
+last=$(printf '%s\n' "$out" | tail -1)
+[ $rc -eq 0 ] && [ "$last" = "recv bulk ok" ] \
+  && ok "TCP 批量接收：4MB/4KB 分块 + 截断 + 超时 5 场景全过" \
+  || bad "TCP 批量接收 rc=$rc [$out]"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

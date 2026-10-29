@@ -72,6 +72,110 @@ pub fn send_all(conn: int, data: str) -> int {
     return sent
 }
 
+// 批量接收的核心（v3.09）：一次分配 + 翻倍扩容 + 原地 mem_copy。
+//
+// limit <= 0 = 不限长；limit > 0 = 最多 limit 字节。
+// timed != 0 = 每次接收带 ms 超时（tcp_recv_to），否则阻塞接收（tcp_recv）。
+//
+// 为什么不能用 `out = out + part`：那是 O(n²)。每轮都把已累计的全部数据
+// 复制一遍——4 MB 负载按 4 KB 分块收，累计复制约 2 GB，直接撞
+// heap_limit_mb（v3.09 实测 recv_exact 4 MB / 4 KB = heap_limit_mb
+// exceeded）。与 v3.07 在发送侧踩的坑是同一类，只是接收侧更隐蔽：小负载
+// 看不出来，只在"大负载 + 小分块"时才爆。
+//
+// 现在的成本：总拷贝量 O(n)（扩容的几何级数），末尾 mem_str 一次成串。
+// 峰值内存 = 当前缓冲 + 扩容瞬间的新缓冲（≤ 2 倍），不是 1.5n 的累计垃圾。
+fn _recv_buf(conn: int, limit: int, chunk: int, timed: int, ms: int) -> str {
+    if chunk <= 0 {
+        chunk = 4096
+    }
+    let mut cap = chunk
+    if limit > 0 && limit < cap {
+        cap = limit
+    }
+    let mut buf = mem_alloc(cap)
+    let mut got = 0
+    while limit <= 0 || got < limit {
+        if got == cap {
+            // 扩容：翻倍，但不越过 limit（limit > 0 时 cap 最终正好等于 limit）
+            let mut ncap = cap * 2
+            if limit > 0 && ncap > limit {
+                ncap = limit
+            }
+            let nb = mem_alloc(ncap)
+            mem_copy(nb, buf, got)
+            mem_free(buf, cap)
+            buf = nb
+            cap = ncap
+        }
+        let mut want = cap - got
+        if limit > 0 {
+            let rem = limit - got
+            if rem < want {
+                want = rem
+            }
+        }
+        let mut part = ""
+        if timed != 0 {
+            part = tcp_recv_to(conn, want, ms)
+        } else {
+            part = tcp_recv(conn, want)
+        }
+        let m = len(part)
+        if m == 0 {
+            break
+        }
+        mem_copy(mem_ptr(buf, got), str_ptr(part), m)
+        got = got + m
+    }
+    let out = mem_str(buf, got)
+    mem_free(buf, cap)
+    return out
+}
+
+/// 从连接读最多 cap 字节并返回 str；对端关闭时返回空串。
+pub fn recv(conn: int, cap: int) -> str {
+    return tcp_recv(conn, cap)
+}
+
+/// 读到**对端关闭**为止，返回全部字节（v3.06，v3.09 起 O(n)）。
+///
+/// `chunk` 是每次 `tcp_recv` 的上限（建议 4096–65536）。为什么需要它：
+/// `recv(conn, cap)` 是**单次** `recv()`，内核缓冲区里有多少就返回多少，
+/// 可能远少于 `cap`——拿它当"读完"用，在慢链路或大数据包上会截断。
+/// 这里循环读到返回空串（对端 FIN）为止。
+///
+/// **v3.09 起累积走缓冲区**（`_recv_buf`），不再每轮 `out = out + part`
+/// 复制全部已读数据：4 MB / 4 KB 分块从堆爆变成一次通过，总拷贝量 O(n)。
+///
+/// 边界：**没有总长度上限**——对端一直发就会一直读，要上限用 `recv_all_max`；
+/// **没有超时**——对端半开时永久阻塞，要超时用 `recv_all_to`。
+pub fn recv_all(conn: int, chunk: int) -> str {
+    return _recv_buf(conn, 0, chunk, 0, 0)
+}
+
+/// 读到对端关闭，但最多读 `maxbytes` 字节（v3.06，v3.09 起 O(n)）。
+///
+/// 与 `recv_all` 的区别：**有上限**，到上限就返回，不会因为对端一直发而
+/// 无限增长内存。适合"读 HTTP 响应体但有 Content-Length 上限"这类场景。
+pub fn recv_all_max(conn: int, chunk: int, maxbytes: int) -> str {
+    if maxbytes <= 0 {
+        return ""
+    }
+    return _recv_buf(conn, maxbytes, chunk, 0, 0)
+}
+
+/// 精确读 `n` 字节；对端提前关闭时返回**已读到的部分**（v3.06，v3.09 起 O(n)）。
+///
+/// 这是 HTTP/1.1 的 `Content-Length` 与 TLS 记录层都要的语义：
+/// "我知道正好要 n 字节，给我读满"。用 `len(result) == n` 判断是否读满。
+pub fn recv_exact(conn: int, n: int, chunk: int) -> str {
+    if n <= 0 {
+        return ""
+    }
+    return _recv_buf(conn, n, chunk, 0, 0)
+}
+
 // 带超时的批量接收三件套（v3.08）：recv_all_to / recv_all_max_to / recv_exact_to。
 //
 // 与 recv_all / recv_all_max / recv_exact 的语义一一对应，唯一区别是每次
@@ -81,158 +185,35 @@ pub fn send_all(conn: int, data: str) -> int {
 // 为什么必须加：recv_all 会一直读到对端 FIN。对端发了一半就挂住不关（半开
 // 连接、慢客户端、恶意对端）时它永久阻塞——v3.08 实测 12 s 未返回。TCP 上
 // 没有"对方还在不在"的心跳，只有超时。
+//
+// ms = 0 是"不限时"（SO_RCVTIMEO 设 0 = 等到底），不是非阻塞探测——
+// v3.09 实测 udp_recvfrom_to(fd, cap, 0) 会一直等到有数据。
 
-/// 读到对端关闭**或超时**，返回已读到的全部（v3.08）。
+/// 读到对端关闭**或超时**，返回已读到的全部（v3.08，v3.09 起 O(n)）。
 ///
 /// 与 `recv_all` 的唯一区别是每次 `tcp_recv_to` 都有 `ms` 毫秒超时：超时后
 /// 把它当作"对端不再发"，**立即停止**并返回已读到的部分（可能为空串）。
 ///
 /// 返回值语义与 `recv_exact` 的短读一致：调用方用 `len(result) == n` 判断
-/// 是否读满，不要假定"返回了就是收全了"。
+/// 是否读满，不要假定"返回了就是收全了"。超时粒度是**每次接收**，不是总时长。
 pub fn recv_all_to(conn: int, chunk: int, ms: int) -> str {
-    if chunk <= 0 {
-        chunk = 4096
-    }
-    let out = ""
-    while true {
-        let part = tcp_recv_to(conn, chunk, ms)
-        if len(part) == 0 {
-            break
-        }
-        out = out + part
-    }
-    return out
+    return _recv_buf(conn, 0, chunk, 1, ms)
 }
 
-/// 读到关闭或超时，最多 `maxbytes` 字节（v3.08）。
+/// 读到关闭或超时，最多 `maxbytes` 字节（v3.08，v3.09 起 O(n)）。
 pub fn recv_all_max_to(conn: int, chunk: int, maxbytes: int, ms: int) -> str {
-    if chunk <= 0 {
-        chunk = 4096
-    }
     if maxbytes <= 0 {
         return ""
     }
-    let out = ""
-    while len(out) < maxbytes {
-        let want = maxbytes - len(out)
-        let cap = chunk
-        if want < cap {
-            cap = want
-        }
-        let part = tcp_recv_to(conn, cap, ms)
-        if len(part) == 0 {
-            break
-        }
-        out = out + part
-    }
-    return out
+    return _recv_buf(conn, maxbytes, chunk, 1, ms)
 }
 
-/// 精确读 `n` 字节，超时即停并返回已读到的部分（v3.08）。
+/// 精确读 `n` 字节，超时即停并返回已读到的部分（v3.08，v3.09 起 O(n)）。
 pub fn recv_exact_to(conn: int, n: int, chunk: int, ms: int) -> str {
     if n <= 0 {
         return ""
     }
-    if chunk <= 0 {
-        chunk = 4096
-    }
-    let out = ""
-    while len(out) < n {
-        let want = n - len(out)
-        let cap = chunk
-        if want < cap {
-            cap = want
-        }
-        let part = tcp_recv_to(conn, cap, ms)
-        if len(part) == 0 {
-            break
-        }
-        out = out + part
-    }
-    return out
-}
-
-/// 从连接读最多 cap 字节并返回 str；对端关闭时返回空串。
-pub fn recv(conn: int, cap: int) -> str {
-    return tcp_recv(conn, cap)
-}
-
-/// 读到**对端关闭**为止，返回全部字节（v3.06）。
-///
-/// `chunk` 是每次 `tcp_recv` 的上限（建议 4096–65536）。为什么需要它：
-/// `recv(conn, cap)` 是**单次** `recv()`，内核缓冲区里有多少就返回多少，
-/// 可能远少于 `cap`——拿它当"读完"用，在慢链路或大数据包上会截断。
-/// 这里循环读到返回空串（对端 FIN）为止。
-///
-/// 边界：**没有总长度上限**——对端一直发就会一直读。需要上限的调用方
-/// 用 `recv_until_close_max`。也没有超时（`tcp_recv` 是阻塞的）。
-pub fn recv_all(conn: int, chunk: int) -> str {
-    if chunk <= 0 {
-        chunk = 4096
-    }
-    let out = ""
-    while true {
-        let part = tcp_recv(conn, chunk)
-        if len(part) == 0 {
-            break
-        }
-        out = out + part
-    }
-    return out
-}
-
-/// 读到对端关闭，但最多读 `maxbytes` 字节（v3.06）。
-///
-/// 与 `recv_all` 的区别：**有上限**，到上限就返回，不会因为对端一直发而
-/// 无限增长内存。适合"读 HTTP 响应体但有 Content-Length 上限"这类场景。
-pub fn recv_all_max(conn: int, chunk: int, maxbytes: int) -> str {
-    if chunk <= 0 {
-        chunk = 4096
-    }
-    if maxbytes <= 0 {
-        return ""
-    }
-    let out = ""
-    while len(out) < maxbytes {
-        let want = maxbytes - len(out)
-        let cap = chunk
-        if want < cap {
-            cap = want
-        }
-        let part = tcp_recv(conn, cap)
-        if len(part) == 0 {
-            break
-        }
-        out = out + part
-    }
-    return out
-}
-
-/// 精确读 `n` 字节；对端提前关闭时返回**已读到的部分**（v3.06）。
-///
-/// 这是 HTTP/1.1 的 `Content-Length` 与 TLS 记录层都要的语义：
-/// "我知道正好要 n 字节，给我读满"。用 `len(result) == n` 判断是否读满。
-pub fn recv_exact(conn: int, n: int, chunk: int) -> str {
-    if n <= 0 {
-        return ""
-    }
-    if chunk <= 0 {
-        chunk = 4096
-    }
-    let out = ""
-    while len(out) < n {
-        let want = n - len(out)
-        let cap = chunk
-        if want < cap {
-            cap = want
-        }
-        let part = tcp_recv(conn, cap)
-        if len(part) == 0 {
-            break
-        }
-        out = out + part
-    }
-    return out
+    return _recv_buf(conn, n, chunk, 1, ms)
 }
 
 /// 关闭连接 fd（不返回值）。

@@ -250,7 +250,10 @@ def main() -> int:
                       b"Transfer-Encoding: chunked\r\n\r\n"
                       b"7\r\nQuelm")                        # 声明 7，只给 5
             time.sleep(0.3)
-            s.sendall(b"ara\r\n0\r\n\r\n")                  # 补齐 2 + 终止块
+            # 补齐剩下的 2 字节 + 终止块。v3.09 修：这里原来是 "ara"(3 字节)，
+            # 声明 7 却实发 8 —— 服务端按 RFC 判 chunk 尾 CRLF 不符就是 400，
+            # 判得对，是**用例数据**错了（"7\r\nQuelm" + "ara" = 8 字节）。
+            s.sendall(b"ar\r\n0\r\n\r\n")
             st, _, b1, _ = read_response(s)
             if b1 == b'{"created":true,"len":7}':
                 ok("chunked 分片: 补齐后 body len=7")
