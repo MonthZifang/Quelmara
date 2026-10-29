@@ -1,0 +1,113 @@
+// t166 —— 批量接收的累积方式（v3.09）：O(n²) -> O(n)
+//
+// 关键回归：4 MB 负载按 4 KB 分块收，旧实现每轮 `out = out + part` 复制
+// 已累计的全部数据，累计拷贝约 2 GB，直接撞 512 MB 堆上限
+// （实测 `heap_limit_mb exceeded`，退出码 1）。
+// 新实现走 `_recv_buf`：一次分配 + 翻倍扩容 + 原地 mem_copy，末尾 mem_str 一次。
+//
+// 4 个场景：
+//   [1] recv_exact 4 MB / 4 KB 分块   —— 旧实现堆爆的那个形状
+//   [2] recv_all   4 MB / 64 KB 分块  —— 不限长路径的扩容
+//   [3] recv_all_max 4 MB 只取 2 MB   —— 上限截断 + 扩容不越过上限
+//   [4] recv_all_to 1 MB / 2 s 超时   —— 带超时的同一套累积逻辑
+import std.net
+
+const N4 = 4 * 1024 * 1024
+
+// 抽样比对：32 字节步长太密（4 MB 要 13 万次 mem_load8），1 KB 抽一次够发现
+// "错位/截断/重复"这三类典型损坏。
+fn check_pattern(s: str, n: int) -> int {
+    if len(s) != n {
+        return 1
+    }
+    let base = str_ptr(s)
+    let mut bad = 0
+    let mut i = 0
+    while i < n {
+        if mem_load8(mem_ptr(base, i), 0) != 65 + (i % 26) {
+            bad = bad + 1
+        }
+        i = i + 1024
+    }
+    // 末字节单独查一次（扩容边界最容易漏）
+    if mem_load8(mem_ptr(base, n - 1), 0) != 65 + ((n - 1) % 26) {
+        bad = bad + 1
+    }
+    return bad
+}
+
+fn sender(port: int, n: int) -> int {
+    let c = connect("127.0.0.1", port)
+    let v = vec[int].new(n)
+    let mut i = 0
+    while i < n {
+        v.push(65 + (i % 26))
+        i = i + 1
+    }
+    let s = str_from_bytes(v)
+    let w = send_all(c, s)
+    close_conn(c)
+    return w
+}
+
+fn main() {
+    // [1] recv_exact 4 MB / 4 KB：旧实现 heap_limit_mb exceeded
+    let l1 = listen(18089)
+    let h1 = spawn sender(18089, N4)
+    let c1 = accept(l1)
+    let t0 = now_ns()
+    let g1 = recv_exact(c1, N4, 4096)
+    let t1 = now_ns()
+    close_conn(c1)
+    join(h1)
+    close_conn(l1)
+    let ms1 = (t1 - t0) / 1000000
+    assert(len(g1) == N4, "recv_exact 4MB len")
+    assert(check_pattern(g1, N4) == 0, "recv_exact 4MB content")
+    assert(ms1 < 20000, "recv_exact 4MB 没超时")
+
+    // [2] recv_all 4 MB / 64 KB：不限长路径（扩容 64KB -> 4MB）
+    let l2 = listen(18088)
+    let h2 = spawn sender(18088, N4)
+    let c2 = accept(l2)
+    let t2 = now_ns()
+    let g2 = recv_all(c2, 65536)
+    let t3 = now_ns()
+    close_conn(c2)
+    join(h2)
+    close_conn(l2)
+    let ms2 = (t3 - t2) / 1000000
+    assert(len(g2) == N4, "recv_all 4MB len")
+    assert(check_pattern(g2, N4) == 0, "recv_all 4MB content")
+    assert(ms2 < 20000, "recv_all 4MB 没超时")
+
+    // [3] recv_all_max：要 4 MB 只给 2 MB，必须正好 2 MB 且内容前缀正确
+    let half = N4 / 2
+    let l3 = listen(18087)
+    let h3 = spawn sender(18087, N4)
+    let c3 = accept(l3)
+    let g3 = recv_all_max(c3, 65536, half)
+    close_conn(c3)
+    join(h3)
+    close_conn(l3)
+    assert(len(g3) == half, "recv_all_max 截断到 2MB")
+    assert(check_pattern(g3, half) == 0, "recv_all_max 前缀内容")
+
+    // [4] recv_all_to：1 MB / 2 s 超时（对端发完就关，走正常路径）
+    let n1 = 1024 * 1024
+    let l4 = listen(18086)
+    let h4 = spawn sender(18086, n1)
+    let c4 = accept(l4)
+    let g4 = recv_all_to(c4, 4096, 2000)
+    close_conn(c4)
+    join(h4)
+    close_conn(l4)
+    assert(len(g4) == n1, "recv_all_to 1MB len")
+    assert(check_pattern(g4, n1) == 0, "recv_all_to 1MB content")
+
+    // [5] 边界：n <= 0 / maxbytes <= 0 返回空串，不分配
+    assert(len(recv_exact(0, 0, 4096)) == 0, "recv_exact n=0")
+    assert(len(recv_all_max(0, 4096, 0)) == 0, "recv_all_max max=0")
+
+    print("recv bulk ok")
+}

@@ -3790,7 +3790,8 @@ class Lower:
             # tcp_recv_to(fd, cap, ms) -> str（v3.08：带接收超时）
             #   超时/出错返回**空串**（不是 fail-fast）——「对端没发完」
             #   是可恢复结果，recv_all 这类循环需要拿到它才能停。
-            #   ms <= 0 表示非阻塞探测（SO_RCVTIMEO 设为 0）。
+            #   ms = 0 表示不限时（SO_RCVTIMEO=0 在 Win/Linux 都是等到底；
+            #   真正的非阻塞要 O_NONBLOCK / ioctlsocket，未实现——v3.09 实测）。
             #
             # 为什么必须加：recv_all 会一直读到对端 FIN。对端发了一半就
             # 挂住不关（半开连接、慢客户端、恶意对端）时它会**永久阻塞**
@@ -9524,7 +9525,7 @@ class Lower:
 
             # __udp_recvfrom_to(fd, cap, ms) -> str（v3.04）
             #
-            # 带接收超时的版本。`ms <= 0` 表示"不等"（非阻塞探测）；
+            # 带接收超时的版本。`ms = 0` 表示"不限时"（等到底）；
             # 超时/失败返回**空串**而不是 fail-fast —— 调用方（DNS）需要
             # "这个 nameserver 没响应"是可恢复结果，不是进程终止条件。
             #

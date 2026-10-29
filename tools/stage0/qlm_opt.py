@@ -1027,10 +1027,27 @@ def check_suspicious_loops(fns):
                 continue
             if not _is_imm(guard[3]):
                 continue                  # hi 非常量：跳过（误报率高）
-            ivar = guard[2]
-            # guard 变量在 [h+2, b)（循环体，回边前）全程无 def → 疑似死循环
+            # v3.09：**复合条件**（`while limit <= 0 || got < limit`）会展开成
+            # header 后多条 `jcc`，中间还夹着 `or`/`and` 的标签。只看第 h+1 条
+            # 会把 `limit` 当成 guard，而 limit 本来就不该在循环体里被赋值 ——
+            # 于是"短路条件在前"的循环全部误报（v3.09 的 `_recv_buf` 实测）。
+            # 正确判据是"**所有** guard 比较变量都没被写过"：把 header 之后
+            # 连续的 jcc 序列（允许中间夹 label）里的 vreg 全收集起来。
+            guard_vars = set()
+            k = h + 1
+            scanned = 0
+            while k < b and scanned < 8:
+                if ins[k][0] == "label":
+                    k += 1
+                    continue
+                if ins[k][0] != "jcc":
+                    break
+                guard_vars.update(x for x in ins[k][2:] if isinstance(x, int))
+                k += 1
+                scanned += 1
             body = ins[h + 2:b]
-            if any(ivar in vreg_mentions(p)[0] for p in body):
+            # guard 变量在 [h+2, b)（循环体，回边前）全程无 def → 疑似死循环
+            if any(guard_vars & set(vreg_mentions(p)[0]) for p in body):
                 continue
             print(f"warning: possible infinite loop in '{fn.name}' "
                   f"(loop #{seq}): guard variable never updated in body")
