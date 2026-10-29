@@ -72,6 +72,86 @@ pub fn send_all(conn: int, data: str) -> int {
     return sent
 }
 
+// 带超时的批量接收三件套（v3.08）：recv_all_to / recv_all_max_to / recv_exact_to。
+//
+// 与 recv_all / recv_all_max / recv_exact 的语义一一对应，唯一区别是每次
+// tcp_recv_to 都带 ms 毫秒超时：收到就继续，超时就当"对端不再发"，立即停止
+// 并返回已读到的内容。
+//
+// 为什么必须加：recv_all 会一直读到对端 FIN。对端发了一半就挂住不关（半开
+// 连接、慢客户端、恶意对端）时它永久阻塞——v3.08 实测 12 s 未返回。TCP 上
+// 没有"对方还在不在"的心跳，只有超时。
+
+/// 读到对端关闭**或超时**，返回已读到的全部（v3.08）。
+///
+/// 与 `recv_all` 的唯一区别是每次 `tcp_recv_to` 都有 `ms` 毫秒超时：超时后
+/// 把它当作"对端不再发"，**立即停止**并返回已读到的部分（可能为空串）。
+///
+/// 返回值语义与 `recv_exact` 的短读一致：调用方用 `len(result) == n` 判断
+/// 是否读满，不要假定"返回了就是收全了"。
+pub fn recv_all_to(conn: int, chunk: int, ms: int) -> str {
+    if chunk <= 0 {
+        chunk = 4096
+    }
+    let out = ""
+    while true {
+        let part = tcp_recv_to(conn, chunk, ms)
+        if len(part) == 0 {
+            break
+        }
+        out = out + part
+    }
+    return out
+}
+
+/// 读到关闭或超时，最多 `maxbytes` 字节（v3.08）。
+pub fn recv_all_max_to(conn: int, chunk: int, maxbytes: int, ms: int) -> str {
+    if chunk <= 0 {
+        chunk = 4096
+    }
+    if maxbytes <= 0 {
+        return ""
+    }
+    let out = ""
+    while len(out) < maxbytes {
+        let want = maxbytes - len(out)
+        let cap = chunk
+        if want < cap {
+            cap = want
+        }
+        let part = tcp_recv_to(conn, cap, ms)
+        if len(part) == 0 {
+            break
+        }
+        out = out + part
+    }
+    return out
+}
+
+/// 精确读 `n` 字节，超时即停并返回已读到的部分（v3.08）。
+pub fn recv_exact_to(conn: int, n: int, chunk: int, ms: int) -> str {
+    if n <= 0 {
+        return ""
+    }
+    if chunk <= 0 {
+        chunk = 4096
+    }
+    let out = ""
+    while len(out) < n {
+        let want = n - len(out)
+        let cap = chunk
+        if want < cap {
+            cap = want
+        }
+        let part = tcp_recv_to(conn, cap, ms)
+        if len(part) == 0 {
+            break
+        }
+        out = out + part
+    }
+    return out
+}
+
 /// 从连接读最多 cap 字节并返回 str；对端关闭时返回空串。
 pub fn recv(conn: int, cap: int) -> str {
     return tcp_recv(conn, cap)
