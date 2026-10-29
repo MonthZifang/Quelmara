@@ -39,9 +39,14 @@ SRC = os.path.join(ROOT, "examples", "http_router.qma")
 EXE = os.path.join(ROOT, "build", "win_http_router.exe")
 
 fails = []
+# v3.11：断言数改成**实际计数**。以前是 `total = 26` 手写常量，加一条用例
+# 不改正数就会打印一个假数字（和文档里"同一个指标四个值"是同一种病）。
+checks = 0
 
 
 def ok(msg):
+    global checks
+    checks += 1
     print(f"  [OK] {msg}")
 
 
@@ -324,13 +329,12 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             proc.kill()
 
-    total = 26
     if fails:
         print(f"\nhttp_router FAIL（{len(fails)} 项）")
         for f in fails:
             print("  -", f)
         return 1
-    print(f"\nhttp_router ok（{total} 项断言）")
+    print(f"\nhttp_router ok（{checks} 项断言）")
     return 0
 
 
