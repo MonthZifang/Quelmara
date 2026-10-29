@@ -1,0 +1,59 @@
+// t163 —— TCP 批量收发（v3.06）
+// recv_all / recv_all_max / recv_exact 在真实 socket 上的语义验证。
+// 每个场景都是"服务端 accept + 工作线程 connect 发数据 + 关闭"。
+import std.net
+
+fn worker(port: int, payload: str) -> int {
+    let c = connect("127.0.0.1", port)
+    send(c, payload)
+    close_conn(c)
+    return 0
+}
+
+fn main() {
+    // [1] recv_exact：要 20 字节，每次只读 7，必须读满
+    let l1 = listen(18081)
+    let h1 = spawn worker(18081, "0123456789abcdefghij")
+    let c1 = accept(l1)
+    let g1 = recv_exact(c1, 20, 7)
+    assert(len(g1) == 20, "len check")
+    assert(g1 == "0123456789abcdefghij", "content check")
+    close_conn(c1)
+    join(h1)
+    close_conn(l1)
+
+    // [2] recv_all：读到对端关闭，每次只读 5，必须读全
+    let l2 = listen(18082)
+    let h2 = spawn worker(18082, "hello-world-from-server")
+    let c2 = accept(l2)
+    let g2 = recv_all(c2, 5)
+    assert(len(g2) == 23, "len check")
+    assert(g2 == "hello-world-from-server", "content check")
+    close_conn(c2)
+    join(h2)
+    close_conn(l2)
+
+    // [3] recv_all_max：上限 6，必须截断到 6
+    let l3 = listen(18083)
+    let h3 = spawn worker(18083, "0123456789ABCDEF")
+    let c3 = accept(l3)
+    let g3 = recv_all_max(c3, 4, 6)
+    assert(len(g3) == 6, "len check")
+    assert(g3 == "012345", "content check")
+    close_conn(c3)
+    join(h3)
+    close_conn(l3)
+
+    // [4] recv_exact 请求超过对端发送量：返回已读到的部分（不挂死）
+    let l4 = listen(18084)
+    let h4 = spawn worker(18084, "abc")
+    let c4 = accept(l4)
+    let g4 = recv_exact(c4, 100, 8)
+    assert(len(g4) == 3, "len check")
+    assert(g4 == "abc", "content check")
+    close_conn(c4)
+    join(h4)
+    close_conn(l4)
+
+    print("recv batch ok")
+}
