@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-67 个模块，**556 个公开函数**（另有 570 个内部函数）
+67 个模块，**559 个公开函数**（另有 570 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -47,7 +47,7 @@
 | `std/net` | 阻塞 TCP 便捷层 | 7 / 7 |
 | `std/net/addr` | 地址文本层：IPv4/IPv6 字面量解析与 RFC 5952 格式化 + fd 对端地址 | 11 / 15 |
 | `std/net/core` | 连接槽位层（IOCP reactor 的底座） | 22 / 22 |
-| `std/net/dns` | 自研 DNS 解析器（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf） | 5 / 6 |
+| `std/net/dns` | 自研 DNS 解析器（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf） | 8 / 9 |
 | `std/net/reactor` | 高并发 reactor：IOCP 事件循环（Quelmara 实现，仅 Windows PE） | 2 / 22 |
 | `std/net/udp` | UDP 封装与地址解析 | 2 / 3 |
 | `std/p256` | NIST P-256 域运算 + ECDSA 验签（TLS 证书签名） | 2 / 45 |
@@ -1186,14 +1186,32 @@ fn dns_resolv_ns(text: str) -> str
 /// dns_resolve(name) -> str：把域名解析成点分 IPv4 字符串；失败返回空串。
 /// 这是调用方真正要用的入口。流程：
 ///   1. 先当 IPv4 字面量试（"1.2.3.4" 直接返回，不查网）；
-///   2. 读 /etc/resolv.conf 取第一个 nameserver（没有则用 8.8.8.8 兜底）；
-///   3. 拼 A 查询、UDP 发到 53、收回、解析。
+///   2. 读 /etc/resolv.conf 取**全部** nameserver（没有则用 8.8.8.8 兜底）；
+///   3. 依次向每个 nameserver 发 A 查询（每个 3 s 超时），第一个成功的胜出。
 /// 失败一律返回空串（不 exit）——DNS 不可用是可恢复错误，调用方可以选择
 /// 回退到字面量或报自己的错。这与库里"能返回就返回、不能返回才 fail-fast"
 /// 的口径一致。
-/// 边界：单 nameserver、单次尝试、无超时控制（udp_recvfrom 是阻塞的）。
-/// 要加超时得先给 udp_recvfrom 一个带超时的变体，见 docs/07-gaps.md。
+/// 需要自定义超时用 `dns_resolve_ex(name, ms_per_ns)`。
 fn dns_resolve(name: str) -> str
+/// dns_resolv_all(text) -> vec[str]：从 resolv.conf 内容里取出**全部**
+/// `nameserver` 地址（按出现顺序）。没有则返回空 vec。
+/// 与 `dns_resolv_ns` 的关系：后者只取第一个（保留给"只要一个"的调用方），
+/// 前者给轮询用。两者共用同一套行扫描规则（注释 / 空白 / 行尾注释）。
+fn dns_resolv_all(text: str) -> vec[str]
+/// dns_query_ns(ns, q, ms) -> int：向**一个** nameserver 发查询并解析，
+/// 返回网络序 u32；超时/失败返回 0。
+/// 每次调用都新开一个 socket 并在结束时关闭：DNS 查询是低频操作，
+/// 复用 fd 省下的那点开销抵不上"超时设置会串到下一次查询"的风险。
+fn dns_query_ns(ns: str, q: str, ms: int) -> int
+/// dns_resolve_ex(name, ms_per_ns) -> str：多 nameserver 轮询版解析。
+/// 依次向 resolv.conf 里的每个 nameserver 发同一个查询，**第一个成功的胜出**；
+/// 全部失败返回空串。`ms_per_ns` 是**每个** nameserver 的超时（不是总预算）——
+/// 这样 3 个 nameserver 各 1 s 的最坏情况是 3 s，而不是把 1 s 摊给三个
+/// （摊薄会让每个都必然超时，等于没轮询）。
+/// 为什么要轮询：resolv.conf 里第一个 nameserver 常常是本地 stub
+/// （127.0.0.53 / 127.0.0.1），它自己再往上游转发；stub 挂了或没起来时，
+/// 只认第一个就等于整个解析不可用。轮询是 glibc 的默认行为，这里对齐它。
+fn dns_resolve_ex(name: str, ms_per_ns: int) -> str
 ```
 
 ### `std/net/reactor.qma`

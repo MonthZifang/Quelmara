@@ -284,23 +284,105 @@ pub fn dns_resolv_ns(text: str) -> str {
 
 // ---------------------------------------------------------------------------
 // 端到端：读 resolv.conf + UDP 查询
-// ---------------------------------------------------------------------------
-
 /// dns_resolve(name) -> str：把域名解析成点分 IPv4 字符串；失败返回空串。
 ///
 /// 这是调用方真正要用的入口。流程：
 ///   1. 先当 IPv4 字面量试（"1.2.3.4" 直接返回，不查网）；
-///   2. 读 /etc/resolv.conf 取第一个 nameserver（没有则用 8.8.8.8 兜底）；
-///   3. 拼 A 查询、UDP 发到 53、收回、解析。
+///   2. 读 /etc/resolv.conf 取**全部** nameserver（没有则用 8.8.8.8 兜底）；
+///   3. 依次向每个 nameserver 发 A 查询（每个 3 s 超时），第一个成功的胜出。
 ///
 /// 失败一律返回空串（不 exit）——DNS 不可用是可恢复错误，调用方可以选择
 /// 回退到字面量或报自己的错。这与库里"能返回就返回、不能返回才 fail-fast"
 /// 的口径一致。
 ///
-/// 边界：单 nameserver、单次尝试、无超时控制（udp_recvfrom 是阻塞的）。
-/// 要加超时得先给 udp_recvfrom 一个带超时的变体，见 docs/07-gaps.md。
+/// 需要自定义超时用 `dns_resolve_ex(name, ms_per_ns)`。
 pub fn dns_resolve(name: str) -> str {
-    // 快路径：已经是 IPv4 字面量
+    return dns_resolve_ex(name, 3000)
+}
+// ---------------------------------------------------------------------------
+// 多 nameserver 轮询（v3.05）
+// ---------------------------------------------------------------------------
+
+/// dns_resolv_all(text) -> vec[str]：从 resolv.conf 内容里取出**全部**
+/// `nameserver` 地址（按出现顺序）。没有则返回空 vec。
+///
+/// 与 `dns_resolv_ns` 的关系：后者只取第一个（保留给"只要一个"的调用方），
+/// 前者给轮询用。两者共用同一套行扫描规则（注释 / 空白 / 行尾注释）。
+pub fn dns_resolv_all(text: str) -> vec[str] {
+    let out = vec[str].new(4)
+    let n = len(text)
+    let mut i = 0
+    while i < n {
+        while i < n && (text[i] == 32 || text[i] == 9) {
+            i = i + 1
+        }
+        if i >= n {
+            break
+        }
+        if text[i] == 35 {
+            while i < n && text[i] != 10 {
+                i = i + 1
+            }
+            i = i + 1
+            continue
+        }
+        if i + 10 <= n && text[i] == 110 && text[i + 1] == 97 && text[i + 2] == 109
+            && text[i + 3] == 101 && text[i + 4] == 115 && text[i + 5] == 101
+            && text[i + 6] == 114 && text[i + 7] == 118 && text[i + 8] == 101
+            && text[i + 9] == 114 {
+            i = i + 10
+            while i < n && (text[i] == 32 || text[i] == 9) {
+                i = i + 1
+            }
+            let s = i
+            while i < n && text[i] != 10 && text[i] != 32 && text[i] != 9
+                && text[i] != 35 {
+                i = i + 1
+            }
+            if i > s {
+                out.push(substr(text, s, i - s))
+            }
+        }
+        while i < n && text[i] != 10 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// dns_query_ns(ns, q, ms) -> int：向**一个** nameserver 发查询并解析，
+/// 返回网络序 u32；超时/失败返回 0。
+///
+/// 每次调用都新开一个 socket 并在结束时关闭：DNS 查询是低频操作，
+/// 复用 fd 省下的那点开销抵不上"超时设置会串到下一次查询"的风险。
+pub fn dns_query_ns(ns: str, q: str, ms: int) -> int {
+    let fd = udp_open()
+    if fd < 0 {
+        return 0
+    }
+    let sent = udp_send_str(fd, ns, 53, q)
+    if sent <= 0 {
+        return 0
+    }
+    let resp = udp_recvfrom_to(fd, 2048, ms)
+    if len(resp) < 12 {
+        return 0
+    }
+    return dns_parse_a(resp)
+}
+
+/// dns_resolve_ex(name, ms_per_ns) -> str：多 nameserver 轮询版解析。
+///
+/// 依次向 resolv.conf 里的每个 nameserver 发同一个查询，**第一个成功的胜出**；
+/// 全部失败返回空串。`ms_per_ns` 是**每个** nameserver 的超时（不是总预算）——
+/// 这样 3 个 nameserver 各 1 s 的最坏情况是 3 s，而不是把 1 s 摊给三个
+/// （摊薄会让每个都必然超时，等于没轮询）。
+///
+/// 为什么要轮询：resolv.conf 里第一个 nameserver 常常是本地 stub
+/// （127.0.0.53 / 127.0.0.1），它自己再往上游转发；stub 挂了或没起来时，
+/// 只认第一个就等于整个解析不可用。轮询是 glibc 的默认行为，这里对齐它。
+pub fn dns_resolve_ex(name: str, ms_per_ns: int) -> str {
     let lit = udp_parse_ip(name)
     if lit != 0 {
         return name
@@ -308,33 +390,21 @@ pub fn dns_resolve(name: str) -> str {
     if len(name) == 0 {
         return ""
     }
-    let ns = ""
-    let rctext = read_text("/etc/resolv.conf")
-    if len(rctext) > 0 {
-        ns = dns_resolv_ns(rctext)
-    }
-    if len(ns) == 0 {
-        ns = "8.8.8.8"
-    }
     let q = dns_build_query(name)
     if len(q) == 0 {
         return ""
     }
-    let fd = udp_open()
-    if fd < 0 {
-        return ""
+    let nss = dns_resolv_all(read_text("/etc/resolv.conf"))
+    if len(nss) == 0 {
+        nss.push("8.8.8.8")
     }
-    let sent = udp_send_str(fd, ns, 53, q)
-    if sent <= 0 {
-        return ""
+    let mut k = 0
+    while k < len(nss) {
+        let ip = dns_query_ns(nss.get(k), q, ms_per_ns)
+        if ip != 0 {
+            return dns_ip4_str(ip)
+        }
+        k = k + 1
     }
-    let resp = udp_recvfrom_to(fd, 2048, 3000)
-    if len(resp) < 12 {
-        return ""
-    }
-    let ip = dns_parse_a(resp)
-    if ip == 0 {
-        return ""
-    }
-    return dns_ip4_str(ip)
+    return ""
 }

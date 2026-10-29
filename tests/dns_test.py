@@ -128,6 +128,19 @@ def py_resolv_ns(text):
     return ""
 
 
+def py_resolv_all(text):
+    """返回全部 nameserver（顺序）。空/注释行跳过，行尾注释截断。"""
+    out = []
+    for line in text.split("\n"):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        parts = s.split()
+        if parts and parts[0] == "nameserver" and len(parts) > 1:
+            out.append(parts[1])
+    return out
+
+
 def py_ip4_str(ip):
     return "%d.%d.%d.%d" % (ip & 0xFF, (ip >> 8) & 0xFF,
                             (ip >> 16) & 0xFF, (ip >> 24) & 0xFF)
@@ -185,6 +198,14 @@ def build_probe(cases):
             lines.append(f'    print(dns_ip4_str({arg}))')
         elif kind == "resolv":
             lines.append(f'    print(dns_resolv_ns("{esc(arg.encode())}"))')
+        elif kind == "resolvall":
+            lines.append(f'    let ra{cid} = dns_resolv_all("{esc(arg.encode())}")')
+            lines.append(f'    print(len(ra{cid}))')
+            lines.append(f'    let mut ri{cid} = 0')
+            lines.append(f'    while ri{cid} < len(ra{cid}) {{')
+            lines.append(f'        print(ra{cid}.get(ri{cid}))')
+            lines.append(f'        ri{cid} = ri{cid} + 1')
+            lines.append('    }')
     lines.append("}")
     src = "\n".join(lines) + "\n"
     with open(PROBE_SRC, "w", encoding="utf-8") as f:
@@ -301,6 +322,21 @@ def main():
         cases.append((cid, "resolv", txt))
         expect.append(("resolv", tag, py_resolv_ns(txt)))
 
+    # ---- dns_resolv_all（v3.05：多 nameserver）----
+    ra_cases = [
+        ("multi", rc),
+        ("one", rc2),
+        ("none", rc3),
+        ("empty", ""),
+        ("blank", "\n\n  \n"),
+        ("trailcomment", "nameserver 8.8.8.8 # primary\n"),
+        ("mixed", "# c\nnameserver 1.1.1.1\nsearch x\nnameserver 9.9.9.9\n"),
+    ]
+    for tag, txt in ra_cases:
+        cid += 1
+        cases.append((cid, "resolvall", txt))
+        expect.append(("resolvall", tag, py_resolv_all(txt)))
+
     # ---- 编译并运行探针 ----
     if VERBOSE:
         print("生成探针：%s（%d 个用例）" % (PROBE_SRC, len(cases)))
@@ -342,6 +378,12 @@ def main():
             ok = (got_s == ref)
             want = ref
             got = got_s
+        elif kind == "resolvall":
+            cnt = int(take())
+            got_list = [take().strip() for _ in range(cnt)]
+            ok = (got_list == ref)
+            want = repr(ref)
+            got = repr(got_list)
         else:  # resolv
             got_s = take().strip()
             ok = (got_s == ref)
