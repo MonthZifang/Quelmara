@@ -328,7 +328,7 @@ pub fn dns_resolve(name: str) -> str {
     if sent <= 0 {
         return ""
     }
-    let resp = udp_recvfrom(fd, 2048)
+    let resp = udp_recvfrom_to(fd, 2048, 3000)
     if len(resp) < 12 {
         return ""
     }

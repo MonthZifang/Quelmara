@@ -3077,21 +3077,25 @@ class Lower:
             d = fn.new_v()
             fn.emit("call", d, "__udp_open", [])
             return d
-        if name in ("udp_bind", "udp_sendto", "udp_recvfrom") and name not in self.fns_ast:
+        if name in ("udp_bind", "udp_sendto", "udp_recvfrom", "udp_recvfrom_to") \
+                and name not in self.fns_ast:
             # udp_bind(fd, port) -> 0/-1
             # udp_sendto(fd, ip_u32, port, data) -> 发送字节数/-1
             #   ip_u32 是**网络序**（std/net/udp.qma 的 udp_parse_ip 产出）
             # udp_recvfrom(fd, cap) -> str（单 datagram，源地址 v0 丢弃）
+            # udp_recvfrom_to(fd, cap, ms) -> str（v3.04：带接收超时；
+            #   超时返回空串而不是永久阻塞 —— DNS 查询没有它就会挂死）
             if self.arch != "x86_64":
                 raise SyntaxError(f"{name} 目前只在 x86_64 后端实现")
             self.uses_udp = True
-            need = {"udp_bind": 2, "udp_sendto": 4, "udp_recvfrom": 2}[name]
+            need = {"udp_bind": 2, "udp_sendto": 4, "udp_recvfrom": 2,
+                    "udp_recvfrom_to": 3}[name]
             if len(e[2]) != need:
                 raise SyntaxError(f"{name} 需要 {need} 个实参")
             vals = [self.eval(a, fn, env) for a in e[2]]
             d = fn.new_v()
             fn.emit("call", d, "__" + name, vals)
-            if name == "udp_recvfrom":
+            if name in ("udp_recvfrom", "udp_recvfrom_to"):
                 return self._mark_str(fn, d)
             return d
         if name == "mem_alloc" and name not in self.fns_ast:
@@ -9399,6 +9403,88 @@ class Lower:
             f.emit("bin", "add", rbuf, buf, ("imm", 8))
             f.emit("ret", rbuf)
             net_fail(f, lf, "udprecvfrom")             # fail 块在 ret 之后
+            self.out.append(f)
+
+            # __udp_recvfrom_to(fd, cap, ms) -> str（v3.04）
+            #
+            # 带接收超时的版本。`ms <= 0` 表示"不等"（非阻塞探测）；
+            # 超时/失败返回**空串**而不是 fail-fast —— 调用方（DNS）需要
+            # "这个 nameserver 没响应"是可恢复结果，不是进程终止条件。
+            #
+            # 实现：先 setsockopt(SO_RCVTIMEO) 设超时，再 recvfrom。
+            #   * Linux x86_64：syscall 54，SOL_SOCKET=1、SO_RCVTIMEO=20，
+            #     optval 是 struct timeval{sec, usec}（16 字节）。
+            #   * Windows：SOCKET 句柄不是 fd，走 winapi setsockopt
+            #     （SOL_SOCKET=0xFFFF、SO_RCVTIMEO=0x1006，DWORD 毫秒）。
+            # 两种平台都**只设一次**，不改回——超时对同一 fd 的后续接收
+            # 持续有效，与调用方预期一致（DNS 用完就 close）。
+            f = Fn("__udp_recvfrom_to")
+            ft, capt, mst = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [ft, capt, mst])
+            tv = f.new_v()
+            f.emit("call", tv, "__alloc", [("imm", 16)])
+            if self.platform == "windows":
+                # DWORD 毫秒（4 字节，直接放在 tv 前 4 字节）
+                f.emit("store", tv, ("imm", 0), mst)
+                f.emit("winapi", None, "setsockopt",
+                       [ft, ("imm", 0xFFFF), ("imm", 0x1006), tv, ("imm", 4)])
+            else:
+                # struct timeval{ tv_sec, tv_usec }（x86_64 各 8 字节）
+                sec = f.new_v()
+                f.emit("bin", "div", sec, mst, ("imm", 1000))
+                mrem = f.new_v()
+                f.emit("bin", "mod", mrem, mst, ("imm", 1000))
+                usec = f.new_v()
+                f.emit("bin", "mul", usec, mrem, ("imm", 1000))
+                f.emit("store", tv, ("imm", 0), sec)
+                f.emit("store", tv, ("imm", 1), usec)
+                f.emit("syscall", None, self.sc["setsockopt"],
+                       [ft, ("imm", 1), ("imm", 20), tv, ("imm", 16)])
+            nb = f.new_v()
+            f.emit("bin", "add", nb, capt, ("imm", 9))
+            buf = f.new_v()
+            f.emit("call", buf, "__alloc", [nb])
+            sinb = f.new_v()
+            f.emit("call", sinb, "__alloc", [("imm", 16)])
+            slen = f.new_v()
+            f.emit("call", slen, "__alloc", [("imm", 8)])
+            f.emit("store", slen, ("imm", 0), ("imm", 16))
+            bufd = f.new_v()
+            f.emit("bin", "add", bufd, buf, ("imm", 8))
+            l_empty = f.label("urt0")
+            l_ok = f.label("urt1")
+            if self.platform == "windows":
+                r = f.new_v()
+                f.emit("winapi", r, "recvfrom",
+                       [ft, bufd, capt, ("imm", 0), sinb, slen])
+                b = f.new_v()
+                r32 = f.new_v()
+                f.emit("bin", "shl", r32, r, ("imm", 32))
+                r322 = f.new_v()
+                f.emit("bin", "sar", r322, r32, ("imm", 32))
+                f.emit("cmpset", "l", b, r322, ("imm", 0))
+                f.emit("jnz", b, l_empty)
+            else:
+                r = f.new_v()
+                f.emit("syscall", r, self.sc["recvfrom"],
+                       [ft, bufd, capt, ("imm", 0), sinb, slen])
+                b = f.new_v()
+                f.emit("cmpset", "l", b, r, ("imm", 0))
+                f.emit("jnz", b, l_empty)
+            # 成功：长度头 = 实收字节数，NUL 在 r+8
+            f.emit("store", buf, ("imm", 0), r)
+            noff = f.new_v()
+            f.emit("bin", "add", noff, r, ("imm", 8))
+            f.emit("store8", buf, noff, ("imm", 0))
+            rbuf = f.new_v()
+            f.emit("bin", "add", rbuf, buf, ("imm", 8))
+            f.emit("ret", rbuf)
+            # 超时/失败：返回空串（长度 0 的 str，头 8 字节写 0）
+            f.emit("label", l_empty)
+            f.emit("store", buf, ("imm", 0), ("imm", 0))
+            f.emit("store8", buf, ("imm", 8), ("imm", 0))
+            f.emit("bin", "add", rbuf, buf, ("imm", 8))
+            f.emit("ret", rbuf)
             self.out.append(f)
 
         if self.uses_cpu:
