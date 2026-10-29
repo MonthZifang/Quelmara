@@ -402,7 +402,10 @@ out=$(timeout 60 ./build/nat_recvbatch 2>&1); rc=$?
 $NAT build tests/t164_sendall.qma -o build/nat_sendall >/dev/null 2>&1 \
   && ok "TCP 批量发送：native 编译通过" || bad "TCP 批量发送：native 编译失败"
 out=$(timeout 120 ./build/nat_sendall 2>&1); rc=$?
-[ $rc -eq 0 ] && [ "$out" = "send batch ok" ] \
+# worker 线程会先 print 两个数字（小负载字节数 / 4MB 字节数），
+# 所以断言用"最后一行"，不是整段输出。
+last=$(printf '%s\n' "$out" | tail -1)
+[ $rc -eq 0 ] && [ "$last" = "send batch ok" ] \
   && ok "TCP 批量发送：send_all 4MB 零拷贝 + str_ptr 语义全过" \
   || bad "TCP 批量发送 rc=$rc [$out]"
 
