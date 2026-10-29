@@ -3386,6 +3386,37 @@ class Lower:
             d = fn.new_v()
             fn.emit("call", d, "__memdiff", vals)
             return d
+        if name == "str_ptr" and name not in self.fns_ast:
+            # str_ptr(s) -> int：取 str 的**数据指针**（v3.07）。
+            #
+            # Quelmara 的 str 是长度前缀 ABI：`[len:8][bytes...]`，而 str 变量
+            # 的值**本身就是数据指针**（指向第一个字节）——`__str_len` 的实现
+            # 就是 `load(p-8)`，正好印证这一点。
+            #
+            # 所以这个内建不分配、不复制、零成本：直接返回操作数。
+            # 用途：把 str 喂给 `tcp_send_n(fd, ptr, n)` 这类零拷贝内建，
+            # 避免 `substr` 切片造成的 O(n²) 复制。
+            #
+            # 边界：返回的指针**只在 s 存活期间有效**；调用方不能保存它跨
+            # 作用域使用（语言没有生命周期检查，这是"裸指针来源"的一类，
+            # 与 mem_str 裸指针同口径）。
+            if len(e[2]) != 1:
+                raise SyntaxError("str_ptr(s) 需要且只需要一个 str 实参")
+            v = self.eval(e[2][0], fn, env)
+            # 关键：操作数 vreg 在 fn.strv 里（print/len 会按 str 处理）。
+            # 本内建要的是**同一个值当 int 用**，但**不能把原 vreg 的 str 标记
+            # 摘掉** —— 那会让 `let p = str_ptr(s)` 之后 `len(s)` 也报
+            # "只支持定长数组/切片/map/str"（v3.07 踩过）。
+            #
+            # 正确做法：拷到一个**新 vreg**，只给新 vreg 去掉 str 标记。
+            # 拷一条 mov 的成本可以忽略（且会被复制传播消掉）。
+            if isinstance(v, int):
+                d = fn.new_v()
+                fn.emit("mov", d, v)
+                if hasattr(fn, "strv"):
+                    fn.strv.discard(d)      # 新 vreg 不是 str
+                return d
+            return v
         if name == "mem_str" and name not in self.fns_ast:
             # mem_str(p, n) -> str：拷 n 字节并补 NUL（缓冲区 -> 不可变串）
             if len(e[2]) != 2:

@@ -37,6 +37,41 @@ pub fn send(conn: int, data: str) -> int {
     return tcp_send(conn, data)
 }
 
+/// 把 `data` **全部**写出，返回实际写出的字节数（v3.07）。
+///
+/// 为什么需要它：`send(conn, data)` 是**一次** `send()` 系统调用，返回值是
+/// "这次写进去多少"，**可能小于 `len(data)`**（短写）。短写不是错误，是 TCP
+/// 的正常行为：内核发送缓冲区快满时只接受一部分；大块数据（> 64 KB）几乎
+/// 一定分多次。拿 `send` 当"发完了"用，会在高吞吐或大包场景丢尾巴。
+///
+/// **实现：零拷贝指针推进**。第一版用 `substr(data, sent, ...)` 切尾巴，
+/// 每轮把剩余数据**复制一遍** —— 4 MB 负载直接 O(n²)、堆爆 512 MB 上限
+/// （实测 `heap_limit_mb exceeded`）。现在改用 `tcp_send_n(fd, ptr+off, n)`：
+/// 裸指针 + 长度，不构造新 str、不扫 strlen。`str_ptr` 取数据指针是零成本的
+/// （str 的值本身就是数据指针，长度在 ptr-8）。
+///
+/// **返回值语义**：成功返回 `len(data)`；中途出错返回已写出的字节数。
+/// 调用方用 `== len(data)` 判断是否发全。
+///
+/// 边界：无超时（`tcp_send_n` 阻塞）；对端一直不收且缓冲区满时会一直等
+/// （这是 TCP 的背压语义，不是 bug）。
+pub fn send_all(conn: int, data: str) -> int {
+    let total = len(data)
+    if total == 0 {
+        return 0
+    }
+    let base = str_ptr(data)
+    let mut sent = 0
+    while sent < total {
+        let n = tcp_send_n(conn, mem_ptr(base, sent), total - sent)
+        if n <= 0 {
+            break
+        }
+        sent = sent + n
+    }
+    return sent
+}
+
 /// 从连接读最多 cap 字节并返回 str；对端关闭时返回空串。
 pub fn recv(conn: int, cap: int) -> str {
     return tcp_recv(conn, cap)

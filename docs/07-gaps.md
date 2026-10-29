@@ -43,7 +43,7 @@
 | `chunked` 请求体 | ✅ v2.95：`std/http_chunk`（`chunk_scan`/`chunk_pack`，纯内存零 socket）+ `std/http` 派发循环就地解包；chunk-ext 与 trailer 丢弃、TE 覆盖 Content-Length（RFC 7230 §3.3.3，两种头序都验）、病态流 400。`tests/t158_chunk.qma` 三后端同一份夹具。仍缺：TE 为 gzip 等其它编码（501）、`Transfer-Encoding` 响应侧分块发送 | 部分客户端上传已可用 |
 | DNS | ✅ **v3.03**：**`std/net/dns`**（自研 DNS 解析器，纯 Quelmara）。Windows 仍走系统 `getaddrinfo`（v1.25；v2.07 起 `AF_UNSPEC`，v4/v6 都返）；**Linux 侧新增 `dns_resolve(name)`**——读 `/etc/resolv.conf` 取 nameserver（v3.05 起全部轮询）、自己拼 A 查询、UDP 发 53 端口、自己解析应答（含名字压缩指针），不依赖 glibc/NSS。实测 `example.com` / `cloudflare.com` 真实解析成功。差分测试 `tests/dns_test.py`（38 项，Python 独立实现对拍）。**边界**：只查 A 记录（AAAA 未做）；**v3.04 已带超时**（`udp_recvfrom_to`，3 s，超时返回空串）、**v3.05 已支持多 nameserver 轮询**（`dns_resolv_all` + `dns_resolve_ex`，每个 ns 独立超时）；无 search domain / ndots（必须是 FQDN）；无 EDNS(0)、无 TCP 回退、无 DNSSEC；压缩指针只跟一跳 | 域名解析不再需要 glibc；Linux 上 `dns_resolve` 直接可用。要 v6 得先补 AAAA + POSIX 的 `tcp_listen6` |
 | IPv6 | ✅ v2.07：**TCP 全链路**——`tcp_listen6`（AF_INET6 + `sockaddr_in6` 28B + `IPV6_V6ONLY=0` 双栈，同一端口同时接 v4 映射连接）；`tcp_connect` 的 family 从 `AF_INET` 放宽到 `AF_UNSPEC`（IPv6 字面量与 AAAA 记录直接可用，失败沿 `ai_next` 回退——`localhost` 先给 `::1` 时 v4-only 服务端仍能连上）；`tcp_peer_raw`（`getpeername` 的 20 字节视图）+ `std/net/addr`（`ip_family` / `ip6_parse` / `ip6_format`（RFC 5952）/ `ip4_format` / `peer_ip` / `peer_port`，双栈上的 `::ffff:a.b.c.d` 还原成点分） | 仍缺：**UDP 没有 v6**（`udp_sendto` 的地址参数是 u32 网络序，要改成 16 字节 API 才带得动 v6）；`net_serve`（IOCP reactor）仍只绑 v4；Linux 侧 `tcp_connect`/`tcp_listen6` 编译期报错；无 zone id（`%eth0`）、不做 `::a.b.c.d` 兼容地址归一 |
-| TCP 批量收发 | ✅ **v3.06**：`std/net` 新增 `recv_all`（读到对端关闭）/ `recv_all_max`（有上限）/ `recv_exact`（精确 n 字节）。`tests/t163_recvbatch.qma` 真实 socket 4 场景验证（含"要 100 字节但只发 3 字节"不挂死）。边界：**发送侧仍是单次 `tcp_send`**（要循环写才叫批量）；无超时（`tcp_recv` 阻塞）；`recv_all` 无总长上限 | 读响应体不用再手写循环；HTTP/1.1 的 Content-Length 与 TLS 记录层有精确读语义 |
+| TCP 批量收发 | ✅ **v3.06 接收 / v3.07 发送**：`std/net` 有 `recv_all`（读到对端关闭）/ `recv_all_max`（有上限）/ `recv_exact`（精确 n 字节）/ **`send_all`（循环写到发全）**。`t163_recvbatch.qma` 接收 4 场景 + `t164_sendall.qma` 发送 3 场景（含 **4 MB 零拷贝**）。**v3.07 的关键修复**：`send_all` 第一版用 `substr` 切尾巴 → 每轮复制剩余数据 → O(n²) 堆爆 512 MB 上限（实测 `heap_limit_mb exceeded`）；改用新内建 `str_ptr(s)` + `tcp_send_n(fd, ptr, n)` 零拷贝推进，4 MB 一次通过。边界：无超时（`tcp_send_n`/`tcp_recv` 阻塞）；`recv_all` 无总长上限；`str_ptr` 返回的指针只在源 str 存活期内有效（无生命周期检查） | 大包高吞吐不再丢尾巴；HTTP/TLS 的批量写有了正确语义 |
 | 可靠 UDP | UDP 四件之上未做 | 游戏/实时传输 |
 | 日志 | ✅ v2.03：**`std/log`**（级别过滤 / **绝对时间戳**（RFC 3339 毫秒 + 时区偏移，同一毫秒内复用缓存）/ **stdout·stderr 双通道** / 结构化 `k=v` 字段 / 每行持锁不交错）+ **`std/logfile`**（追加写 + **按大小轮转** `.1`…`.keep` + 64 KB 攒批 + `logf_tee` 同时打控制台 + 共享打开可边写边 tail）。边界：文件通道走 `std/fs`，**仅 Windows PE**；攒批的崩溃窗口最多 64 KB（要即时落盘调 `logf_flush`，掉电仍要 `fs_sync`）；不做 syslog/网络输出、不做压缩归档、级别不能热加载 | 生产可观测性：日志能对上外部系统的时钟，stdout 留业务、stderr 留诊断，文件自己滚动；写路径 434 ns/行（173 MB/s），被过滤的行 2 ns |
 | 编码 | ✅ v1.29：`std/utf8`（严格解码/编码/校验/按字符切片）+ `b64url_*`（hex v1.19 已补） | 仍缺 Unicode 规范化与大小写折叠；**f64 打印已修（v1.51）**：定点/科学计数按 C 后端口径逐位一致（`__f64_to_str` 有限值路径漏长度前缀已补），仍缺最短往返表示（grisu/ryu） |
@@ -173,7 +173,7 @@
 3. `map[str]Struct`（~~`vec[map]`~~ ✅ v1.37）
 4. 函数值放宽：8 参、允许 struct 实参
 5. ~~`defer` / `Drop`~~（✅ v1.48 / v1.93：资源生命周期进语法）
-6. UDP v6 / reactor 双栈（~~TCP 批量收发~~ ✅ v3.06 接收侧）
+6. UDP v6 / reactor 双栈（~~TCP 批量收发~~ ✅ v3.06 接收 / v3.07 发送）
 7. ~~包管理 registry + 发布~~ ✅ v1.99（~~semver 区间~~ v1.45 → registry/发布/传递依赖）
 8. 自举主线：函数体 parser 收敛（当前分叉数见 `06-status.md`）
 

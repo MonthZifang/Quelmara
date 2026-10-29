@@ -871,6 +871,7 @@ fn make_adder(k: int) -> closure {          // 闭包逃逸：环境在堆上
 | `pclmulqdq(d, s, imm8)` | 64×64 进位无乘法（GCM 的 GF(2^128) 乘法核心） |
 | `psrlw/psllw/psrlq/psllq/pslldq/psrldq`(d, imm8) | 字/双字/整寄存器移位 |
 | `mem_str(p, n)` | 内存转 str |
+| `str_ptr(s)` | str -> **数据指针**（int，零成本，v3.07）。str 是长度前缀 ABI（`[len:8][bytes]`），变量的值本身就是数据指针；长度在 `ptr-8`。用途：喂 `tcp_send_n` 做零拷贝发送，避免 `substr` 切片的 O(n²) 复制。**指针只在 s 存活期间有效**；不破坏原 str 的类型（拷到新 vreg） |
 | `cstr(s)` | str -> **NUL 结尾**的 C 字符串指针（新分配，返回 int；FFI 传 `char*` 用它，v1.87） |
 | `cstr_read(p)` | C 字符串指针 -> str（扫到首个 NUL，无上界保护，v1.87） |
 | `mem_load8/32/64(p)`、`mem_store8/64(p, v)` | 裸读写（8/32 是字节偏移，64 是槽索引 ×8） |
