@@ -951,6 +951,7 @@ fn make_adder(k: int) -> closure {          // 闭包逃逸：环境在堆上
 | `tcp_peer_raw(fd)` | 对端地址的 20 字节视图（端口网络序 / family / 地址），文本化交给 `std/net/addr`（v2.07） |
 | `udp_open()` / `udp_bind(fd, port)` / `udp_sendto(fd, ip, port, s)` / `udp_recvfrom(fd)` | UDP 四件 |
 | `tcp_recv_to(fd, cap, ms)` | 带**接收超时**的单次 TCP 接收（v3.08）：`ms` 毫秒内没收到返回**空串**，不 fail-fast。`ms = 0` 表示**不限时**（`SO_RCVTIMEO=0` 在 Windows/Linux 都是等到底，不是非阻塞）。Linux 走 `setsockopt(SO_RCVTIMEO)` + `recv`，Windows 走 `setsockopt(SO_RCVTIMEO)`（DWORD 毫秒）。给 `recv_all_to` 系列用——无超时的 `recv_all` 遇半开连接会**永久阻塞** |
+| `tcp_send_n_to(fd, ptr, n, ms)` | 带**发送超时**的零拷贝发送（v3.10）：返回本次写出的字节数，等满 `ms` 仍写不动就返回 **0**（不 fail-fast）。`ms = 0` 表示**不限时**。实现是「先 `select`(Windows) / `poll`(Linux) 等可写、再 `send`」——**不是** `SO_SNDTIMEO`：Win32 上那个选项对零窗口的阻塞发送不生效（v3.10 实测设 5 s 也挂 40 s+）。仅 x86_64；给 `send_all_to` 用 |
 | `udp_recvfrom_to(fd, cap, ms)` | 带**接收超时**的单 datagram 接收（v3.04）：`ms` 毫秒内没收到返回**空串**，不 fail-fast。`ms = 0` 表示**不限时**（`SO_RCVTIMEO=0` 在 Windows/Linux 都是等到底，不是非阻塞——v3.09 实测挂住 8 s）。Linux 走 `setsockopt(SO_RCVTIMEO)` + `recvfrom`，Windows 走 `setsockopt(SO_RCVTIMEO)`（DWORD 毫秒）。给 `std/net/dns` 用，避免 nameserver 不响应时永久挂起 |
 | `net_config(key)` | **编译期常量**（v2.12）：`0` = `max_conns`、`1` = `recv_buffer`、`2` = `io_threads`（已解析：`0` → 物理核数）、`3` = `tcp_nodelay`（0/1）。`key` 必须是编译期常量 |
 

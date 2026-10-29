@@ -233,7 +233,11 @@ WS2_32_FUNCS = {"WSAStartup", "WSACleanup", "socket", "bind", "listen",
                 "accept", "recv", "send", "sendto", "recvfrom",
                 "closesocket", "inet_addr", "connect", "getaddrinfo",
                 "freeaddrinfo", "getpeername", "getsockname",
-                "htons", "ntohs", "setsockopt", "ioctlsocket"}
+                "htons", "ntohs", "setsockopt", "ioctlsocket",
+                # v3.10：发送超时靠"先等可写再发"。SO_SNDTIMEO 在 Win32 上
+                # 对 TCP 零窗口的阻塞发送**不生效**（实测 5 s 也不返回），
+                # 只能自己 select。select 在标准库里是 ws2_32 的符号。
+                "select"}
 
 
 def _norm_dll(dll):
