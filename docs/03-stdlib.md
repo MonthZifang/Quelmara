@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-67 个模块，**559 个公开函数**（另有 570 个内部函数）
+67 个模块，**562 个公开函数**（另有 570 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -44,7 +44,7 @@
 | `std/mem` | slab 分配 / fd 表 / 缓冲 / 对象池 | 21 / 30 |
 | `std/mime` | 扩展名 ↔ Content-Type（内置 30 项表，大小写不敏感，带 charset 参数反查） | 4 / 5 |
 | `std/multipart` | multipart/form-data 解析（boundary 提取 / 表单字段与文件部分 / 头字段大小写不敏感） | 4 / 6 |
-| `std/net` | 阻塞 TCP 便捷层 | 7 / 7 |
+| `std/net` | 阻塞 TCP 便捷层 | 10 / 10 |
 | `std/net/addr` | 地址文本层：IPv4/IPv6 字面量解析与 RFC 5952 格式化 + fd 对端地址 | 11 / 15 |
 | `std/net/core` | 连接槽位层（IOCP reactor 的底座） | 22 / 22 |
 | `std/net/dns` | 自研 DNS 解析器（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf） | 8 / 9 |
@@ -1068,6 +1068,22 @@ fn connect(host: str, port: int) -> int
 fn send(conn: int, data: str) -> int
 /// 从连接读最多 cap 字节并返回 str；对端关闭时返回空串。
 fn recv(conn: int, cap: int) -> str
+/// 读到**对端关闭**为止，返回全部字节（v3.06）。
+/// `chunk` 是每次 `tcp_recv` 的上限（建议 4096–65536）。为什么需要它：
+/// `recv(conn, cap)` 是**单次** `recv()`，内核缓冲区里有多少就返回多少，
+/// 可能远少于 `cap`——拿它当"读完"用，在慢链路或大数据包上会截断。
+/// 这里循环读到返回空串（对端 FIN）为止。
+/// 边界：**没有总长度上限**——对端一直发就会一直读。需要上限的调用方
+/// 用 `recv_until_close_max`。也没有超时（`tcp_recv` 是阻塞的）。
+fn recv_all(conn: int, chunk: int) -> str
+/// 读到对端关闭，但最多读 `maxbytes` 字节（v3.06）。
+/// 与 `recv_all` 的区别：**有上限**，到上限就返回，不会因为对端一直发而
+/// 无限增长内存。适合"读 HTTP 响应体但有 Content-Length 上限"这类场景。
+fn recv_all_max(conn: int, chunk: int, maxbytes: int) -> str
+/// 精确读 `n` 字节；对端提前关闭时返回**已读到的部分**（v3.06）。
+/// 这是 HTTP/1.1 的 `Content-Length` 与 TLS 记录层都要的语义：
+/// "我知道正好要 n 字节，给我读满"。用 `len(result) == n` 判断是否读满。
+fn recv_exact(conn: int, n: int, chunk: int) -> str
 /// 关闭连接 fd（不返回值）。
 fn close_conn(fd: int)
 ```

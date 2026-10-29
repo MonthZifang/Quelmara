@@ -388,6 +388,15 @@ out=$(timeout 180 ./build/nat_p384c 2>&1); rc=$?
   && ok "P-384 链：deno/cloudflare 两链验到自签根 + 负向全过" \
   || bad "P-384 链执行 rc=$rc [$out]"
 
+# v3.06：TCP 批量收发（recv_all / recv_all_max / recv_exact）真实 socket 4 场景。
+# 需要本机 loopback 与 spawn；沙箱拦 socket 时记 SKIP 而不是红。
+$NAT build tests/t163_recvbatch.qma -o build/nat_recvbatch >/dev/null 2>&1 \
+  && ok "TCP 批量收发：native 编译通过" || bad "TCP 批量收发：native 编译失败"
+out=$(timeout 60 ./build/nat_recvbatch 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$out" = "recv batch ok" ] \
+  && ok "TCP 批量收发：recv_all/recv_all_max/recv_exact 4 场景全过" \
+  || bad "TCP 批量收发 rc=$rc [$out]"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]
