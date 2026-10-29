@@ -1,0 +1,111 @@
+// t167 —— 发送超时（v3.10）：对端不收时 send_all_to 不再永久阻塞
+//
+// 关键回归：`send_all` / `tcp_send_n` 是阻塞 send。对端不读、内核发送缓冲区
+// 满之后，它们**永久阻塞**（v3.10 实测循环发 1 MB，12 s 被外部杀掉，退出码 124）。
+//
+// 实现注意：SO_SNDTIMEO 在 Win32 上对"零窗口"的阻塞发送**不生效**（设 5 s
+// 也照样挂 40 s+），所以 tcp_send_n_to 走的是「先 select/poll 等可写，再 send」。
+// 这个用例因此也钉住了那条实现路径：耗时必须落在 ms 附近，不能是 0（假成功）
+// 也不能是几秒（等错了地方）。
+import std.net
+
+// 1 MB 负载，字节 patterns 65 + i%26（与 t166 同构，便于交叉核对）
+fn big(n: int) -> str {
+    let v = vec[int].new(n)
+    let mut i = 0
+    while i < n {
+        v.push(65 + (i % 26))
+        i = i + 1
+    }
+    return str_from_bytes(v)
+}
+
+// 正常消费者：收满 n 字节，抽样校验后回一行"长度 + 坏字节数"
+fn reader(port: int, n: int) -> int {
+    let c = connect("127.0.0.1", port)
+    let g = recv_exact(c, n, 65536)
+    let mut bad = 0
+    if len(g) != n {
+        bad = bad + 1
+    }
+    let base = str_ptr(g)
+    let mut i = 0
+    while i < n {
+        if mem_load8(mem_ptr(base, i), 0) != 65 + (i % 26) {
+            bad = bad + 1
+        }
+        i = i + 4096
+    }
+    send(c, "len=" + len(g).to_str() + " bad=" + bad.to_str())
+    close_conn(c)
+    return 0
+}
+
+// 不消费者：连上就睡，全程不 recv（窗口会被填满）
+fn deaf(port: int) -> int {
+    let c = connect("127.0.0.1", port)
+    sleep_ms(3000)
+    close_conn(c)
+    return 0
+}
+
+fn main() {
+    let n = 1024 * 1024
+    let payload = big(n)
+
+    // [1] 正常路径：对端在读，send_all_to 必须发全，且内容正确
+    let l1 = listen(18075)
+    let h1 = spawn reader(18075, n)
+    let c1 = accept(l1)
+    let w1 = send_all_to(c1, payload, 5000)
+    let back = recv(c1, 64)
+    close_conn(c1)
+    join(h1)
+    close_conn(l1)
+    assert(w1 == n, "send_all_to 发全")
+    assert(back == "len=1048576 bad=0", "对端收到且内容正确")
+
+    // [2] 对端不读：循环发 1 MB，直到某次发不全；耗时应 ≈ 300 ms
+    let l2 = listen(18074)
+    let h2 = spawn deaf(18074)
+    let c2 = accept(l2)
+    let t0 = now_ns()
+    let mut i = 0
+    let mut short = 0
+    while i < 100 {
+        let w2 = send_all_to(c2, payload, 300)
+        if w2 < n {
+            short = 1
+            break
+        }
+        i = i + 1
+    }
+    let el = (now_ns() - t0) / 1000000
+    assert(short == 1, "窗口满后 send_all_to 返回短写")
+    assert(el >= 250, "至少等了 ms 那么久（不是 0 毫秒假成功）")
+    assert(el < 5000, "没有挂死")
+
+    // [3] 单次 send_to：此时窗口已经满了，应在 ms 内返回 0（不是挂住）
+    let t1 = now_ns()
+    let w3 = send_to(c2, payload, 300)
+    let el2 = (now_ns() - t1) / 1000000
+    assert(w3 == 0, "窗口满时 send_to 返回 0")
+    assert(el2 >= 250, "send_to 也等满了 ms")
+    assert(el2 < 5000, "send_to 没有挂死")
+    close_conn(c2)
+    join(h2)
+    close_conn(l2)
+
+    // [4] 小负载 + 空串：不受超时影响
+    let l3 = listen(18073)
+    let h3 = spawn reader(18073, 5)
+    let c3 = accept(l3)
+    assert(send_all_to(c3, "hello", 1000) == 5, "小负载发全")
+    close_conn(c3)
+    join(h3)
+    close_conn(l3)
+    assert(send_all_to(0, "", 1000) == 0, "空串返回 0")
+    assert(send_to(0, "", 1000) == 0, "空串 send_to 返回 0")
+
+    print("send timeout ok")
+}

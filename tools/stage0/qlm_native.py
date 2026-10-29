@@ -3800,10 +3800,36 @@ class Lower:
             if len(e[2]) != 3:
                 raise SyntaxError("tcp_recv_to(fd, cap, ms) 需要 3 个实参")
             self.uses_net = True
+            self.uses_free = True          # __tcp_recv_to 里要 __free timeval
             vals = [self.eval(a, fn, env) for a in e[2]]
             d = fn.new_v()
             fn.emit("call", d, "__tcp_recv_to", vals)
             return self._mark_str(fn, d)
+        if name == "tcp_send_n_to" and name not in self.fns_ast:
+            # tcp_send_n_to(fd, ptr, n, ms) -> 本次写出的字节数（v3.10：发送超时）
+            #
+            # 零拷贝 + 发送超时，与 tcp_send_n 同参、多一个 ms。
+            # 超时/出错返回 **0**（不是 fail-fast）——与 tcp_recv_to 同口径：
+            # "对端一时不收"是可恢复结果，send_all_to 这类循环靠 n <= 0 停。
+            # ms = 0 表示不限时（SO_SNDTIMEO=0 = 等到底，不是非阻塞）。
+            #
+            # 为什么必须加：tcp_send_n / tcp_send 是阻塞 send()。对端不读
+            # （慢消费者、卡死的客户端、只发不收的对端）时，内核发送缓冲区一满
+            # 就永久阻塞——v3.10 实测 8 MB 发不出去，挂住 12 s 被外部杀掉。
+            # 这是 v3.08 接收超时的发送侧对称缺口。
+            if len(e[2]) != 4:
+                raise SyntaxError("tcp_send_n_to(fd, ptr, n, ms) 需要 4 个实参")
+            if self.arch != "x86_64":
+                raise SyntaxError(
+                    "tcp_send_n_to 目前只在 x86_64 实现（发送超时依赖 "
+                    "select/poll；arm64 内核没有 7 号 poll 系统调用，"
+                    "要用 ppoll 另写一条路）")
+            self.uses_net = True
+            self.uses_free = True          # __tcp_send_n_to 里要 __free timeval
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            d = fn.new_v()
+            fn.emit("call", d, "__tcp_send_n_to", vals)
+            return d
         if name in ("tcp_send_n", "tcp_recv_n") and name not in self.fns_ast:
             # 零拷贝变体（v1.5）：直接给指针 + 长度，不构造 str、不扫 strlen。
             #   tcp_send_n(fd, ptr, n) -> 发送字节数
@@ -8565,6 +8591,11 @@ class Lower:
                 f.emit("store", tv, ("imm", 1), usec)
                 f.emit("syscall", None, self.sc["setsockopt"],
                        [rfd, ("imm", 1), ("imm", 20), tv, ("imm", 16)])
+            # timeval 用完即还：setsockopt 会把它**拷进内核**，之后不再引用。
+            # 这是每次调用一次的分配，recv_all_to 收 4 MB / 4 KB 分块要调
+            # 上千次 —— 不释放就是按分块数线性泄漏（v3.10 补）。
+            tfr = f.new_v()
+            f.emit("call", tfr, "__free", [tv, ("imm", 16)])
             nb = f.new_v()
             f.emit("bin", "add", nb, rcap, ("imm", 9))
             h = f.new_v()
@@ -8600,6 +8631,138 @@ class Lower:
             f.emit("store", h, ("imm", 0), ("imm", 0))
             f.emit("store8", h, ("imm", 8), ("imm", 0))
             f.emit("ret", buf)
+            self.out.append(f)
+
+            # __tcp_send_n_to(fd, ptr, n, ms) -> 写出字节数（v3.10）
+            #
+            # **不能**用 setsockopt(SO_SNDTIMEO)：本机实测它只对"第一次"
+            # send 生效，对端窗口关死后（零窗口）阻塞中的 send **完全不
+            # 理会**这个超时 —— 设 5 s 也照样挂 40 s 以上。这是 Win32
+            # 传输层的已知行为，不是参数写错了（SO_RCVTIMEO 那条路正常）。
+            #
+            # 改用「**先等可写、再发**」：每轮先用 select(Windows) /
+            # poll(Linux) 等 `ms` 毫秒，确认可写了再调 send。阻塞 socket 上
+            # 只要还写得进哪怕 1 字节，send 就会立刻返回（不会为了凑满 n
+            # 而等），所以这个顺序既不会永久阻塞，也不留"临时改成非阻塞"
+            # 那种需要复原的副作用。
+            #
+            #   * Windows：select(0, NULL, &wset, NULL, &timeval)
+            #       fd_set = {u_int count; SOCKET fd_array[64]} ——
+            #       count 在偏移 0（4 字节，后跟 4 字节填充），数组从偏移 8
+            #       开始；timeval 是**两个 4 字节 long**（与 Linux 的
+            #       两个 8 字节不同），所以两个值要拼进一个 8 字节字写。
+            #   * Linux x86_64：poll(struct pollfd*, nfds, timeout_ms)，
+            #       pollfd = {int fd; short events; short revents}（8 字节），
+            #       events=POLLOUT(4)，timeout 直接吃毫秒，比 fd_set 省事。
+            #
+            # ms <= 0 = 不限时（Windows 传 NULL、Linux 传 -1），与
+            # tcp_recv_to 的 ms=0 口径一致。
+            f = Fn("__tcp_send_n_to")
+            sfd, spp, snn = f.new_v(), f.new_v(), f.new_v()
+            sms = f.new_v()
+            f.emit("args", [sfd, spp, snn, sms])
+            # 每次调用一块工作区：Windows 544（fd_set 520 + timeval 8，留余量）
+            # / Linux 8（一个 pollfd）。用完 __free。
+            wsz = f.new_v()
+            f.emit("call", wsz, "__alloc", [("imm", 544 if self.platform == "windows"
+                                             else 8)])
+            l_wait = f.label("tsndw")
+            l_done = f.label("tsndd")
+            total = f.new_v()
+            f.emit("mov", total, ("imm", 0))
+            f.emit("label", l_wait)
+            # ---- 等可写 ----
+            if self.platform == "windows":
+                f.emit("store", wsz, ("imm", 0), ("imm", 1))     # fd_count = 1
+                f.emit("store", wsz, ("imm", 1), sfd)            # fd_array[0]
+                tvp = f.new_v()
+                f.emit("bin", "add", tvp, wsz, ("imm", 520))
+                # timeval{ tv_sec:long(4), tv_usec:long(4) } 拼成一个 8 字节字
+                sec = f.new_v()
+                f.emit("bin", "div", sec, sms, ("imm", 1000))
+                mrem = f.new_v()
+                f.emit("bin", "mod", mrem, sms, ("imm", 1000))
+                usec = f.new_v()
+                f.emit("bin", "mul", usec, mrem, ("imm", 1000))
+                usec32 = f.new_v()
+                f.emit("bin", "shl", usec32, usec, ("imm", 32))
+                tvv = f.new_v()
+                f.emit("bin", "or", tvv, sec, usec32)
+                f.emit("store", tvp, ("imm", 0), tvv)
+                # ms <= 0 -> timeout 指针传 NULL（无限等）
+                tptr = f.new_v()
+                f.emit("cmpset", "le", tptr, sms, ("imm", 0))
+                # tptr 是 0/1 布尔：用它选 NULL 还是 tvp
+                linf = f.label("tsndi")
+                lsel = f.label("tsnds")
+                f.emit("jnz", tptr, linf)
+                f.emit("mov", tptr, tvp)
+                f.emit("jmp", lsel)
+                f.emit("label", linf)
+                f.emit("mov", tptr, ("imm", 0))
+                f.emit("label", lsel)
+                sel = f.new_v()
+                f.emit("winapi", sel, "select",
+                       [("imm", 0), ("imm", 0), wsz, ("imm", 0), tptr])
+                sb = f.new_v()
+                f.emit("cmpset", "le", sb, sel, ("imm", 0))
+                f.emit("jnz", sb, l_done)
+            else:
+                # pollfd: 低 4 字节 fd、接着 2 字节 events=POLLOUT(4)
+                e4 = f.new_v()
+                f.emit("mov", e4, ("imm", 4))          # POLLOUT
+                ev = f.new_v()
+                f.emit("bin", "shl", ev, e4, ("imm", 32))
+                pfd = f.new_v()
+                f.emit("bin", "or", pfd, sfd, ev)
+                f.emit("store", wsz, ("imm", 0), pfd)
+                # ms <= 0 -> -1（无限等）
+                tmo = f.new_v()
+                f.emit("cmpset", "le", tmo, sms, ("imm", 0))
+                linf = f.label("tsndi")
+                lsel = f.label("tsnds")
+                f.emit("jnz", tmo, linf)
+                f.emit("mov", tmo, sms)
+                f.emit("jmp", lsel)
+                f.emit("label", linf)
+                f.emit("mov", tmo, ("imm", -1))
+                f.emit("label", lsel)
+                pr = f.new_v()
+                f.emit("syscall", pr, self.sc["poll"], [wsz, ("imm", 1), tmo])
+                pb = f.new_v()
+                f.emit("cmpset", "le", pb, pr, ("imm", 0))
+                f.emit("jnz", pb, l_done)
+            # ---- 可写：发剩余部分 ----
+            off = f.new_v()
+            f.emit("bin", "add", off, spp, total)
+            rem = f.new_v()
+            f.emit("bin", "sub", rem, snn, total)
+            if self.platform == "windows":
+                s = f.new_v()
+                f.emit("winapi", s, "send", [sfd, off, rem, ("imm", 0)])
+                s32 = f.new_v()
+                f.emit("bin", "shl", s32, s, ("imm", 32))
+                s322 = f.new_v()
+                f.emit("bin", "sar", s322, s32, ("imm", 32))
+                rs = s322
+            else:
+                s = f.new_v()
+                f.emit("syscall", s, self.sc["sendto"],
+                       [sfd, off, rem, ("imm", 0), ("imm", 0), ("imm", 0)])
+                rs = s
+            sb2 = f.new_v()
+            f.emit("cmpset", "le", sb2, rs, ("imm", 0))
+            f.emit("jnz", sb2, l_done)
+            f.emit("bin", "add", total, total, rs)
+            lt2 = f.new_v()
+            f.emit("cmpset", "ge", lt2, total, snn)
+            f.emit("jnz", lt2, l_done)
+            f.emit("jmp", l_wait)
+            f.emit("label", l_done)
+            zfr = f.new_v()
+            f.emit("call", zfr, "__free", [wsz, ("imm", 544 if self.platform == "windows"
+                                                 else 8)])
+            f.emit("ret", total)
             self.out.append(f)
 
             # __tcp_close(fd) -> 0
@@ -9226,7 +9389,12 @@ class Lower:
         f.emit("store", ("ga", gid_fl), cls, fp)
         f.emit("label", l_skip)
         f.emit("ret", ("imm", 0))
-        if self.uses_free:
+        # v3.10：**`uses_net` 也要发**。网络运行库只要用到 socket 就无条件
+        # 发射 `__tcp_recv_to` / `__tcp_send_n_to`（不看程序是否真调了 `*_to`），
+        # 而它们内部要用 `__free` 还 timeval。只按 `uses_free` 发的话，
+        # 一个"只用 tcp_send/tcp_recv 但导入了 std.net"的程序会在 label
+        # 解析期炸 `KeyError: '__free'`（v3.10 主回归实测）。
+        if self.uses_free or self.uses_net:
             self.out.append(f)
 
         # ---- 接口装箱引用计数（v1.81）----
@@ -10921,7 +11089,7 @@ SYSCALLS = {
                "yield": 24, "read": 0, "close": 3, "openat": 257,
                "socket": 41, "bind": 49, "listen": 50, "accept": 43,
                "sendto": 44, "recvfrom": 45, "connect": 42,
-               "getsockname": 51, "setsockopt": 54,
+               "getsockname": 51, "setsockopt": 54, "poll": 7,
                "clock_gettime": 228,
                "mkdir": 83, "unlink": 87, "access": 21, "lseek": 8,
                "nanosleep": 35, "getpid": 39},

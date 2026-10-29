@@ -2285,6 +2285,43 @@ R10 这项红了 4 个版本没人发现，原因是 **`http_router_test.py` 不
 （要编译 `examples/http_router.qma` 并占 8092 端口）。接进主回归需要处理端口
 占用与起停时序，留作单独一轮，见 `07-gaps.md` §3。
 
+### 3.65 TCP 发送超时（v3.10）：`SO_SNDTIMEO` 不管用，只能自己等可写
+
+发送侧的对称缺口：`send_all` 里的 `tcp_send_n` 是阻塞 `send()`，对端不读时缓冲区一满
+就再也不返回。**改前**（`build/probe_sendloop.qma`：循环发 1 MB，对端全程不读）：
+
+| 命令 | 结果 |
+|---|---|
+| `timeout 12 ./build/probe_sendloop.exe` | **退出码 124**（12 s 被外部杀掉，程序自己不会返回） |
+
+### 负结果：`SO_SNDTIMEO` 在 Win32 上对零窗口无效
+
+第一版照抄接收侧的 `setsockopt(SO_RCVTIMEO)` 写法，换成 `SO_SNDTIMEO`（`0x1007`）：
+
+| 实验 | 结果 |
+|---|---|
+| `ms = 200` | 窗口满后 `send` 挂住，不返回 |
+| `ms = 5000` | 挂 **40 s+**（外部 `timeout` 杀掉） |
+| 对照：同一套发射代码的 `SO_RCVTIMEO`（接收侧） | 1.0 s 按时返回（v3.08 已验） |
+
+参数与常量都按文档传的，问题在 Win32 传输层：零窗口挂起后它会自己重试，不看这个
+选项。**这条实现被整条废掉**（留一个"看着像超时、其实不超时"的 API 比没有更糟）。
+
+### 改成「先等可写、再发」
+
+每轮先用 `select`(Windows) / `poll`(Linux) 等 `ms` 毫秒，可写了再 `send`——阻塞
+socket 只在"连 1 字节都进不去"时阻塞，于是 `send` 写一部分就返回。
+
+| 场景 | 结果 |
+|---|---|
+| 对端不读，循环发 1 MB / 200 ms | `iters=1 total=1048576 short=1 ms=200`（第二次发送等满 200 ms 后短写） |
+| `t167` 全链（4 组，含 1 MB 正常路径） | **3.27 s**，退出码 0，连跑 3 次稳定 |
+| 窗口满时单次 `send_to` | 返回 **0**，耗时 ∈ [250, 5000) ms |
+
+两个平台的布局差异（`fd_set` vs `pollfd`、Windows `timeval` 是两个 4 字节 long 而不是
+两个 8 字节）见 `versions/v3.10/CHANGELOG.md`；`select` 另需登记进 `ws2_32` 白名单，
+否则是加载期 `ENTRYPOINT_NOT_FOUND`。
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |

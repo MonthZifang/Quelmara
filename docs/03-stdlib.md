@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-67 个模块，**566 个公开函数**（另有 571 个内部函数）
+67 个模块，**568 个公开函数**（另有 572 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -44,7 +44,7 @@
 | `std/mem` | slab 分配 / fd 表 / 缓冲 / 对象池 | 21 / 30 |
 | `std/mime` | 扩展名 ↔ Content-Type（内置 30 项表，大小写不敏感，带 charset 参数反查） | 4 / 5 |
 | `std/multipart` | multipart/form-data 解析（boundary 提取 / 表单字段与文件部分 / 头字段大小写不敏感） | 4 / 6 |
-| `std/net` | 阻塞 TCP 便捷层 | 14 / 15 |
+| `std/net` | 阻塞 TCP 便捷层 | 16 / 18 |
 | `std/net/addr` | 地址文本层：IPv4/IPv6 字面量解析与 RFC 5952 格式化 + fd 对端地址 | 11 / 15 |
 | `std/net/core` | 连接槽位层（IOCP reactor 的底座） | 22 / 22 |
 | `std/net/dns` | 自研 DNS 解析器（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf） | 8 / 9 |
@@ -1079,8 +1079,21 @@ fn send(conn: int, data: str) -> int
 /// **返回值语义**：成功返回 `len(data)`；中途出错返回已写出的字节数。
 /// 调用方用 `== len(data)` 判断是否发全。
 /// 边界：无超时（`tcp_send_n` 阻塞）；对端一直不收且缓冲区满时会一直等
-/// （这是 TCP 的背压语义，不是 bug）。
+/// ——要超时用 `send_all_to`。
 fn send_all(conn: int, data: str) -> int
+/// 把 `data` 全部写出，**每次发送**最多等 `ms` 毫秒（v3.10）。
+/// 与 `send_all` 的唯一区别：对端不读、内核发送缓冲区满时，不会永久阻塞，
+/// 而是等 `ms` 毫秒后停下并返回**已写出的字节数**。
+/// 调用方用 `== len(data)` 判断是否发全：短了就是"对端吃不下"，通常意味着
+/// 该断开（慢消费者）或重试（瞬时拥塞），这是调用方的策略，不是库的。
+/// 超时粒度是**每次 `send()`**，不是整段总时长——一个持续被读的对端可以让
+/// 这个循环跑任意久（这正是想要的：大文件传输不该被总时长砍断）。
+/// 边界：`ms = 0` 是**不限时**（等到底，等价于 `send_all`），不是非阻塞。
+fn send_all_to(conn: int, data: str, ms: int) -> int
+/// 单次发送（可能短写），带 `ms` 毫秒超时；超时返回 0（v3.10）。
+/// 与 `send` 的关系同 `tcp_send_to` 与 `tcp_send`：`send` 是阻塞单次写，
+/// 这里是"最多等 ms 毫秒的一次写"。要"发全"用 `send_all_to`。
+fn send_to(conn: int, data: str, ms: int) -> int
 /// 从连接读最多 cap 字节并返回 str；对端关闭时返回空串。
 fn recv(conn: int, cap: int) -> str
 /// 读到**对端关闭**为止，返回全部字节（v3.06，v3.09 起 O(n)）。

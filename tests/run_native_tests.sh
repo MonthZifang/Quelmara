@@ -432,6 +432,18 @@ last=$(printf '%s\n' "$out" | tail -1)
   && ok "TCP 批量接收：4MB/4KB 分块 + 截断 + 超时 5 场景全过" \
   || bad "TCP 批量接收 rc=$rc [$out]"
 
+# v3.10：发送侧超时（send_all_to / send_to / tcp_send_n_to）。
+# 关键回归：对端不读、窗口填满后阻塞 send() 永不返回（实测 12s 不返回，
+# 退出码 124）。注意实现**不是** SO_SNDTIMEO（Win32 上无效），而是
+# 「先 select/poll 等可写、再 send」——所以耗时断言同时钉住了那条路径。
+$NAT build tests/t167_sendtimeout.qma -o build/nat_sendto >/dev/null 2>&1 \
+  && ok "TCP 发送超时：native 编译通过" || bad "TCP 发送超时：native 编译失败"
+out=$(timeout 120 ./build/nat_sendto 2>&1); rc=$?
+last=$(printf '%s\n' "$out" | tail -1)
+[ $rc -eq 0 ] && [ "$last" = "send timeout ok" ] \
+  && ok "TCP 发送超时：零窗口短写 + send_to 返回 0 + 正常路径 4 组全过" \
+  || bad "TCP 发送超时 rc=$rc [$out]"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

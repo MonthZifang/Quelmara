@@ -37,6 +37,33 @@ pub fn send(conn: int, data: str) -> int {
     return tcp_send(conn, data)
 }
 
+// 批量发送的核心（v3.10）：零拷贝指针推进，可带毫秒超时。
+//
+// timed != 0 = 每次发送带 ms 超时（tcp_send_n_to），否则阻塞（tcp_send_n）。
+// 两条路径共用一段推进逻辑，区别只在调哪个内建——避免 v3.07/v3.08 那种
+// "同一个循环抄两份、改一份忘一份"的重复。
+fn _send_buf(conn: int, data: str, timed: int, ms: int) -> int {
+    let total = len(data)
+    if total == 0 {
+        return 0
+    }
+    let base = str_ptr(data)
+    let mut sent = 0
+    while sent < total {
+        let mut n = 0
+        if timed != 0 {
+            n = tcp_send_n_to(conn, mem_ptr(base, sent), total - sent, ms)
+        } else {
+            n = tcp_send_n(conn, mem_ptr(base, sent), total - sent)
+        }
+        if n <= 0 {
+            break
+        }
+        sent = sent + n
+    }
+    return sent
+}
+
 /// 把 `data` **全部**写出，返回实际写出的字节数（v3.07）。
 ///
 /// 为什么需要它：`send(conn, data)` 是**一次** `send()` 系统调用，返回值是
@@ -54,22 +81,37 @@ pub fn send(conn: int, data: str) -> int {
 /// 调用方用 `== len(data)` 判断是否发全。
 ///
 /// 边界：无超时（`tcp_send_n` 阻塞）；对端一直不收且缓冲区满时会一直等
-/// （这是 TCP 的背压语义，不是 bug）。
+/// ——要超时用 `send_all_to`。
 pub fn send_all(conn: int, data: str) -> int {
+    return _send_buf(conn, data, 0, 0)
+}
+
+/// 把 `data` 全部写出，**每次发送**最多等 `ms` 毫秒（v3.10）。
+///
+/// 与 `send_all` 的唯一区别：对端不读、内核发送缓冲区满时，不会永久阻塞，
+/// 而是等 `ms` 毫秒后停下并返回**已写出的字节数**。
+///
+/// 调用方用 `== len(data)` 判断是否发全：短了就是"对端吃不下"，通常意味着
+/// 该断开（慢消费者）或重试（瞬时拥塞），这是调用方的策略，不是库的。
+///
+/// 超时粒度是**每次 `send()`**，不是整段总时长——一个持续被读的对端可以让
+/// 这个循环跑任意久（这正是想要的：大文件传输不该被总时长砍断）。
+///
+/// 边界：`ms = 0` 是**不限时**（等到底，等价于 `send_all`），不是非阻塞。
+pub fn send_all_to(conn: int, data: str, ms: int) -> int {
+    return _send_buf(conn, data, 1, ms)
+}
+
+/// 单次发送（可能短写），带 `ms` 毫秒超时；超时返回 0（v3.10）。
+///
+/// 与 `send` 的关系同 `tcp_send_to` 与 `tcp_send`：`send` 是阻塞单次写，
+/// 这里是"最多等 ms 毫秒的一次写"。要"发全"用 `send_all_to`。
+pub fn send_to(conn: int, data: str, ms: int) -> int {
     let total = len(data)
     if total == 0 {
         return 0
     }
-    let base = str_ptr(data)
-    let mut sent = 0
-    while sent < total {
-        let n = tcp_send_n(conn, mem_ptr(base, sent), total - sent)
-        if n <= 0 {
-            break
-        }
-        sent = sent + n
-    }
-    return sent
+    return tcp_send_n_to(conn, str_ptr(data), total, ms)
 }
 
 // 批量接收的核心（v3.09）：一次分配 + 翻倍扩容 + 原地 mem_copy。
