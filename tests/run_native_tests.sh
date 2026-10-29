@@ -409,6 +409,17 @@ last=$(printf '%s\n' "$out" | tail -1)
   && ok "TCP 批量发送：send_all 4MB 零拷贝 + str_ptr 语义全过" \
   || bad "TCP 批量发送 rc=$rc [$out]"
 
+# v3.08：TCP 批量接收的超时保护（recv_all_to / recv_exact_to）。
+# 关键回归：对端发部分数据但保持连接（不 FIN）时，无超时的 recv_all 会
+# 永久阻塞（实测 12s 未返回，退出码 124）；带超时的变体必须按时返回。
+$NAT build tests/t165_recvtimeout.qma -o build/nat_recvto >/dev/null 2>&1 \
+  && ok "TCP 接收超时：native 编译通过" || bad "TCP 接收超时：native 编译失败"
+out=$(timeout 90 ./build/nat_recvto 2>&1); rc=$?
+last=$(printf '%s\n' "$out" | tail -1)
+[ $rc -eq 0 ] && [ "$last" = "recv timeout ok" ] \
+  && ok "TCP 接收超时：recv_all_to/recv_exact_to 3 场景全过" \
+  || bad "TCP 接收超时 rc=$rc [$out]"
+
 echo "----------------------------------------"
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]

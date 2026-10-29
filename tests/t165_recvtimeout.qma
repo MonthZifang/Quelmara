@@ -1,0 +1,69 @@
+// t165 —— TCP 批量接收的超时保护（v3.08）
+// 对端发部分数据但保持连接（不 FIN）时：
+//   * recv_all      会永久阻塞（v3.08 实测 12s 未返回，退出码 124）
+//   * recv_all_to   应在超时后返回已读到的内容
+// worker 只 sleep 3s（不是 60s），让 join 能及时返回。
+import std.net
+
+fn worker(port: int) -> int {
+    let c = connect("127.0.0.1", port)
+    send_all(c, "partial-no-close")
+    sleep_ms(3000)
+    close_conn(c)
+    return 0
+}
+
+fn main() {
+    // [1] recv_all_to：对端不关连接 -> 超时返回已读到的 16 字节
+    let l1 = listen(18097)
+    let h1 = spawn worker(18097)
+    let c1 = accept(l1)
+    let t0 = now_ns()
+    let g1 = recv_all_to(c1, 4096, 1000)
+    let t1 = now_ns()
+    let el1 = (t1 - t0) / 1000000
+    close_conn(c1)
+    join(h1)
+    close_conn(l1)
+    assert(g1 == "partial-no-close", "recv_all_to got partial")
+    assert(el1 >= 900, "waited at least ~1s")
+    assert(el1 < 5000, "did not hang for many seconds")
+
+    // [2] recv_exact_to：要 100 字节，对端只发 3 就保持连接 -> 超时返回 3
+    let l2 = listen(18096)
+    let h2 = spawn small_worker(18096)
+    let c2 = accept(l2)
+    let g2 = recv_exact_to(c2, 100, 8, 800)
+    close_conn(c2)
+    join(h2)
+    close_conn(l2)
+    assert(len(g2) == 3, "recv_exact_to partial len")
+    assert(g2 == "abc", "recv_exact_to content")
+
+    // [3] 正常路径不受影响：对端发完就关 -> 读到全部内容
+    let l3 = listen(18095)
+    let h3 = spawn closer_worker(18095)
+    let c3 = accept(l3)
+    let g3 = recv_all_to(c3, 4096, 2000)
+    close_conn(c3)
+    join(h3)
+    close_conn(l3)
+    assert(g3 == "full-and-closed", "normal close path")
+
+    print("recv timeout ok")
+}
+
+fn small_worker(port: int) -> int {
+    let c = connect("127.0.0.1", port)
+    send_all(c, "abc")
+    sleep_ms(3000)
+    close_conn(c)
+    return 0
+}
+
+fn closer_worker(port: int) -> int {
+    let c = connect("127.0.0.1", port)
+    send_all(c, "full-and-closed")
+    close_conn(c)
+    return 0
+}

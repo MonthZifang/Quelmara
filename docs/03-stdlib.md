@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-67 个模块，**563 个公开函数**（另有 570 个内部函数）
+67 个模块，**566 个公开函数**（另有 570 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -44,7 +44,7 @@
 | `std/mem` | slab 分配 / fd 表 / 缓冲 / 对象池 | 21 / 30 |
 | `std/mime` | 扩展名 ↔ Content-Type（内置 30 项表，大小写不敏感，带 charset 参数反查） | 4 / 5 |
 | `std/multipart` | multipart/form-data 解析（boundary 提取 / 表单字段与文件部分 / 头字段大小写不敏感） | 4 / 6 |
-| `std/net` | 阻塞 TCP 便捷层 | 11 / 11 |
+| `std/net` | 阻塞 TCP 便捷层 | 14 / 14 |
 | `std/net/addr` | 地址文本层：IPv4/IPv6 字面量解析与 RFC 5952 格式化 + fd 对端地址 | 11 / 15 |
 | `std/net/core` | 连接槽位层（IOCP reactor 的底座） | 22 / 22 |
 | `std/net/dns` | 自研 DNS 解析器（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf） | 8 / 9 |
@@ -1081,6 +1081,16 @@ fn send(conn: int, data: str) -> int
 /// 边界：无超时（`tcp_send_n` 阻塞）；对端一直不收且缓冲区满时会一直等
 /// （这是 TCP 的背压语义，不是 bug）。
 fn send_all(conn: int, data: str) -> int
+/// 读到对端关闭**或超时**，返回已读到的全部（v3.08）。
+/// 与 `recv_all` 的唯一区别是每次 `tcp_recv_to` 都有 `ms` 毫秒超时：超时后
+/// 把它当作"对端不再发"，**立即停止**并返回已读到的部分（可能为空串）。
+/// 返回值语义与 `recv_exact` 的短读一致：调用方用 `len(result) == n` 判断
+/// 是否读满，不要假定"返回了就是收全了"。
+fn recv_all_to(conn: int, chunk: int, ms: int) -> str
+/// 读到关闭或超时，最多 `maxbytes` 字节（v3.08）。
+fn recv_all_max_to(conn: int, chunk: int, maxbytes: int, ms: int) -> str
+/// 精确读 `n` 字节，超时即停并返回已读到的部分（v3.08）。
+fn recv_exact_to(conn: int, n: int, chunk: int, ms: int) -> str
 /// 从连接读最多 cap 字节并返回 str；对端关闭时返回空串。
 fn recv(conn: int, cap: int) -> str
 /// 读到**对端关闭**为止，返回全部字节（v3.06）。

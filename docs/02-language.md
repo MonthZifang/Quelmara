@@ -950,6 +950,7 @@ fn make_adder(k: int) -> closure {          // 闭包逃逸：环境在堆上
 | `tcp_connect(host, port)` | 客户端连接：域名 / IPv4 / IPv6 字面量都行（`AF_UNSPEC` + `ai_next` 回退，Windows PE；Linux 编译期报错） |
 | `tcp_peer_raw(fd)` | 对端地址的 20 字节视图（端口网络序 / family / 地址），文本化交给 `std/net/addr`（v2.07） |
 | `udp_open()` / `udp_bind(fd, port)` / `udp_sendto(fd, ip, port, s)` / `udp_recvfrom(fd)` | UDP 四件 |
+| `tcp_recv_to(fd, cap, ms)` | 带**接收超时**的单次 TCP 接收（v3.08）：`ms` 毫秒内没收到返回**空串**，不 fail-fast。`ms <= 0` 是非阻塞探测。Linux 走 `setsockopt(SO_RCVTIMEO)` + `recv`，Windows 走 `setsockopt(SO_RCVTIMEO)`（DWORD 毫秒）。给 `recv_all_to` 系列用——无超时的 `recv_all` 遇半开连接会**永久阻塞** |
 | `udp_recvfrom_to(fd, cap, ms)` | 带**接收超时**的单 datagram 接收（v3.04）：`ms` 毫秒内没收到返回**空串**，不 fail-fast。`ms <= 0` 是非阻塞探测。Linux 走 `setsockopt(SO_RCVTIMEO)` + `recvfrom`，Windows 走 `setsockopt(SO_RCVTIMEO)`（DWORD 毫秒）。给 `std/net/dns` 用，避免 nameserver 不响应时永久挂起 |
 | `net_config(key)` | **编译期常量**（v2.12）：`0` = `max_conns`、`1` = `recv_buffer`、`2` = `io_threads`（已解析：`0` → 物理核数）、`3` = `tcp_nodelay`（0/1）。`key` 必须是编译期常量 |
 

@@ -3786,6 +3786,23 @@ class Lower:
             d = fn.new_v()
             fn.emit("call", d, "__tcp_peer_raw", [fv])
             return self._mark_str(fn, d)
+        if name == "tcp_recv_to" and name not in self.fns_ast:
+            # tcp_recv_to(fd, cap, ms) -> str（v3.08：带接收超时）
+            #   超时/出错返回**空串**（不是 fail-fast）——「对端没发完」
+            #   是可恢复结果，recv_all 这类循环需要拿到它才能停。
+            #   ms <= 0 表示非阻塞探测（SO_RCVTIMEO 设为 0）。
+            #
+            # 为什么必须加：recv_all 会一直读到对端 FIN。对端发了一半就
+            # 挂住不关（半开连接、慢客户端、恶意对端）时它会**永久阻塞**
+            # —— v3.08 实测 12 s 都没返回（退出码 124）。这是与 v3.04
+            # UDP 挂死同一类的健壮性缺陷。
+            if len(e[2]) != 3:
+                raise SyntaxError("tcp_recv_to(fd, cap, ms) 需要 3 个实参")
+            self.uses_net = True
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            d = fn.new_v()
+            fn.emit("call", d, "__tcp_recv_to", vals)
+            return self._mark_str(fn, d)
         if name in ("tcp_send_n", "tcp_recv_n") and name not in self.fns_ast:
             # 零拷贝变体（v1.5）：直接给指针 + 长度，不构造 str、不扫 strlen。
             #   tcp_send_n(fd, ptr, n) -> 发送字节数
@@ -8513,6 +8530,75 @@ class Lower:
                 f.emit("jnz", b, l_fail)
             f.emit("ret", n)
             net_fail(f, l_fail, "recv")
+            self.out.append(f)
+
+            # __tcp_recv_to(fd, cap, ms) -> str（v3.08）
+            #
+            # 实现：先 setsockopt(SO_RCVTIMEO) 设超时，再 recv()。
+            #   * Linux x86_64：syscall 54，SOL_SOCKET=1、SO_RCVTIMEO=20，
+            #     optval 是 struct timeval{sec, usec}（16 字节）。
+            #   * Windows：winapi setsockopt，SOL_SOCKET=0xFFFF、
+            #     SO_RCVTIMEO=0x1006，optval 是 DWORD 毫秒（4 字节）。
+            #
+            # 超时后 recv() 返回 -1（EAGAIN/EWOULDBLOCK），这里返回**空串**
+            # 而不是 fail-fast：调用方（recv_all 系列）靠 len==0 停循环。
+            # 真正的连接错误（ECONNRESET 等）同样返回空串——TCP 上区分
+            # "超时"和"连接断了"对循环语义没有区别，都要停。
+            f = Fn("__tcp_recv_to")
+            rfd, rcap, rms = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [rfd, rcap, rms])
+            tv = f.new_v()
+            f.emit("call", tv, "__alloc", [("imm", 16)])
+            if self.platform == "windows":
+                f.emit("store", tv, ("imm", 0), rms)
+                f.emit("winapi", None, "setsockopt",
+                       [rfd, ("imm", 0xFFFF), ("imm", 0x1006), tv, ("imm", 4)])
+            else:
+                sec = f.new_v()
+                f.emit("bin", "div", sec, rms, ("imm", 1000))
+                mrem = f.new_v()
+                f.emit("bin", "mod", mrem, rms, ("imm", 1000))
+                usec = f.new_v()
+                f.emit("bin", "mul", usec, mrem, ("imm", 1000))
+                f.emit("store", tv, ("imm", 0), sec)
+                f.emit("store", tv, ("imm", 1), usec)
+                f.emit("syscall", None, self.sc["setsockopt"],
+                       [rfd, ("imm", 1), ("imm", 20), tv, ("imm", 16)])
+            nb = f.new_v()
+            f.emit("bin", "add", nb, rcap, ("imm", 9))
+            h = f.new_v()
+            f.emit("call", h, "__alloc", [nb])
+            buf = f.new_v()
+            f.emit("bin", "add", buf, h, ("imm", 8))
+            l_empty = f.label("trt0")
+            if self.platform == "windows":
+                n = f.new_v()
+                f.emit("winapi", n, "recv", [rfd, buf, rcap, ("imm", 0)])
+                n32 = f.new_v()
+                f.emit("bin", "shl", n32, n, ("imm", 32))
+                n322 = f.new_v()
+                f.emit("bin", "sar", n322, n32, ("imm", 32))
+                b = f.new_v()
+                f.emit("cmpset", "le", b, n322, ("imm", 0))
+                f.emit("jnz", b, l_empty)
+            else:
+                n = f.new_v()
+                f.emit("syscall", n, self.sc["recvfrom"],
+                       [rfd, buf, rcap, ("imm", 0), ("imm", 0), ("imm", 0)])
+                b = f.new_v()
+                f.emit("cmpset", "le", b, n, ("imm", 0))
+                f.emit("jnz", b, l_empty)
+            # 成功：长度头 = n，NUL 在 n+8
+            f.emit("store", h, ("imm", 0), n)
+            noff = f.new_v()
+            f.emit("bin", "add", noff, n, ("imm", 8))
+            f.emit("store8", h, noff, ("imm", 0))
+            f.emit("ret", buf)
+            # 超时/出错：空串
+            f.emit("label", l_empty)
+            f.emit("store", h, ("imm", 0), ("imm", 0))
+            f.emit("store8", h, ("imm", 8), ("imm", 0))
+            f.emit("ret", buf)
             self.out.append(f)
 
             # __tcp_close(fd) -> 0
