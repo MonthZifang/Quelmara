@@ -1,0 +1,70 @@
+// t178_phi_copy.qma —— 归纳变量化简的正确性（v3.30）
+//
+// v3.30 加了 `opt_phi_copy`：把归纳变量化简留下的
+//     mov tmp, r; r 更新; acc += tmp
+// 重排成
+//     acc += r; r 更新
+//
+// 这是**重排**变换，错了会静默算错（不崩、不报错），所以必须用
+// 已知答案钉住，而不是"跑通就行"。
+//
+// 期望值由 Python 现算：sum((i*7) % 13 for i in range(n))
+module t178_phi_copy
+
+fn work(n: int) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + (i * 7) % 13
+        i = i + 1
+    }
+    return acc
+}
+
+// 同形状但用 % 7（另一个模数，确保不是碰巧对上）
+fn work7(n: int) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + (i * 11) % 7
+        i = i + 1
+    }
+    return acc
+}
+
+// 累加方向相反（acc = 累加量 + acc），检验重排的另一种结合
+fn work_rev(n: int) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = (i * 7) % 13 + acc
+        i = i + 1
+    }
+    return acc
+}
+
+fn main() {
+    // [1] 边界：n = 0 / 1 必须正确（循环 0 次、1 次）
+    assert(work(0) == 0, "n=0")
+    assert(work(1) == 0, "n=1")
+    assert(work(2) == 7, "n=2")
+
+    // [2] 已知答案（Python 现算）
+    assert(work(5) == 18, "n=5")
+    assert(work(13) == 78, "n=13")
+    assert(work(100) == 590, "n=100")
+    assert(work(1000) == 6000, "n=1000")
+
+    // [3] 另一个模数：sum((i*11)%7 for i in range(1000))
+    //     Python: 3000
+    assert(work7(1000) == 3000, "work7 n=1000")
+
+    // [4] 交换结合顺序必须同值
+    assert(work_rev(1000) == 6000, "work_rev n=1000")
+
+    // [5] 大 n 的奇偶校验（只验与 n 的关系，不验具体值）
+    //     (i*7)%13 一个周期 13 项，和 78；n=13000 应为 100 个周期
+    assert(work(13000) == 78000, "n=13000 周期")
+
+    print("PASS: 归纳变量化简后语义正确")
+}
