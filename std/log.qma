@@ -34,14 +34,20 @@
 import std.core
 import std.sync
 
-const _T0_W = 9          // static_word(9) = 首条日志的 now_ns（相对模式基准）
-const _LVL_W = 10        // static_word(10) = 当前级别阈值
-const _SINK_W = 13       // static_word(13) = 输出通道（0=stdout 1=stderr）
-const _TZ_W = 14         // static_word(14) = 时区偏移（分钟，默认 0=UTC）
-const _TMODE_W = 15      // static_word(15) = 时间戳模式（0=绝对 1=相对）
-const _LOCK_W = 16       // static_word(16) = 输出锁句柄（0 = 还没建）
-const _TSBUF_W = 28      // static_word(28) = 时间戳缓存块（29 字节，惰性分配）
-const _TSKEY_W = 29      // static_word(29) = 缓存键（毫秒 × 2048 + 时区 + 1024）
+// v3.23：log 的 9 个槽位整体搬到 32–40。
+//
+// 原来它们散在 9/10/13/14/15/16/28/29，与 timer（13/14）、reactor（15）、
+// sync（28/29）**直接抢槽** —— 两模块各自单独用都正常，一起用就静默崩溃
+// （先初始化的那个被后来者覆盖状态指针）。低区留给"用得更早"的模块，
+// log 是可选设施，往后放。
+const _T0_W = 32         // static_word(32) = 首条日志的 now_ns（相对模式基准）
+const _LVL_W = 33        // static_word(33) = 当前级别阈值
+const _SINK_W = 34       // static_word(34) = 输出通道（0=stdout 1=stderr）
+const _TZ_W = 35         // static_word(35) = 时区偏移（分钟，默认 0=UTC）
+const _TMODE_W = 36      // static_word(36) = 时间戳模式（0=绝对 1=相对）
+const _LOCK_W = 37       // static_word(37) = 输出锁句柄（0 = 还没建）
+const _TSBUF_W = 38      // static_word(38) = 时间戳缓存块（29 字节，惰性分配）
+const _TSKEY_W = 39      // static_word(39) = 缓存键（毫秒 × 2048 + 时区 + 1024）
 
 const _ABS_LEN = 29      // "YYYY-MM-DDTHH:MM:SS.mmm+HH:MM"
 

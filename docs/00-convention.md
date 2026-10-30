@@ -130,3 +130,13 @@
 4. **数字单一来源**：除 `06-status.md`、`versions/` 外，文档里不得出现"回归 n 项"这类实测数字。
 
 新增一种漂移，就把特征加进脚本的 `STALE` 表——**只改文档不改门禁，等于没修**。
+
+另有两道结构性门禁（v3.23）：
+
+- **`tools/dev/check_static_words.py`** —— `static_word(i)` 的槽位登记表。
+  解析 `std/**/*.qma` 里所有 `static_word(...)`（跨过注释 / `const` /
+  辅助函数三层间接），按槽位归组后判越界 / 抢槽 / 登记表双向一致。
+  **改槽位必须同时改 `REGISTRY` 与源码**，只改一边会被打回。
+  已挂进 `tests/run_win_tests.py`（`case_static_word_registry`）。
+- **`gen_stdlib_doc.py --check`** / **`check_names.py`** / **`check_origin.py`**
+  —— 标准库文档、命名、来源标注。
