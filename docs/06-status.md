@@ -13,7 +13,7 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=333 FAIL=0 SKIP=0**（v3.15 口径：新增 `t170_wg_park`（WaitGroup 的 park 唤醒 4 组）= 332 → 333；v3.14 口径：新增 `t169_spin_wait`（自旋等待不被 LICM 外提 load）= 331 → 332；v3.13 口径：把 4 项"文档记着 PASS、门禁里没有"的脚本接进主回归——`gzip_http_test`（重写为自包含）、`debugger_test`、`doc_test`、`bootstrap_test --strict`（自举五级链）= 327 → 331；v3.12 口径：新增 `t168_httpc_bulk`（HTTP 客户端大响应 5 场景）= 326 → 327；v3.11 口径：新增 `[3k]` TCP 批量收发与两端超时 5 项 + `[11]` HTTP 端到端 1 项 = 302 → 308，当时记录的 SKIP=1 是 WSL 交叉验证，本机 v3.12 复跑为 SKIP=0；v3.10 及以前为 302。下面那串历史注记停在 v2.76，仅作追溯）（v2.76 口径：qlmc 差分 63 条、LSP 42 条；数字增长来自 v2.27–v2.75 期间各轨新增夹具，本轮只跑不改。v2.26 口径：qlmc 差分 35 → 37 条（新增 `s13_closure`），主回归总数不变；v2.25 口径：新增 `s12_ffi`；v2.24 口径：新增 `s11_import`；v2.23 口径：新增 `s10_defer`；v2.22 口径：新增 `s9_slice`；v2.21 口径：新增 `s8_map`；v2.20 口径：新增 `s7_aggfn`；v2.19 口径：新增 `s6_vec`；v2.18 口径：新增 `s5_enum`；v2.17 口径：新增 `s4_agg`；v2.16 口径：新增 `t143_parshard`（分片并行写 / 工作线程读共享 vec / 8 参 spawn）；v2.14 口径：新增 `[9b]` stage-1 编译器差分（`tests/qlmc_test.py`，7 条）；v2.13 口径：新增 `t141_vecindex`（vec 下标六形态）+ `test_exitcode()` 三条（`exit(运行期值)` 的退出码）；v2.12 口径：新增负向夹具 `net_serve_builtin`——reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断；v2.11 那条 `.qla` 沙箱删除 FAIL 已随夹具改「就地覆盖」收口。以下为 v2.10 口径的历史记录：本版新增项 `[3j2]`：`t130_router_dispatch`（路由表 / 参数 / 404·405 / 表满）+ `http_router_test.py`（20 项真实 socket E2E）。**唯一 FAIL 是 `.qla` 目标文件用例撞沙箱的批量删除策略**（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`：一次删 `build/_qlatest` 里 62 个文件，超过 50 个的阈值），与被测逻辑无关；`cache_test` 的 `build/` 争用失败本次未复现。v2.07 记录的那条 LSP FAIL 已收口（`tests/lsp_test.py` 的容错索引段改成 `std/sse` / `std/ws`（仍解析失败）负向 + `std/http` / `std/timer`（已修好）正向，内部断言 38 → 42）。SKIP 为 WSL 交叉验证，本机被沙箱拦。此前新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
+| PE 回归（主回归） | **PASS=334 FAIL=0 SKIP=0**（v3.20 口径：新增 \	173_udp6\（UDP over IPv6 回环 4 组）= 333 → 334；v3.15 口径：新增 `t170_wg_park`（WaitGroup 的 park 唤醒 4 组）= 332 → 333；v3.14 口径：新增 `t169_spin_wait`（自旋等待不被 LICM 外提 load）= 331 → 332；v3.13 口径：把 4 项"文档记着 PASS、门禁里没有"的脚本接进主回归——`gzip_http_test`（重写为自包含）、`debugger_test`、`doc_test`、`bootstrap_test --strict`（自举五级链）= 327 → 331；v3.12 口径：新增 `t168_httpc_bulk`（HTTP 客户端大响应 5 场景）= 326 → 327；v3.11 口径：新增 `[3k]` TCP 批量收发与两端超时 5 项 + `[11]` HTTP 端到端 1 项 = 302 → 308，当时记录的 SKIP=1 是 WSL 交叉验证，本机 v3.12 复跑为 SKIP=0；v3.10 及以前为 302。下面那串历史注记停在 v2.76，仅作追溯）（v2.76 口径：qlmc 差分 63 条、LSP 42 条；数字增长来自 v2.27–v2.75 期间各轨新增夹具，本轮只跑不改。v2.26 口径：qlmc 差分 35 → 37 条（新增 `s13_closure`），主回归总数不变；v2.25 口径：新增 `s12_ffi`；v2.24 口径：新增 `s11_import`；v2.23 口径：新增 `s10_defer`；v2.22 口径：新增 `s9_slice`；v2.21 口径：新增 `s8_map`；v2.20 口径：新增 `s7_aggfn`；v2.19 口径：新增 `s6_vec`；v2.18 口径：新增 `s5_enum`；v2.17 口径：新增 `s4_agg`；v2.16 口径：新增 `t143_parshard`（分片并行写 / 工作线程读共享 vec / 8 参 spawn）；v2.14 口径：新增 `[9b]` stage-1 编译器差分（`tests/qlmc_test.py`，7 条）；v2.13 口径：新增 `t141_vecindex`（vec 下标六形态）+ `test_exitcode()` 三条（`exit(运行期值)` 的退出码）；v2.12 口径：新增负向夹具 `net_serve_builtin`——reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断；v2.11 那条 `.qla` 沙箱删除 FAIL 已随夹具改「就地覆盖」收口。以下为 v2.10 口径的历史记录：本版新增项 `[3j2]`：`t130_router_dispatch`（路由表 / 参数 / 404·405 / 表满）+ `http_router_test.py`（20 项真实 socket E2E）。**唯一 FAIL 是 `.qla` 目标文件用例撞沙箱的批量删除策略**（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`：一次删 `build/_qlatest` 里 62 个文件，超过 50 个的阈值），与被测逻辑无关；`cache_test` 的 `build/` 争用失败本次未复现。v2.07 记录的那条 LSP FAIL 已收口（`tests/lsp_test.py` 的容错索引段改成 `std/sse` / `std/ws`（仍解析失败）负向 + `std/http` / `std/timer`（已修好）正向，内部断言 38 → 42）。SKIP 为 WSL 交叉验证，本机被沙箱拦。此前新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
 | 词法器对拍 | **PASS=297 FAIL=0**（300 个源文件，v2.78 口径；SKIP 3 个含 `f"..."` 插值的文件——stage-1 词法器不认 `FSTR`，v1.61 插值未移植。**闭包不再进 SKIP 名单**：`fn(x: int) -> int { ... }` 用的全是既有记号，`t126_closure` 逐记号一致（v1.95）） | `python tests/lexdiff.py` |
 | 声明级 AST 对拍 | **PASS=201 FAIL=0**（201 个源文件，v2.78 口径：v2.78 让 stage-1 parser 的签名行"struct/enum 全在前、fn 全在后"，与 oracle 顺序一致；v1.98 口径：150 个源文件；唯一 FAIL 是 `tests/t115_derive.qma`——并行轨的 enum 派生让声明顺序变了、自举 parser 还没跟上，**与并发改动无关**。跳过 17 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer` / `t99_generic_struct` / `t101_bounds` / `t102_generic_impl` / `t103_generic_enum` / `t104_generic_enum_impl` / `t116_iface_multi` / `iface_rc` / `iface_rc_a64` / `t118_iface_own` / `t119_drop` / `t123_derive_enum` / `t124_macro` / `t125_refl_dyn`——自举 parser 未做 interface/impl/泛型单态化、类型约束、泛型 impl 与泛型 enum，v1.96 的 enum 派生 / token 宏 / 运行时下标反射也未移植；v1.97 把 `iface_rc_a64` 与 `t118_iface_own` 按同一口径记账，`t120_ffi` / `t115_derive` / `dpub_*` 两侧逐行一致） | `python tests/parsediff.py` |
 | 函数体 dump 对拍 | **一致 1719 / 分叉 1608 / SKIP 同步 26 / SKIP 不同步 44**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |
@@ -2557,6 +2557,38 @@ target_arch() -> 1 = x86_64 / 2 = aarch64
 
 **`t172` 只接 CI linux job 的 x86-64**：AArch64 没有 `spawn`，
 而 park 验证必须有第二个线程唤醒。是能力边界，不是遗漏。
+
+### 3.70 UDP over IPv6（v3.20）：`AF_INET6` 在 Windows 是 23 不是 10
+
+`std/net/udp` 的四个内建全按 IPv4 构造（`sockaddr_in` 16B、地址 u32 网络序），
+v6 需要 `sockaddr_in6` 28B + 16 字节地址。新增五个内建 + `std/net/udp6`：
+
+| 内建 | 说明 |
+|---|---|
+| `udp_open6()` | `AF_INET6` + `SOCK_DGRAM` |
+| `udp_bind6(fd, port)` | 28B `sockaddr_in6`，地址 `::` 通配 |
+| `udp_sendto6(fd, addr_ptr, port, data)` | `addr_ptr` 指向 16 字节大端地址 |
+| `udp_recvfrom6{,_to}` | 源地址丢弃；`_to` 超时返回**空串** |
+
+**执行级验证**（`tests/t173_udp6.qma`，主回归 `[3k]` 段之后）：
+
+| 组 | 内容 | 结果 |
+|---|---|---|
+| `[1]` | `udp_open6` + `udp_bind6` | fd ≥ 0 / 0 |
+| `[2]` | `::1` 回环收发 | 发 10 字节，收回内容一致 |
+| `[3]` | 非法地址 | `udp_send6` 返回 **-1** |
+| `[4]` | `udp_recv6_to(fd, 512, 100)` | 约 100 ms 返回**空串** |
+
+**三个静默失败（每个都真实卡了一次）**：
+
+| 坑 | 症状 | 根因 |
+|---|---|---|
+| `sin6_family` 写死 10 | `bind` 返回 **-1**，不报错 | Windows 的 `AF_INET6` = **23**、Linux = 10。`__udp_open6` 分叉了、`udp_sin6` 没有 |
+| `__net_fail_<tag>` 未定义 | 链接期 `KeyError` | `net_fail` 只 emit `call __net_fail_<tag>`，标签要手工在运行库定义；原来只有 3 个 |
+| `recvfrom` 返回 `buf` | 内容错位 | str 的值必须指向**数据起点**（`buf+8`），长度头在前 8 字节 |
+
+**都不是崩溃，是"返回错误值"** —— 内建层的隐式契约没有编译期检查，
+所以 `t173` 必须做**真实回环收发**，不能只验"能编过"。
 
 ## 4. 自举
 

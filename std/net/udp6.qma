@@ -1,0 +1,60 @@
+// std/net/udp6.qma —— UDP over IPv6（v3.20）
+//
+// 与 `std/net/udp`（v1.17，IPv4）配对：**同一组语义、不同地址家族**。
+//
+// 为什么单独一个模块而不是给 udp.qma 加参数：地址家族在 `socket()` 那一刻
+// 就定死了，而调用方拿到的是一个不透明的 fd —— 后续 `udp_sendto` 无法判断
+// 该按 16 字节（sockaddr_in）还是 28 字节（sockaddr_in6）构造地址。
+// 把"用哪个内建"当作家族的载体，比在 fd 之外再传一个 family 参数更不容易错。
+//
+// 地址表示：**16 字节网络序原始串**（与 `sockaddr_in6.sin6_addr` 同布局），
+// 由 `std/net/addr` 的 `ip6_parse` 产出。这样文本形式（`::` 压缩、
+// `::ffff:1.2.3.4` 混合写法、未来的 `%zone`）的解析全在库层，内建只认字节。
+//
+// 边界：
+//   * **仅 x86_64**（与 std/net/udp 同口径：`udp_*` 内建只有 x86_64 发射）。
+//   * 源地址**丢弃**（与 v4 的 `udp_recvfrom` 同口径）—— 要 peer 信息
+//     得加 `udp_recvfrom6_from` 内建，登记 07-gaps。
+//   * 无 `udp_bind6`：绑定用 `udp_bind(fd, port)`（端口与家族无关）。
+//   * Windows 的 `AF_INET6` 是 **23**、Linux 是 **10** —— 内建层已按平台分叉，
+//     库层不用关心。
+//
+// **注意**：本模块直接暴露内建 `udp_open6` / `udp_sendto6` /
+// `udp_recvfrom6` / `udp_recvfrom6_to`，不做同名包装 ——
+// 库函数与内建同名会导致解析到内建、库函数成为死代码（或无限递归）。
+// 所以这里只做"文本地址 -> 字节"的转换层，语义包装放在调用方。
+
+import std.net
+import std.net.addr
+
+/// 把点分/冒号形式的 IPv6 文本发到 (addr, port)。
+/// 返回发送字节数；地址非法返回 -1。
+pub fn udp_send6(fd: int, addr: str, port: int, data: str) -> int {
+    let raw = ip6_parse(addr)
+    if len(raw) != 16 {
+        return 0 - 1
+    }
+    return udp_sendto6(fd, str_ptr(raw), port, data)
+}
+
+/// 收一个数据报（源地址丢弃，与 v4 同口径）。
+pub fn udp_recv6(fd: int, cap: int) -> str {
+    return udp_recvfrom6(fd, cap)
+}
+
+/// 收一个数据报，最多等 ms 毫秒；超时返回空串（与 v4 的 `*_to` 同口径）。
+pub fn udp_recv6_to(fd: int, cap: int, ms: int) -> str {
+    return udp_recvfrom6_to(fd, cap, ms)
+}
+
+/// 便捷：建 socket + 发一个数据报 + 关掉。
+/// 适合"发一条 DNS 查询"这类一次性场景。
+pub fn udp_once6(addr: str, port: int, data: str) -> int {
+    let fd = udp_open6()
+    let n = udp_send6(fd, addr, port, data)
+    // 关 fd：UDP 没有连接态，close 直接释放。用 tcp_close 是因为
+    // 内建层只有它（socket fd 在 Win32/Linux 上是同一类句柄，closesocket
+    // 与 close 的差别由发射层按平台处理）。
+    tcp_close(fd)
+    return n
+}

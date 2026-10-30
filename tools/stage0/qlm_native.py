@@ -3077,6 +3077,46 @@ class Lower:
             d = fn.new_v()
             fn.emit("call", d, "__udp_open", [])
             return d
+        if name == "udp_open6" and name not in self.fns_ast:
+            # udp_open6() -> fd：**AF_INET6** + SOCK_DGRAM（v3.20）。
+            #
+            # 为什么单独一个内建而不是给 udp_open 加参数：地址家族在 socket()
+            # 那一刻就定死了，而调用方拿到的只是一个 fd —— 后续 udp_sendto
+            # 不知道该按 16 字节还是 28 字节构造 sockaddr。加参数会让
+            # "fd 与家族"这对信息散落在调用方，容易传错；单独的内建把
+            # "这个 fd 是 v6"编码进"用哪个内建"里。
+            if len(e[2]) != 0:
+                raise SyntaxError("udp_open6() 不需要实参")
+            if self.arch != "x86_64":
+                raise SyntaxError("udp_open6 目前只在 x86_64 后端实现")
+            self.uses_udp = True
+            d = fn.new_v()
+            fn.emit("call", d, "__udp_open6", [])
+            return d
+        if name in ("udp_bind6", "udp_sendto6", "udp_recvfrom6", "udp_recvfrom6_to") \
+                and name not in self.fns_ast:
+            # udp_bind6(fd, port) -> 0/-1（v3.20）
+            #   **必须用这个而不是 udp_bind** —— 16 字节的 sockaddr_in
+            #   绑到 AF_INET6 socket 上会被内核按 family 判错。
+            # udp_sendto6(fd, addr_ptr, port, data) -> 发送字节数/-1
+            #   addr_ptr 指向 **16 字节**的 IPv6 地址（大端，与 sockaddr_in6
+            #   的 sin6_addr 同布局）。用指针而不是字符串：v6 的文本形式
+            #   （含 :: 压缩、%zone）解析放在 std/net/addr 里，内建只认字节。
+            # udp_recvfrom6(fd, cap) -> str（源地址丢弃，与 v4 同口径）
+            # udp_recvfrom6_to(fd, cap, ms) -> str
+            if self.arch != "x86_64":
+                raise SyntaxError(f"{name} 目前只在 x86_64 后端实现")
+            self.uses_udp = True
+            need = {"udp_bind6": 2, "udp_sendto6": 4, "udp_recvfrom6": 2,
+                    "udp_recvfrom6_to": 3}[name]
+            if len(e[2]) != need:
+                raise SyntaxError(f"{name} 需要 {need} 个实参")
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            d = fn.new_v()
+            fn.emit("call", d, "__" + name, vals)
+            if name in ("udp_recvfrom6", "udp_recvfrom6_to"):
+                return self._mark_str(fn, d)
+            return d
         if name in ("udp_bind", "udp_sendto", "udp_recvfrom", "udp_recvfrom_to") \
                 and name not in self.fns_ast:
             # udp_bind(fd, port) -> 0/-1
@@ -9575,9 +9615,18 @@ class Lower:
                 udp_net_fail(f, lb, tag)
 
             # UDP 自己的 __net_fail_* 运行库（TCP gate 只定义了它的五个）
+            #
+            # v3.20 补了 4 个 v6 的：open6 / sendto6 / recvfrom6 / recvfrom6to。
+            # 每个 `net_fail(f, lb, tag)` 调用点都会 emit 一个
+            # `call __net_fail_<tag>`，标签必须在运行库里定义，否则链接期
+            # `KeyError: '__net_fail_<tag>'`（本次就是这么发现的）。
             for tag, msg in (("udpsocket", "quelmara: udp socket failed (fail-fast)\n"),
                              ("udpsendto", "quelmara: udp sendto failed (fail-fast)\n"),
-                             ("udprecvfrom", "quelmara: udp recvfrom failed (fail-fast)\n")):
+                             ("udprecvfrom", "quelmara: udp recvfrom failed (fail-fast)\n"),
+                             ("udpopen6", "quelmara: udp6 socket failed (fail-fast)\n"),
+                             ("udpsendto6", "quelmara: udp6 sendto failed (fail-fast)\n"),
+                             ("udprecvfrom6", "quelmara: udp6 recvfrom failed (fail-fast)\n"),
+                             ("udprecvfrom6to", "quelmara: udp6 recvfrom failed (fail-fast)\n")):
                 gid_nf = self.intern_str(msg)
                 f = Fn("__net_fail_" + tag)
                 bp = f.new_v()
@@ -9628,6 +9677,248 @@ class Lower:
                 f.emit("store", sinb, ("imm", 0), w2)          # family|port|addr
                 f.emit("store", sinb, ("imm", 1), ("imm", 0))  # sin_zero
                 return sinb
+
+            def udp_sin6(f, addr_ptr, port_v):
+                """构造 sockaddr_in6（28B），返回堆指针 vreg（v3.20）。
+
+                真实字节布局（RFC 3493 / `<netinet/in.h>`）：
+                    offset  0-1   sin6_family  (AF_INET6，主机序)
+                    offset  2-3   sin6_port    (网络序)
+                    offset  4-7   sin6_flowinfo
+                    offset  8-23  sin6_addr    (16 字节，网络序)
+                    offset 24-27  sin6_scope_id
+                共 28 字节。**不是 8B 槽对齐**，所以用 store8 逐段写、
+                地址段用 mem_copy 整段搬（16 字节）。
+
+                调用方传的 `addr_ptr` 指向 16 字节大端地址（与 sin6_addr
+                同布局），由 `std/net/addr` 的 `ip6_parse` 产出。
+
+                **AF_INET6 的数值两个平台不同**：Windows = **23**、
+                Linux = **10**。v3.20 第一版把 10 写死了，结果 Windows 上
+                `bind` 返回 -1（内核按 family 字段判错）—— 与 `tcp_peer_raw`
+                注释里记的 "2=v4 / 23=v6" 是同一个事实，当时没串起来。
+                """
+                # 平台相关的地址家族常量
+                af_inet6 = 23 if self.platform == "windows" else 10
+                sinb = f.new_v()
+                f.emit("call", sinb, "__alloc", [("imm", 32)])   # 28 向上取整到 8 的倍数
+                # sin6_port：htons(port) 放在字节 2-3；family 放字节 0-1。
+                # 一次性 store 8 字节到槽 0：低 16 位 family、次 16 位 htons(port)，
+                # 高 32 位 0 = sin6_flowinfo。
+                pb = f.new_v()
+                f.emit("bin", "and", pb, port_v, ("imm", 0xFF))
+                pb2 = f.new_v()
+                f.emit("bin", "shl", pb2, pb, ("imm", 8))
+                ph = f.new_v()
+                f.emit("bin", "shr", ph, port_v, ("imm", 8))
+                ph2 = f.new_v()
+                f.emit("bin", "and", ph2, ph, ("imm", 0xFF))
+                pw = f.new_v()
+                f.emit("bin", "or", pw, pb2, ph2)               # htons(port)
+                pw2 = f.new_v()
+                f.emit("bin", "shl", pw2, pw, ("imm", 16))
+                w0 = f.new_v()
+                f.emit("bin", "or", w0, pw2, ("imm", af_inet6)) # family|port
+                f.emit("store", sinb, ("imm", 0), w0)
+                # sin6_addr：从 addr_ptr 整段搬 16 字节到 offset 8
+                a8 = f.new_v()
+                f.emit("bin", "add", a8, sinb, ("imm", 8))
+                f.emit("call", None, "__memcpy", [a8, addr_ptr, ("imm", 16)])
+                # sin6_scope_id = 0（字节 24-27，槽 3）
+                f.emit("store", sinb, ("imm", 3), ("imm", 0))
+                return sinb
+
+            # __udp_open6（v3.20）：AF_INET6 + SOCK_DGRAM
+            f = Fn("__udp_open6")
+            if self.platform == "windows":
+                wsa = f.new_v()
+                f.emit("movaddr", wsa, gid_wsa_udp)
+                sw = f.new_v()
+                f.emit("winapi", sw, "WSAStartup", [("imm", 0x202), wsa])
+                b = f.new_v()
+                f.emit("cmpset", "ne", b, sw, ("imm", 0))
+                lf = f.label("uo6f")
+                f.emit("jnz", b, lf)
+                # AF_INET6 = 23（Windows 的 AF_INET6 与 Linux 的 10 不同！）
+                s = f.new_v()
+                f.emit("winapi", s, "socket", [("imm", 23), ("imm", 2), ("imm", 0)])
+                b = f.new_v()
+                r32 = f.new_v()
+                f.emit("bin", "shl", r32, s, ("imm", 32))
+                r322 = f.new_v()
+                f.emit("bin", "sar", r322, r32, ("imm", 32))
+                f.emit("cmpset", "e", b, r322, ("imm", -1))
+                f.emit("jnz", b, lf)
+                f.emit("ret", s)
+                net_fail(f, lf, "udpopen6")
+            else:
+                # Linux AF_INET6 = 10
+                s = f.new_v()
+                f.emit("syscall", s, self.sc["socket"], [("imm", 10), ("imm", 2), ("imm", 0)])
+                b = f.new_v()
+                f.emit("cmpset", "l", b, s, ("imm", 0))
+                lf = f.label("uo6f")
+                f.emit("jnz", b, lf)
+                f.emit("ret", s)
+                net_fail(f, lf, "udpopen6")
+            self.out.append(f)
+
+            # __udp_sendto6(fd, addr_ptr, port, data) -> 发送字节数 / fail-fast
+            f = Fn("__udp_sendto6")
+            fdu, apu, pu, du = f.new_v(), f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [fdu, apu, pu, du])
+            sinb = udp_sin6(f, apu, pu)
+            dn = f.new_v()
+            f.emit("call", dn, "__str_len", [du])
+            if self.platform == "windows":
+                r = f.new_v()
+                f.emit("winapi", r, "sendto",
+                       [fdu, du, dn, ("imm", 0), sinb, ("imm", 28)])
+                b = f.new_v()
+                r32 = f.new_v()
+                f.emit("bin", "shl", r32, r, ("imm", 32))
+                r322 = f.new_v()
+                f.emit("bin", "sar", r322, r32, ("imm", 32))
+                f.emit("cmpset", "l", b, r322, ("imm", 0))
+                lf = f.label("us6f")
+                f.emit("jnz", b, lf)
+                f.emit("ret", r)
+                net_fail(f, lf, "udpsendto6")
+            else:
+                f.emit("syscall", r, self.sc["sendto"],
+                       [fdu, du, dn, ("imm", 0), sinb, ("imm", 28)])
+                b = f.new_v()
+                f.emit("cmpset", "l", b, r, ("imm", 0))
+                lf = f.label("us6f")
+                f.emit("jnz", b, lf)
+                f.emit("ret", r)
+                net_fail(f, lf, "udpsendto6")
+            self.out.append(f)
+
+            # __udp_recvfrom6(fd, cap) -> str（单 datagram，源地址丢弃）
+            f = Fn("__udp_recvfrom6")
+            fdu, capu = f.new_v(), f.new_v()
+            f.emit("args", [fdu, capu])
+            nb = f.new_v()
+            f.emit("bin", "add", nb, capu, ("imm", 9))
+            buf = f.new_v()
+            f.emit("call", buf, "__alloc", [nb])
+            sinb = f.new_v()
+            f.emit("call", sinb, "__alloc", [("imm", 32)])
+            slen = f.new_v()
+            f.emit("call", slen, "__alloc", [("imm", 8)])
+            f.emit("store", slen, ("imm", 0), ("imm", 28))     # in: 缓冲区大小
+            bufd = f.new_v()
+            f.emit("bin", "add", bufd, buf, ("imm", 8))
+            if self.platform == "windows":
+                r = f.new_v()
+                f.emit("winapi", r, "recvfrom",
+                       [fdu, bufd, capu, ("imm", 0), sinb, slen])
+                b = f.new_v()
+                r32 = f.new_v()
+                f.emit("bin", "shl", r32, r, ("imm", 32))
+                r322 = f.new_v()
+                f.emit("bin", "sar", r322, r32, ("imm", 32))
+                f.emit("cmpset", "l", b, r322, ("imm", 0))
+                lf = f.label("ur6f")
+                f.emit("jnz", b, lf)
+            else:
+                r = f.new_v()
+                f.emit("syscall", r, self.sc["recvfrom"],
+                       [fdu, bufd, capu, ("imm", 0), sinb, slen])
+                b = f.new_v()
+                f.emit("cmpset", "l", b, r, ("imm", 0))
+                lf = f.label("ur6f")
+                f.emit("jnz", b, lf)
+            f.emit("store", buf, ("imm", 0), r)
+            noff = f.new_v()
+            f.emit("bin", "add", noff, r, ("imm", 8))
+            f.emit("store8", buf, noff, ("imm", 0))
+            # 返回**数据指针**（buf+8），不是 buf —— 长度头在 buf 的前 8 字节，
+            # str 的值必须指向数据起点（与 v4 的 `__udp_recvfrom` 同口径）。
+            rbuf = f.new_v()
+            f.emit("bin", "add", rbuf, buf, ("imm", 8))
+            f.emit("ret", rbuf)
+            net_fail(f, lf, "udprecvfrom6")
+            self.out.append(f)
+
+            # __udp_recvfrom6_to(fd, cap, ms) -> str（v3.20）
+            #
+            # 与 v4 的 `__udp_recvfrom_to` 同构：先 setsockopt(SO_RCVTIMEO)，
+            # 再 recvfrom。**区别只在 sockaddr 长度**（28 而不是 16）——
+            # 内核对这个参数是"输入输出"：进来时告诉你缓冲区多大，
+            # 出去时告诉你实际写入了多少。给 16 而实际是 sockaddr_in6 时，
+            # 内核会把地址截断（不报错），下次读到的地址就是垃圾。
+            #
+            # `ms = 0` 表示不限时；超时/失败返回**空串**而不是 fail-fast ——
+            # 与 v4 同口径（DNS 需要"这个 nameserver 没响应"是可恢复结果）。
+            f = Fn("__udp_recvfrom6_to")
+            ft6, capt6, mst6 = f.new_v(), f.new_v(), f.new_v()
+            f.emit("args", [ft6, capt6, mst6])
+            tv6 = f.new_v()
+            f.emit("call", tv6, "__alloc", [("imm", 16)])
+            if self.platform == "windows":
+                f.emit("store", tv6, ("imm", 0), mst6)
+                f.emit("winapi", None, "setsockopt",
+                       [ft6, ("imm", 0xFFFF), ("imm", 0x1006), tv6, ("imm", 4)])
+            else:
+                sec6 = f.new_v()
+                f.emit("bin", "div", sec6, mst6, ("imm", 1000))
+                mrem6 = f.new_v()
+                f.emit("bin", "mod", mrem6, mst6, ("imm", 1000))
+                usec6 = f.new_v()
+                f.emit("bin", "mul", usec6, mrem6, ("imm", 1000))
+                f.emit("store", tv6, ("imm", 0), sec6)
+                f.emit("store", tv6, ("imm", 1), usec6)
+                f.emit("syscall", None, self.sc["setsockopt"],
+                       [ft6, ("imm", 1), ("imm", 20), tv6, ("imm", 16)])
+            nb6 = f.new_v()
+            f.emit("bin", "add", nb6, capt6, ("imm", 9))
+            buf6 = f.new_v()
+            f.emit("call", buf6, "__alloc", [nb6])
+            sinb6 = f.new_v()
+            f.emit("call", sinb6, "__alloc", [("imm", 32)])
+            slen6 = f.new_v()
+            f.emit("call", slen6, "__alloc", [("imm", 8)])
+            f.emit("store", slen6, ("imm", 0), ("imm", 28))
+            bufd6 = f.new_v()
+            f.emit("bin", "add", bufd6, buf6, ("imm", 8))
+            if self.platform == "windows":
+                r6 = f.new_v()
+                f.emit("winapi", r6, "recvfrom",
+                       [ft6, bufd6, capt6, ("imm", 0), sinb6, slen6])
+                b6 = f.new_v()
+                r6_32 = f.new_v()
+                f.emit("bin", "shl", r6_32, r6, ("imm", 32))
+                r6_322 = f.new_v()
+                f.emit("bin", "sar", r6_322, r6_32, ("imm", 32))
+                f.emit("cmpset", "l", b6, r6_322, ("imm", 0))
+                lf6 = f.label("ur6tf")
+                f.emit("jnz", b6, lf6)
+            else:
+                r6 = f.new_v()
+                f.emit("syscall", r6, self.sc["recvfrom"],
+                       [ft6, bufd6, capt6, ("imm", 0), sinb6, slen6])
+                b6 = f.new_v()
+                f.emit("cmpset", "l", b6, r6, ("imm", 0))
+                lf6 = f.label("ur6tf")
+                f.emit("jnz", b6, lf6)
+            f.emit("store", buf6, ("imm", 0), r6)
+            noff6 = f.new_v()
+            f.emit("bin", "add", noff6, r6, ("imm", 8))
+            f.emit("store8", buf6, noff6, ("imm", 0))
+            rbuf6 = f.new_v()
+            f.emit("bin", "add", rbuf6, buf6, ("imm", 8))
+            f.emit("ret", rbuf6)
+            # 超时/失败：返回**空串**（长度 0 的 str，头 8 字节写 0），
+            # 与 v4 的 `__udp_recvfrom_to` 同口径 —— 调用方（DNS）需要
+            # "这个 nameserver 没响应"是可恢复结果，不是进程终止条件。
+            f.emit("label", lf6)
+            f.emit("store", buf6, ("imm", 0), ("imm", 0))
+            f.emit("store8", buf6, ("imm", 8), ("imm", 0))
+            f.emit("bin", "add", rbuf6, buf6, ("imm", 8))
+            f.emit("ret", rbuf6)
+            self.out.append(f)
 
             # __udp_open
             f = Fn("__udp_open")
@@ -9687,6 +9978,45 @@ class Lower:
             else:
                 f.emit("syscall", r, self.sc["bind"],
                        [fdu, sinb, ("imm", 16), ("imm", 0), ("imm", 0), ("imm", 0)])
+                z = f.new_v()
+                f.emit("cmpset", "e", z, r, ("imm", 0))
+                r2 = f.new_v()
+                f.emit("bin", "sub", r2, z, ("imm", 1))
+                f.emit("ret", r2)
+            self.out.append(f)
+
+            # __udp_bind6(fd, port)（v3.20）
+            #
+            # 与 `__udp_bind` 的唯一区别是地址结构：28 字节的 sockaddr_in6
+            # （family=AF_INET6、port、全零的 sin6_addr = `::` 通配）。
+            # **不能复用 `udp_sin`** —— 16 字节的 sockaddr_in 绑到 AF_INET6
+            # socket 上，内核会按 family 字段判错（返回 -1/EINVAL），
+            # 本次就是先踩了这个才补的。
+            f = Fn("__udp_bind6")
+            fdu6b, pu6b = f.new_v(), f.new_v()
+            f.emit("args", [fdu6b, pu6b])
+            # sin6_addr 全零 = 通配地址 `::`：先分配 16 字节零块
+            zero6 = f.new_v()
+            f.emit("call", zero6, "__alloc", [("imm", 16)])
+            f.emit("store", zero6, ("imm", 0), ("imm", 0))
+            f.emit("store", zero6, ("imm", 1), ("imm", 0))
+            sinb6b = udp_sin6(f, zero6, pu6b)
+            if self.platform == "windows":
+                r = f.new_v()
+                f.emit("winapi", r, "bind", [fdu6b, sinb6b, ("imm", 28)])
+                b = f.new_v()
+                r32 = f.new_v()
+                f.emit("bin", "shl", r32, r, ("imm", 32))
+                r322 = f.new_v()
+                f.emit("bin", "sar", r322, r32, ("imm", 32))
+                f.emit("cmpset", "ne", b, r322, ("imm", -1))
+                r2 = f.new_v()
+                f.emit("bin", "sub", r2, b, ("imm", 1))
+                f.emit("ret", r2)
+            else:
+                r = f.new_v()
+                f.emit("syscall", r, self.sc["bind"],
+                       [fdu6b, sinb6b, ("imm", 28), ("imm", 0), ("imm", 0), ("imm", 0)])
                 z = f.new_v()
                 f.emit("cmpset", "e", z, r, ("imm", 0))
                 r2 = f.new_v()
