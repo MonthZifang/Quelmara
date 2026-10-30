@@ -19,8 +19,14 @@
 // 第一版夹具用 200 ms 等，注回"漏唤醒"bug 之后**仍然通过** —— 因为
 // worker 完成时等待方还停在 yield 段里（yield 每轮都重新读计数），
 // 根本不需要被唤醒。改成 300 ms 后 bug 才暴露（见下）。
+//
+// v3.16：park 实现搬到 `std/park`，`std/sync` 不再直接依赖 `@ffi` ——
+// 这样 `std/sync` 能在 native/arm64 编译（CI 的 t122_syncport 才不会红）。
+// 代价是**调用方要显式注入**：`sync_set_park(park_on, wake_all)`。
+// 本夹具因此先注入再测，并在开头断言注入成功 —— 否则测的就退化成 sleep 片了。
 module t170
 
+import std.park
 import std.sync
 
 const ST_DONE_NS = 20
@@ -39,6 +45,11 @@ fn worker(w: int, target_ns: int, payload: int, slot: int) -> int {
 }
 
 fn main() {
+    // ---- [0] 先注入 park 实现（v3.16：std/sync 不再自带 @ffi）----
+    assert(park_available() == 1, "[0] std/park 在本后端可用")
+    sync_set_park(park_on, wake_all)
+    assert(sync_has_park() == 1, "[0] 注入成功")
+
     // ---- [1][2] 唤醒必须发生且及时 ----
     let w = wg_new()
     wg_add(w, 1)

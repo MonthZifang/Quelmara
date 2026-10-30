@@ -348,6 +348,29 @@ enum 派生的生成代码量更大（每个变体一个 match 臂 × 三条路�
 | 给 `mutex_lock` 也用 park | 16 线程 × 20 万次加锁 **281 → 1568 ms（慢 5.6×）**；加「先 yield 1024 次」门槛后仍 855 ms | 锁的临界区约 88 ns，「已经等多久」这个代理判据区分不了「马上就好」与「要等很久」。**park 只对"等待 ≫ 系统调用开销、且只等一次"有利** |
 | 给 `wg_done` 加「有人在睡才 Wake」的 parked 计数 | **漏唤醒**，lag ≈ **953 ms**（睡到 1000 ms 兜底超时） | 「登记」与「检查」是两次独立原子操作，窗口关不掉；Win32 没有把「减计数 + 检查 + Wake」做成原子事务的原语。改成无条件 Wake |
 
+#### 3.5b.2 park 拆成 `std/park`、改为注入式（v3.16）
+
+v3.15 把三条 `@ffi` 直接写进 `std/sync`，**打红了 native/arm64 编译** ——
+`@ffi` 只在 Windows PE 后端实现，于是 `tests/t122_syncport.qma` 在
+`--target native` / `--target arm64` 上都是声明期 SyntaxError，而 CI 的
+`run_native_tests.sh [7]` 正是编它到 A64 再在模拟器里跑。
+
+v3.16 把 `@ffi` 与 `_park` 整体搬到 **`std/park`**（只编 Windows PE），
+`std/sync` 回到零 `@ffi`、跨平台可编译；park 由调用方
+`sync_set_park(park_on, wake_all)` **显式注入**（两个 `static_word` 存函数指针）。
+不注入时 `wg_wait` 第 3 段退回 `sleep_ms(1)`，语义正确、只是唤醒晚一个时钟片。
+
+**收益仍在**（`build/probe_wake3b.qma`，200 ms 忙等，交替各 7 次；
+这次对照组是**不注入的 `wg_wait`**，而 v3.15 的对照组是手写的 `wg_wait_old`）：
+
+| 模式 | min | median | max |
+|---|---|---|---|
+| 不注入（纯退避） | 64 µs | **622 µs** | 1488 µs |
+| 注入 park | 30 µs | **44 µs** | 102 µs |
+
+**中位 14×**。与 v3.15 记的 21.7× 的差异在噪声范围内（§3.50：本机分辨率 ±20%），
+**量级结论不变**：park 把唤醒从"一个时钟片"降到几十 µs。
+
 ### 3.5c chan 抢锁策略 A/B（否决的实验，v1.98）
 
 把通道锁的"抢不到就 `thread_yield`"改成"先 `pause` 32 次再让出"，
