@@ -1,0 +1,55 @@
+// t171_syscall.qma —— 用户可调的 syscall 内建（v3.18）
+//
+// 在这之前 `syscall` 只是编译器内部的发射指令，用户代码发不了系统调用，
+// 于是 Linux 侧的 futex / io_uring / 新 socket 选项全都做不了
+// （见 07-gaps §4/§5）。
+//
+// 本夹具只走**三个最稳的系统调用**，不碰 futex（那需要多线程配合）：
+//   [1] getpid   —— 返回值必须 > 0，且两次一致
+//   [2] write    —— 往 stdout 写一行，返回字节数
+//   [3] 非法编号 —— 内核返回 -ENOSYS（负值），验证"原样返回 -errno"的约定
+//
+// 边界：**只在 Linux（native / arm64）后端编译**。Windows 上编译期报错。
+// 执行级验证：x86 直接跑（CI linux job）；A64 走 tests/a64_emu.py。
+module t171
+
+// x86-64 Linux 的系统调用号
+const SYS_WRITE_X64 = 1
+const SYS_GETPID_X64 = 39
+
+// AArch64 Linux 的系统调用号
+const SYS_WRITE_A64 = 64
+const SYS_GETPID_A64 = 172
+
+fn main() {
+    // ---- [1] getpid：> 0 且两次一致 ----
+    // 两个架构的编号不同，这里用 0 判断不可行 —— 改为各自试一次，
+    // 取"返回值 > 0 的那个"。这是刻意的：夹具要能在两个后端跑同一份源码。
+    let pid_x64 = syscall(SYS_GETPID_X64, 0, 0, 0, 0, 0, 0)
+    let pid_a64 = syscall(SYS_GETPID_A64, 0, 0, 0, 0, 0, 0)
+    let pid = pid_x64
+    if pid_x64 <= 0 {
+        pid = pid_a64
+    }
+    assert(pid > 0, "[1] getpid 必须返回正数（两个架构至少一个对）")
+    let pid2 = syscall(SYS_GETPID_X64, 0, 0, 0, 0, 0, 0)
+    if pid_x64 <= 0 {
+        pid2 = syscall(SYS_GETPID_A64, 0, 0, 0, 0, 0, 0)
+    }
+    assert(pid == pid2, "[1] 两次 getpid 一致")
+
+    // ---- [2] write：往 stdout 写一行 ----
+    let msg = "syscall write ok\n"
+    let n = syscall(SYS_WRITE_X64, 1, str_ptr(msg), len(msg), 0, 0, 0)
+    if n <= 0 {
+        n = syscall(SYS_WRITE_A64, 1, str_ptr(msg), len(msg), 0, 0, 0)
+    }
+    assert(n == len(msg), "[2] write 必须写满")
+
+    // ---- [3] 非法编号：内核返回 -ENOSYS（负值）----
+    // 9999 在 x86-64 与 AArch64 上都不是合法调用号。
+    let bad = syscall(9999, 0, 0, 0, 0, 0, 0)
+    assert(bad < 0, "[3] 非法调用号必须返回负值（-errno）")
+
+    print("syscall ok")
+}

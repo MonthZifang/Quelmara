@@ -23,6 +23,28 @@ HEAP_BASE = 0x6F0000000000
 HEAP_SZ = 512 * 1024 * 1024         # 虚拟堆空间（__alloc 一次性 mmap 整个 arena）
                                    # 实际内存按需惰性展开，不会真占 512MB
 
+# v3.18：模拟器**明确知道但没实现**的系统调用号。
+# 不在这个集合里的编号一律返回 -ENOSYS（与真实内核同语义），
+# 这样 tests/t171_syscall.qma 的"非法调用号返回负值"才测得对。
+# 加新用例时若需要某个系统调用，要么实现它，要么加进这里 ——
+# 不能靠"抛异常"混过去。
+_KNOWN_UNIMPL = {
+    56,   # openat
+    57,   # close
+    63,   # read
+    98,   # futex（AArch64；模拟器无线程，无法有意义地实现）
+    124,  # sched_yield
+    198,  # socket
+    200,  # bind
+    201,  # listen
+    202,  # accept
+    203,  # connect
+    206,  # sendto
+    207,  # recvfrom
+    220,  # clone
+    260,  # wait4
+}
+
 COND = {"0": ("Z",), }  # 占位，见 condh
 
 
@@ -385,8 +407,23 @@ class A64:
             ptr = HEAP_BASE + self.heap_off
             self.heap_off += size
             self.put(0, ptr)
+        elif num == 172:                       # getpid（v3.18：syscall 内建要用）
+            self.put(0, 1)
+        elif num == 214:                       # brk：返回"当前断点"，不真分配
+            self.put(0, HEAP_BASE + self.heap_off)
         else:
-            raise RuntimeError(f"未实现 syscall {num}")
+            # v3.18：**一律返回 -ENOSYS，不抛异常**。
+            #
+            # 之前是 `raise RuntimeError(f"未实现 syscall {num}")`，两个问题：
+            #   ① 真实内核遇到非法编号返回 -ENOSYS，模拟器抛异常与内核语义不符，
+            #      `tests/t171_syscall.qma` 的"非法编号必须返回负值"会假红；
+            #   ② 更隐蔽：**同一编号在不同架构上是不同的调用**
+            #      （202 在 x86-64 是 futex、在 AArch64 是 accept）。探针/夹具
+            #      若按 x86 编号写，在 A64 模拟器上会撞进这里 —— 抛异常会让人
+            #      以为是模拟器缺陷，其实只是"这个编号在 A64 上不存在/没实现"。
+            # 所以 `_KNOWN_UNIMPL` 现在只用于**文档性列举**，不再改变行为；
+            # 保留它是因为它记录了"哪些编号我们知道但故意不实现"。
+            self.put(0, self.sext(-38, 64))    # -ENOSYS
 
     def run(self, max_steps=200_000_000):
         for _ in range(max_steps):

@@ -3468,6 +3468,53 @@ class Lower:
             d = fn.new_v()
             fn.emit("call", d, "__str_from_mem", [p, k])
             return self._mark_str(fn, d)
+        if name == "syscall" and name not in self.fns_ast:
+            # syscall(n, a0..a5) -> int：**用户可调**的裸系统调用（v3.18）。
+            #
+            # 为什么需要它：在这之前 `syscall` 只是编译器内部的发射指令
+            # （`fn.emit("syscall", ...)`），用户代码发不了系统调用。于是
+            # Linux 侧的 futex / io_uring / 新 socket 选项全部做不了 ——
+            # `std/park` 只能 Windows（`@ffi` 在 ELF 后端是声明期硬失败，
+            # 且 ELF 是静态可执行、无外部符号可解析）。见 07-gaps §4/§5。
+            #
+            # 语义（x86-64 Linux / AArch64 Linux，都是"编号 + 最多 6 个实参"）：
+            #   x86-64：rax=编号，rdi/rsi/rdx/r10/r8/r9=参数，syscall 指令，
+            #           返回值在 rax；出错时 rax = -errno（**不置 errno**）。
+            #   AArch64：x8=编号，x0..x5=参数，svc #0，返回值在 x0；
+            #           出错时 x0 = -errno。
+            # 两者都返回"原样的内核返回值"，负值即 -errno。**不抛异常、不转换**：
+            # 这一层是裸的，封装成 Result/错误对象是调用方（标准库）的事。
+            #
+            # 边界：
+            #   * **仅 Linux（native / arm64）**。Windows 上 `syscall` 指令在
+            #     用户态不通用（要过 ntdll 的 stub），编译期 fail-fast 而不是
+            #     产出一个会崩的可执行文件。
+            #   * 编号**不做白名单**：内核会拒绝非法编号并返回 -ENOSYS，这与
+            #     C 里直接 `syscall(2)` 一致。安全边界由操作系统提供。
+            #   * 实参必须是 int（指针用 `mem_ptr` / `str_ptr` 转）。
+            #   * 返回 int，不是 bool —— 内核返回值语义（字节数 / fd / -errno）。
+            if len(e[2]) < 1:
+                raise SyntaxError("syscall(n, a0, ..., a5) 至少需要一个实参（调用号）")
+            if len(e[2]) > 7:
+                raise SyntaxError("syscall 最多 6 个实参（调用号 + 6 个参数）")
+            if self.platform == "windows":
+                raise SyntaxError(
+                    "syscall() 只在 Linux（native / arm64）后端实现——"
+                    "Windows 用户态不能直接发 syscall 指令；"
+                    "要调 Win32 API 请用 @ffi")
+            vals = [self.eval(a, fn, env) for a in e[2]]
+            # 调用号必须是编译期常量：内核在 rax/x8 里读它，
+            # 允许运行期值没有意义，而且能提前抓出笔误。
+            if not (isinstance(vals[0], tuple) and vals[0][0] == "imm"):
+                raise SyntaxError("syscall 的调用号必须是整型常量")
+            num = vals[0][1]
+            if not isinstance(num, int):
+                raise SyntaxError("syscall 的调用号必须是整型常量")
+            # 补齐到 6 个实参（内核只看用得到的，但寄存器要填满以免读到垃圾）
+            args = vals[1:] + [("imm", 0)] * (6 - len(vals[1:]))
+            d = fn.new_v()
+            fn.emit("syscall", d, num, args)
+            return d
         if name == "thread_yield" and name not in self.fns_ast:
             # thread_yield()：让出当前时间片（v1.98）。Windows 走
             # kernel32.SwitchToThread，Linux 走 sched_yield（x86 24 / A64 124）。
