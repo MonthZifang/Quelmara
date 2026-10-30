@@ -397,6 +397,52 @@ def main():
         else:
             bad(f"分片未完成时的新数据帧没被拒（op={op}）")
         s3.close()
+
+        # ---- [13] 超长消息被拒（close 1009） ----
+        # v3.29 修的：消息上限原来等于连接缓冲上限（都是 1 MB），
+        # "上限之内"的消息反而收不全，永久卡死。现在上限 960 KB，
+        # 留 64 KB 余量给帧头，1009 才能正常触发。
+        #
+        # **只发帧头、不发载荷**：服务端读到 64 位长度就知道超限了，
+        # 立即回 1009。如果真把 1.1 MB 灌进去，会在客户端一侧先把
+        # TCP 缓冲塞满（那是背压问题，不是 ws 协议问题），
+        # 测的就不是"协议是否拒绝"了。
+        s4 = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+        handshake(s4)
+        safe_recv(s4)
+        over = 1100000
+        hdr = bytes([0x81, 0x80 | 127]) + struct.pack(">Q", over) + os.urandom(4)
+        safe_send(s4, hdr)
+        op, payload = safe_recv(s4, timeout=5)
+        if op == 0x8:
+            code = struct.unpack(">H", payload[:2])[0] if len(payload) >= 2 else -1
+            ok(f"超长消息（声明 {over} B）被拒（close code={code}）") if code == 1009 \
+                else bad(f"超长消息被拒但 code={code}（期望 1009）")
+        else:
+            bad(f"超长消息没被拒（op={op}）")
+        s4.close()
+
+        # ---- [14] 上限之内的大消息能正常收发 ----
+        # 与 [13] 配对，证明"留余量"没把上限压得太低 —— 960 KB 上限下，
+        # 900 KB 必须能完整收发（含 64 位长度档，因为 900 KB > 65535）。
+        #
+        # 诚实说明：这条**抓不到** v3.29 修的那个 bug（消息上限 == 连接缓冲
+        # 上限导致边缘卡死）。那个 bug 只在"载荷恰好逼近 1 MB"时暴露，
+        # 而边界值差几十字节，钉死具体数字的测试会非常脆。
+        # 这里钉的是"大消息这条路通"，边界由 [13] 的 1009 侧兜住。
+        s5 = socket.create_connection(("127.0.0.1", PORT), timeout=20)
+        handshake(s5)
+        safe_recv(s5)
+        big_ok = b"K" * (900 * 1024)
+        if safe_send(s5, make_frame(0x1, big_ok)):
+            op, payload = safe_recv(s5, timeout=20)
+            if payload == big_ok:
+                ok(f"上限内的大消息正常收发（{len(big_ok)} B）")
+            else:
+                bad(f"大消息收发不符：op={op} len={len(payload) if payload else 0}")
+        else:
+            bad("大消息发送失败")
+        s5.close()
     finally:
         proc.kill()
         try:
