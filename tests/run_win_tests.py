@@ -253,6 +253,33 @@ def test_http_e2e():
         bad(f"HTTP E2E 失败 rc={r.returncode} {r.stdout[-400:]}{r.stderr[-300:]}")
 
 
+def test_gzip_http_e2e():
+    """HTTP gzip 协商端到端（v3.13 接进主回归）。
+
+    `gzip_http_test.py` 从 v1.6 起就存在，但一直是"手工先起 18080 服务"的形态，
+    所以从没进过任何门禁 —— v3.11 接 `http_router_test.py` 时留的尾巴（`07-gaps.md` §3）。
+    v3.13 把它改成同构（自己编译 / 起停 / 等就绪 / 端口探测），这里只做判定。
+
+    端口占用记 SKIP：共享机器上"18080 被占"与"gzip 协商坏了"是两件事。
+    脚本对这种情况返回 2，用退出码区分比 grep 输出文本稳。
+    """
+    if not IS_WIN:
+        skip("gzip HTTP E2E：非 Windows 平台（服务端运行时仅 PE）")
+        return
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/gzip_http_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=300)
+    if r.returncode == 2:
+        skip("gzip HTTP E2E：18080 已被占用，跳过")
+    elif r.returncode == 0 and "gzip_http ok" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines() if ln.startswith("gzip_http ok")]
+        ok(f"gzip HTTP E2E：{line[-1] if line else 'ok'}")
+    else:
+        bad(f"gzip HTTP E2E 失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
 def test_log_streams():
     """std/log 的通道分流：stdout 只有 out-line*，stderr 只有 err-line。"""
     out = os.path.join(ROOT, "build", "win_log_streams.exe")
@@ -374,6 +401,15 @@ def test_qlmc():
     """stage-1 编译器（`bootstrap/qlmc/qlmc.qma`）：与 stage-0 逐字节差分（v2.14）
 
     同一份源码分别用两个编译器编，比较 stdout 与退出码。覆盖子集 S1 的三组用例。
+
+    v3.13 起追加 `bootstrap_test.py --strict`（自举五级链）：
+      [0] stage-0 编 qlmc → stage-1
+      [1] qlmc 编自己 → stage-2
+      [2] stage-2 与 stage-1 逐字节一致
+      [2.5] 错误路径干净退 2
+      [3] 不动点 stage-2 == stage-3
+    这一项在 `06-status.md` 里一直写着"五级全 PASS"，但**既不在 CI 也不在主回归** ——
+    自举是这条轨道的核心指标，不能靠"有人记得手工跑"。整套约 1.5 s，代价可忽略。
     """
     r = subprocess.run([sys.executable, os.path.join(ROOT, "tests/qlmc_test.py")],
                        capture_output=True, text=True, cwd=ROOT)
@@ -382,6 +418,21 @@ def test_qlmc():
         ok(f"stage-1 编译器 qlmc 差分：{tail[-1]}")
     else:
         bad(f"qlmc 差分失败：{(r.stdout or '')[-500:]}{(r.stderr or '')[-300:]}")
+
+    try:
+        rb = subprocess.run([sys.executable,
+                             os.path.join(ROOT, "tests/bootstrap_test.py"),
+                             "--strict"],
+                            cwd=ROOT, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        bad("自举五级链：超时")
+        return
+    btail = (rb.stdout or "").strip().splitlines()[-1:] or [""]
+    if rb.returncode == 0:
+        ok(f"自举五级链（stage-1/2/3 + 不动点）：{btail[0]}")
+    else:
+        bad(f"自举五级链失败：{btail[0]}  "
+            f"{(rb.stdout or '')[-600:]}{(rb.stderr or '')[-300:]}")
 
 
 def test_exitcode():
@@ -692,22 +743,30 @@ def test_debug_chain():
 
     dwarf_test：独立 DWARF 读取器对照 .qlmdbg（行表/变量位置/结构体布局）
     dbg_test  ：qlm_dbg 跑完整命令链（断点/求值/单步/bt/退出码）
+    debugger_test：调试器脚本化会话（18 项期望输出 + 调试构建不改行为）
     cov_test   ：行 + 分支覆盖率（含增量合并与两种阈值门禁）
     fuzz_test  ：编译器前端模糊测试（Quelmara 变异器 + 崩溃分类）
     cache_test ：增量缓存（命中/失效/损坏/串行=并行）
     qla_test   ：`.qla` 目标文件（往返/函数级增量/二进制库/失败路径）
+    doc_test   ：`///` doc comment（语法/挂载/工具链/产物逐字节相同）
+
+    v3.13：补进 `debugger_test` 与 `doc_test`。这两个在 `06-status.md` 里一直记着
+    PASS，但**既不在 CI 也不在主回归** —— 只有人记得手工跑的时候才存在。
+    与 `gzip_http_test.py` 是同一类漏洞：文档说有门禁，实际没有。
     """
     if not IS_WIN:
         skip("调试链路：仅 Windows（Windows 调试 API）")
         return
     for name, script in (("DWARF 互操作", "tests/dwarf_test.py"),
                          ("调试器端到端", "tests/dbg_test.py"),
+                         ("调试器脚本化会话", "tests/debugger_test.py"),
                          ("行+分支覆盖率", "tests/cov_test.py"),
                          ("模糊测试", "tests/fuzz_test.py"),
                          ("增量缓存", "tests/cache_test.py"),
                          ("持久化 KV", "tests/kv_test.py"),
                          ("qla 目标文件", "tests/qla_test.py"),
-                         ("解释器差分", "tests/interp_test.py")):
+                         ("解释器差分", "tests/interp_test.py"),
+                         ("doc comment 链路", "tests/doc_test.py")):
         try:
             r = subprocess.run([sys.executable,
                                 os.path.join(ROOT, script)],
@@ -1242,6 +1301,7 @@ def main():
 
     print("== [11] HTTP 端到端（路由 / 中间件 / chunked / gzip） ==")
     test_http_e2e()
+    test_gzip_http_e2e()
 
     print("-" * 52)
     print(f"PASS={PASS} FAIL={FAIL} SKIP={SKIP}")
