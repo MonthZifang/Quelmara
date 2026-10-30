@@ -191,6 +191,31 @@ def case_selfcheck(name, src):
         else bad(f"{name} 失败 rc={rc} stderr={stderr[-200:]!r}")
 
 
+def case_qlmc_coverage():
+    """qlmc 对 `std/` 的覆盖率门禁（v3.37）。
+
+    这是"编译器核心改用自研语言"的唯一硬指标。脚本用 qlmc 逐个编译
+    `std/**/*.qma`（lib 模式），与基线比较：低于基线判 FAIL。
+
+    代价约 40 s（70 个模块 × 编译），但它是**唯一**能反映自举真实进度的
+    数字 —— 比任何"已完成 N 个组件"的说法都硬。
+    """
+    script = os.path.join(ROOT, "tools", "dev", "qlmc_coverage.py")
+    if not os.path.exists(script):
+        skip("qlmc_coverage.py 不存在，跳过")
+        return
+    r = subprocess.run([sys.executable, script], cwd=ROOT,
+                       capture_output=True, text=True, errors="replace",
+                       timeout=900)
+    lines = (r.stdout or "").strip().splitlines()
+    cov = [ln for ln in lines if "qlmc 覆盖 std/" in ln]
+    if r.returncode == 0:
+        ok(f"qlmc 覆盖率：{cov[0] if cov else 'ok'}")
+    else:
+        tail = lines[-4:] if lines else [""]
+        bad("qlmc 覆盖率低于基线：" + " | ".join(tail))
+
+
 def case_selfcheck_to(name, src, seconds):
     """同 case_selfcheck，但给一个**短超时**。
 
@@ -1548,10 +1573,16 @@ def main():
     case_selfcheck_to("arg_types", "tests/t179_arg_types.qma", 60)
     case_arg_types()
 
+    # v3.37：qlmc 对 std/ 的覆盖率门禁。
+    # 这是"编译器核心改用自研语言"的**唯一硬指标** —— 靠它会变的数字，
+    # 不靠感觉。基线只许上调。
+    case_qlmc_coverage()
+
     # v3.36：qlmc 新增内建的语义（str_from_bytes / static_word /
     # mem_ptr / mem_load32 / str_alloc）。夹具用 stage-0 编，验证语义；
     # qlmc 侧的**逐字节一致**由 qlmc_test.py 的差分保证。
     case_selfcheck_to("qlmc_builtins", "tests/t180_qlmc_builtins.qma", 60)
+    case_selfcheck_to("qlmc_lib", "tests/t181_qlmc_lib.qma", 60)
 
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），
