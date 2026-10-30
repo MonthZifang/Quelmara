@@ -667,6 +667,29 @@ def test_qlmc():
         bad(f"自举五级链失败：{btail[0]}  "
             f"{(rb.stdout or '')[-600:]}{(rb.stderr or '')[-300:]}")
 
+    # v3.35：stage-1 **parser** 的声明级对拍（v3.34 之前不在任何门禁里）。
+    #
+    # 教训很直接：`tools/dev/selfhost_status.py` 一直显示
+    # "语法：声明级 对拍失败"，但那个脚本不是门禁，所以 stage-1 parser
+    # 编不过这件事被隐藏了至少 4 个版本（v3.31 引入类型检查后它就红了）。
+    # 自举状态是核心指标，"对拍失败"必须让某个门禁红。
+    #
+    # 代价：约 6 s（编译 234 个源文件），可忽略。
+    try:
+        rp = subprocess.run([sys.executable,
+                             os.path.join(ROOT, "tests/parsediff.py")],
+                            cwd=ROOT, capture_output=True, text=True,
+                            timeout=600)
+    except subprocess.TimeoutExpired:
+        bad("stage-1 parser 对拍：超时")
+        return
+    ptail = [ln for ln in (rp.stdout or "").splitlines() if ln.startswith("PASS=")]
+    if rp.returncode == 0 and ptail:
+        ok(f"stage-1 parser 声明级对拍：{ptail[-1]}")
+    else:
+        bad(f"stage-1 parser 对拍失败：{(rp.stdout or '')[-500:]}"
+            f"{(rp.stderr or '')[-300:]}")
+
 
 def test_exitcode():
     """exit(运行期值) 的退出码必须真的传出去（v2.13）
