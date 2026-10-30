@@ -129,6 +129,26 @@ pub fn httpc_bad_response() -> HttpResponse {
     return _bad_resp()
 }
 
+/// 由传输层组装一条已解析的响应（v3.12）。
+///
+/// 为什么需要这个工厂：**限定 struct 字面量不做**（`02-language.md` §1），
+/// 所以 `std/httpc_net` 没法写 `HttpResponse { ... }`。v3.12 起传输层不再
+/// 每轮把整个缓冲区重新喂给 `httpc_parse_response`（那是 O(n²)），改成
+/// "头块解析一次 + body 增量累积"，最后由这里按部件拼出结果。
+///
+/// `chunked` 由 `framing == 2` 决定，调用方不必重复判断。
+pub fn httpc_make_response(status: int, reason: str, head: str, body: str,
+                           complete: int, chunked: int) -> HttpResponse {
+    return HttpResponse {
+        status: status,
+        reason: reason,
+        head: head,
+        body: body,
+        complete: complete,
+        chunked: chunked,
+    }
+}
+
 // 内部：chunked 解码结果
 struct _ChunkRes {
     body: str
@@ -149,61 +169,178 @@ fn _hexval(c: int) -> int {
     return 0 - 1
 }
 
-fn _parse_hex(s: str) -> int {
+// ---------------------------------------------------------------------------
+// 增量 chunked 解码器（v3.12）
+// ---------------------------------------------------------------------------
+//
+// v3.11 及以前的 `_dechunk(s)` 是「对整段缓冲区做纯函数解析」，每次续收都
+// **从头重解一遍**，而且每块都 `r.body = r.body + slice` 复制已累计的全部数据。
+// 两层叠加是 O(n²)：2 MB 响应（256 块）实测直接撞 `heap_limit_mb`。
+//
+// 现在拆成「状态机 + 输出缓冲」：
+//   * `_Ck` 记住扫描游标 `pos`，续收后从断点继续，不重扫已消费的字节；
+//   * 块数据 `mem_copy` 进一块按倍数扩容的原始内存，末尾一次成串；
+//   * 总拷贝量 O(n)，峰值内存 ≤ 2n（扩容瞬间新旧缓冲并存）。
+//
+// 契约与旧实现一致：数据不完整时返回 `complete=0` 且 `body` 是**已解出的部分**。
+// 唯一的语义差别是"未收全的块只交出完整部分"——旧实现会把半块数据也塞进
+// body，那本来就无法被调用方正确使用（长度未知），收紧后反而更好用。
+
+struct _Ck {
+    pos: int        // 扫描游标（下一个 size 行的起点）
+    complete: int   // 1 = 见到 0 长度块
+    bad: int        // 1 = 病态流（非法 hex / 缺 CRLF）
+}
+
+// 一个 size 行的解析结果：sz >= 0 是块长度；-1 = 行未收全；-2 = 非法。
+struct _SzLine {
+    sz: int
+    pos: int
+}
+
+fn _ck_new() -> _Ck {
+    return _Ck { pos: 0, complete: 0, bad: 0 }
+}
+
+// 从 s[pos] 读一个 size 行。
+fn _ck_size_line(s: str, pos: int) -> _SzLine {
+    let n = len(s)
+    let mut i = pos
     let mut v = 0
-    let mut i = 0
-    while i < len(s) {
-        let ch = s[i]
-        let d = _hexval(ch)
-        if d < 0 {
-            return 0 - 1
+    let mut ndig = 0
+    let mut ext = 0
+    while i < n {
+        let c = s[i]
+        if c == 59 {
+            ext = 1                  // ';' = chunk-ext 起点，整段丢到行尾
+        } else {
+            if c == 13 {
+                if i + 1 >= n {
+                    return _SzLine { sz: 0 - 1, pos: pos }
+                }
+                if s[i + 1] != 10 {
+                    return _SzLine { sz: 0 - 2, pos: pos }
+                }
+                if ndig == 0 {
+                    return _SzLine { sz: 0 - 2, pos: pos }   // 空 size 行
+                }
+                return _SzLine { sz: v, pos: i + 2 }
+            }
+            if ext == 0 {
+                let d = _hexval(c)
+                if d < 0 {
+                    return _SzLine { sz: 0 - 2, pos: pos }
+                }
+                ndig = ndig + 1
+                if ndig > 8 {
+                    return _SzLine { sz: 0 - 2, pos: pos }   // 超 8 位：防溢出
+                }
+                v = v * 16 + d
+            }
         }
-        v = v * 16 + d
         i = i + 1
     }
-    return v
+    return _SzLine { sz: 0 - 1, pos: pos }                   // 行还没收全
+}
+
+// 把 [from, from+n) 追加到增长缓冲（mem 块 3 字 {ptr, cap, len}）。
+fn _buf_reserve(h: int, need: int) {
+    let cap = mem_load64(h, 1)
+    if need <= cap {
+        return
+    }
+    let mut ncap = cap * 2
+    if ncap < need {
+        ncap = need
+    }
+    let np = mem_alloc(ncap)
+    let used = mem_load64(h, 2)
+    if used > 0 {
+        mem_copy(np, mem_load64(h, 0), used)
+    }
+    mem_free(mem_load64(h, 0), cap)
+    mem_store64(h, 0, np)
+    mem_store64(h, 1, ncap)
+}
+
+fn _buf_append(h: int, src: int, n: int) {
+    if n <= 0 {
+        return
+    }
+    let used = mem_load64(h, 2)
+    _buf_reserve(h, used + n)
+    mem_copy(mem_load64(h, 0) + used, src, n)
+    mem_store64(h, 2, used + n)
+}
+
+// 增量解码：把 s 里从 st.pos 起的完整块全部搬进 h，返回推进后的状态。
+// Quelmara 的 struct 是**值语义**，所以状态必须由返回值带出，不能靠形参回写。
+fn _ck_feed(s: str, st0: _Ck, h: int) -> _Ck {
+    let mut st = st0
+    let n = len(s)
+    while st.complete == 0 && st.bad == 0 {
+        let r = _ck_size_line(s, st.pos)
+        let sz = r.sz
+        if sz == 0 - 1 {
+            return st                // size 行未收全，等下一段
+        }
+        if sz == 0 - 2 {
+            st.bad = 1
+            return st
+        }
+        st.pos = r.pos
+        if sz == 0 {
+            st.complete = 1          // 结尾块；trailer 忽略
+            return st
+        }
+        let ds = st.pos
+        let de = ds + sz
+        if de + 2 > n {
+            // 数据段（含尾 CRLF）未收全：把**已到的那部分数据**交出去，
+            // 保持 v1.48 起的对外语义（t92 的 `chunked-short partial` 依赖它）。
+            // 只交数据、不交 CRLF：老实现是 `slice(ds, len(s))`，在"数据齐、
+            // CRLF 只到一半"时会把 \r 混进 body——那条路径当时没有用例覆盖。
+            let mut have = n
+            if have > de {
+                have = de
+            }
+            if have > ds {
+                _buf_append(h, str_ptr(s) + ds, have - ds)
+            }
+            return st
+        }
+        // 尾 CRLF 必须是 \r\n，否则是病态流
+        if s[de] != 13 || s[de + 1] != 10 {
+            st.bad = 1
+            return st
+        }
+        _buf_append(h, str_ptr(s) + ds, sz)
+        st.pos = de + 2
+    }
+    return st
 }
 
 /// chunked 解码：拼合各块数据；见到 0 长度块 = complete。数据不完整时
-/// 返回已拼部分且 complete=0（调用方应继续收字节后整体重试）。
+/// 返回已拼部分且 complete=0。
+///
+/// v3.12 起内部走增量状态机（见 `_ck_feed`）：整段重解与逐块 `+` 拼接都去掉了，
+/// 成本从 O(n²) 降到 O(n)。对外语义不变（纯函数、无副作用）。
 fn _dechunk(s: str) -> _ChunkRes {
     let mut r = _ChunkRes { body: "", complete: 0 }
-    let mut i = 0
-    while i < len(s) {
-        let nl = str_find_from(s, i, "\r\n")
-        if nl < 0 {
-            return r                    // size 行不完整
-        }
-        let line = str_slice(s, i, nl)
-        let semi = str_find(line, ";")
-        let mut sz = line
-        if semi >= 0 {
-            sz = str_slice(line, 0, semi)   // 去 chunk 扩展
-        }
-        let n = _parse_hex(sz)
-        if n < 0 {
-            return r                    // 非法 size 行
-        }
-        if n == 0 {
-            r.complete = 1
-            return r                    // 结尾块；trailer 忽略
-        }
-        let ds = nl + 2
-        let de = ds + n
-        if de + 2 > len(s) {
-            // 数据未收全：回已到部分（与 content-length 不足同语义；
-            // 解析是缓冲区的纯函数，续收后整体重试自然拼齐）
-            if ds < len(s) {
-                r.body = r.body + str_slice(s, ds, len(s))
-            }
-            return r
-        }
-        r.body = r.body + str_slice(s, ds, de)
-        i = de + 2
+    let h = mem_alloc(24)
+    mem_store64(h, 0, mem_alloc(1024))
+    mem_store64(h, 1, 1024)
+    mem_store64(h, 2, 0)
+    let st = _ck_feed(s, _ck_new(), h)
+    let used = mem_load64(h, 2)
+    if used > 0 {
+        r.body = mem_str(mem_load64(h, 0), used)
     }
+    r.complete = st.complete
+    mem_free(mem_load64(h, 0), mem_load64(h, 1))
+    mem_free(h, 24)
     return r
 }
-
 /// 解析完整响应字节。buf 可以只含部分响应（complete=0）；传输层应持续
 /// 拼接后再次调用。头未收全（无 \r\n\r\n）返回 status=-1。
 pub fn httpc_parse_response(buf: str) -> HttpResponse {
@@ -257,8 +394,11 @@ pub fn httpc_parse_response(buf: str) -> HttpResponse {
     return r
 }
 
-// 头块内按名取值（大小写不敏感；跳过 status line）
-fn httpc_header_raw(head: str, name: str) -> str {
+/// 头块内按名取值（大小写不敏感；跳过 status line）。
+///
+/// v3.12 起公开：传输层 `std/httpc_net` 的接收循环要自己判 framing
+/// （content-length / chunked），而它只拿到头块文本、拿不到 HttpResponse。
+pub fn httpc_header_raw(head: str, name: str) -> str {
     let lines = str_lines(head)
     let mut i = 1
     while i < len(lines) {

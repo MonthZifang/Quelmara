@@ -1067,6 +1067,10 @@ def main():
     case_selfcheck("t90_mathfn", "tests/t90_mathfn.qma")
     case_selfcheck("t93_f64print", "tests/t93_f64print.qma")
     case_selfcheck("t92_httpc", "tests/t92_httpc.qma")
+    # HTTP 客户端大响应（v3.12）：1 MB / 4 MB 的 content-length 与 chunked。
+    # 老接收循环是两层 O(n²)（每轮 `buf + part` 且整段重解析），2 MB 就
+    # heap_limit_mb exceeded。给短超时：正常 3–5 s，挂住说明接收循环坏了。
+    case_selfcheck_to("t168_httpc_bulk", "tests/t168_httpc_bulk.qma", 180)
     case_selfcheck("t94_slice_narrow", "tests/t94_slice_narrow.qma")
     case_selfcheck("t95_hash512", "tests/t95_hash512.qma")
     # @simd f64 点积（v1.60）：acc += a[i] * b[i]，SSE2 mulpd 两路
