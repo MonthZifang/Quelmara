@@ -59,7 +59,7 @@ def require_source(path):
     _rs(path)
 
 # 版本号口径：与 docs/versions/ 下的目录一致（vX.Y → "X.Y.0"，补丁 → "X.Y.Z"）
-VERSION = "3.31.0"
+VERSION = "3.32.0"
 
 def _default_target():
     """当前主机默认只选自研后端；不把 C99 当产品默认链路。"""
@@ -1107,7 +1107,19 @@ def main(argv=None):
                "debug": cmd_debug, "cov": cmd_cov, "fuzz": cmd_fuzz,
                "cache": cmd_cache, "link": cmd_link, "qla": cmd_qla,
                "lsp": cmd_lsp, "version": cmd_version}[args.cmd]
-    return handler(args)
+    # v3.32：编译期诊断统一出口。
+    #
+    # 以前单源构建路径（cmd_build -> build()）不捕获 SyntaxError，用户看到
+    # 的是**一整段 Python traceback**，真正的诊断埋在最后一行。多源并行路径
+    # （`_build_unit`）反而捕得干净 —— "单源比多源难读"没有任何道理。
+    #
+    # 这里只处理 SyntaxError（语言层的编译错误，**预期内**的失败）。
+    # 其它异常仍然抛出去带 traceback —— 那是编译器自己的 bug，藏起来更难查。
+    try:
+        return handler(args)
+    except SyntaxError as exc:
+        print(f"[qlm] 编译错误：{exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
