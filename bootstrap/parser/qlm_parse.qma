@@ -592,13 +592,13 @@ fn num_tok(src: str, n: int, k: map[str]int) -> str {
         return ""
     }
     if len(t) > 1 && t[0] == 48 && (t[1] == 120 || t[1] == 88) {
-        return "(num " + dec_val(radix_val(strip_us(substr(t, 2, len(t) - 2)), 16)).to_str() + ")"
+        return "(num " + radix_val(strip_us(substr(t, 2, len(t) - 2)), 16).to_str() + ")"
     }
     if len(t) > 1 && t[0] == 48 && (t[1] == 98 || t[1] == 66) {
-        return "(num " + dec_val(radix_val(strip_us(substr(t, 2, len(t) - 2)), 2)).to_str() + ")"
+        return "(num " + radix_val(strip_us(substr(t, 2, len(t) - 2)), 2).to_str() + ")"
     }
     if len(t) > 1 && t[0] == 48 && (t[1] == 111 || t[1] == 79) {
-        return "(num " + dec_val(radix_val(strip_us(substr(t, 2, len(t) - 2)), 8)).to_str() + ")"
+        return "(num " + radix_val(strip_us(substr(t, 2, len(t) - 2)), 8).to_str() + ")"
     }
     let u = strip_us(t)
     let dv = dec_val(u)
