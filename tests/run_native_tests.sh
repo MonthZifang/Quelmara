@@ -90,6 +90,19 @@ $NAT2 build tests/t122_syncport.qma -o build/t122_a64 >/dev/null 2>&1
 out=$(timeout 600 python3 tests/a64_emu.py build/t122_a64 2>/dev/null)
 [ "$out" = "sync port ok" ] && ok "a64 t122 std/sync => sync port ok" \
   || bad "a64 t122 std/sync [$out]"
+# v3.18：用户可调的 syscall 内建（Linux 专属；Windows 上编译期 fail-fast）
+# 两个后端各验一次：x86-64 直接跑，A64 走模拟器。
+# 模拟器把未实现的调用号统一返回 -ENOSYS（与真实内核同语义），
+# 所以 [3] 那组"非法编号必须返回负值"在两边都能过。
+$NAT build tests/t171_syscall.qma -o build/t171_nat >/dev/null 2>&1
+# 夹具会先打印 "syscall write ok"（那是 [2] 的 write 输出），末行才是结论
+out=$(timeout 300 build/t171_nat 2>/dev/null | tail -1)
+[ "$out" = "syscall ok" ] && ok "t171 syscall（x86-64）=> syscall ok" \
+  || bad "t171 syscall x86-64 [$out]"
+$NAT2 build tests/t171_syscall.qma -o build/t171_a64 >/dev/null 2>&1
+out=$(timeout 600 python3 tests/a64_emu.py build/t171_a64 2>/dev/null | tail -1)
+[ "$out" = "syscall ok" ] && ok "a64 t171 syscall => syscall ok" \
+  || bad "a64 t171 syscall [$out]"
 
 echo "[8] 语言 v0.2：break/continue + struct（双后端交叉验证）"
 for t in tests/t8.qma tests/t9.qma tests/t10.qma tests/t11.qma; do
