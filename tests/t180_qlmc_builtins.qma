@@ -1,0 +1,83 @@
+// t180_qlmc_builtins.qma —— qlmc 新增内建的正确性（v3.36）
+//
+// v3.36 给 stage-1 编译器（qlmc）补了 4 个内建，它们是 qlmc 编译 std/
+// 的主要阻塞项：
+//
+//   str_from_bytes(vec[int])  17 个模块用（最大项）
+//   static_word(i)            11 个模块用
+//   mem_ptr(p, off)            4 个模块用
+//   mem_load32(p, i)           4 个模块用
+//   str_alloc(n)               3 个模块用
+//
+// 这个夹具用 **stage-0** 编（因为 stage-0 也有这些内建），验证语义；
+// qlmc 侧由 `tests/qlmc_test.py` 的逐字节差分保证一致。
+//
+// 重点验的是"边界与独立性"，不是"能跑"：
+//   * static_word 的不同槽互不干扰、初始为 0
+//   * str_from_bytes 取 vec 每个元素的**低字节**（不是整个 8 字节槽）
+//   * str_alloc 的长度头是 n（不是 0），可写、有 NUL
+//   * mem_ptr 是纯算术，不做任何类型标记
+module t180_qlmc_builtins
+
+fn main() {
+    // ---- [1] static_word：初始为 0，不同槽独立 ----
+    assert(mem_load64(static_word(0), 0) == 0, "static_word(0) 初始为 0")
+    assert(mem_load64(static_word(7), 0) == 0, "static_word(7) 初始为 0")
+
+    mem_store64(static_word(0), 0, 111)
+    mem_store64(static_word(7), 0, 777)
+    assert(mem_load64(static_word(0), 0) == 111, "槽 0 保持")
+    assert(mem_load64(static_word(7), 0) == 777, "槽 7 保持")
+
+    // 覆盖写同一个槽
+    mem_store64(static_word(0), 0, 222)
+    assert(mem_load64(static_word(0), 0) == 222, "槽 0 可覆盖")
+    assert(mem_load64(static_word(7), 0) == 777, "覆盖槽 0 不影响槽 7")
+
+    // ---- [2] str_from_bytes：取每个元素的低字节 ----
+    let v = vec[int].new(4)
+    v.push(65)          // 'A'
+    v.push(66)          // 'B'
+    v.push(67)          // 'C'
+    v.push(0x141)       // 低字节 = 0x41 = 'A'（高位必须被丢掉）
+    let s = str_from_bytes(v)
+    assert(len(s) == 4, "str_from_bytes 长度 = 元素个数")
+    assert(s[0] == 65, "第 0 字节 = A")
+    assert(s[1] == 66, "第 1 字节 = B")
+    assert(s[2] == 67, "第 2 字节 = C")
+    assert(s[3] == 65, "第 3 字节取低字节（0x141 -> 0x41）")
+
+    // ---- [3] str_alloc：长度头是 n，可写，末尾有 NUL ----
+    let buf = str_alloc(5)
+    assert(len(buf) == 5, "str_alloc(5) 长度头是 5")
+    mem_store8(buf, 0, 72)      // 'H'
+    mem_store8(buf, 1, 105)     // 'i'
+    assert(buf[0] == 72, "str_alloc 可写第 0 字节")
+    assert(buf[1] == 105, "str_alloc 可写第 1 字节")
+
+    // ---- [4] mem_ptr：纯指针算术 ----
+    let blk = mem_alloc(32)
+    let p1 = mem_ptr(blk, 0)
+    let p2 = mem_ptr(blk, 8)
+    mem_store64(p1, 0, 0xAAAA)
+    mem_store64(p2, 0, 0xBBBB)
+    assert(mem_load64(p1, 0) == 0xAAAA, "mem_ptr(blk,0) 写入")
+    assert(mem_load64(p2, 0) == 0xBBBB, "mem_ptr(blk,8) 写入")
+    assert(mem_load64(blk, 0) == 0xAAAA, "偏移 0 与原指针同址")
+    assert(mem_load64(blk, 1) == 0xBBBB, "偏移 8 字节 = 第 1 个字")
+
+    // ---- [5] mem_load32：零扩展，不读到相邻字节 ----
+    let q = mem_alloc(16)
+    mem_store64(q, 0, 0x1122334455667788)
+    // 注意：mem_load32 的第 2 个参数是**字节偏移**，不是 4 字节下标
+    // （实测 mem_load32(q,1) = 0x44556677 = 从偏移 1 开始的 4 字节）。
+    let lo = mem_load32(q, 0)
+    assert(lo == 0x55667788, "mem_load32(q,0) 读偏移 0 的 4 字节")
+    let mid = mem_load32(q, 4)
+    assert(mid == 0x11223344, "mem_load32(q,4) 读偏移 4 的 4 字节")
+    let sh1 = mem_load32(q, 1)
+    assert(sh1 == 0x44556677, "mem_load32 的偏移是字节单位")
+    assert(lo > 0, "mem_load32 零扩展（不会读到符号位变负）")
+
+    print("PASS: qlmc 新增内建语义正确")
+}

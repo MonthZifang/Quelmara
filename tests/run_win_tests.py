@@ -1548,6 +1548,11 @@ def main():
     case_selfcheck_to("arg_types", "tests/t179_arg_types.qma", 60)
     case_arg_types()
 
+    # v3.36：qlmc 新增内建的语义（str_from_bytes / static_word /
+    # mem_ptr / mem_load32 / str_alloc）。夹具用 stage-0 编，验证语义；
+    # qlmc 侧的**逐字节一致**由 qlmc_test.py 的差分保证。
+    case_selfcheck_to("qlmc_builtins", "tests/t180_qlmc_builtins.qma", 60)
+
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），
     # 单源构建还打整段 traceback。
