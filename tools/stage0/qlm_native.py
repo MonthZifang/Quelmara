@@ -771,6 +771,35 @@ class Fn:
 # 因此作函数参数/返回值零改动复用。
 SLICE_WORDS = 2
 
+# 内建函数的**确定**标量返回类型（v3.31，供调用点实参类型比对用）。
+#
+# 只登记"返回 str / int / bool 无疑"的那些。**不确定的一律不登记** ——
+# 漏登记只是少一次检查（放行），错登记会让正确程序编不过。
+# 例如 `mem_ptr` 返回地址（int）、`to_str` 是方法不是内建、泛型相关的一律不列。
+_BUILTIN_SCALAR_RET = {
+    # str
+    "str_slice": "str", "str_cat": "str", "chr": "str", "str_repeat": "str",
+    "int_to_str": "str", "i64_to_str": "str", "f64_to_str": "str",
+    "bool_to_str": "str", "read_text": "str", "str_join": "str",
+    "substr": "str", "trim": "str", "to_upper": "str", "to_lower": "str",
+    "str_replace": "str", "str_from_bytes": "str", "mem_str": "str",
+    "str_of_int": "str", "hex_encode": "str", "b64_encode": "str",
+    # int
+    "len": "int", "str_len": "int", "str_to_int": "int", "abs": "int",
+    "now_ns": "int", "now_ms": "int", "wall_ms": "int", "rdtsc": "int",
+    "mem_alloc": "int", "mem_ptr": "int", "str_find": "int",
+    "str_find_from": "int", "str_cmp": "int", "mem_load8": "int",
+    "mem_load16": "int", "mem_load32": "int", "mem_load64": "int",
+    "mem_diff": "int", "mem_chr": "int", "atomic_add": "int",
+    "atomic_load": "int", "atomic_swap": "int", "cores": "int",
+    "argc": "int", "static_word": "int", "spin_hint": "int",
+    # bool
+    "str_eq": "bool", "str_starts_with": "bool", "str_ends_with": "bool",
+    "mem_eq": "bool", "file_exists": "bool", "is_digit": "bool",
+    "is_space": "bool", "is_alpha": "bool", "cpu_aes": "bool",
+    "cpu_sha": "bool", "cpu_pclmul": "bool",
+}
+
 # 进程级静态字区容量（`static_word(i)` 的槽位总数）。
 #
 # v3.23：32 -> 64。v3.22 时 32 个槽位已被标准库**全部占满**，而 log 与
@@ -4330,6 +4359,10 @@ class Lower:
             raise SyntaxError(f"未定义函数 {name}")
         args = [self.eval(a, fn, env) for a in e[2]]
         params = self.fns_ast[name]["params"]
+        # v3.31：标量实参类型比对（收 §7.14）。放在 eval 之后是因为
+        # 前面那些专项校验（数组长度 / 接口 / 闭包）要先用 eval 的结果。
+        # 只看 AST 表达式，不看 vreg —— 静态可判的才拦。
+        self._check_arg_types(name, e[2], params)
         for i, a in enumerate(args):
             n = self._arr_of(fn, a)
             if n is not None:
@@ -5000,6 +5033,72 @@ class Lower:
 
     def _is_iface(self, name):
         return name in getattr(self, "iface_names", set())
+
+    # ------------------------------------------------------------------
+    # 实参静态类型推断（v3.31，收 §7.14）
+    # ------------------------------------------------------------------
+    #
+    # 调用点原先只做**个数**校验（"需要 N 个实参"）与数组/接口/闭包
+    # 的专项校验，`str` 与 `int` 之间**什么都不查** —— 它们在 IR 里都是
+    # 一个 8 字节槽，于是 `g("x", "not-int", "y")` 编得过，跑起来把 str
+    # 的数据指针当 int 返回（v2.07 在 `std/net/addr` 踩过一次 SIGSEGV）。
+    #
+    # 这里只做**保守**推断：能确定的才报错，不确定就放行。
+    # 宁可漏报也不能误报 —— 误报会让正确的程序编不过。
+    #
+    # 能确定的：
+    #   * 字符串字面量      ("str", ...)
+    #   * 整数字面量        ("num", n)
+    #   * 布尔字面量        ("bool", ...)
+    #   * 用户函数调用      ("call", [名字], ...) -> 查 fns_ast 的 ret
+    #   * 内建函数调用      ("call", [内建名], ...) -> 查一张小表
+    # 不能确定的（一律放行）：
+    #   * 变量名、字段访问、下标、二元运算、闭包调用、泛型实参……
+    def _ast_scalar_ty(self, e):
+        """保守推断表达式的标量类型：'str' / 'int' / 'bool' / None（未知）。"""
+        if not (isinstance(e, tuple) and e):
+            return None
+        k = e[0]
+        if k == "str":
+            return "str"
+        if k == "num":
+            return "int"
+        if k == "bool":
+            return "bool"
+        if k == "call" and len(e) > 1 and isinstance(e[1], list) and e[1]:
+            fname = e[1][-1] if isinstance(e[1][-1], str) else None
+            if fname is None:
+                return None
+            spec = self.fns_ast.get(fname)
+            if spec is not None:
+                ret = spec.get("ret")
+                if isinstance(ret, tuple) and ret and ret[0] == "named":
+                    if ret[1] in ("str", "int", "bool"):
+                        return ret[1]
+                return None
+            # 内建：只登记"确定返回标量"的，其余放行
+            return _BUILTIN_SCALAR_RET.get(fname)
+        return None
+
+    def _check_arg_types(self, name, exprs, params):
+        """标量实参类型比对（保守版，见 `_ast_scalar_ty`）。"""
+        n = min(len(exprs), len(params))
+        for i in range(n):
+            pt = params[i][1]
+            if not (isinstance(pt, tuple) and pt and pt[0] == "named"):
+                continue
+            want = pt[1]
+            if want not in ("str", "int", "bool"):
+                continue
+            got = self._ast_scalar_ty(exprs[i])
+            if got is None or got == want:
+                continue
+            # int <-> bool 不拦（语言允许 0/1 当 bool 用，历史上也这么写）
+            if {want, got} == {"int", "bool"}:
+                continue
+            raise SyntaxError(
+                f"函数 {name} 的第 {i + 1} 个形参期望 {want}，实参是 {got}"
+                f"（v3.31 起调用点做标量类型比对；这以前会静默按位重解释）")
 
     def box_iface(self, fn, spec, sname, iname):
         """把具体结构体装箱成接口值；spec 已经是接口值则只复制。

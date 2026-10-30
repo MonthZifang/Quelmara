@@ -208,6 +208,65 @@ def case_selfcheck_to(name, src, seconds):
         else bad(f"{name} 失败 rc={rc} stderr={stderr[-200:]!r}")
 
 
+def case_arg_types():
+    """调用点标量类型比对（v3.31，收 §7.14）。
+
+    两组断言：
+    * **必须编过**：正确调用（含变量实参、内建返回值、int→bool）——
+      防止检查过严把对的拦下来；
+    * **必须编不过**：字面量类型不符（str 传给 int 形参）——
+      这正是 v2.07 在 `std/net/addr` 踩过的形状，当时编过了并 SIGSEGV。
+
+    保守策略：只查字面量与已知返回类型的调用，变量一律放行
+    （stage-0 没有完整类型传播，见 07-gaps §7.28）。
+    """
+    def compiles(src):
+        p = os.path.join(ROOT, "build", "_argty.qma")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(src)
+        try:
+            qlm_pe.transpile_win(p)
+            return True, ""
+        except SyntaxError as e:
+            return False, str(e)
+        finally:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    # ---- 错误路径：必须拦下 ----
+    ok_bad, msg = compiles(
+        "fn g(a: str, b: int) -> int { return b }\n"
+        'fn main() { print(g("x", "not-int").to_str()) }\n')
+    if ok_bad:
+        bad("str 传给 int 形参没有编译期报错（§7.14 回归）")
+    elif "形参期望 int" in msg:
+        ok("str 传给 int 形参：编译期报错")
+    else:
+        bad(f"报错信息不对：{msg[:120]}")
+
+    # ---- 错误路径：反向也必须拦下 ----
+    ok_bad2, msg2 = compiles(
+        "fn h(a: str) -> int { return 1 }\n"
+        "fn main() { print(h(42).to_str()) }\n")
+    if ok_bad2:
+        bad("int 传给 str 形参没有编译期报错")
+    elif "形参期望 str" in msg2:
+        ok("int 传给 str 形参：编译期报错")
+    else:
+        bad(f"报错信息不对：{msg2[:120]}")
+
+    # ---- 正确路径：不能误伤 ----
+    ok_good, msg3 = compiles(
+        "fn g(a: str, b: int) -> int { return b }\n"
+        'fn main() { let v = "s"\n    print(g(v, 5).to_str()) }\n')
+    if ok_good:
+        ok("变量实参放行（保守策略，不误报）")
+    else:
+        bad(f"变量实参被误拦：{msg3[:120]}")
+
+
 def case_std_import():
     """每个 std 模块都能被单独 import 且都有 pub 导出（v3.26）。
 
@@ -1437,6 +1496,11 @@ def main():
     # v3.30：归纳变量化简（i*7%13 -> r+=7/cssub）是**重排型**变换，
     # 错了会静默算错。用 Python 现算的已知答案钉住它。
     case_selfcheck_to("phi_copy", "tests/t178_phi_copy.qma", 120)
+
+    # v3.31：调用点标量类型比对（收 §7.14）。
+    # 夹具验"不误伤"，这个 case 验"错误必须拦下"。
+    case_selfcheck_to("arg_types", "tests/t179_arg_types.qma", 60)
+    case_arg_types()
 
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])
