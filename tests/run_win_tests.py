@@ -221,6 +221,10 @@ def test_tcp_batch():
     case_selfcheck_to("recv_to", "tests/t165_recvtimeout.qma", 120)
     case_selfcheck_to("recv_bulk", "tests/t166_recvbulk.qma", 180)
     case_selfcheck_to("send_to", "tests/t167_sendtimeout.qma", 120)
+    # 自旋等待不得被 LICM 外提 load（v3.14）：修复前任何自旋等待都挂死，
+    # 而 `check_suspicious_loops` 当时就在报警。挂住正是它要测的失败模式，
+    # 所以给短超时而不是默认 600 s。
+    case_selfcheck_to("spin_wait", "tests/t169_spin_wait.qma", 60)
 
 
 def test_http_e2e():

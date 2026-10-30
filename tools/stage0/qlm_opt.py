@@ -479,10 +479,31 @@ def opt_licm(fn, rounds=3):
                     use_pos.setdefault(x, []).append(off)
             # 本循环是不是"纯读"：没有 call、没有 store/store8。
             # 只有纯读循环才允许外提 load（见 _licm_safe 的说明）。
+            #
+            # v3.14：**自旋等待循环不算纯读**。
+            #
+            # 判据原来是"循环里没有 call/store"，于是
+            #     while mem_load64(w, 0) != 0 { spin_hint() }
+            # 被判成纯读循环 —— `spin_hint()` 发射的是 ('pause',)，读写集都空，
+            # 既不是 call 也不是 store。结果 `load` 被提到循环外，循环里每轮
+            # 都用同一个旧值：**任何自旋等待都会挂死**。
+            #
+            # 实测：build/probe_spin.qma 10 s 不退出；bench/wg_bench.qma 的纯自旋
+            # 对照组同样挂住。而 `check_suspicious_loops` 当时就已经在报警
+            # （"guard variable never updated in body"）—— 告警是对的，只是
+            # 没人把它当成编译期缺陷看。
+            #
+            # 为什么不能只靠"循环里有没有写"：自旋等待的正确性恰恰来自**别的
+            # 线程**在写同一块内存，循环体自己当然不写。所以判据必须更宽：
+            # 只要循环里出现"让出 CPU / 等别的线程"的指令（pause、让出、
+            # 睡眠、rdtsc 之外的同步原语），这个循环就不是纯读，load 一律不外提。
             readonly = not any(
                 i[0] in ("call", "callr", "syscall", "winapi", "ffi",
                          "store", "store8", "xchg", "atomic", "stlr",
-                         "ffi", "spawn_child")
+                         "ffi", "spawn_child",
+                         # v3.14：等别的线程的指令 —— 循环体不写内存，
+                         # 但内存会被**别人**写，load 外提即语义错误
+                         "pause", "yield", "rdtsc")
                 for i in region)
 
             hoist_offs = []

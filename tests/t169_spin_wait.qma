@@ -1,0 +1,108 @@
+// t169_spin_wait.qma —— 自旋等待循环里的 load 不得被外提（v3.14）
+//
+// 关键回归：LICM 把"纯读循环"里的 load 外提到循环头之前。判据原来是
+// "循环里没有 call / store"，于是
+//     while mem_load64(w, 0) != 0 { spin_hint() }
+// 被判成纯读循环 —— `spin_hint()` 发射的是 ('pause',)，读写集都空。
+// 结果 load 只读一次，循环里每轮用同一个旧值：**任何自旋等待都会挂死**。
+//
+// 实测（修复前）：本文件的 [1] 10 s 不退出；bench/wg_bench.qma 的纯自旋对照组
+// 同样挂住。而 `check_suspicious_loops` 当时就已经在报警
+// （"guard variable never updated in body"）——告警是对的。
+//
+// 修复：`readonly` 的判据加上"等别的线程"的指令（pause / yield / rdtsc）。
+// 自旋等待的正确性恰恰来自**别的线程**在写同一块内存，循环体自己当然不写，
+// 所以"循环体有没有写"根本不是判据。
+//
+// 4 个场景：
+//   [1] 自旋等 WaitGroup 计数归零        —— 原始形状
+//   [2] 自旋等普通共享变量（非 atomic）  —— 同一缺陷的另一种写法
+//   [3] 循环里调 spin_hint 但不读共享内存 —— 确认不是"所有 pause 循环都禁用外提"
+//   [4] 纯读循环的 load 仍应外提         —— 确认修复没把优化整个关掉
+import std.sync
+
+const SPIN_BUDGET_MS = 5000
+
+fn wg_worker(w: int, ms: int) -> int {
+    sleep_ms(ms)
+    wg_done(w)
+    return 0
+}
+
+// [2] 用普通共享变量（不是 atomic）：worker 直接 store
+fn set_flag(p: int, ms: int) -> int {
+    sleep_ms(ms)
+    mem_store64(p, 0, 0)
+    return 0
+}
+
+fn spin_on_flag(p: int) {
+    while mem_load64(p, 0) != 0 {
+        spin_hint()
+    }
+}
+
+// [4] 纯读循环：load 的 base 是形参、循环内不变、循环体无写无 pause
+//     这个应该仍然被外提（否则说明修复过度保守）
+fn sum_loop(h: int, n: int) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + mem_load64(h, i * 8)
+        i = i + 1
+    }
+    return acc
+}
+
+fn main() {
+    // ---- [1] 自旋等 WaitGroup ----
+    let w = wg_new()
+    wg_add(w, 1)
+    let h1 = spawn wg_worker(w, 50)
+    let t0 = now_ns()
+    while mem_load64(w, 0) != 0 {
+        spin_hint()
+    }
+    let t1 = now_ns()
+    join(h1)
+    let ms1 = (t1 - t0) / 1000000
+    assert(mem_load64(w, 0) == 0, "[1] wg 归零")
+    assert(ms1 < SPIN_BUDGET_MS, "[1] 自旋必须退出（未外提）")
+    // 50 ms 的等待，返回时间应落在 [50, 200] 区间；外提的话根本不会返回
+    assert(ms1 >= 40, "[1] 确实等到了 worker")
+
+    // ---- [2] 自旋等普通共享变量 ----
+    let p = mem_alloc(8)
+    mem_store64(p, 0, 1)
+    let h2 = spawn set_flag(p, 40)
+    let t2 = now_ns()
+    spin_on_flag(p)
+    let t3 = now_ns()
+    join(h2)
+    let ms2 = (t3 - t2) / 1000000
+    assert(mem_load64(p, 0) == 0, "[2] flag 归零")
+    assert(ms2 < SPIN_BUDGET_MS, "[2] 自旋必须退出")
+
+    // ---- [3] pause 循环但不读共享内存：只是空转，必须能退出 ----
+    let t4 = now_ns()
+    let mut k = 0
+    while k < 10000 {
+        spin_hint()
+        k = k + 1
+    }
+    let t5 = now_ns()
+    assert(k == 10000, "[3] 计数循环正常")
+    assert((t5 - t4) / 1000000 < SPIN_BUDGET_MS, "[3] 计数循环不挂")
+
+    // ---- [4] 纯读循环结果正确（外提与否都必须对）----
+    let buf = mem_alloc(8 * 100)
+    let mut i = 0
+    while i < 100 {
+        mem_store64(buf, i * 8, i)
+        i = i + 1
+    }
+    let s = sum_loop(buf, 100)
+    assert(s == 4950, "[4] 纯读循环求和 = 0+..+99")
+
+    print("spin wait ok")
+}

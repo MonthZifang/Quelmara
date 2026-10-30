@@ -17,6 +17,14 @@ fn worker(w: int, ms: int) -> int {
 }
 
 // A) 纯自旋等待（对照组，等价于旧 wg_wait）
+//
+// v3.14 之前这个函数编出来是**死循环**：LICM 把 `mem_load64(w,0)` 外提到了
+// 循环头之前（判据"循环里没有 call/store"把它当成了纯读循环，而
+// `spin_hint()` 发射的 ('pause',) 读写集都是空的），于是每轮比较的都是同一个
+// 旧值。症状：本基准永远不返回，而编译器当时已经在报警
+// "guard variable never updated in body"。
+// 修复在 `qlm_opt.opt_licm` 的 readonly 判据里（pause/yield/rdtsc 也算
+// "等别的线程"）。回归夹具见 `tests/t169_spin_wait.qma`。
 fn spin_wait(w: int) {
     while mem_load64(w, 0) != 0 {
         spin_hint()
