@@ -1583,6 +1583,8 @@ def main():
     # qlmc 侧的**逐字节一致**由 qlmc_test.py 的差分保证。
     case_selfcheck_to("qlmc_builtins", "tests/t180_qlmc_builtins.qma", 60)
     case_selfcheck_to("qlmc_lib", "tests/t181_qlmc_lib.qma", 60)
+    # v3.38：mem_diff / mem_xchg（手写机器码，错了只静默算错）
+    case_selfcheck_to("qlmc_memdiff", "tests/t182_qlmc_memdiff.qma", 60)
 
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），
