@@ -1587,6 +1587,8 @@ def main():
     case_selfcheck_to("qlmc_memdiff", "tests/t182_qlmc_memdiff.qma", 60)
     # v3.39：vec.pop()（std/ 四个模块用；空 vec 上必须 fail-fast）
     case_selfcheck_to("qlmc_vecpop", "tests/t183_qlmc_vecpop.qma", 60)
+    # v3.40：str_ptr（依赖 str ABI 约定）/ target_arch（编译期常量）
+    case_selfcheck_to("qlmc_strptr", "tests/t184_qlmc_strptr.qma", 60)
 
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），

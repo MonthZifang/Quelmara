@@ -1,0 +1,54 @@
+// t184_qlmc_strptr.qma —— qlmc 的 str_ptr / target_arch（v3.40）
+//
+// ## 为什么需要它
+//
+// 这两个内建各卡住 1 个 std 模块，但它们本身是**零成本**的：
+//
+//   str_ptr(s)      -> s 的数据指针。Quelmara 的 str 值**本身就是**数据
+//                      指针（长度在 p-8），所以直接返回操作数，不分配不复制。
+//   target_arch()   -> 编译期常量：1 = x86_64 / 2 = aarch64。
+//                      qlmc 只产 x86-64 PE，所以恒为 1。
+//
+// ## 为什么值得钉
+//
+// `str_ptr` 的语义**依赖 ABI 约定**（str 值即指针）。如果哪天有人把 str
+// 改成"指向长度头"，`str_ptr` 就会静默偏移 8 字节 —— 拿它喂
+// `tcp_send_n(fd, ptr, n)` 会发出错误的数据。所以必须有断言钉住
+// "str_ptr(s) 指向第一个字节"。
+//
+// `target_arch` 是编译期常量，钉住它的值等于钉住"qlmc 只产 x86-64"这个事实。
+module t184_qlmc_strptr
+
+fn main() {
+    // ---- [1] str_ptr 指向第一个字节（不是长度头） ----
+    let s = "hello"
+    let p = str_ptr(s)
+    assert(mem_load8(p, 0) == 104, "p[0] = 'h' = 104")
+    assert(mem_load8(p, 1) == 101, "p[1] = 'e' = 101")
+    assert(mem_load8(p, 4) == 111, "p[4] = 'o' = 111")
+
+    // ---- [2] 长度头在 p-8（ABI 约定的另一半） ----
+    // 这条与 [1] 配对：证明 str_ptr 返回的是**数据**指针，
+    // 而长度在它前面 8 字节。若 str_ptr 错指到长度头，[1] 会全错。
+    assert(mem_load64(p - 8, 0) == 5, "长度头在 p-8，值为 5")
+
+    // ---- [3] 空串：str_ptr 仍有效，长度为 0 ----
+    let e = ""
+    let ep = str_ptr(e)
+    assert(mem_load64(ep - 8, 0) == 0, "空串长度头为 0")
+
+    // ---- [4] str_ptr 与下标读一致 ----
+    let t = "ABC"
+    let tp = str_ptr(t)
+    let mut i = 0
+    while i < 3 {
+        assert(mem_load8(tp, i) == t[i], "str_ptr 与下标读一致")
+        i = i + 1
+    }
+
+    // ---- [5] target_arch 是编译期常量 ----
+    assert(target_arch() == 1, "qlmc 只产 x86-64，target_arch 恒为 1")
+    assert(target_arch() == target_arch(), "常量调用可重复")
+
+    print("PASS: str_ptr / target_arch 语义正确")
+}
