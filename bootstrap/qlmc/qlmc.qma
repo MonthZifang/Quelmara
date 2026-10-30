@@ -2281,6 +2281,15 @@ fn _mov_load(code: vec[int], dst: int, base: int, disp: int) {
     _w32(code, disp)
 }
 
+// mov r32, [base+disp32]（v3.36：32 位加载，写入 32 位寄存器即**零扩展**）
+// 与 _mov_load 的区别只有 REX.W：不带 W 时 mov eax, [mem] 会把高 32 位清零。
+fn _mov_load32(code: vec[int], dst: int, base: int, disp: int) {
+    _rex2(code, 0, dst, base)
+    _b(code, 0x8B)
+    _modrm_mem(code, 2, dst, base)
+    _w32(code, disp)
+}
+
 // mov [base+disp32], src
 fn _mov_store(code: vec[int], base: int, disp: int, src: int) {
     _rex2(code, 1, src, base)
@@ -2641,6 +2650,7 @@ const OP_F64IMM = 76      // dst(f64) = imm 的位模式
 // v2.57：条件跳转的立即数形式。`cmp r64, imm32` 一条顶"装载常量 + 比较"两条。
 // dst = jcc 码、a = 左操作数、b = 常量、imm = 目标标签。
 const OP_JCMPI = 77
+const OP_BSSADDR = 78  // dst = &bss[imm]（lea rip + FK_BSS 重定位）
 
 struct Ir {
     op: int
@@ -7165,6 +7175,21 @@ fn _emit_ir(fc: FnCtx, i: int) {
         }
         return
     }
+    if op == OP_BSSADDR {
+        // dst = &bss[imm]：与 OP_LEA 同构，只是重定位类型是 FK_BSS
+        let dloc = fc.vloc.get(ins.dst)
+        if dloc > 0 {
+            let at = len(code) + 3
+            _lea_rip(code, dloc - 1, 0)
+            _addfix(fc.fixes, at, ins.imm, FK_BSS)
+        } else {
+            let at = len(code) + 3
+            _lea_rip(code, RAX, 0)
+            _addfix(fc.fixes, at, ins.imm, FK_BSS)
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+        }
+        return
+    }
     if op == OP_LEN {
         let dloc = fc.vloc.get(ins.dst)
         if dloc > 0 {
@@ -7568,6 +7593,17 @@ fn _emit_ir(fc: FnCtx, i: int) {
         if fc.vty.get(ins.dst) == TY_F64 {
             _sse_mem0(code, 1, 0x10, XMM0, RAX)    // movsd xmm0, [rax]
             _from_xmm(fc, XMM0, ins.dst)
+            return
+        }
+        // v3.36：按 imm 给的宽度分派。以前无条件发 8 字节 mov，
+        // 于是 mem_load32 会读到 8 字节（高 32 位脏），差分立刻对不上。
+        if ins.imm == 4 {
+            if dloc > 0 {
+                _mov_load32(code, dloc - 1, RAX, 0)
+            } else {
+                _mov_load32(code, RAX, RAX, 0)
+                _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+            }
             return
         }
         if dloc > 0 {
@@ -9011,7 +9047,13 @@ const ARENA_CAP = 4 * 1024 * 1024
 // v2.76：这块内存改用 VirtualAlloc 拿（私有页首次触碰比 .bss 映像节快 5 倍），
 // BSS_SIZE 因此缩到 32 字节 —— .bss 只剩游标/锁/基址/上限四个槽。
 const HEAP_SIZE = 0x4000000      // 64 MB，VirtualAlloc(MEM_COMMIT|MEM_RESERVE)
-const BSS_SIZE = 32              // 游标 / 自旋锁 / 堆基址 / 堆上限
+// v3.36：静态字区（static_word(i)）也放在 .bss，紧跟原来 32 字节之后。
+// 为什么放 bss 而不是堆：静态字是**进程级**状态，std/ 的模块在初始化时
+// 拿它的地址、之后长期持有；放堆里要惰性分配 + 一个已分配标志槽，
+// 多两条分支还多一次间接。bss 本来就是零初始化，正好。
+const STATIC_SLOTS = 64          // 与 stage-0 的 STATIC_SLOTS 一致
+const STATICW_BSS_OFF = 32       // 静态字区在 .bss 里的偏移
+const BSS_SIZE = 32 + STATIC_SLOTS * 8   // 游标/锁/基址/上限 + 静态字区
 
 fn _compile_range(hdr: int, wid: int, nodes: vec[Node], names: vec[str],
                   strs: vec[str], fns: vec[Fn], rt: vec[int], stt: vec[int]) -> int {
@@ -10061,6 +10103,163 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         let p = _lower_expr(fc, nd.b)
         let n = _lower_expr(fc, nd.c)
         return _bi_mem_str(fc, p, n)
+    }
+    // v3.36：mem_load32(p, i) -> int（读第 i 个 4 字节，零扩展）
+    // 与 mem_load64 同构，只是宽度 4。std/crc32 / crc64 用它。
+    if bn == "mem_load32" {
+        // **第 2 个参数是字节偏移，不是 4 字节下标**（与 mem_load64 的
+        // "第 w 个字"不同！）。实测 stage-0：mem_load32(q,1) 读的是
+        // 从偏移 1 开始的 4 字节。这里必须与它一致，否则差分对不上。
+        let p = _lower_expr(fc, nd.b)
+        let o = _lower_expr(fc, nd.c)
+        let a = _vnew(fc)
+        fc.vty.set(a, TY_INT)
+        _ir_emit(fc, OP_ADD, a, p, o, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_LOAD, d, a, 0, 4)
+        return d
+    }
+    // v3.36：str_alloc(n) -> str（分配长度 n 的可写空串，len 头写 0，末尾 NUL）
+    //
+    // 返回**数据指针**（str 值约定）。std/ 里 join / split / gzip 用它
+    // 批量构造：先 alloc 再 mem_store8 填充，比逐字节 vec push 快得多。
+    if bn == "str_alloc" {
+        let n = _lower_expr(fc, nd.b)
+        let nine = _vnew(fc)
+        fc.vty.set(nine, TY_INT)
+        _ir_emit(fc, OP_CONST, nine, 0, 0, 9)
+        let sz = _vnew(fc)
+        fc.vty.set(sz, TY_INT)
+        _ir_emit(fc, OP_ADD, sz, n, nine, 0)
+        _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+        let q = _vnew(fc)
+        fc.vty.set(q, TY_INT)
+        _ir_emit(fc, OP_CALLRT, q, 0, 0, RT_ALLOC)
+        let a0 = _vnew(fc)
+        fc.vty.set(a0, TY_INT)
+        _ir_emit(fc, OP_ADDRF, a0, q, 0, 0)
+        _ir_emit(fc, OP_STORE, 0, a0, n, 8)          // 长度头 = n（不是 0）
+        let dstp = _vnew(fc)
+        fc.vty.set(dstp, TY_INT)
+        _ir_emit(fc, OP_ADDRF, dstp, q, 0, 8)
+        let endp = _vnew(fc)
+        fc.vty.set(endp, TY_INT)
+        _ir_emit(fc, OP_ADD, endp, dstp, n, 0)
+        let z = _vnew(fc)
+        fc.vty.set(z, TY_INT)
+        _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+        _ir_emit(fc, OP_STORE8, 0, endp, z, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_STR)
+        _ir_emit(fc, OP_MOV, d, dstp, 0, 0)
+        return d
+    }
+    // v3.36：mem_ptr(p, off) -> int（纯指针算术，返回值不带任何标记）
+    // std/ 里 4 个模块用它做指针偏移。stage-0 的语义就是 p + off。
+    if bn == "mem_ptr" {
+        let p = _lower_expr(fc, nd.b)
+        let o = _lower_expr(fc, nd.c)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_ADD, d, p, o, 0)
+        return d
+    }
+    // v3.36：static_word(i) -> int（进程级静态字区第 i 个槽的地址）
+    //
+    // std/ 有 11 个模块用它（log / timer / reactor / sync …），把状态
+    // 放在回调能读到的进程级位置。qlmc 产物的 .bss 现在带一块
+    // STATIC_SLOTS 个 8 字节槽的区域（见 STATICW_BSS_OFF），零初始化。
+    //
+    // 地址 = &bss[STATICW_BSS_OFF] + i*8。用 LEA rip 相对 + FK_BSS 重定位。
+    if bn == "static_word" {
+        let i = _lower_expr(fc, nd.b)
+        let base = _vnew(fc)
+        fc.vty.set(base, TY_INT)
+        _ir_emit(fc, OP_BSSADDR, base, 0, 0, STATICW_BSS_OFF)
+        let eight = _vnew(fc)
+        fc.vty.set(eight, TY_INT)
+        _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+        let off = _vnew(fc)
+        fc.vty.set(off, TY_INT)
+        _ir_emit(fc, OP_MUL, off, i, eight, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_ADD, d, base, off, 0)
+        return d
+    }
+    // v3.36：str_from_bytes(v: vec[int]) -> str
+    //
+    // **注意签名**：stage-0 收的是**一个 vec[int]**（不是 (p, n)），
+    // 每个元素占 8 字节槽、只取**低字节**拼成串（见
+    // qlm_native.py 的 __str_from_bytes）。std/ 里有 17 个模块用它，
+    // 是 qlmc 编 std/ 失败的第一大原因。
+    //
+    // 实现：n = v.len()，alloc(n+9)，写长度头，逐元素取低字节写入，
+    // 末尾补 NUL。与 _bi_mem_str 的布局一致（[len][bytes][NUL]），
+    // 但数据源是 vec 槽而不是连续字节，所以不能直接复用。
+    if bn == "str_from_bytes" {
+        // v3.36：str_from_bytes(v: vec[int]) -> str
+        //
+        // **签名**：收的是**一个 vec[int]**（不是 (p, n)），每个元素占
+        // 8 字节槽、只取**低字节**拼成串（见 qlm_native.py 的
+        // __str_from_bytes）。std/ 里有 17 个模块用它，是 qlmc 编 std/
+        // 失败的第一大原因。
+        //
+        // 布局与 _bi_mem_str 一致：[len][bytes][NUL]，返回数据指针。
+        let v = _lower_expr(fc, nd.b)
+        let vn = _vec_field(fc, v, 8)                 // vec 长度在 +8
+        let vp = _vec_field(fc, v, 0)                 // 数据指针在 +0
+        let nine = _vnew(fc)
+        fc.vty.set(nine, TY_INT)
+        _ir_emit(fc, OP_CONST, nine, 0, 0, 9)
+        let sz = _vnew(fc)
+        fc.vty.set(sz, TY_INT)
+        _ir_emit(fc, OP_ADD, sz, vn, nine, 0)
+        _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+        let q = _vnew(fc)
+        fc.vty.set(q, TY_INT)
+        _ir_emit(fc, OP_CALLRT, q, 0, 0, RT_ALLOC)
+        let a0 = _vnew(fc)
+        fc.vty.set(a0, TY_INT)
+        _ir_emit(fc, OP_ADDRF, a0, q, 0, 0)
+        _ir_emit(fc, OP_STORE, 0, a0, vn, 8)
+        let dstp = _vnew(fc)
+        fc.vty.set(dstp, TY_INT)
+        _ir_emit(fc, OP_ADDRF, dstp, q, 0, 8)
+        // 逐元素：i < n；取槽的低字节写进 dstp+i
+        let i = _vnew(fc)
+        fc.vty.set(i, TY_INT)
+        _ir_emit(fc, OP_CONST, i, 0, 0, 0)
+        let ltop = _newlab(fc.labs)
+        let ldone = _newlab(fc.labs)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, ltop)
+        _ir_emit(fc, OP_JCMP, 0x8D, i, vn, ldone)     // jge .done
+        let bv = _vnew(fc)
+        fc.vty.set(bv, TY_INT)
+        _ir_emit(fc, OP_LOAD8X, bv, vp, i, 0)         // [vp + i*8] 的低字节
+        let da = _vnew(fc)
+        fc.vty.set(da, TY_INT)
+        _ir_emit(fc, OP_ADD, da, dstp, i, 0)
+        _ir_emit(fc, OP_STORE8, 0, da, bv, 0)
+        let one = _vnew(fc)
+        fc.vty.set(one, TY_INT)
+        _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+        _ir_emit(fc, OP_ADD, i, i, one, 0)
+        _ir_emit(fc, OP_JMP, 0, 0, 0, ltop)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, ldone)
+        // 末尾 NUL
+        let endp = _vnew(fc)
+        fc.vty.set(endp, TY_INT)
+        _ir_emit(fc, OP_ADD, endp, dstp, vn, 0)
+        let zz = _vnew(fc)
+        fc.vty.set(zz, TY_INT)
+        _ir_emit(fc, OP_CONST, zz, 0, 0, 0)
+        _ir_emit(fc, OP_STORE8, 0, endp, zz, 0)
+        let dd = _vnew(fc)
+        fc.vty.set(dd, TY_STR)
+        _ir_emit(fc, OP_MOV, dd, dstp, 0, 0)
+        return dd
     }
     return -1
 }
