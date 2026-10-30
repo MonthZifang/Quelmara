@@ -486,6 +486,30 @@ def _check_compatible(arcs):
                     f"档案不兼容：{a.unit} 的 {f}={getattr(a, f)!r} 与 "
                     f"{first.unit} 的 {getattr(first, f)!r} 不同"
                     f"（同一产物的所有档案必须同架构/同平台/同优化档/同编译器）")
+    # v3.24：进程级单例（`static` / `argc` / `argv` …）的块尺寸也必须一致。
+    #
+    # 编译器指纹通常已经兜住这件事（改了编译器 -> 指纹变 -> 上面就报错），
+    # 但它只保证"同一份编译器"，不保证"同一块尺寸"。真正会出事的是
+    # **同指纹、不同尺寸**：v3.23 把 static 从 32 字扩到 64 字，若某个
+    # 档案是在那次改动前后分别产出、而指纹又恰好相同（比如指纹算的是
+    # 别的目录、或手工构造），链接后代码按 64 字写就会踩到下一个全局块。
+    #
+    # 链接期是**唯一**能拦住它的地方：尺寸信息在档案里现成（global_len），
+    # 比对一次是 O(特例数)，可以忽略。
+    spec0 = first.special or {}
+    for a in arcs[1:]:
+        for name, gid in (a.special or {}).items():
+            if name not in spec0:
+                continue
+            g0, g1 = spec0[name], gid
+            if not (0 <= g0 < len(first.globals) and 0 <= g1 < len(a.globals)):
+                continue
+            n0, n1 = len(first.globals[g0]), len(a.globals[g1])
+            if n0 != n1:
+                raise LinkError(
+                    f"档案不兼容：进程级单例 `{name}` 的尺寸不同 —— "
+                    f"{first.unit} 是 {n0} 字节，{a.unit} 是 {n1} 字节"
+                    f"（同名单例在所有档案里必须等长，否则链接后会错位踩内存）")
 
 
 def merge(arcs, unit=None):
