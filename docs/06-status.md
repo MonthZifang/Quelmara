@@ -13,7 +13,7 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=332 FAIL=0 SKIP=0**（v3.14 口径：新增 `t169_spin_wait`（自旋等待不被 LICM 外提 load）= 331 → 332；v3.13 口径：把 4 项"文档记着 PASS、门禁里没有"的脚本接进主回归——`gzip_http_test`（重写为自包含）、`debugger_test`、`doc_test`、`bootstrap_test --strict`（自举五级链）= 327 → 331；v3.12 口径：新增 `t168_httpc_bulk`（HTTP 客户端大响应 5 场景）= 326 → 327；v3.11 口径：新增 `[3k]` TCP 批量收发与两端超时 5 项 + `[11]` HTTP 端到端 1 项 = 302 → 308，当时记录的 SKIP=1 是 WSL 交叉验证，本机 v3.12 复跑为 SKIP=0；v3.10 及以前为 302。下面那串历史注记停在 v2.76，仅作追溯）（v2.76 口径：qlmc 差分 63 条、LSP 42 条；数字增长来自 v2.27–v2.75 期间各轨新增夹具，本轮只跑不改。v2.26 口径：qlmc 差分 35 → 37 条（新增 `s13_closure`），主回归总数不变；v2.25 口径：新增 `s12_ffi`；v2.24 口径：新增 `s11_import`；v2.23 口径：新增 `s10_defer`；v2.22 口径：新增 `s9_slice`；v2.21 口径：新增 `s8_map`；v2.20 口径：新增 `s7_aggfn`；v2.19 口径：新增 `s6_vec`；v2.18 口径：新增 `s5_enum`；v2.17 口径：新增 `s4_agg`；v2.16 口径：新增 `t143_parshard`（分片并行写 / 工作线程读共享 vec / 8 参 spawn）；v2.14 口径：新增 `[9b]` stage-1 编译器差分（`tests/qlmc_test.py`，7 条）；v2.13 口径：新增 `t141_vecindex`（vec 下标六形态）+ `test_exitcode()` 三条（`exit(运行期值)` 的退出码）；v2.12 口径：新增负向夹具 `net_serve_builtin`——reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断；v2.11 那条 `.qla` 沙箱删除 FAIL 已随夹具改「就地覆盖」收口。以下为 v2.10 口径的历史记录：本版新增项 `[3j2]`：`t130_router_dispatch`（路由表 / 参数 / 404·405 / 表满）+ `http_router_test.py`（20 项真实 socket E2E）。**唯一 FAIL 是 `.qla` 目标文件用例撞沙箱的批量删除策略**（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`：一次删 `build/_qlatest` 里 62 个文件，超过 50 个的阈值），与被测逻辑无关；`cache_test` 的 `build/` 争用失败本次未复现。v2.07 记录的那条 LSP FAIL 已收口（`tests/lsp_test.py` 的容错索引段改成 `std/sse` / `std/ws`（仍解析失败）负向 + `std/http` / `std/timer`（已修好）正向，内部断言 38 → 42）。SKIP 为 WSL 交叉验证，本机被沙箱拦。此前新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
+| PE 回归（主回归） | **PASS=333 FAIL=0 SKIP=0**（v3.15 口径：新增 `t170_wg_park`（WaitGroup 的 park 唤醒 4 组）= 332 → 333；v3.14 口径：新增 `t169_spin_wait`（自旋等待不被 LICM 外提 load）= 331 → 332；v3.13 口径：把 4 项"文档记着 PASS、门禁里没有"的脚本接进主回归——`gzip_http_test`（重写为自包含）、`debugger_test`、`doc_test`、`bootstrap_test --strict`（自举五级链）= 327 → 331；v3.12 口径：新增 `t168_httpc_bulk`（HTTP 客户端大响应 5 场景）= 326 → 327；v3.11 口径：新增 `[3k]` TCP 批量收发与两端超时 5 项 + `[11]` HTTP 端到端 1 项 = 302 → 308，当时记录的 SKIP=1 是 WSL 交叉验证，本机 v3.12 复跑为 SKIP=0；v3.10 及以前为 302。下面那串历史注记停在 v2.76，仅作追溯）（v2.76 口径：qlmc 差分 63 条、LSP 42 条；数字增长来自 v2.27–v2.75 期间各轨新增夹具，本轮只跑不改。v2.26 口径：qlmc 差分 35 → 37 条（新增 `s13_closure`），主回归总数不变；v2.25 口径：新增 `s12_ffi`；v2.24 口径：新增 `s11_import`；v2.23 口径：新增 `s10_defer`；v2.22 口径：新增 `s9_slice`；v2.21 口径：新增 `s8_map`；v2.20 口径：新增 `s7_aggfn`；v2.19 口径：新增 `s6_vec`；v2.18 口径：新增 `s5_enum`；v2.17 口径：新增 `s4_agg`；v2.16 口径：新增 `t143_parshard`（分片并行写 / 工作线程读共享 vec / 8 参 spawn）；v2.14 口径：新增 `[9b]` stage-1 编译器差分（`tests/qlmc_test.py`，7 条）；v2.13 口径：新增 `t141_vecindex`（vec 下标六形态）+ `test_exitcode()` 三条（`exit(运行期值)` 的退出码）；v2.12 口径：新增负向夹具 `net_serve_builtin`——reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断；v2.11 那条 `.qla` 沙箱删除 FAIL 已随夹具改「就地覆盖」收口。以下为 v2.10 口径的历史记录：本版新增项 `[3j2]`：`t130_router_dispatch`（路由表 / 参数 / 404·405 / 表满）+ `http_router_test.py`（20 项真实 socket E2E）。**唯一 FAIL 是 `.qla` 目标文件用例撞沙箱的批量删除策略**（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`：一次删 `build/_qlatest` 里 62 个文件，超过 50 个的阈值），与被测逻辑无关；`cache_test` 的 `build/` 争用失败本次未复现。v2.07 记录的那条 LSP FAIL 已收口（`tests/lsp_test.py` 的容错索引段改成 `std/sse` / `std/ws`（仍解析失败）负向 + `std/http` / `std/timer`（已修好）正向，内部断言 38 → 42）。SKIP 为 WSL 交叉验证，本机被沙箱拦。此前新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
 | 词法器对拍 | **PASS=297 FAIL=0**（300 个源文件，v2.78 口径；SKIP 3 个含 `f"..."` 插值的文件——stage-1 词法器不认 `FSTR`，v1.61 插值未移植。**闭包不再进 SKIP 名单**：`fn(x: int) -> int { ... }` 用的全是既有记号，`t126_closure` 逐记号一致（v1.95）） | `python tests/lexdiff.py` |
 | 声明级 AST 对拍 | **PASS=201 FAIL=0**（201 个源文件，v2.78 口径：v2.78 让 stage-1 parser 的签名行"struct/enum 全在前、fn 全在后"，与 oracle 顺序一致；v1.98 口径：150 个源文件；唯一 FAIL 是 `tests/t115_derive.qma`——并行轨的 enum 派生让声明顺序变了、自举 parser 还没跟上，**与并发改动无关**。跳过 17 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer` / `t99_generic_struct` / `t101_bounds` / `t102_generic_impl` / `t103_generic_enum` / `t104_generic_enum_impl` / `t116_iface_multi` / `iface_rc` / `iface_rc_a64` / `t118_iface_own` / `t119_drop` / `t123_derive_enum` / `t124_macro` / `t125_refl_dyn`——自举 parser 未做 interface/impl/泛型单态化、类型约束、泛型 impl 与泛型 enum，v1.96 的 enum 派生 / token 宏 / 运行时下标反射也未移植；v1.97 把 `iface_rc_a64` 与 `t118_iface_own` 按同一口径记账，`t120_ffi` / `t115_derive` / `dpub_*` 两侧逐行一致） | `python tests/parsediff.py` |
 | 函数体 dump 对拍 | **一致 1719 / 分叉 1608 / SKIP 同步 26 / SKIP 不同步 44**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |
@@ -318,6 +318,35 @@ enum 派生的生成代码量更大（每个变体一个 match 臂 × 三条路�
 > 结论方向不变（退避把核还回去了），但**纯自旋的 CPU 是 101% 不是 51–82%** ——
 > 旧数字低得不合逻辑（自旋等待本就该吃满一个核）。修 bug 顺带纠正了这个口径。
 > 修复与夹具见 `versions/v3.14/CHANGELOG.md`、`tests/t169_spin_wait.qma`。
+
+#### 3.5b.1 唤醒延迟：`sleep_ms` 片 → `WaitOnAddress` park（v3.15）
+
+上表第 3 段退避是 `sleep_ms(1)`，本机实际 **15.6–25 ms**，长等待的唤醒要等
+一整个时钟片。v3.15 换成 `WaitOnAddress`（KernelBase.dll）。
+
+**测法**（`build/probe_wake2.qma`，未入库）：worker **忙等**到精确时刻再
+`wg_done`，把 `wg_done` 前的 `now_ns()` 记进静态字；等待方醒来后与之相减，
+得到真正的唤醒延迟。200 ms 等待，新旧两版**交替**各 7 次：
+
+| 实现 | min | median | max |
+|---|---|---|---|
+| 旧（`sleep_ms(1)` 片） | 292 µs | **1194 µs** | 1824 µs |
+| 新（`WaitOnAddress`） | 24 µs | **55 µs** | 74 µs |
+
+**中位 21.7×**，最大抖动 1824 → 74 µs；CPU 两者都归零（`bench/wg_bench.qma`
+仍是 0%）。
+
+> **探针踩过的坑**：第一版让 worker `sleep_ms(ms)` 再算 `wall - ms`，测出来
+> park 反而"慢 2 倍"。真因是 **Windows 的 sleep 粒度 15.6 ms 把被测的
+> 唤醒延迟整个淹掉了** —— 量到的是 sleep 抖动。**测 µs 级的东西，夹具里
+> 不能出现 ms 级的定时器。**
+
+**两段负结果（都记在 `versions/v3.15/CHANGELOG.md`）：**
+
+| 尝试 | 结果 | 结论 |
+|---|---|---|
+| 给 `mutex_lock` 也用 park | 16 线程 × 20 万次加锁 **281 → 1568 ms（慢 5.6×）**；加「先 yield 1024 次」门槛后仍 855 ms | 锁的临界区约 88 ns，「已经等多久」这个代理判据区分不了「马上就好」与「要等很久」。**park 只对"等待 ≫ 系统调用开销、且只等一次"有利** |
+| 给 `wg_done` 加「有人在睡才 Wake」的 parked 计数 | **漏唤醒**，lag ≈ **953 ms**（睡到 1000 ms 兜底超时） | 「登记」与「检查」是两次独立原子操作，窗口关不掉；Win32 没有把「减计数 + 检查 + Wake」做成原子事务的原语。改成无条件 Wake |
 
 ### 3.5c chan 抢锁策略 A/B（否决的实验，v1.98）
 

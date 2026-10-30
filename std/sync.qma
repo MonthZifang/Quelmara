@@ -1,4 +1,4 @@
-// std/sync.qma —— 无锁同步原语（v1.10，v1.98 并发转绿）
+// std/sync.qma —— 无锁同步原语（v1.10，v1.98 并发转绿，v3.15 futex park）
 // Quelmara 自实现，零 Python/Node 运行时
 //
 // 为什么需要它：atomic_add/cas 内建（v1.10）给了"单条 CPU 指令级"的读改写，
@@ -11,16 +11,72 @@
 //   stack  : [head][poplock]；节点 = [next][value]（16 字节堆块）
 //   wg     : [count]
 //
-// 边界（v1.98 起，诚实标注）：
+// 边界（v3.15 起，诚实标注）：
 //   * 栈 pop 现在是 **MPMC 安全**：每次 pop 先取每栈的消费者锁再 CAS head，
 //     从而排除 ABA（见 stack_pop 注释里的证明）；单消费者想省这把锁用
 //     stack_pop_single。节点不回收（mem_free 不调用），所以"弹出的节点地址
 //     被复用"这条 ABA 前提在库内也不成立——锁只是让"调用方自行 free 后
 //     再 push"这种用法也安全。
 //   * 锁对象/节点不归还（堆是 bump 分配 + mem_free 显式归还，本库不自动 free）。
-//   * wg_wait / mutex_lock 是**退避等待**：先自旋、再让出时间片、最后按毫秒
-//     睡眠；不是 futex park，唤醒延迟最坏 = 一个 sleep 片（1 ms）。
-//     实测 CPU 占用见 docs/06-status.md §3.5b。
+//   * **v3.15：长等待走 `WaitOnAddress` park**（Windows），唤醒延迟从
+//     "一个 sleep 片（本机实测约 25 ms）"降到微秒级，且 CPU 仍然归零。
+//     三段退避仍然是第一层：短等待不该付系统调用的钱（见 `_park` 的注释）。
+//     实测见 docs/06-status.md §3.5b。
+//   * **非 Windows 目标没有 park**：`@ffi` 声明在非 PE 后端是声明期硬失败，
+//     所以本模块只能编译到 Windows PE（与 std/fs / std/logfile 同口径）。
+//     要 Linux 支持得等 epoll/futex 那条线（登记 07-gaps §5）。
+
+// ---- Windows park 原语（v3.15）----
+//
+// WaitOnAddress / WakeByAddress{All,Single} 在 **KernelBase.dll**，不在
+// kernel32（v1.87 的 @ffi 支持显式 DLL 名，所以不需要动导入表白名单）。
+//
+// 语义（Win32 文档）：
+//   BOOL WaitOnAddress(PVOID addr, PVOID compare, SIZE_T size, DWORD ms)
+//     若 *addr == *compare → 睡眠到有人 Wake 或超时；否则**立即返回**。
+//     返回 true = 被唤醒，false = 超时。
+//   VOID WakeByAddressAll(PVOID addr)
+//
+// **为什么"立即返回"这条语义是安全的关键**：它让"检查谓词"与"开始睡眠"
+// 变成一个原子操作（内核在同一个临界区里做比较与入队），于是不存在
+// "我刚检查完、还没睡下去，别人就 Wake 了"的丢失唤醒窗口。调用方仍然要
+// 在 park 返回后**重新检查谓词**（谓词为假就再 park），但不需要额外的锁。
+
+@ffi("KernelBase.dll", "WaitOnAddress")
+fn _WaitOnAddress(addr: int, compare: int, size: int, ms: int) -> bool
+
+@ffi("KernelBase.dll", "WakeByAddressAll")
+fn _WakeByAddressAll(addr: int)
+
+@ffi("KernelBase.dll", "WakeByAddressSingle")
+fn _WakeByAddressSingle(addr: int)
+
+// 每个线程复用的 8 字节"比较值"槽：WaitOnAddress 要求 compare 与 addr 是
+// **不同的指针**（同一块内存会永远相等，等于永远不睡）。
+// 用 static_word 而不是每次 mem_alloc：park 是热路径，别每轮漏 8 字节。
+// 索引 3/4/5/7/30/31 空闲（其余被 ws/http/sse/timer/kv 占着），取 30。
+const PARK_CMP_SLOT = 30
+
+// 把 p 上的 8 字节值 park 到 `want` 不再相等为止，最多 ms 毫秒。
+//
+// 调用方契约：调用前已经把"当前值"读进 `want`。**不必**先确认谓词仍成立 ——
+// WaitOnAddress 自己会比：*p != want 时立即返回。
+//
+// 返回 1 = 被唤醒，0 = 超时。
+//
+// **没有"有没有人在睡"的登记**：v3.15 试过加一个 parked 计数让唤醒方跳过
+// 无人的 Wake，结果**漏唤醒**（见 `wg_done` 的注释）。这里保持最简形态，
+// 唤醒方无条件 Wake。
+fn _park(p: int, want: int, ms: int) -> int {
+    let cmp = static_word(PARK_CMP_SLOT)
+    mem_store64(cmp, 0, want)
+    let woke = _WaitOnAddress(p, cmp, 8, ms)
+    if woke {
+        return 1
+    }
+    return 0
+}
+
 
 // ---- 自旋锁 ----
 
@@ -35,6 +91,22 @@ pub fn mutex_new() -> int {
 
 /// 获取锁：atomic_cas 抢 0→1，失败时前 128 次 spin_hint、之后 thread_yield，直到抢到。
 /// **不是 futex park**：长等待靠让出时间片，不睡眠。
+///
+/// **v3.15 的负结果：锁不用 park，这是实测结论，不是没做。**
+///
+/// 第一版把长等待换成 `WaitOnAddress`（与 `wg_wait` 同样的改法），16 线程 ×
+/// 20 万次加锁从 **281 ms 掉到 1568 ms（慢 5.6×）**。加"先 yield 1024 次再
+/// park"的门槛后仍有 855 ms（慢 3×）。原因不是 park 慢，而是**判据在原理上
+/// 缺信息**：
+///   * 这个基准的临界区约 88 ns，整个基准才 281 ms；
+///   * 每个线程等待锁的时间被切成很多小段（每次等几十 µs），
+///     而"已经等多久"这个代理判据无法区分"马上就好"与"要等很久"；
+///   * 一旦跨过门槛就付 ~400 ns 的 `WaitOnAddress` + 解锁侧的
+///     `WakeByAddressAll`，比"再 yield 一次（~5.5 µs，但能立刻抢到）"还亏，
+///     因为 park 的唤醒要经过内核调度器，而 yield 的对手通常就在同一个核上。
+/// **park 只对"等待时长 ≫ 系统调用开销"有利**，而锁的等待时长在拿锁瞬间
+/// 是不可知的。WaitGroup 不一样：它的等待时长由调用方决定（等一批任务），
+/// 动辄几十毫秒到几秒，且**只等一次**，不在热循环里 —— 那才是 park 的战场。
 pub fn mutex_lock(m: int) {
     // CAS 自旋：旧值 0 = 抢锁成功；否则退避（先 pause，再让出时间片）
     let mut old = atomic_cas(m, 0, 1)
@@ -56,6 +128,9 @@ pub fn mutex_unlock(m: int) {
     // AArch64 需要 STLR，否则临界区内的写在别的核看来可能晚于解锁。
     // 用 mem_store_rel 而不是 atomic_fence()：后者在 x86 是 mfence，
     // 会给每次解锁加约 20 个周期，而 release 语义本来不需要全屏障。
+    //
+    // v3.15：这里**不** WakeByAddressAll —— mutex_lock 不用 park
+    // （负结果见 mutex_lock 的注释），没有等待者会睡在锁上。
     mem_store_rel(m, 0)
 }
 
@@ -172,27 +247,56 @@ pub fn wg_add(w: int, n: int) {
 /// 计数减 1；减到 0 时等待方才能通过 wg_wait。
 pub fn wg_done(w: int) {
     atomic_add(w, 0 - 1)
+    // v3.15：计数归零就 wake 等待方。
+    //
+    // **无条件 Wake，不做"有没有人在睡"的判据** —— 这是踩过坑之后的决定。
+    // 第一版为了省系统调用，加了个 parked 计数（`_park` 进入时 +1、退出时 -1，
+    // 这里读到 0 就跳过 Wake）。实测**漏唤醒**：等待方刚跨过退避门槛、
+    // 还没把 parked 计数加上的那个窗口里，wg_done 读到 0 跳过了 Wake，
+    // 于是等待方一直睡到 1000 ms 兜底超时（实测 lag ≈ 953 ms）。
+    //
+    // 这个窗口**关不掉**：`_park` 的"登记"与 `wg_done` 的"检查"是两次
+    // 独立的原子操作，要消除它就得把"减计数 + 检查等待者 + Wake"做成一个
+    // 原子事务，而 Win32 没有这样的原语（WaitOnAddress 只保证"比较+入队"
+    // 原子，不保证"唤醒者的检查"与"睡眠者的入队"之间有序）。
+    //
+    // 代价是 wg_done 每次多一次 `WakeByAddressAll`（没人睡时约 300–400 ns）。
+    // 对一个"每个任务调一次"的屏障原语来说这是可接受的；**漏唤醒是不可接受的**。
+    _WakeByAddressAll(w)
 }
 
-/// 阻塞到计数归零：先纯自旋（64 次）→ 让出时间片（到 1088 次）→ 每轮 sleep 1 ms。
-/// 计数归零时 wg_done 之前的写对这里可见（atomic 全屏障）。
-/// 退避参数（全部来自本机实测，不是拍脑袋）：
-///   spin_hint  ≈ 4 ns      → 64 次 ≈ 0.3 µs，覆盖"马上就好"的等待
-///   thread_yield ≈ 5.5 µs  → 1024 次 ≈ 5.6 ms，覆盖"毫秒级"的等待
-///   sleep_ms(1) ≈ 25 ms    → 本机（Windows 默认 15.6 ms 时钟片 + VBS）
-///   所以睡眠段只在等待超过 ~5 ms 后才进，短等待不会被拉长到 25 ms。
+/// 阻塞到计数归零（v3.15：长等待 park，不再靠 sleep 片）。
+///
+/// 三段退避：
+///   1. 前 64 次 `spin_hint`（≈0.3 µs）—— "马上就好"的等待不该付系统调用；
+///   2. 再 1024 次 `thread_yield`（≈5.6 ms）—— 毫秒级等待，让出但不睡；
+///   3. 之后 `WaitOnAddress` park —— 真正睡眠，CPU 归零，唤醒延迟微秒级。
+///
+/// **v3.15 之前第 3 段是 `sleep_ms(1)`，本机实际约 25 ms**（Windows 默认
+/// 15.6 ms 时钟片 + VBS 的抖动），所以长等待的唤醒会晚 25 ms。这是
+/// `07-gaps.md` §5 登记的那条缺口，本版收口。
+///
+/// **为什么不需要额外的锁**：`WaitOnAddress(w, &cmp, 8, ms)` 的语义是
+/// "若 *w == cmp 才睡，否则立即返回"，内核在同一个临界区里完成"比较 + 入队"。
+/// 我们把 cmp 设成**刚刚读到的非零值**，于是：
+///   * 若 wg_done 已经把计数减到 0，*w != cmp → 立即返回，重新检查，退出循环；
+///   * 若我们真的睡下去了，那 wg_done 的 `_WakeByAddressAll` 一定能把我们叫醒。
+/// 两种情况都不丢唤醒，所以循环里只要"读值 → 若非零则 park → 回头重读"。
 pub fn wg_wait(w: int) {
-    // 三段退避：短等待纯自旋（延迟最低）→ 中等待让出时间片（不占核）→
-    // 长等待睡 1 ms（CPU 归零）。计数用 atomic_add 更新（lock 前缀 / LDAXR
-    // 都是全屏障），所以计数归零时 wg_done 之前的内存写对这里可见。
     let mut n = 0
-    while mem_load64(w, 0) != 0 {
+    while true {
+        let cur = mem_load64(w, 0)
+        if cur == 0 {
+            return
+        }
         if n < 64 {
             spin_hint()
         } else if n < 1088 {
             thread_yield()
         } else {
-            sleep_ms(1)
+            // park 到"计数不再是 cur"为止。超时 1000 ms 只是兜底：
+            // 将来若有人新增一条减计数的路径却忘了 wake，最坏晚 1 s 而不是挂死。
+            _park(w, cur, 1000)
         }
         n = n + 1
     }
