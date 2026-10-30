@@ -152,54 +152,11 @@ class Tok:
         return f"{self.kind}({self.val!r})"
 
 
-def read_source(path):
-    """读源文件，把编码错误翻译成带文件名/行号的 SyntaxError（v3.32）。
-
-    ## 为什么需要它
-
-    `open(path, encoding="utf-8").read()` 遇到非 UTF-8 字节会抛裸的
-    `UnicodeDecodeError`：
-
-        UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in
-        position 45: invalid start byte
-
-    这里**没有文件名、没有行号、不是 SyntaxError**。后果有三：
-
-    1. 用户不知道是哪个文件出错（多文件构建时尤其致命）；
-    2. CLI 的错误处理只捕 `SyntaxError`，于是打出一整段 Python traceback；
-    3. 报错说"position 45"，那是**字节偏移**，不是行列，用户还得自己数。
-
-    ## 做什么
-
-    * 解码失败 -> `SyntaxError`，带**文件名**与**行:列**；
-    * 额外提示最常见的原因（GBK/ANSI 编码保存、编辑器存成 UTF-16）；
-    * 顺手剥掉 UTF-8 BOM —— 否则词法器会报"非法字符 '\ufeff'"，
-      而用户看不出 BOM 在哪（这个坑在写测试夹具时踩过不止一次）。
-    """
-    try:
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
-    except UnicodeDecodeError as e:
-        # 用出错字节之前的内容算行列（按字节切，不解码整段）
-        try:
-            with open(path, "rb") as f:
-                raw = f.read()
-        except OSError:
-            raw = b""
-        head = raw[:e.start]
-        line = head.count(b"\n") + 1
-        col = e.start - (head.rfind(b"\n") + 1) + 1
-        raise SyntaxError(
-            f"{os.path.basename(path)}:{line}:{col}: 源文件不是合法的 UTF-8 "
-            f"（字节 0x{raw[e.start]:02x} 无法解码）。"
-            f"常见原因：编辑器按 GBK/ANSI 保存，或存成了 UTF-16。"
-            f"请转成 UTF-8（无 BOM）。") from None
-    # BOM：\ufeff 会让词法器报"非法字符"，而用户看不到它
-    if text.startswith("\ufeff"):
-        text = text[1:]
-    return text
-
-
+# v3.33：`read_source` 抽到独立的 `qlm_src` 模块（零依赖），
+# 让 qlm_doc / qlm_fmt / qlm_fuzz / qlm_dbinfo / qlm_dbg / qlm_cli
+# 都能用上，而不必为一个读文件函数去 import 整个编译器。
+# 这里保留同名别名，老调用点与 `qlm.read_source` 都不受影响。
+from qlm_src import read_source  # noqa: E402,F401
 def tokenize(src, keep_comments=False):
     """词法分析。keep_comments=True 时保留注释记号（供 `quelmara fmt` 使用，
     格式化器必须能原样保留注释，否则会静默删掉用户文档）。"""

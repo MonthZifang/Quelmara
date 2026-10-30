@@ -19,6 +19,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from qlm import tokenize, SRC_EXT  # noqa: E402
+from qlm_src import read_source  # noqa: E402
 
 INDENT = "    "
 
@@ -176,8 +177,7 @@ def main():
 
     bad = 0
     for t in sorted(targets):
-        with open(t, encoding="utf-8") as f:
-            src = f.read()
+        src = read_source(t)
         formatted = format_src(src)
         if formatted == src:
             if not args.quiet:

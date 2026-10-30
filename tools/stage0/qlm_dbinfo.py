@@ -31,6 +31,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import qlm  # noqa: E402
+from qlm_src import read_source  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 1. 行号钩子（只包 parse_stmt 一层，安装/卸载成对）
@@ -82,8 +83,7 @@ def load_program_dbg(src_path, cfg=None):
         res = qlm.load_program(src_path, cfg)
         # 主文件独有函数名：再单独解析一份主文件（不解析 import），
         # 取其中定义的函数名。import 进来的库函数不在此列。
-        with open(src_path, encoding="utf-8") as f:
-            main_res = qlm.Parser(qlm.tokenize(f.read())).parse_program()
+        main_res = qlm.Parser(qlm.tokenize(read_source(src_path))).parse_program()
         main_fns = {fd["name"] for fd in main_res[2]}
     finally:
         uninstall_stmt_lines()

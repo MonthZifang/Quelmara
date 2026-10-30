@@ -40,6 +40,8 @@ import os
 import sys
 import time
 
+from qlm_src import read_source  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
@@ -136,8 +138,7 @@ def main(argv=None):
             bugs.append((path, detail))
     t_run = time.perf_counter() - t1
 
-    with open(args.src, encoding="utf-8") as f:
-        seed_text = f.read()
+    seed_text = read_source(args.src)
     print("qlm_fuzz — 编译器前端模糊测试（变异器用 Quelmara 写）")
     print(f"  种子: {args.src}（{len(seed_text.splitlines())} 行，"
           f"{len(seed_text.encode('utf-8'))} 字节）")

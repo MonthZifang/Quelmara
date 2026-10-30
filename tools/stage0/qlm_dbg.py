@@ -48,6 +48,8 @@ import os
 import struct
 import sys
 
+from qlm_src import read_source_or_none  # noqa: E402
+
 k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 # ---------------------------------------------------------------------------
@@ -420,12 +422,15 @@ class Debugger:
                          os.path.join(os.path.dirname(self.exe), path),
                          os.path.join(os.path.dirname(self.exe),
                                       os.path.basename(path))):
-                try:
-                    with open(cand, encoding="utf-8") as f:
-                        self._src_cache[path] = f.read().splitlines()
+                # v3.33：用 read_source_or_none —— 调试器读不到源码
+                # 应该退化成 "<source unavailable>"，不该让整个调试会话
+                # 因为编码错误/文件缺失而失败。这里顺带把编码错误也归进
+                # "读不到"，以前它抛 UnicodeDecodeError 会穿出 except OSError。
+                text = read_source_or_none(cand)
+                if text is not None:
+                    self._src_cache[path] = text.splitlines()
                     break
-                except OSError:
-                    continue
+                continue
             else:
                 self._src_cache[path] = None
         lines = self._src_cache[path]
