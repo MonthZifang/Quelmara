@@ -1,0 +1,68 @@
+// t175_static_words.qma —— static_word 槽位不再抢槽（v3.23）
+//
+// 这个夹具锁住 v3.22 发现的那个**静默崩溃**：
+// `std/log` 与 `std/timer` 曾经抢 static_word(13)/(14)，
+// 两个模块各自单独用都正常，一起用就先初始化的那个被覆盖 ——
+// 症状是 log_info 之后再无任何输出，进程直接死掉，没有报错。
+//
+// v3.23 把静态字区从 32 扩到 64，并把 log 的 9 个槽位整体挪到 32–39。
+// 现在这里必须同时用 log / timer / rand / 内存分配，全部正常收尾。
+
+import std.core
+import std.log
+import std.timer
+import std.rand
+
+fn main() {
+    // 1. 先让 timer 初始化（它拿 13/14）
+    let t0 = timer_after(5)
+    if t0 <= 0 {
+        print("FAIL: timer_after 返回了 " + t0.to_str())
+        return
+    }
+
+    // 2. 紧接着用 log —— 这正是过去崩溃的顺序
+    log_set_level(0)
+    log_info("timer 初始化之后写日志")
+    log_info("再来一条，确认输出通道没被踩")
+
+    // 3. rand 也用它的槽位（8）
+    rand_seed(12345)
+    let r1 = rand_next()
+    let r2 = rand_next()
+    if r1 == r2 {
+        print("FAIL: rand 序列没推进")
+        return
+    }
+
+    // 4. 堆分配（确认静态区扩容没挤坏别的全局数据）
+    let buf = mem_alloc(256)
+    if buf == 0 {
+        print("FAIL: mem_alloc 失败")
+        return
+    }
+    mem_store64(buf, 0, 0x5A5A5A5A)
+    if mem_load64(buf, 0) != 0x5A5A5A5A {
+        print("FAIL: 堆读写不一致")
+        return
+    }
+
+    // 5. 越界必须**编译期**报错（运行期会静默踩内存）
+    //    这里不写 static_word(64)，因为那会让整个夹具编译失败；
+    //    由 tools/dev/check_static_words.py 与编译器共同把关。
+
+    // 6. 槽位边界内仍可正常读写
+    mem_store64(static_word(0), 0, 7)
+    if mem_load64(static_word(0), 0) != 7 {
+        print("FAIL: static_word(0) 读写失败")
+        return
+    }
+    mem_store64(static_word(63), 0, 99)
+    if mem_load64(static_word(63), 0) != 99 {
+        print("FAIL: static_word(63) 读写失败（最后一个槽位）")
+        return
+    }
+
+    log_info("static_word 槽位隔离 OK")
+    print("PASS: static_word 槽位隔离")
+}

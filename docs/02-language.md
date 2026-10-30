@@ -891,29 +891,42 @@ fn make_adder(k: int) -> closure {          // 闭包逃逸：环境在堆上
 | `spin_hint()` | `pause` | `YIELD` | 自旋提示（纳秒级、不切线程） |
 | `thread_yield()` | `SwitchToThread` | `sched_yield` | 让出时间片（微秒级、会切上下文） |
 | `now_cycle()` | `rdtsc` | `CNTVCT_EL0` | 单调计数器（**不保证 = 核心周期**） |
-| `static_word(n)` | — | — | 静态字槽（库内部用于惰性表）。**共 32 个（0–31），手工分配、没有登记表**——见下方「静态字占用」 |
+| `static_word(n)` | — | — | 静态字槽（库内部用于惰性表）。**共 64 个（0–63）**；字面量下标在编译期做越界检查，槽位分配由 `tools/dev/check_static_words.py` 强制登记——见下方「静态字占用」 |
 | `thread_start(fn, arg)` | `CreateThread` | `clone` + 新栈 | **显式 OS 线程**（v2.12）：`arg` 按 int 传（句柄/指针，不做类型转换），返回线程句柄。与 `spawn` 的唯一区别是**不受 `multicore=false` 降级**——给 reactor 这类「循环永不返回」的线程用；`spawn` 在单核配置下会内联执行，主线程就再也回不到 accept |
 | `syscall(n, a0..a5)` | **编译期报错** | `rax=n` + `syscall` 指令 | **用户可调的裸系统调用**（v3.18）。`n` 必须是**编译期常量**，最多 6 个实参（不足补 0），返回内核**原样**返回值——**负值即 `-errno`**，不置 errno、不抛异常。Windows 上编译期 fail-fast（用户态不能直接发 `syscall`，要调 Win32 用 `@ffi`）。**编号是架构相关的**（futex 在 x86-64 是 202、AArch64 是 98），而语言没有条件编译——同一份源码没法自动选对编号 |
 | `target_os()` | 编译期立即数 | 编译期立即数 | **当前目标 OS**（v3.19）：`1` = Linux / `2` = Windows。返回**编译期常量**，所以 `if target_os() == 1 { ... }` 的比较在编译期折叠。**不能用在 `const` 右值里**（parser 不知道 target）。**不是条件编译**——它只帮"选对常量"，`@ffi`/`syscall` 的声明期硬失败仍需拆文件 |
 | `target_arch()` | 编译期立即数 | 编译期立即数 | **当前目标架构**（v3.19）：`1` = x86_64 / `2` = aarch64。与 `target_os()` 配对——系统调用编号**同时**取决于 OS 与架构 |
 
-**静态字占用**（`static_word(i)` 是进程级 8 字节槽，库之间靠约定避让；撞了会静默改坏
-另一个库的指针，编译器不会报错）：
+**静态字占用**（`static_word(i)` 是进程级 8 字节槽。v3.23 起由
+`tools/dev/check_static_words.py` **强制登记**：源码里的槽位与登记表必须双向一致，
+否则门禁失败。字面量下标越界在编译期就报错——以前是静默踩内存）：
 
 | 槽 | 使用者 |
 |---|---|
-| 0–2 | 协议库：`std/sse`（0）、`std/ws`（0）、`std/http`（0 连接状态 / 1 解析失败码 / 2 路由中间件表） |
+| 0 | **共享回调通道**：`std/http` / `std/ws` / `std/sse` 三者共用（同一机制、同一槽，登记表里写作模块列表） |
+| 1 / 2 | `std/http`（解析失败码 / 路由中间件表） |
 | 6 | `std/gzip`（CRC-32 查表指针） |
 | 8 | `std/rand`（xorshift64* 状态） |
-| 9 | `std/log`（首条日志的 `now_ns` 基准） |
 | 11 | `std/net/core`（协议库全局自旋锁） |
 | 12 | `std/aes`（sbox / inv_sbox 表指针） |
 | 13 / 14 | `std/timer`（堆块指针 / 存活位块指针，v2.08） |
 | 15 | `std/net/reactor`（reactor 全局状态块指针，v2.12） |
+| 17–27 | `std/logfile`（路径 / 轮转 / 缓冲 / 锁共 11 个） |
+| 28 / 29 | `std/sync`（park / wake 函数指针，v3.16） |
+| 30 | `std/park`（`WaitOnAddress` 比较值槽） |
+| 32–39 | `std/log`（时间基准 / 级别 / 通道 / 时区 / 模式 / 锁 / 时间戳缓存） |
 
-> 新增库请取**下一个空号**并在这里登记。v2.08 修掉过一个真实冲突：`std/timer` 原先也用
-> 12，与 `std/aes` 撞车——同时用 HTTPS 与定时器的进程会把 sbox 指针踩成堆指针。
-> 现在 timer 用 13/14。
+> 新增库请取**下一个空号**，并在 `check_static_words.py` 的 `REGISTRY` 与这里同时登记。
+> 40–63 目前空闲。
+>
+> v2.08 修掉过一个真实冲突：`std/timer` 原先也用 12，与 `std/aes` 撞车——同时用 HTTPS
+> 与定时器的进程会把 sbox 指针踩成堆指针。
+>
+> v3.23 修掉了**槽位总量不足**导致的一批冲突：`std/log` 与 `std/timer` 抢 13/14、
+> 与 `std/net/reactor` 抢 15、与 `std/sync` 抢 28/29。13/14 那条是实测的
+> **静默崩溃**——同时 `import std.log` 与 `std.timer`，`log_info` 之后再无输出，
+> 进程直接死掉且没有任何报错。当时 32 个槽位的需求是 33 个，装不下；
+> 现在扩到 64，并把 log 整体挪到 32–39。
 
 边界（v1.86 起双后端）：
 

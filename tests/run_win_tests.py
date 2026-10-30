@@ -208,6 +208,51 @@ def case_selfcheck_to(name, src, seconds):
         else bad(f"{name} 失败 rc={rc} stderr={stderr[-200:]!r}")
 
 
+def case_static_word_oob():
+    """static_word 越界必须是**编译期**错误（v3.23）。
+
+    以前越界是静默的：`static_word(120)` 写到静态区之外，
+    踩别的全局数据或直接崩，编译器一句话都不说。
+    v3.22 的测试夹具就这么崩过一次，所以这里锁住"必须报错"。
+    """
+    src = os.path.join(ROOT, "build", "_oob_probe.qma")
+    with open(src, "w", encoding="utf-8") as f:
+        f.write('import std.core\nfn main() {\n'
+                '    mem_store64(static_word(64), 0, 1)\n'
+                '    print("unreachable")\n}\n')
+    try:
+        qlm_pe.transpile_win(src)
+        bad("static_word(64) 越界没有在编译期报错（会静默踩内存）")
+    except SyntaxError as e:
+        ok(f"static_word 越界编译期报错（{e}）") if "越界" in str(e) \
+            else bad(f"static_word 越界报错信息不对：{e}")
+    finally:
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+
+
+def case_static_word_registry():
+    """槽位登记表与源码一致（v3.23）。
+
+    跑 tools/dev/check_static_words.py —— 它解析 `std/**/*.qma` 里所有
+    `static_word(...)`（跨过注释、const、辅助函数三层间接），
+    按槽位归组后判抢槽 / 越界 / 登记表双向一致。
+    """
+    script = os.path.join(ROOT, "tools", "dev", "check_static_words.py")
+    if not os.path.exists(script):
+        skip("check_static_words.py 不存在，跳过")
+        return
+    r = subprocess.run([sys.executable, script], cwd=ROOT,
+                       capture_output=True, text=True, timeout=120)
+    if r.returncode == 0:
+        ok("static_word 槽位登记表与源码一致")
+    else:
+        tail = (r.stdout or r.stderr).strip().splitlines()[-6:]
+        bad("static_word 槽位登记表不一致：" + " | ".join(tail))
+
+
 def test_tcp_batch():
     """TCP 批量收发与两端超时（v3.06–v3.10）。
 
@@ -1298,6 +1343,14 @@ def main():
     # 但**从来没有夹具在真实双栈连接上验证过** —— 这里补上。
     # 端口 18130，与 t173（18120）和 TCP 那批（18073–18097）都不冲突。
     case_selfcheck_to("peer_ip", "tests/t174_peer_ip.qma", 60)
+
+    # v3.23：static_word 槽位隔离。
+    # 以前 `std.log` 与 `std.timer` 抢 static_word(13)/(14)，
+    # 一起用就静默崩溃（log_info 之后再无输出）。这个夹具按
+    # "先 timer、再 log、再 rand、再堆分配" 的顺序复现那条路径。
+    case_selfcheck_to("static_words", "tests/t175_static_words.qma", 60)
+    case_static_word_oob()
+    case_static_word_registry()
 
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])

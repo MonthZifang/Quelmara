@@ -771,6 +771,16 @@ class Fn:
 # 因此作函数参数/返回值零改动复用。
 SLICE_WORDS = 2
 
+# 进程级静态字区容量（`static_word(i)` 的槽位总数）。
+#
+# v3.23：32 -> 64。v3.22 时 32 个槽位已被标准库**全部占满**，而 log 与
+# timer / reactor / sync 抢的是同一批槽位 —— 症状是"同时用 std.log 和
+# std.timer 就静默崩溃"。槽位只有 8 字节，扩一倍 = 256 字节静态区。
+#
+# 加新槽位：先看 tools/dev/check_static_words.py 的 REGISTRY 有没有空位，
+# 那个门禁会强制源码与登记表一致。
+STATIC_SLOTS = 64
+
 
 # v1.33：GHASH 用的 SSE 族（xmm 槽 + 立即数），与 AES 族分开登记便于排查
 _SSE_BUILTINS = ("cpu_pclmul", "xmm_mov", "pand", "por", "pshufb", "pclmulqdq",
@@ -902,9 +912,16 @@ class Lower:
             return gid
         return self.intern_array(words)
     def static_gid(self):
-        """进程级静态字区（static_word(i) 的落点，32 个字）。"""
+        """进程级静态字区（static_word(i) 的落点，STATIC_SLOTS 个字）。
+
+        v3.23：从 32 扩到 64。32 个槽位在 v3.22 已经**全部占满**
+        （log 9 个 + logfile 11 个 + 协议库 3 个 + 其余模块），
+        而 log 与 timer/reactor/sync 抢的是同一批槽位 —— 症状是
+        "同时用 std.log 和 std.timer 就静默崩溃"。
+        槽位只有 8 字节，扩一倍只是 256 字节静态区，代价可忽略。
+        """
         if getattr(self, "_static_gid", None) is None:
-            self._static_gid = self._seed_gid("static", 32)
+            self._static_gid = self._seed_gid("static", STATIC_SLOTS)
         return self._static_gid
 
     def free_list_gid(self):
@@ -3966,12 +3983,22 @@ class Lower:
             fn.emit("call", d, "__" + name, vals)
             return d
         if name == "static_word" and name not in self.fns_ast:
-            # static_word(i) -> int：第 i 个进程级 8 字节静态字的地址（共 32 个）。
-            # 语言没有模块级可变全局，而协议库（ws/http/sse）必须把回调与
-            # 连接表放在进程级位置才能被 reactor 的回调函数读到 —— 这是那条
-            # 通道的最小实现：返回地址，库层用 mem_load64/mem_store64 读写。
+            # static_word(i) -> int：第 i 个进程级 8 字节静态字的地址
+            # （共 STATIC_SLOTS 个）。语言没有模块级可变全局，而协议库
+            # （ws/http/sse）必须把回调与连接表放在进程级位置才能被
+            # reactor 的回调函数读到 —— 这是那条通道的最小实现：
+            # 返回地址，库层用 mem_load64/mem_store64 读写。
             if len(e[2]) != 1:
                 raise SyntaxError("static_word(i) 需要一个实参")
+            # v3.23：字面量下标做编译期越界检查。以前越界是**静默**的，
+            # 会写到静态区之外踩别的全局数据 —— v3.22 的测试夹具就这么
+            # 崩过一次。运行期变量没法静态判定，只能放行。
+            arg = e[2][0]
+            if isinstance(arg, tuple) and arg and arg[0] == "num":
+                if not (0 <= arg[1] < STATIC_SLOTS):
+                    raise SyntaxError(
+                        f"static_word({arg[1]}) 越界：槽位下标必须在 "
+                        f"0..{STATIC_SLOTS - 1} 之间（共 {STATIC_SLOTS} 个槽位）")
             iv = self.eval(e[2][0], fn, env)
             off = fn.new_v()
             fn.emit("bin", "shl", off, iv, ("imm", 3))
