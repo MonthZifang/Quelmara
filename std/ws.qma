@@ -438,7 +438,14 @@ fn _frames(st: int, p: int, fd: int) -> int {
                 mem_copy(buf + mlen, buf + pay, plen)
                 let total = mlen + plen
                 let msg = mem_str(buf, total)
-                _drop_frame(p, total, pay, plen)
+                // v3.28：keep_to 必须是 **0**，不是 total。
+                //
+                // 分片消息在这里已经消费完了：消息本体 [0,total) 要整体丢弃，
+                // 帧尾之后的字节贴到 0。原来写 `_drop_frame(p, total, ...)`
+                // 会把消息本体**留在缓冲区**，而 fop 已清零、下一帧又从
+                // off=0 开始解析 —— 于是下一帧从消息本体中间读，永远解析
+                // 不出帧头，连接就此卡死（实测：分片之后再发任何消息都无响应）。
+                _drop_frame(p, 0, pay, plen)
                 mem_store64(p, WS_FOP, 0)
                 mem_store64(p, WS_MLEN, 0)
                 mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
