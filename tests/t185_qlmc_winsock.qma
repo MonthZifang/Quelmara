@@ -1,0 +1,82 @@
+// t185_qlmc_winsock.qma —— qlmc 能否做网络（v3.41）
+//
+// ## 这个夹具回答一个**决策问题**
+//
+// `std/net*` 有 6 个模块卡在"缺 tcp_* / udp_* 内建"。要补它们，先得知道：
+// **qlmc 产出的程序能不能调 Winsock？**
+//
+// 如果不能，补内建就得改 qlmc 的 IAT 表（风险高）；如果能（通过 `@ffi`），
+// 就可以用 Quelmara 源码实现整组内建（风险低）。
+//
+// 这个夹具把答案钉住：**能**。
+//
+// ## 验证范围
+//
+// 完整的 socket 生命周期（不真正 accept，避免夹具挂住）：
+//   WSAStartup -> socket -> bind -> listen -> closesocket
+//
+// 每个 API 都用 `@ffi("ws2_32.dll", ...)` 声明 —— 这条路径如果能走通，
+// 说明 qlmc 的 @ffi 机制对 ws2_32 完全可用，网络内建可以用源码写。
+//
+// ## 为什么用 0 端口 + 不 accept
+//
+// 夹具要在回归里稳定通过：
+//   * 端口写 0 = 让系统分配，不会与任何服务冲突；
+//   * 不调 accept（会阻塞），只验证到 listen 成功。
+module t185_qlmc_winsock
+
+@ffi("ws2_32.dll", "WSAStartup")
+fn _WSAStartup(ver: int, data: int) -> int
+
+@ffi("ws2_32.dll", "socket")
+fn _socket(af: int, typ: int, proto: int) -> int
+
+@ffi("ws2_32.dll", "bind")
+fn _bind(s: int, addr: int, n: int) -> int
+
+@ffi("ws2_32.dll", "listen")
+fn _listen(s: int, backlog: int) -> int
+
+@ffi("ws2_32.dll", "closesocket")
+fn _closesocket(s: int) -> int
+
+@ffi("ws2_32.dll", "WSAGetLastError")
+fn _WSAGetLastError() -> int
+
+fn main() {
+    // ---- [1] WSAStartup：0 = 成功 ----
+    let wsa = mem_alloc(64)
+    mem_zero(wsa, 64)
+    let r = _WSAStartup(514, wsa)          // 0x0202 = 版本 2.2
+    assert(r == 0, "WSAStartup 必须成功")
+
+    // ---- [2] socket：AF_INET(2) + SOCK_STREAM(1) ----
+    let s = _socket(2, 1, 0)
+    // 失败时 Win64 的 int 返回值只写 eax，与 -1 比较会漏检 —— 所以用 > 0 判断
+    assert(s > 0, "socket 必须返回有效句柄")
+
+    // ---- [3] sockaddr_in：family 在低 16 位，port 在位 16-31 ----
+    // 端口 0 = 系统分配，避免与任何服务冲突
+    let sin = mem_alloc(16)
+    mem_zero(sin, 16)
+    mem_store64(sin, 0, 2)                 // family = AF_INET(2)，port = 0
+    mem_store64(sin, 1, 0)                 // addr = 0.0.0.0
+
+    // ---- [4] bind：0 = 成功 ----
+    let br = _bind(s, sin, 16)
+    assert(br == 0, "bind 到 0.0.0.0:0 必须成功")
+
+    // ---- [5] listen：0 = 成功 ----
+    let lr = _listen(s, 8)
+    assert(lr == 0, "listen 必须成功")
+
+    // ---- [6] closesocket：0 = 成功 ----
+    let cr = _closesocket(s)
+    assert(cr == 0, "closesocket 必须成功")
+
+    // ---- [7] 关闭后再用同一个句柄必须失败（证明真的关了） ----
+    let bad = _closesocket(s)
+    assert(bad != 0, "重复 closesocket 必须失败")
+
+    print("PASS: qlmc 可以通过 @ffi 调用 Winsock（网络内建可用源码实现）")
+}
