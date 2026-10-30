@@ -143,6 +143,28 @@ def main():
     else:
         bad(f"正常程序 rc={r.returncode} stderr={r.stderr[-200:]!r}")
 
+    # ---- [5] v3.33：其它工具读源码也要给同样的诊断 ----
+    # 这些工具以前各写各的 `open(..., encoding="utf-8")`，编码错时
+    # 直接抛裸 UnicodeDecodeError。现在统一走 `qlm_src.read_source`。
+    gbk = write_bytes("enc_gbk.qma",
+                      b'import std.core\nfn main() { print("x") }\n// \xc3\x28\n')
+    for label, argv in [
+        ("doc", ["doc", gbk, "-o", os.path.join(BUILD, "enc_gbk.md")]),
+        ("fmt --check", ["fmt", gbk, "--check"]),
+        ("lex", ["lex", gbk]),
+    ]:
+        rr = subprocess.run([sys.executable, CLI] + argv,
+                            capture_output=True, text=True, timeout=180)
+        out = (rr.stderr or "") + (rr.stdout or "")
+        if "Traceback" in out:
+            bad(f"{label} 对非 UTF-8 仍打 traceback")
+        elif "不是合法的 UTF-8" not in out:
+            bad(f"{label} 没有给编码诊断：{out.strip()[-100:]}")
+        elif rr.returncode == 0:
+            bad(f"{label} 对非 UTF-8 竟然退出码 0")
+        else:
+            ok(f"{label} 对非 UTF-8 给统一诊断、无 traceback")
+
     print(f"\nENCODING_DIAG: PASS={PASS} FAIL={FAIL}")
     return 0 if FAIL == 0 else 1
 

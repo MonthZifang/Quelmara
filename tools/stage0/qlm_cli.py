@@ -45,6 +45,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import qlm_cache  # noqa: E402  —— 缓存模块不依赖编译器：命中路径不许导入 qlm
 
+# v3.33：`read_source` 在独立的零依赖模块里，所以这里能用它而**不必**
+# import 整个编译器（下面那段注释解释了为什么不能 import qlm）。
+from qlm_src import read_source  # noqa: E402
+
 # 源码扩展名，与 `qlm.SRC_EXT` 同值。**刻意不 import qlm 去取**：`import qlm`
 # 在本机要 1.3 s，而缓存命中的整条路径只该花几十毫秒；扩展名口径由
 # `tools/dev/check_names.py` 门禁守着，两边不会漂。
@@ -59,7 +63,7 @@ def require_source(path):
     _rs(path)
 
 # 版本号口径：与 docs/versions/ 下的目录一致（vX.Y → "X.Y.0"，补丁 → "X.Y.Z"）
-VERSION = "3.32.0"
+VERSION = "3.33.0"
 
 def _default_target():
     """当前主机默认只选自研后端；不把 C99 当产品默认链路。"""
@@ -245,7 +249,7 @@ def cmd_lex(args):
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "dev"))
     import tokfmt
-    src = open(args.src, encoding="utf-8").read()
+    src = read_source(args.src)
     sys.stdout.buffer.write(tokfmt.dump(src).encode("utf-8"))
     return 0
 
@@ -538,9 +542,9 @@ def _discover_tests(paths):
             files.append(p)
     out = []
     for f in sorted(files):
-        with open(f, encoding="utf-8") as fh:
-            if 'test "' in fh.read():
-                out.append(f)
+        # v3.33：这里读的是 `.qma` 源码，用 read_source 统一编码诊断
+        if 'test "' in read_source(f):
+            out.append(f)
     return out
 
 

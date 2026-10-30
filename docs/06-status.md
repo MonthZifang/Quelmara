@@ -2981,6 +2981,42 @@ v3.31 复核确认 §7.11 仍存在。它其实是**两个问题叠在一起**�
 夹具 `tests/encoding_diag_test.py`（6 项，含"带 BOM 的文件能编译**并运行**"
 —— BOM 若被当普通字符喂给词法器，编译期就挂，所以运行成功才说明真剥掉了）。
 
+### 3.83 `read_source` 抽成零依赖模块（v3.33）：7 处读源码的点收口
+
+v3.32 只修了编译主路径，其它工具各写各的 `open(..., encoding="utf-8")`。
+这一版收掉，但**直接改行不通** —— 先看清约束：
+
+`qlm_cli.py` 里有一段明确注释：
+
+```python
+# 源码扩展名，与 `qlm.SRC_EXT` 同值。**刻意不 import qlm 去取**：
+# `import qlm` 在本机要 1.3 s，而缓存命中的整条路径只该花几十毫秒。
+```
+
+`read_source` 原本在 `qlm.py` 里。让 CLI 为了一个读文件函数拉进整个
+编译器，直接毁掉缓存命中的意义。
+
+所以抽成**零依赖**的 `qlm_src.py`（只用 `os`）：
+
+| 函数 | 行为 |
+|---|---|
+| `read_source(path)` | 失败抛 `SyntaxError`（带 `文件:行:列`） |
+| `read_source_or_none(path)` | 任何失败返回 `None` |
+
+`qlm.py` 保留转发别名，`qlm.read_source` 与老调用点都不受影响。
+
+收口 7 处：`qlm_cli`（`lex` + 扫 `test "` 块）、`qlm_doc`、`qlm_fmt`、
+`qlm_fuzz`、`qlm_dbinfo`、`qlm_dbg`。其中 `qlm_dbg` 用
+`read_source_or_none` —— 调试器读不到源码应退化成 `<source unavailable>`，
+不该让整个会话挂掉。顺带修了它原来的 `except OSError` 捕不到
+`UnicodeDecodeError` 的缺陷。
+
+**剩下 5 处没改是对的**：它们读的是缓存统计 JSON、缓存元数据、调试脚本、
+已生成的文档 —— 都不是源码，失败语义也不同（缓存坏了要静默重建，
+不是报语法错）。
+
+现在 `doc` / `fmt --check` / `lex` 对非 UTF-8 都给统一诊断、无 traceback。
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |

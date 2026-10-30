@@ -30,6 +30,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from qlm import SRC_EXT, iter_decls, scan_doc_comments  # noqa: E402
+from qlm_src import read_source  # noqa: E402
 
 
 class Decl:
@@ -121,8 +122,7 @@ def scan_file(path, rel=None):
     公开 API 面 = 顶层 `pub` 声明（含没写 `///` 的——`--missing` 靠它统计）；
     非 pub 声明即使写了 `///` 也不进公开文档（前端仍挂到 AST 上）。
     """
-    with open(path, encoding="utf-8") as f:
-        src = f.read()
+    src = read_source(path)
     lines = src.splitlines()
     module_doc, blocks, orphans = scan_doc_comments(src)
     doc_at = {line: doc for line, _k, _n, _p, doc in blocks}
@@ -142,15 +142,14 @@ def scan_file(path, rel=None):
 def fn_counts(path):
     """(pub fn 数, 内部 fn 数)——文档引言句用，与 scan_file 同源。"""
     pub = internal = 0
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            s = line.strip()
-            if not s.startswith("fn ") and not s.startswith("pub fn "):
-                continue
-            if s.startswith("pub fn "):
-                pub += 1
-            else:
-                internal += 1
+    for line in read_source(path).splitlines():
+        s = line.strip()
+        if not s.startswith("fn ") and not s.startswith("pub fn "):
+            continue
+        if s.startswith("pub fn "):
+            pub += 1
+        else:
+            internal += 1
     return pub, internal
 
 
