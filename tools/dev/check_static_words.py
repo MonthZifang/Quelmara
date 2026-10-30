@@ -75,13 +75,25 @@ FUNC = re.compile(r"^(?:pub\s+)?fn\s+([A-Za-z_]\w*)\s*\(([^)]*)\)", re.M)
 # **共享**同一个回调通道槽 —— 同一个机制、同一个槽，不是冲突。
 # 除此之外任何共享都是 bug。
 #
+# 共享与抢槽是两件事，判据不同：
+#
+#   抢槽 = 两个模块**互不知情**地用同一个号 -> 必须改
+#   共享 = 多个模块**约定**用同一个号，且布局一致、生命周期不重叠 -> 登记即可
+#
+# 共享槽位额外要求：所有共享者必须调**同一个**状态块构造函数，
+# 否则就是"按 A 的布局读 B 的块"，那其实是抢槽。由 SHARED_LAYOUT 声明并校验。
+#
 # v3.23 重排：原来 log 与 timer 抢 13/14、log 与 reactor 抢 15、
 # log 与 sync 抢 28/29 —— 其中 log+timer 那条实测会让程序**静默崩溃**。
 # ---------------------------------------------------------------------------
+# 共享槽位的布局一致性声明：槽位 -> 所有共享者都必须调用的构造函数
+SHARED_LAYOUT = {
+    0: "conn_state_new",
+}
+
 REGISTRY = {
     0:  (["std/http", "std/ws", "std/sse"],
-         "连接状态块（三个服务端框架共享的回调通道）"),
-    1:  (["std/http"], "解析失败码"),
+         "连接状态块（三个服务端框架共享的回调通道）"),    1:  (["std/http"], "解析失败码"),
     2:  (["std/http"], "路由/中间件表"),
     6:  (["std/gzip"], "CRC32 查表指针"),
     8:  (["std/rand"], "xorshift64* 状态（0 = 未播种）"),
@@ -155,6 +167,23 @@ def module_of(path):
     """`std/net/reactor.qma` -> `std/net/reactor`（与 REGISTRY 的写法一致）。"""
     rel = os.path.relpath(path, ROOT).replace("\\", "/")
     return rel[:-4] if rel.endswith(".qma") else rel
+
+
+_TEXT_CACHE = {}
+
+
+def _module_text(mod):
+    """按模块名取源码文本（去注释），供共享布局校验用。"""
+    if mod in _TEXT_CACHE:
+        return _TEXT_CACHE[mod]
+    path = os.path.join(ROOT, mod.replace("/", os.sep) + ".qma")
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = strip_comments(f.read())
+    except OSError:
+        text = ""
+    _TEXT_CACHE[mod] = text
+    return text
 
 
 def module_consts(text):
@@ -267,6 +296,22 @@ def main():
             declared = REGISTRY.get(idx, (None, None))[0]
             if isinstance(declared, list) and len(declared) > 1 \
                     and set(declared) == used[idx]:
+                # 登记为共享且占用者一致 —— 还要验证**布局一致**，
+                # 否则就是"按 A 的布局读 B 的块"，那其实是抢槽
+                ctor = SHARED_LAYOUT.get(idx)
+                if ctor is None:
+                    fails.append(
+                        f"共享未声明布局：static_word({idx}) 登记为共享"
+                        f"（{', '.join(sorted(used[idx]))}），但 SHARED_LAYOUT "
+                        f"里没有说明它们用哪个构造函数 —— 补上才能证明布局一致")
+                else:
+                    bad_mods = [m for m in sorted(used[idx])
+                                if ctor not in _module_text(m)]
+                    if bad_mods:
+                        fails.append(
+                            f"共享布局不一致：static_word({idx}) 声明共享者是 "
+                            f"{ctor} 的调用方，但 {', '.join(bad_mods)} 里找不到它"
+                            f"（布局不同就是抢槽，不是共享）")
                 continue  # 登记为共享，且占用者与登记一致
             mods = ", ".join(sorted(used[idx]))
             fails.append(f"抢槽：static_word({idx}) 被多个模块占用 —— {mods}")

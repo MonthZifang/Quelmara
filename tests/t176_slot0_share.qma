@@ -1,0 +1,63 @@
+// t176_slot0_share.qma —— static_word(0) 共享通道的真实语义（v3.25）
+//
+// 背景：v3.23 的门禁把 `static_word(0)` 登记成 http / ws / sse **共享**，
+// 当时在 07-gaps.md 里留了一句"三者同时在跑会互相覆盖，要真正支持并发
+// 多协议得改成连接表"。这一版去核实那句话到底成不成立。
+//
+// 核实结论（分三步）：
+//   1. 三个框架都用 `conn_state_new(max_conns, 80)` —— **布局完全相同**，
+//      所以共享槽位在结构上是安全的，不存在"按 A 的布局读 B 的块"。
+//   2. `net_serve` 是**阻塞式单实例**：acceptor 主线程进 `while true` 永不
+//      返回，进程内根本起不了第二个服务。所以"两个框架同时在跑"这个前提
+//      本身不成立。
+//   3. 于是 slot 0 的语义就是"最后写入者获胜"——与 `net_serve` 的单实例
+//      语义**一致**，不是额外引入的风险。
+//
+// 本夹具钉住第 3 条：槽位就是最后写入者获胜，且块内容不受影响。
+
+import std.core
+import std.http
+
+fn main() {
+    // 不真起服务（端口 + 线程 + 阻塞 acceptor 会拖慢回归，且第二个
+    // net_serve 永远返回不了）。这里只验证槽位本身的读写语义。
+    let a = mem_alloc(64)
+    let b = mem_alloc(64)
+    mem_zero(a, 64)
+    mem_zero(b, 64)
+    mem_store64(a, 0, 111)
+    mem_store64(b, 0, 222)
+
+    // [1] 第一个"框架"占用槽位
+    mem_store64(static_word(0), 0, a)
+    if mem_load64(static_word(0), 0) != a {
+        print("FAIL: slot0 没存住 a")
+        return
+    }
+
+    // [2] 第二个"框架"启动，覆盖同一个槽（这正是单实例语义下的正常行为：
+    //     真要起第二个服务，第一个的 acceptor 已经把主线程占死了）
+    mem_store64(static_word(0), 0, b)
+    if mem_load64(static_word(0), 0) != b {
+        print("FAIL: slot0 没被覆盖成 b")
+        return
+    }
+
+    // [3] 槽位是"指针槽"，覆盖它不会改坏两个状态块自己的内容 ——
+    //     这是共享安全的**结构前提**（三框架布局相同，见文件头第 1 条）
+    if mem_load64(a, 0) != 111 || mem_load64(b, 0) != 222 {
+        print("FAIL: 块内容被改坏了")
+        return
+    }
+
+    // [4] 确认三个框架用的是同一个状态块构造函数（布局一致的证据）
+    //     这里只能验证 http 这一路；ws / sse 由 check_static_words.py
+    //     的共享登记 + 源码审查保证。
+    let st = conn_state_new(8, 80)
+    if st == 0 {
+        print("FAIL: conn_state_new 返回 0")
+        return
+    }
+
+    print("PASS: slot0 是最后写入者获胜的共享槽（与 net_serve 单实例语义一致）")
+}

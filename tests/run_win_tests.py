@@ -1352,6 +1352,11 @@ def main():
     case_static_word_oob()
     case_static_word_registry()
 
+    # v3.25：static_word(0) 的共享语义（http/ws/sse 共用回调通道）。
+    # 核实结论是"与 net_serve 单实例语义一致，不是额外风险"——
+    # 详见 tests/t176_slot0_share.qma 文件头。
+    case_selfcheck_to("slot0_share", "tests/t176_slot0_share.qma", 60)
+
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])
     case_selfcheck("prime_parallel", "examples/prime_parallel.qma")

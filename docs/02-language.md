@@ -903,7 +903,7 @@ fn make_adder(k: int) -> closure {          // 闭包逃逸：环境在堆上
 
 | 槽 | 使用者 |
 |---|---|
-| 0 | **共享回调通道**：`std/http` / `std/ws` / `std/sse` 三者共用（同一机制、同一槽，登记表里写作模块列表） |
+| 0 | **共享回调通道**：`std/http` / `std/ws` / `std/sse` 三者共用（同一机制、同一槽，登记表里写作模块列表）。三者都用 `conn_state_new(max_conns, 80)`，布局相同；而 `net_serve` 是阻塞式单实例（acceptor 永不返回），所以"最后写入者获胜"与既有语义一致 —— 见 `07-gaps.md` §4.2 |
 | 1 / 2 | `std/http`（解析失败码 / 路由中间件表） |
 | 6 | `std/gzip`（CRC-32 查表指针） |
 | 8 | `std/rand`（xorshift64* 状态） |
