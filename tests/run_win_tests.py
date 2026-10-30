@@ -288,6 +288,33 @@ def test_gzip_http_e2e():
             f"{r.stdout[-400:]}{r.stderr[-300:]}")
 
 
+def test_reactor_dualstack():
+    """reactor 双栈（v3.21）：同一端口同时接受 IPv4 与 IPv6。
+
+    改造前 reactor 用 `WSASocketW(2, ...)`（AF_INET）+ 16 字节 sockaddr_in，
+    只接 v4 —— 脚本对那种代码是红的（IPv6 连接被拒绝），所以这不是
+    "跑通就行"的用例。
+
+    端口占用记 SKIP（脚本返回 2），与 http_router / gzip 两段同口径。
+    """
+    if not IS_WIN:
+        skip("reactor 双栈：非 Windows 平台（IOCP 仅 PE）")
+        return
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/reactor_dualstack_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=300)
+    if r.returncode == 2:
+        skip("reactor 双栈：8092 已被占用，跳过")
+    elif r.returncode == 0 and "reactor_dualstack ok" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines()
+                if ln.startswith("reactor_dualstack ok")]
+        ok(f"reactor 双栈 E2E：{line[-1] if line else 'ok'}")
+    else:
+        bad(f"reactor 双栈 E2E 失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
 def test_log_streams():
     """std/log 的通道分流：stdout 只有 out-line*，stderr 只有 err-line。"""
     out = os.path.join(ROOT, "build", "win_log_streams.exe")
@@ -1311,9 +1338,10 @@ def main():
     print("== [10] 语言服务器（索引对拍 / 补全 / 跳转 / 重命名 / 协议） ==")
     test_lsp()
 
-    print("== [11] HTTP 端到端（路由 / 中间件 / chunked / gzip） ==")
+    print("== [11] HTTP 端到端（路由 / 中间件 / chunked / gzip / 双栈） ==")
     test_http_e2e()
     test_gzip_http_e2e()
+    test_reactor_dualstack()
 
     print("-" * 52)
     print(f"PASS={PASS} FAIL={FAIL} SKIP={SKIP}")

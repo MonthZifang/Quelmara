@@ -300,18 +300,37 @@ pub fn net_serve(port: int, backlog: int,
     }
     mem_store64(g, G_IOCP, iocp)
 
-    // 监听 socket：显式 WSA_FLAG_OVERLAPPED（accept 出来的连接继承可重叠性）
-    let s = _WSASocketW(2, 1, 0, 0, 0, 1)
+    // 监听 socket：**AF_INET6 双栈**（v3.21）。
+    //
+    // 原来是 `_WSASocketW(2, ...)`（AF_INET）+ 16 字节 sockaddr_in，只接 v4。
+    // 现在改成 AF_INET6（Windows 上是 **23**，不是 Linux 的 10）+ 28 字节
+    // sockaddr_in6 + `IPV6_V6ONLY=0`：同一个端口同时接 IPv6 与 IPv4
+    // （v4 连接在 accept 后表现为 `::ffff:a.b.c.d` 映射地址）。
+    //
+    // 为什么不开两个 socket（v4 + v6 各一个）：双栈 socket 就是 Win32 的
+    // 标准做法，两个 socket 要处理端口冲突（SO_REUSEADDR）与"哪个先 bind"，
+    // 而 IOCP 的完成键还要区分来源 —— 复杂度远高于收益。
+    //
+    // 显式 WSA_FLAG_OVERLAPPED（1）：accept 出来的连接继承可重叠性。
+    let s = _WSASocketW(23, 1, 0, 0, 0, 1)
     if _se32(s) == INVALID_SOCKET {
         _fail("WSASocketW")
     }
-    // sockaddr_in：w0 = family(2) | htons(port) << 16
-    let sinb = mem_alloc(16)
-    mem_zero(sinb, 16)
+    // IPV6_V6ONLY=0：Windows 默认是 1（只接 v6），不开双栈就接不到 v4。
+    // 级别 41 = IPPROTO_IPV6，选项 27 = IPV6_V6ONLY，DWORD 0。
+    let v6only = mem_alloc(4)
+    mem_store64(v6only, 0, 0)
+    if _se32(_setsockopt(s, 41, 27, v6only, 4)) == INVALID_SOCKET {
+        _fail("setsockopt(IPV6_V6ONLY)")
+    }
+    // sockaddr_in6（28B）：[0]=family(23)|htons(port)<<16、[1..3]=全零
+    //   → sin6_addr = ::（通配，双栈接所有接口），sin6_scope_id = 0
+    let sinb = mem_alloc(32)
+    mem_zero(sinb, 32)
     let lo = (port & 0xFF) << 8
     let hi = (port >> 8) & 0xFF
-    mem_store64(sinb, 0, ((lo | hi) << 16) | 2)
-    if _se32(_bind(s, sinb, 16)) == INVALID_SOCKET {
+    mem_store64(sinb, 0, ((lo | hi) << 16) | 23)
+    if _se32(_bind(s, sinb, 28)) == INVALID_SOCKET {
         _fail("bind")
     }
     if _se32(_listen(s, backlog)) == INVALID_SOCKET {
