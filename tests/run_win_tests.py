@@ -1434,6 +1434,10 @@ def main():
     case_selfcheck_to("ws_sse", "tests/t177_ws_sse.qma", 60)
     case_std_import()
 
+    # v3.30：归纳变量化简（i*7%13 -> r+=7/cssub）是**重排型**变换，
+    # 错了会静默算错。用 Python 现算的已知答案钉住它。
+    case_selfcheck_to("phi_copy", "tests/t178_phi_copy.qma", 120)
+
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])
     case_selfcheck("prime_parallel", "examples/prime_parallel.qma")
