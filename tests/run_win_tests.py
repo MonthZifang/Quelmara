@@ -208,6 +208,26 @@ def case_selfcheck_to(name, src, seconds):
         else bad(f"{name} 失败 rc={rc} stderr={stderr[-200:]!r}")
 
 
+def case_std_import():
+    """每个 std 模块都能被单独 import 且都有 pub 导出（v3.26）。
+
+    跑 tools/dev/check_std_import.py：逐个模块生成只 import 它的空程序
+    编译一次，再检查"有顶层函数却一个 pub 都没有"。
+    后者最隐蔽 —— 模块能编译、文档里也标着可用，但外部一个函数都调不到。
+    """
+    script = os.path.join(ROOT, "tools", "dev", "check_std_import.py")
+    if not os.path.exists(script):
+        skip("check_std_import.py 不存在，跳过")
+        return
+    r = subprocess.run([sys.executable, script], cwd=ROOT,
+                       capture_output=True, text=True, timeout=600)
+    if r.returncode == 0:
+        ok("std 模块全部可 import 且有 pub 导出")
+    else:
+        tail = (r.stdout or r.stderr).strip().splitlines()[-8:]
+        bad("std 模块可用性检查失败：" + " | ".join(tail))
+
+
 def case_static_word_oob():
     """static_word 越界必须是**编译期**错误（v3.23）。
 
@@ -1356,6 +1376,12 @@ def main():
     # 核实结论是"与 net_serve 单实例语义一致，不是额外风险"——
     # 详见 tests/t176_slot0_share.qma 文件头。
     case_selfcheck_to("slot0_share", "tests/t176_slot0_share.qma", 60)
+
+    # v3.26：ws / sse 从"外部一个函数都调不到"到真正可用。
+    # 这两个模块此前所有函数都没有 pub，std/ws 还用了关键字 `rc` 作变量名，
+    # 整个模块连解析都过不去（v2.01 审计记过，一直挂着）。
+    case_selfcheck_to("ws_sse", "tests/t177_ws_sse.qma", 60)
+    case_std_import()
 
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])

@@ -138,5 +138,10 @@
   辅助函数三层间接），按槽位归组后判越界 / 抢槽 / 登记表双向一致。
   **改槽位必须同时改 `REGISTRY` 与源码**，只改一边会被打回。
   已挂进 `tests/run_win_tests.py`（`case_static_word_registry`）。
+- **`tools/dev/check_std_import.py`** —— 每个 `std` 模块能否被单独
+  `import` 并构建，且**有顶层函数就必须至少有一个 `pub`**。
+  第二条是 v3.26 加的：`std/ws` / `std/sse` 曾经"能编译但全私有"，
+  文档里标着可用、外部一个函数也调不到。**能编译 ≠ 能用**。
+  已挂进 `run_win_tests.py`（`case_std_import`）。
 - **`gen_stdlib_doc.py --check`** / **`check_names.py`** / **`check_origin.py`**
   —— 标准库文档、命名、来源标注。

@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-70 个模块，**584 个公开函数**（另有 597 个内部函数）
+70 个模块，**635 个公开函数**（另有 546 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -18,14 +18,14 @@
 | `std/blake2b` | BLAKE2b（RFC 7693）密码学哈希 + keyed / 变长输出 | 4 / 10 |
 | `std/cli` | 命令行 flag 解析（--k=v / --k v / -k v） | 6 / 9 |
 | `std/cookie` | Cookie 头解析与 Set-Cookie 生成（取值 / 百分号编解码 / Max-Age / SameSite / HttpOnly / Secure） | 6 / 9 |
-| `std/core` | 标量小工具 | 0 / 4 |
+| `std/core` | 标量小工具 | 4 / 4 |
 | `std/crc64` | CRC-64/XZ（ECMA-182 反射多项式，xz/zlib 容器的 64 位校验） | 2 / 3 |
 | `std/csv` | CSV 解析与生成（RFC 4180：引号包裹 / "" 转义 / 字段内换行 / CRLF 或 LF） | 4 / 6 |
 | `std/deque` | 双端队列（两端 O(1) + 自动扩容） | 13 / 21 |
 | `std/ds` | 环形缓冲与二叉最小堆 | 13 / 13 |
 | `std/f64` | 十进制文本 ↔ f64（严格十进制解析 + Clinger 快路径，非十进制 fail-fast） | 3 / 16 |
 | `std/fs` | 文件读写（open/read/write/seek/size/sync/close/rename；Windows PE，@ffi 直调 kernel32） | 11 / 20 |
-| `std/gen` | 泛型算法库（min/max/clamp/dist/contains/index_of/reverse，调用点推导单态化） | 0 / 9 |
+| `std/gen` | 泛型算法库（min/max/clamp/dist/contains/index_of/reverse，调用点推导单态化） | 9 / 9 |
 | `std/gzip` | DEFLATE 编码 + gzip 包装 + CRC-32；v1.19 起含 inflate 解码 | 6 / 33 |
 | `std/hash` | FNV-1a 32/64 非密码学哈希（缓存键 / 分片） | 4 / 4 |
 | `std/hex` | 十六进制编解码 | 4 / 5 |
@@ -60,18 +60,18 @@
 | `std/regex` | 正则引擎（回溯 VM）：字面/./字符类/转义类/量词 *+?{n,m}/交替/分组(?:)/锚点 ^$；compile+match/full/exec/find/replace[_all]，步数上限防病态回溯 | 7 / 24 |
 | `std/router` | 路径模板匹配（/users/:id、尾部 * 通配、query/尾斜杠归一化、方法白名单） | 11 / 14 |
 | `std/rsa` | RSA PKCS#1 v1.5 / PSS 验签（SHA-256，证书链与 TLS 用） | 3 / 14 |
-| `std/serialize` | LEB128 varint / 定长整数 / 长度前缀帧 | 0 / 10 |
+| `std/serialize` | LEB128 varint / 定长整数 / 长度前缀帧 | 10 / 10 |
 | `std/session` | 内存会话存储（sid 生成 / TTL 惰性过期 / 滑动续期 / 墓碑销毁） | 8 / 9 |
 | `std/set` | 集合 set[int] / set[str]（map 支撑，含交并差） | 14 / 17 |
-| `std/sha1` | SHA-1 | 1 / 5 |
+| `std/sha1` | SHA-1 | 2 / 5 |
 | `std/sha256` | SHA-256 + HMAC-SHA256 | 4 / 13 |
 | `std/sha512` | SHA-512 / SHA-384（变体 IV 复用压缩函数）+ HMAC-SHA512 | 6 / 12 |
 | `std/sort` | 快速排序与有序性检查 | 2 / 5 |
-| `std/sse` | Server-Sent Events 服务端 | 0 / 20 |
+| `std/sse` | Server-Sent Events 服务端 | 14 / 20 |
 | `std/staticfile` | 静态文件服务的安全解析层（URL 解码 / 目录穿越防护 / index 补全 / Cache-Control / ETag / Range 解析） | 9 / 14 |
 | `std/str` | 字符串工具集 | 26 / 30 |
 | `std/sync` | 自旋锁 / Treiber 无锁栈 / WaitGroup（零 @ffi，park 由调用方注入） | 13 / 15 |
-| `std/time` | 时间便捷层 | 0 / 2 |
+| `std/time` | 时间便捷层 | 2 / 2 |
 | `std/timer` | 轮询式定时器（mem 块上的二叉最小堆；无后台线程 / 无回调，主循环 poll） | 5 / 9 |
 | `std/tls13` | TLS 1.3 密钥调度（HKDF-Expand-Label）+ AEAD 记录层 | 23 / 29 |
 | `std/tls_client` | TLS 1.3 客户端握手核心 + 证书链入口（RFC 8448 逐字节） | 7 / 13 |
@@ -79,7 +79,7 @@
 | `std/url` | URL 解析 / query 取值 / 编码解码 | 12 / 19 |
 | `std/utf8` | UTF-8 解码/编码/严格校验（RFC 3629） | 7 / 8 |
 | `std/uuid` | UUID v4 生成 + nil + 校验/版本/变体位（随机源为 std/rand，非密码学） | 5 / 9 |
-| `std/ws` | WebSocket 服务端（RFC 6455） | 0 / 24 |
+| `std/ws` | WebSocket 服务端（RFC 6455） | 11 / 24 |
 | `std/x25519` | Curve25519 上的 X25519 密钥交换（RFC 7748，TLS ECDHE 地基） | 3 / 21 |
 | `std/x509` | X.509 解析 + P-256 验签 + 证书链/有效期/域名校验 | 19 / 42 |
 | `std/x509roots` | 内置 TLS 根证书库（12 个主流根 + 按 DN 配锚 + 一键验证到表内锚；v2.97） | 6 / 7 |
@@ -243,8 +243,14 @@ fn cookie_set(name: str, value: str, path: str, max_age: int, attrs: str) -> str
 标量小工具
 
 ```quelmara
-// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
-// 编译失败（见 07-gaps.md §7.13）
+/// 整数绝对值。`abs(INT64_MIN)` 溢出未定义（取负仍是它自己）。
+fn abs(x: int) -> int
+/// 两个整数的较大者。
+fn max2(a: int, b: int) -> int
+/// 两个整数的较小者。
+fn min2(a: int, b: int) -> int
+/// `x << k`：乘 2 的 k 次幂。k 为负或 ≥64 时行为未定义。
+fn pow2k(x: int, k: int) -> int
 ```
 
 ### `std/crc64.qma`
@@ -404,8 +410,24 @@ fn fs_write_all(path: str, data: str) -> int
 泛型算法库（min/max/clamp/dist/contains/index_of/reverse，调用点推导单态化）
 
 ```quelmara
-// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
-// 编译失败（见 07-gaps.md §7.13）
+/// 两个值的较小者。约束 [T: Ord]（整数 / 浮点）。
+fn gen_min[T: Ord](a: T, b: T) -> T
+/// 两个值的较大者。约束 [T: Ord]（整数 / 浮点）。
+fn gen_max[T: Ord](a: T, b: T) -> T
+/// 把 v 夹到 [lo, hi]：小于 lo 取 lo，大于 hi 取 hi。
+fn gen_clamp[T: Ord](v: T, lo: T, hi: T) -> T
+/// |a - b|：数值型通用（int / float）
+fn gen_dist[T: Num + Ord](a: T, b: T) -> T
+/// vec[T] 算法族：T 从 vec 元素类型一元化推出
+fn gen_first[T](xs: vec[T]) -> T
+/// 最后一个元素。空 vec 行为未定义（调用方保证非空）。
+fn gen_last[T](xs: vec[T]) -> T
+/// 线性查找：xs 里是否有 v。O(n)，用 == 比较。
+fn gen_contains[T: Eq](xs: vec[T], v: T) -> bool
+/// 线性查找：返回 v 首次出现的下标，找不到返回 -1。
+fn gen_index_of[T: Eq](xs: vec[T], v: T) -> int
+/// 原地反转：两端向中间交换（vec.set 写入）
+fn gen_reverse[T](xs: vec[T])
 ```
 
 ### `std/gzip.qma`
@@ -1512,8 +1534,29 @@ fn rsa_verify_pss_sha256(n: str, e: int, sig: str, hash: str, salt_len: int) -> 
 LEB128 varint / 定长整数 / 长度前缀帧
 
 ```quelmara
-// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
-// 编译失败（见 07-gaps.md §7.13）
+/// varint_put(v) -> str：无符号 64 位 LEB128（每字节 7 位有效 + 续位标志）
+fn varint_put(v: int) -> str
+/// varint_get(buf: str, off: int) -> int：从 off 读 varint，
+/// 返回 (值 << 32) | 新偏移——高 32 位是值、低 32 是偏移。
+/// 解析越过串尾返回 (0 << 32) | -1（调用方查低 32 == 0xFFFFFFFF 判失败）。
+fn varint_get(buf: str, off: int) -> int
+/// put_u16le / put_u32le / put_u64le：小端定长写入（返回写入后偏移）
+fn put_u16le(w: int, off: int, v: int) -> int
+/// 小端写 32 位无符号到 w+off，返回写入后的偏移（off + 4）。
+fn put_u32le(w: int, off: int, v: int) -> int
+/// 小端写 64 位无符号到 w+off，返回写入后的偏移（off + 8）。
+fn put_u64le(w: int, off: int, v: int) -> int
+/// get_u16le / get_u32le / get_u64le：小端定长读取
+fn get_u16le(buf: int, off: int) -> int
+/// 小端读 32 位无符号（越界不检查，调用方保证）。
+fn get_u32le(buf: int, off: int) -> int
+/// 小端读 64 位无符号（越界不检查，调用方保证）。
+fn get_u64le(buf: int, off: int) -> int
+/// frame_put(payload) -> str：长度前缀帧（4 字节 LE 长度 + 内容）
+fn frame_put(payload: str) -> str
+/// frame_get(buf: str, off: int) -> str：从 off 解出一帧内容。
+/// 无完整帧返回空串。
+fn frame_get(buf: str, off: int) -> str
 ```
 
 ### `std/session.qma`
@@ -1580,6 +1623,13 @@ fn sset_len(s: map[str]int) -> int
 SHA-1
 
 ```quelmara
+/// sha1_str(s) -> int：返回 20 字节摘要缓冲区指针（大端序，含 0 字节，
+/// 不能当 str 用；要字符串请走 sha1_hex / b64_encode）
+/// v3.26：加 `pub` —— `std/ws` 的握手要的是**原始摘要**
+/// （`b64_encode(dig, 20)`），`sha1_hex` 只给 40 位十六进制，拿不到字节。
+/// 此前 `ws` 直接调了这个非 pub 函数，导致整个模块**连解析都过不去**
+/// （v2.01 审计记过，一直挂着没修）。
+fn sha1_str(s: str) -> int
 /// 对 str 的 UTF-8 字节算 SHA-1，返回 40 位小写十六进制（WebSocket 握手用）。
 /// 按字节计算，不做任何归一；空串有定义（da39a3ee…）。
 fn sha1_hex(s: str) -> str
@@ -1639,8 +1689,37 @@ fn is_sorted(v: vec[int]) -> int
 Server-Sent Events 服务端
 
 ```quelmara
-// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
-// 编译失败（见 07-gaps.md §7.13）
+/// 启动 SSE 服务（连接上限取 `SSE_DEFAULT_CONNS`）。
+/// 阻塞：acceptor 占住调用线程直到进程退出，一个进程只能起一个服务。
+/// `on_sub` 是订阅回调（`fn(fd: int) -> int`），返回 0 表示断开该连接。
+fn sse_serve(port: int, backlog: int, on_sub: int) -> int
+/// 同 `sse_serve`，但显式指定连接上限。
+fn sse_serve_max(port: int, backlog: int, on_sub: int, max_conns: int) -> int
+/// 累计 accept 的连接数（起服务前调用返回 0，不会崩）。
+fn sse_accepted() -> int
+/// 累计关闭的连接数。
+fn sse_closed() -> int
+/// 累计订阅数（每个 SSE 连接算一次订阅）。
+fn sse_subs() -> int
+/// 累计发出的字节数（事件流总字节）。
+fn sse_events_out() -> int
+/// 完整事件：event 字段 + data（多行拆分）+ 可选 id，空行收尾。
+fn sse_event_ext(fd: int, event: str, data: str, id: str) -> int
+/// 发一个带事件名的消息（浏览器 addEventListener(event) 收到）。
+fn sse_event(fd: int, event: str, data: str) -> int
+/// 纯 data 事件（浏览器 e.data）
+fn sse_data(fd: int, data: str) -> int
+/// 带事件 id（浏览器断线重连会带 Last-Event-ID）
+fn sse_event_id(fd: int, event: str, data: str, id: str) -> int
+/// 重连间隔（毫秒）。建流后先发一次，浏览器据此重连。
+fn sse_retry(fd: int, ms: int) -> int
+/// 心跳注释行：不产生事件，但让中间代理不掐空闲连接
+fn sse_comment(fd: int, text: str) -> int
+/// 向**所有**活跃订阅者广播带事件名与 id 的消息。
+/// O(活跃连接数)：遍历槽位层逐个 send，没有额外索引。
+fn sse_broadcast_ext(event: str, data: str, id: str) -> int
+/// 向所有活跃订阅者广播（不带 id）。
+fn sse_broadcast(event: str, data: str) -> int
 ```
 
 ### `std/staticfile.qma`
@@ -1818,8 +1897,10 @@ fn wg_wait(w: int)
 时间便捷层
 
 ```quelmara
-// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
-// 编译失败（见 07-gaps.md §7.13）
+/// now_ms()：启动无关的单调毫秒（延迟测量粗粒度用）
+fn now_ms() -> int
+/// time_ms(s) -> str：把毫秒数格式化成 "123ms" 字符串（日志/报表用）
+fn ms_str(ms: int) -> str
 ```
 
 ### `std/timer.qma`
@@ -2013,8 +2094,30 @@ fn uuid_variant_ok(s: str) -> bool
 WebSocket 服务端（RFC 6455）
 
 ```quelmara
-// 本模块的顶层函数都未 pub 导出：可以 import，但用户代码引用会
-// 编译失败（见 07-gaps.md §7.13）
+/// 启动 WebSocket 服务（连接上限取 `WS_DEFAULT_CONNS`）。
+/// 阻塞：acceptor 占住调用线程直到进程退出，所以一个进程只能起一个服务。
+/// 回调按 `fn(fd: int) -> int` 传函数指针，返回 0 表示断开该连接。
+fn ws_serve(port: int, backlog: int, on_open: int, on_message: int, on_close: int) -> int
+/// 同 `ws_serve`，但显式指定连接上限（槽位按此预分配，超出直接拒绝）。
+fn ws_serve_max(port: int, backlog: int, on_open: int, on_message: int, on_close: int, max_conns: int) -> int
+/// 累计 accept 的连接数（起服务前调用返回 0，不会崩）。
+fn ws_accepted() -> int
+/// 累计关闭的连接数。
+fn ws_closed() -> int
+/// 累计收到的完整消息数（一帧一条，分片已合并）。
+fn ws_msgs() -> int
+/// 累计收到的字节数（含握手与帧头）。
+fn ws_bytes_in() -> int
+/// 累计发出的字节数（含握手与帧头）。
+fn ws_bytes_out() -> int
+/// 发一条文本帧（opcode 0x1）。返回实际发出的字节数。
+fn ws_send(fd: int, data: str) -> int
+/// 发一条二进制帧（opcode 0x2）。
+fn ws_send_bin(fd: int, data: str) -> int
+/// 发 ping 帧（opcode 0x9）；对端应回 pong，由 `_frames` 自动处理。
+fn ws_ping(fd: int, data: str) -> int
+/// 主动关闭：发 close 帧（对端回 close 后 reactor 收尾调 on_close）
+fn ws_close(fd: int, code: int) -> int
 ```
 
 ### `std/x25519.qma`

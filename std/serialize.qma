@@ -3,8 +3,8 @@
 // 纯 Quelmara（str_alloc/mem 原语），O(n) 单遍。
 // ---------------------------------------------------------------------------
 
-// varint_put(v) -> str：无符号 64 位 LEB128（每字节 7 位有效 + 续位标志）
-fn varint_put(v: int) -> str {
+/// varint_put(v) -> str：无符号 64 位 LEB128（每字节 7 位有效 + 续位标志）
+pub fn varint_put(v: int) -> str {
     // 最坏 10 字节
     let s = str_alloc(10)
     let w = mem_ptr(s, 0)
@@ -22,10 +22,10 @@ fn varint_put(v: int) -> str {
     return s
 }
 
-// varint_get(buf: str, off: int) -> int：从 off 读 varint，
-// 返回 (值 << 32) | 新偏移——高 32 位是值、低 32 是偏移。
-// 解析越过串尾返回 (0 << 32) | -1（调用方查低 32 == 0xFFFFFFFF 判失败）。
-fn varint_get(buf: str, off: int) -> int {
+/// varint_get(buf: str, off: int) -> int：从 off 读 varint，
+/// 返回 (值 << 32) | 新偏移——高 32 位是值、低 32 是偏移。
+/// 解析越过串尾返回 (0 << 32) | -1（调用方查低 32 == 0xFFFFFFFF 判失败）。
+pub fn varint_get(buf: str, off: int) -> int {
     let n = len(buf)
     let mut x = 0
     let mut shift = 0
@@ -45,14 +45,15 @@ fn varint_get(buf: str, off: int) -> int {
     return (0 << 32) | 0xFFFFFFFF
 }
 
-// put_u16le / put_u32le / put_u64le：小端定长写入（返回写入后偏移）
-fn put_u16le(w: int, off: int, v: int) -> int {
+/// put_u16le / put_u32le / put_u64le：小端定长写入（返回写入后偏移）
+pub fn put_u16le(w: int, off: int, v: int) -> int {
     mem_store8(w, off, v & 0xFF)
     mem_store8(w, off + 1, (v >> 8) & 0xFF)
     return off + 2
 }
 
-fn put_u32le(w: int, off: int, v: int) -> int {
+/// 小端写 32 位无符号到 w+off，返回写入后的偏移（off + 4）。
+pub fn put_u32le(w: int, off: int, v: int) -> int {
     mem_store8(w, off, v & 0xFF)
     mem_store8(w, off + 1, (v >> 8) & 0xFF)
     mem_store8(w, off + 2, (v >> 16) & 0xFF)
@@ -60,7 +61,8 @@ fn put_u32le(w: int, off: int, v: int) -> int {
     return off + 4
 }
 
-fn put_u64le(w: int, off: int, v: int) -> int {
+/// 小端写 64 位无符号到 w+off，返回写入后的偏移（off + 8）。
+pub fn put_u64le(w: int, off: int, v: int) -> int {
     let mut i = 0
     while i < 8 {
         mem_store8(w, off + i, (v >> (i * 8)) & 0xFF)
@@ -69,16 +71,18 @@ fn put_u64le(w: int, off: int, v: int) -> int {
     return off + 8
 }
 
-// get_u16le / get_u32le / get_u64le：小端定长读取
-fn get_u16le(buf: int, off: int) -> int {
+/// get_u16le / get_u32le / get_u64le：小端定长读取
+pub fn get_u16le(buf: int, off: int) -> int {
     return mem_load8(buf, off) | (mem_load8(buf, off + 1) << 8)
 }
 
-fn get_u32le(buf: int, off: int) -> int {
+/// 小端读 32 位无符号（越界不检查，调用方保证）。
+pub fn get_u32le(buf: int, off: int) -> int {
     return mem_load8(buf, off) | (mem_load8(buf, off + 1) << 8) | (mem_load8(buf, off + 2) << 16) | (mem_load8(buf, off + 3) << 24)
 }
 
-fn get_u64le(buf: int, off: int) -> int {
+/// 小端读 64 位无符号（越界不检查，调用方保证）。
+pub fn get_u64le(buf: int, off: int) -> int {
     let mut x = 0
     let mut i = 7
     while i >= 0 {
@@ -88,8 +92,8 @@ fn get_u64le(buf: int, off: int) -> int {
     return x
 }
 
-// frame_put(payload) -> str：长度前缀帧（4 字节 LE 长度 + 内容）
-fn frame_put(payload: str) -> str {
+/// frame_put(payload) -> str：长度前缀帧（4 字节 LE 长度 + 内容）
+pub fn frame_put(payload: str) -> str {
     let n = len(payload)
     let s = str_alloc(n + 4)
     let w = mem_ptr(s, 0)
@@ -98,9 +102,9 @@ fn frame_put(payload: str) -> str {
     return s
 }
 
-// frame_get(buf: str, off: int) -> str：从 off 解出一帧内容。
-// 无完整帧返回空串。
-fn frame_get(buf: str, off: int) -> str {
+/// frame_get(buf: str, off: int) -> str：从 off 解出一帧内容。
+/// 无完整帧返回空串。
+pub fn frame_get(buf: str, off: int) -> str {
     let n = len(buf)
     if off + 4 > n {
         return ""

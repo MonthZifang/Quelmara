@@ -1,21 +1,25 @@
 // std/core.qma —— 标准库雏形：整数与通用工具
 // 扁平合并语义：import std.core 后这些函数直接可见（无命名空间前缀）。
 
-fn abs(x: int) -> int {
+/// 整数绝对值。`abs(INT64_MIN)` 溢出未定义（取负仍是它自己）。
+pub fn abs(x: int) -> int {
     if x < 0 { return -x }
     return x
 }
 
-fn max2(a: int, b: int) -> int {
+/// 两个整数的较大者。
+pub fn max2(a: int, b: int) -> int {
     if a > b { return a }
     return b
 }
 
-fn min2(a: int, b: int) -> int {
+/// 两个整数的较小者。
+pub fn min2(a: int, b: int) -> int {
     if a < b { return a }
     return b
 }
 
-fn pow2k(x: int, k: int) -> int {
+/// `x << k`：乘 2 的 k 次幂。k 为负或 ≥64 时行为未定义。
+pub fn pow2k(x: int, k: int) -> int {
     return x << k
 }
