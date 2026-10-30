@@ -1,0 +1,69 @@
+// t173_udp6.qma —— UDP over IPv6（v3.20）
+//
+// 验证 4 件事：
+//   [1] udp_open6 能建出 AF_INET6 数据报套接字
+//   [2] ::1 回环收发（发一个数据报，收回来内容一致）
+//   [3] 地址非法时 udp_send6 返回 -1（不是崩溃）
+//   [4] udp_recv6_to 超时返回空串（不永久阻塞）
+//
+// 边界：仅 x86_64（与 std/net/udp 同口径）。
+module t173
+
+import std.net
+import std.net.udp6
+
+const PORT6 = 18120
+
+fn echo6(fd: int, n: int) -> int {
+    let mut got = 0
+    while got < n {
+        let s = udp_recv6_to(fd, 512, 3000)
+        if len(s) == 0 {
+            break
+        }
+        // 原样发回去
+        let r = udp_send6(fd, "::1", PORT6, s)
+        if r <= 0 {
+            break
+        }
+        got = got + 1
+    }
+    return got
+}
+
+fn main() {
+    // ---- [1] 建 socket ----
+    let fd = udp_open6()
+    assert(fd >= 0, "[1] udp_open6 必须成功")
+
+    // 绑端口：**必须用 udp_bind6**（16 字节的 sockaddr_in 绑到 AF_INET6 会被内核判错）
+    let rb = udp_bind6(fd, PORT6)
+    assert(rb == 0, "[1] udp_bind 必须成功")
+
+    // ---- [2] ::1 回环收发 ----
+    let h = spawn echo6(fd, 1)
+    sleep_ms(100)
+    let sent = udp_send6(fd, "::1", PORT6, "hello-udp6")
+    assert(sent == 10, "[2] 必须发满 10 字节")
+    join(h)
+
+    // 自己收自己（echo6 已把数据发回 PORT6）
+    let back = udp_recv6_to(fd, 512, 2000)
+    assert(back == "hello-udp6", "[2] 回环内容必须一致")
+
+    // ---- [3] 非法地址返回 -1 ----
+    let bad = udp_send6(fd, "not-an-ip", PORT6, "x")
+    assert(bad == 0 - 1, "[3] 非法地址必须返回 -1")
+
+    // ---- [4] 超时返回空串 ----
+    let t0 = now_ns()
+    let empty = udp_recv6_to(fd, 512, 100)
+    let t1 = now_ns()
+    assert(len(empty) == 0, "[4] 超时必须返回空串")
+    let ms = (t1 - t0) / 1000000
+    assert(ms >= 80, "[4] 确实等了约 100 ms")
+    assert(ms < 3000, "[4] 不该永久阻塞")
+
+    tcp_close(fd)
+    print("udp6 ok")
+}

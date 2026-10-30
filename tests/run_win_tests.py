@@ -1261,6 +1261,10 @@ def main():
     print("== [3k] TCP 批量收发与两端超时（v3.06–v3.10） ==")
     test_tcp_batch()
 
+    # v3.20：UDP over IPv6（回环收发 / 非法地址 / 超时）。
+    # 放在 [3k] 之后：同属网络栈，端口 18120 与 TCP 那批（18073–18097）不冲突。
+    case_selfcheck_to("udp6", "tests/t173_udp6.qma", 60)
+
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])
     case_selfcheck("prime_parallel", "examples/prime_parallel.qma")

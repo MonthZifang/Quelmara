@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-69 个模块，**580 个公开函数**（另有 597 个内部函数）
+70 个模块，**584 个公开函数**（另有 597 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -50,6 +50,7 @@
 | `std/net/dns` | 自研 DNS 解析器（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf） | 8 / 9 |
 | `std/net/reactor` | 高并发 reactor：IOCP 事件循环（Quelmara 实现，仅 Windows PE） | 2 / 22 |
 | `std/net/udp` | UDP 封装与地址解析 | 2 / 3 |
+| `std/net/udp6` | UDP over IPv6：文本地址转换 + 便捷发送（udp_open6/udp_bind6 内建） | 4 / 4 |
 | `std/p256` | NIST P-256 域运算 + ECDSA 验签（TLS 证书签名） | 2 / 45 |
 | `std/p384` | NIST P-384（secp384r1）ECDSA 验签（12 limb Montgomery + Jacobian，SHA-384 摘要；v2.99） | 2 / 47 |
 | `std/park` | 线程 park 原语：WaitOnAddress / WakeByAddress（仅 Windows PE；由 std/sync 注入使用） | 4 / 7 |
@@ -1312,6 +1313,23 @@ fn udp_parse_ip(ip: str) -> int
 /// udp_send_str(fd, ip, port, data) -> int：字符串地址便捷层
 /// （解析失败返回 -1）
 fn udp_send_str(fd: int, ip: str, port: int, data: str) -> int
+```
+
+### `std/net/udp6.qma`
+
+UDP over IPv6：文本地址转换 + 便捷发送（udp_open6/udp_bind6 内建）
+
+```quelmara
+/// 把点分/冒号形式的 IPv6 文本发到 (addr, port)。
+/// 返回发送字节数；地址非法返回 -1。
+fn udp_send6(fd: int, addr: str, port: int, data: str) -> int
+/// 收一个数据报（源地址丢弃，与 v4 同口径）。
+fn udp_recv6(fd: int, cap: int) -> str
+/// 收一个数据报，最多等 ms 毫秒；超时返回空串（与 v4 的 `*_to` 同口径）。
+fn udp_recv6_to(fd: int, cap: int, ms: int) -> str
+/// 便捷：建 socket + 发一个数据报 + 关掉。
+/// 适合"发一条 DNS 查询"这类一次性场景。
+fn udp_once6(addr: str, port: int, data: str) -> int
 ```
 
 ### `std/p256.qma`
