@@ -143,7 +143,8 @@
 | **gzip lazy matching** | 压缩率 -3~8%（时间 +20~30%） | 若要更好压缩率再做；与上面的提速是两个目标，别混 |
 | **int 点积加宽（4 通道 / 32 位元素）** | v1.85 的 int 点积是 2 通道 + 3×`pmuludq`，4 拍/2 元素打满 port 0。32 位元素可走单条 `pmulld`（2 元素/条），AVX2 4 通道可望再快 2× | ① 本机（Haswell-EP）**无 AVX2**，要先写 Python mini-emulator 验语义；② AVX2 也没有 `vpmullq`（64 位乘要 AVX-512DQ），4 通道只对 32 位元素成立；③ 32 位元素要求槽压缩——`[N]i32` 现在也是 8 字节槽，见下一条 |
 | ~~chan 抢锁先自旋~~ | ❌ **已验证无收益**（v1.98）：双线程往返与 4 生产者争用两个场景，自旋版与让出版的中位数差异都落在噪声里（区间大幅重叠） | 自旋只对"持锁者一定在跑"成立；本机核数少于生产者数时这个前提不成立，收益被"抢到锁的概率"抵消。结论：**测不出好处就不留这份复杂度**，保留"抢不到就让出"；想同时要低延迟与低 CPU 只能上 futex/WaitOnAddress（见下条）。数字见 `06-status.md` §3.5c |
-| **futex / WaitOnAddress park** | `wg_wait`/`mutex_lock` 的唤醒延迟从 25 ms 降到 µs 级，CPU 仍然归零 | Linux 要发 `futex(FUTEX_WAIT/WAKE)`（syscall 202，参数 6 个、含超时结构）；Windows 的 `WaitOnAddress`/`WakeByAddressAll` 在 KernelBase 而非 kernel32，PE 导入表要加第二个 DLL；还要处理"唤醒丢失"（park 前重查谓词）。数字见 `06-status.md` §3.5b |
+| **futex / WaitOnAddress park** | `wg_wait`/`mutex_lock` 的唤醒延迟从 25 ms 降到 µs 级，CPU 仍然归零 | Linux 要发 `futex(FUTEX_WAIT/WAKE)`（syscall 202，参数 6 个、含超时结构）；Windows 的 `WaitOnAddress`/`WakeByAddressAll` 在 KernelBase 而非 kernel32，PE 导入表要加第二个 DLL；还要处理"唤醒丢失"（park 前重查谓词）。数字见 `06-status.md` §3.5b。**v3.14 前提已就绪**：`bench/wg_bench.qma` 之前跑不完（见下一行），现在能跑出真实基线（退避 202 ms / 0% CPU），可以直接对比 |
+| ~~自旋等待被 LICM 外提 load~~ | ✅ **v3.14 已修**：`while mem_load64(w,0) != 0 { spin_hint() }` 被编成**死循环** —— `opt_licm` 的 `readonly` 判据是"循环里没有 call/store"，而 `spin_hint()` 发射的 `('pause',)` 读写集都空，于是自旋循环被判成纯读、`load` 被外提到循环外。修复：判据加上 `pause`/`yield`/`rdtsc`（"等别的线程"的指令）。夹具 `tests/t169_spin_wait.qma`（对旧代码 15 s 不退出）已进主回归。见 `06-status.md` §3.5b、`versions/v3.14/CHANGELOG.md` | **这条判据从原理上就是错的**：自旋等待的正确性恰恰来自**别的线程**写同一块内存，循环体自己不写。教训：`check_suspicious_loops` 早就在报 `guard variable never updated in body`，但它是 `warning:`、从不影响退出码，于是被当成背景噪音 —— **一条从不影响退出码的告警迟早等于不存在**。没有改成硬失败（要先把现存告警清干净），但下次看到这条警告先怀疑编译器 |
 | **vec 窄元素槽压缩**（**已降级**） | 理论收益是 `vec[u8]` 内存 8×，但 v2.02 全库盘点：`std/` 里 `vec[u8]`/`u16`/`u32` 只有 **3 处**，`vec[int]` 339 处、`vec[str]` 42 处——**真实代码吃不到收益** | 运行时按 `ew` 字寻址（`ln*ew*8`），压缩要改成字节寻址 + 符号扩展加载，push/get/set/pop/foreach/grow + A64 + C 后端全动。除非将来出现字节缓冲密集的库（图像 / 编解码），否则不做 |
 
 > 性能实验两条铁律（两次回滚换来的）：
@@ -1237,6 +1238,34 @@ Segmentation fault (exit 139)
 
 **根因仍未定位**（本机没有 cdb/WinDbg）。判据：把 `_die` 换回 `exit`，
 `tests/qlmc_test.py` 不会红，但手工编一个语法错的文件就会看到 139。
+
+### 7.35 已修（v3.14）：自旋等待被 LICM 编成死循环
+
+**现象**：任何 `while mem_load64(p, 0) != 0 { spin_hint() }` 形状的循环都挂死。
+最小复现 10 s 不退出；`bench/wg_bench.qma` 的纯自旋对照组 300 s 不退出。
+
+**根因**：`opt_licm` 允许对"纯读循环"外提 `load`，而 `readonly` 的判据是
+"循环里没有 call / store / atomic"。`spin_hint()` 发射的是 `('pause',)`，
+`vreg_mentions` 里它的读写集都是空 —— 于是自旋循环被判成纯读循环，
+`load` 被提到循环头之前，循环里每轮比较的都是同一个旧值。
+
+**这条判据从原理上就是错的**：自旋等待的正确性恰恰来自**别的线程**在写同一块
+内存，循环体自己当然不写。"循环体有没有写"不是"这块内存会不会变"的依据。
+
+**修复**：`readonly` 的排除集加上"等别的线程"的指令（`pause` / `yield` /
+`rdtsc`）。没有采用更激进的"循环里有 load 就不外提"——那会把 v2.60 起的收益
+全吐回去（`a[i]` 的句柄/长度 load 外提是 b4_array / b7_sort 的大头）。
+紧循环里没有 pause/yield/系统调用，单线程内确实不可能有人改那块内存。
+
+**证据链**：`tests/t169_spin_wait.qma` 对修复前的代码 15 s 不退出、修复后
+`spin wait ok`；`bench/gbench.qma` 8 个形状 A/B 各 3 次，除 0.3 ms 的
+`nested`（±20% 噪声区）外全部落在 ±3%。详见 `versions/v3.14/CHANGELOG.md`。
+
+**教训**：`check_suspicious_loops` 早就在对这段代码报
+`warning: possible infinite loop ... guard variable never updated in body`，
+而它是对的。但它是 `warning:`、不影响退出码，于是被当成背景噪音。
+**一条从不影响退出码的告警，迟早等于不存在。** 本版没有把警告改成硬失败
+（要先清干净现存告警），但判据记在这里：下次看到这条警告，先怀疑编译器。
 
 ## 8. 推进顺序（2026-10-22 调整）
 平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
