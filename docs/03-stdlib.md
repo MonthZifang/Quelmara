@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-67 个模块，**568 个公开函数**（另有 572 个内部函数）
+67 个模块，**570 个公开函数**（另有 590 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -31,8 +31,8 @@
 | `std/hex` | 十六进制编解码 | 4 / 5 |
 | `std/http` | HTTP/1.1 服务端（keep-alive / 流水线 / 压缩协商 / chunked 请求体 v2.95） | 39 / 55 |
 | `std/http_chunk` | Transfer-Encoding: chunked 的扫描与就地解包（纯内存，零 socket 依赖；v2.95） | 2 / 2 |
-| `std/httpc` | HTTP/1.1 客户端核心：URL 拆分 / 请求构造 / 响应解析（content-length / chunked）/ 重定向判定（纯函数，零 socket 依赖） | 6 / 11 |
-| `std/httpc_net` | HTTP 客户端传输层：httpc_get / httpc_get_tls / httpc_get_follow（Windows；TLS 走 std/tls_net） | 3 / 4 |
+| `std/httpc` | HTTP/1.1 客户端核心：URL 拆分 / 请求构造 / 响应解析（content-length / chunked）/ 重定向判定（纯函数，零 socket 依赖） | 8 / 16 |
+| `std/httpc_net` | HTTP 客户端传输层：httpc_get / httpc_get_tls / httpc_get_follow（Windows；TLS 走 std/tls_net） | 3 / 19 |
 | `std/httpdate` | HTTP 日期（RFC 7231 IMF-fixdate）格式化与解析 + If-Modified-Since 判定 | 3 / 13 |
 | `std/json` | DOM 式 JSON 解析与 builder | 32 / 85 |
 | `std/kv` | 持久化键值存储（追加日志 + 内存索引；重开重放 / 撕裂尾恢复 / 压缩；Windows PE） | 11 / 16 |
@@ -594,9 +594,20 @@ fn httpc_split_url(u: str) -> HttpUrl
 fn httpc_build_request(method: str, url: str, hdrs: vec[str], body: str) -> str
 /// 失败响应（URL 非法 / 连接失败时由传输层返回）
 fn httpc_bad_response() -> HttpResponse
+/// 由传输层组装一条已解析的响应（v3.12）。
+/// 为什么需要这个工厂：**限定 struct 字面量不做**（`02-language.md` §1），
+/// 所以 `std/httpc_net` 没法写 `HttpResponse { ... }`。v3.12 起传输层不再
+/// 每轮把整个缓冲区重新喂给 `httpc_parse_response`（那是 O(n²)），改成
+/// "头块解析一次 + body 增量累积"，最后由这里按部件拼出结果。
+/// `chunked` 由 `framing == 2` 决定，调用方不必重复判断。
+fn httpc_make_response(status: int, reason: str, head: str, body: str, complete: int, chunked: int) -> HttpResponse
 /// 解析完整响应字节。buf 可以只含部分响应（complete=0）；传输层应持续
 /// 拼接后再次调用。头未收全（无 \r\n\r\n）返回 status=-1。
 fn httpc_parse_response(buf: str) -> HttpResponse
+/// 头块内按名取值（大小写不敏感；跳过 status line）。
+/// v3.12 起公开：传输层 `std/httpc_net` 的接收循环要自己判 framing
+/// （content-length / chunked），而它只拿到头块文本、拿不到 HttpResponse。
+fn httpc_header_raw(head: str, name: str) -> str
 /// 响应头取值（大小写不敏感；无此头返回 ""）
 fn httpc_header(resp: HttpResponse, name: str) -> str
 /// 重定向目标解析：3xx 且有 Location 返回目标 URL（绝对 Location 原样，

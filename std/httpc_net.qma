@@ -3,40 +3,472 @@
 // （Linux DNS 未实现，编译期报错）；TLS 走 std/tls_net（v1.25，Windows）。
 //
 // 解析逻辑全在 std/httpc（纯函数、跨平台）——本文件只做 socket 拼接：
-// 建连 → 发请求 → 收到 complete=1 或对端关闭 → 交回 httpc_parse_response。
+// 建连 → 发请求 → 收到 complete=1 或对端关闭 → 返回结构化响应。
 //
-// 边界：
+// v3.12 重写接收循环。v1.48 起的老循环是：
+//
+//     while ... { part = recv(); buf = buf + part; r = parse(buf); if r.complete ... }
+//
+// 三处叠加起来是 O(n²)，而且是**两层**的 O(n²)：
+//   1. `buf = buf + part` 每轮复制已收到的全部字节；
+//   2. `parse(buf)` 每轮把整个缓冲区从头再解析一遍（头块 + chunked 从头重解）。
+// 2 MB 响应（8 KB 分块 = 256 轮）实测直接 `heap_limit_mb exceeded`——与
+// v3.09 在 `std/net` 六个接收函数上修掉的是同一个坑，只是这里更隐蔽：
+// 老用例 `t92_httpc` 的响应只有 12 字节，轮数根本不够暴露它。
+//
+// 现在的结构：
+//   * 字节累积走可扩容原始内存（`_buf_append`，几何扩容 + mem_copy），
+//     总拷贝 O(n)；
+//   * 头块只在**第一次凑齐 `\r\n\r\n`** 时解析一次，之后复用（`_RespHead`）；
+//   * chunked 走增量状态机，续收从断点继续，不重扫；块数据直接 mem_copy
+//     进 body 缓冲，**从不把整个缓冲区成串**；
+//   * content-length 直接比长度，够了就 mem_str 一次成串。
+//
+// 边界（与老实现一致）：
 //   * 连接失败 fail-fast（与 std/net 一致，不返回错误码）；
 //   * TLS 路径的 record seq 由本模块维护；服务器在应用数据前插多条握手
 //     消息（NewSessionTicket 等）时 seq 会错位（std/tls_net 已知限制，
 //     "一次请求一次响应"场景）——生产用法建议服务端关掉 session ticket；
 //   * 不校验证书链（std/x509 另用）；httpc_get_follow 只发 GET，
-//     303→GET 的方法语义无歧义。
+//     303→GET 的方法语义无歧义；
+//   * 无总时长上限：对端一直发就会一直读（与 `recv_all` 同口径）。
+//     要上限得先把 `std/net` 的 `*_to` 三件套接进来（登记 07-gaps）。
 
 import std.httpc
 import std.str
 import std.tls_net
 
-// 收响应字节：头齐后按 framing 判定 complete；否则读到对端关闭（空串）为止。
-fn _recv_until_complete(fd: int) -> str {
-    let mut buf = ""
-    let mut guard = 0
-    while guard < 4096 {
-        let part = tcp_recv(fd, 8192)
-        if len(part) == 0 {
-            break
+// 接收上限：防止对端无限发导致堆爆。默认 64 MB，够覆盖绝大多数 API 响应；
+// 超限返回已收到的部分且 complete=0，调用方能看出"没收全"。
+const HTTPC_MAX_BYTES = 64 * 1024 * 1024
+
+// 每次 recv 的请求长度。16 KB 是吞吐与轮数的折中（老实现用 8192）。
+const HTTPC_CHUNK = 16384
+
+// ---------------------------------------------------------------------------
+// 可扩容缓冲（3 字 mem 块：{ptr, cap, len}）
+// ---------------------------------------------------------------------------
+
+fn _bnew(cap: int) -> int {
+    let h = mem_alloc(24)
+    mem_store64(h, 0, mem_alloc(cap))
+    mem_store64(h, 1, cap)
+    mem_store64(h, 2, 0)
+    return h
+}
+
+fn _bfree(h: int) {
+    mem_free(mem_load64(h, 0), mem_load64(h, 1))
+    mem_free(h, 24)
+}
+
+fn _bptr(h: int) -> int {
+    return mem_load64(h, 0)
+}
+
+fn _blen(h: int) -> int {
+    return mem_load64(h, 2)
+}
+
+// 保证还能再放 need 字节：容量不足时按倍数扩容（至少到 need）。
+fn _breserve(h: int, need: int) {
+    let cap = mem_load64(h, 1)
+    if need <= cap {
+        return
+    }
+    let mut ncap = cap * 2
+    if ncap < need {
+        ncap = need
+    }
+    let np = mem_alloc(ncap)
+    let used = mem_load64(h, 2)
+    if used > 0 {
+        mem_copy(np, mem_load64(h, 0), used)
+    }
+    mem_free(mem_load64(h, 0), cap)
+    mem_store64(h, 0, np)
+    mem_store64(h, 1, ncap)
+}
+
+fn _bappend(h: int, src: int, n: int) {
+    if n <= 0 {
+        return
+    }
+    let used = mem_load64(h, 2)
+    _breserve(h, used + n)
+    mem_copy(mem_load64(h, 0) + used, src, n)
+    mem_store64(h, 2, used + n)
+}
+
+fn _bappend_str(h: int, s: str) {
+    let n = len(s)
+    if n > 0 {
+        _bappend(h, str_ptr(s), n)
+    }
+}
+
+// 把缓冲 [from, from+n) 成串（mem_str 会拷贝，调用后仍可继续用缓冲）。
+fn _bslice(h: int, from: int, n: int) -> str {
+    if n <= 0 {
+        return ""
+    }
+    return mem_str(_bptr(h) + from, n)
+}
+
+// 在缓冲里找 "\r\n\r\n"，返回头结束偏移（= 空行之后的第一个 body 字节）。
+// 从 `from` 起扫，避免每轮重扫整段。找不到返回 -1。
+fn _bhead_end(h: int, from: int) -> int {
+    let p = _bptr(h)
+    let n = _blen(h)
+    let mut i = from
+    while i + 3 < n {
+        if mem_load8(p, i) == 13 && mem_load8(p, i + 1) == 10 &&
+           mem_load8(p, i + 2) == 13 && mem_load8(p, i + 3) == 10 {
+            return i + 4
         }
-        buf = buf + part
-        if str_find(buf, "\r\n\r\n") >= 0 {
-            let r = httpc_parse_response(buf)
-            if r.complete == 1 {
-                break
+        i = i + 1
+    }
+    return -1
+}
+
+// ---------------------------------------------------------------------------
+// 头块（只解析一次）
+// ---------------------------------------------------------------------------
+
+// framing：0 = 读到对端关闭，1 = content-length，2 = chunked
+struct _RespHead {
+    ok: int          // 1 = 头块解析成功
+    status: int
+    reason: str
+    head: str        // 头块文本（不含空行）
+    framing: int
+    clen: int        // framing=1 时的字节数
+    body_at: int     // body 在接收缓冲里的起始偏移
+}
+
+fn _parse_head(h: int, he: int) -> _RespHead {
+    let mut r = _RespHead { ok: 0, status: -1, reason: "", head: "",
+                            framing: 0, clen: 0, body_at: he }
+    let hlen = he - 4                       // 头块是 [0, he-4)
+    if hlen <= 0 {
+        return r
+    }
+    let head = _bslice(h, 0, hlen)
+    r.head = head
+    let lines = str_lines(head)
+    if len(lines) == 0 {
+        return r
+    }
+    let sl = lines.get(0)
+    let sp1 = str_find(sl, " ")
+    if sp1 < 0 {
+        return r
+    }
+    r.status = str_slice(sl, sp1 + 1, sp1 + 4).to_int()
+    let sp2 = str_find_from(sl, sp1 + 4, " ")
+    if sp2 >= 0 {
+        r.reason = str_slice(sl, sp2 + 1, len(sl))
+    }
+    let cl = httpc_header_raw(head, "Content-Length")
+    let te = httpc_header_raw(head, "Transfer-Encoding")
+    if str_find(str_lower(te), "chunked") >= 0 {
+        r.framing = 2
+    } else {
+        if len(cl) > 0 {
+            let n = cl.to_int()
+            if n >= 0 {
+                r.framing = 1
+                r.clen = n
             }
         }
-        guard = guard + 1
     }
-    return buf
+    r.ok = 1
+    return r
 }
+
+// ---------------------------------------------------------------------------
+// chunked 增量解码（直接在接收缓冲上扫，不整段成串）
+// ---------------------------------------------------------------------------
+
+struct _Ck {
+    pos: int        // 扫描游标（相对 body_at）：当前块数据的下一个未搬字节
+    pend: int       // 当前块的剩余长度；-1 = 该读下一个 size 行
+    done: int       // 当前块已搬字节数
+    sz: int         // 最近一次 size 行结果（>=0 块长 / -1 未收全 / -2 非法）
+    npos: int       // size 行之后的数据起点
+    complete: int   // 1 = 见到 0 长度块
+    bad: int        // 1 = 病态流
+}
+
+fn _ck_new() -> _Ck {
+    return _Ck { pos: 0, pend: 0 - 1, done: 0, sz: 0, npos: 0, complete: 0, bad: 0 }
+}
+
+fn _hexv(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 0 - 1
+}
+
+// 从 buf[base+pos] 读 size 行，结果写进 st（值语义：由调用方接回返回值）。
+fn _ck_sz(buf: int, base: int, pos: int, n: int, st0: _Ck) -> _Ck {
+    let mut st = st0
+    let mut i = pos
+    let mut v = 0
+    let mut ndig = 0
+    let mut ext = 0
+    while i < n {
+        let c = mem_load8(buf, base + i)
+        if c == 59 {
+            ext = 1                  // ';' = chunk-ext 起点，整段丢到行尾
+        } else {
+            if c == 13 {
+                if i + 1 >= n {
+                    st.sz = 0 - 1
+                    st.npos = pos
+                    return st
+                }
+                if mem_load8(buf, base + i + 1) != 10 {
+                    st.sz = 0 - 2
+                    st.npos = pos
+                    return st
+                }
+                if ndig == 0 {
+                    st.sz = 0 - 2    // 空 size 行
+                    st.npos = pos
+                    return st
+                }
+                st.sz = v
+                st.npos = i + 2
+                return st
+            }
+            if ext == 0 {
+                let d = _hexv(c)
+                if d < 0 {
+                    st.sz = 0 - 2
+                    st.npos = pos
+                    return st
+                }
+                ndig = ndig + 1
+                if ndig > 8 {
+                    st.sz = 0 - 2    // 超 8 位：防 int64 溢出
+                    st.npos = pos
+                    return st
+                }
+                v = v * 16 + d
+            }
+        }
+        i = i + 1
+    }
+    st.sz = 0 - 1                    // size 行还没收全
+    st.npos = pos
+    return st
+}
+
+// 把 buf 里从 st.pos 起的**新增**完整块搬进 body 缓冲 bo，返回推进后的状态。
+//
+// 状态机（v3.12 第二版）：v3.12 第一版把 `pos` 当"下一个 size 行起点"，
+// 但块数据没到齐时会反复 `return` 同一个 pos，于是每次续收都把**已搬过的
+// 数据再搬一遍**——大块（8 KB > 16 KB recv 缓冲之外）必然错。
+// 现在 `pos` 是"当前块下一个未搬字节"，`pend` 是剩余长度：
+//   * pend < 0  → 该读 size 行；
+//   * pend > 0  → 有多少搬多少，搬完置 pend = -1；
+//   * pend == 0 → 该吃掉尾 CRLF，然后回到读 size 行。
+fn _ck_feed(buf: int, base: int, n: int, st0: _Ck, bo: int) -> _Ck {
+    let mut st = st0
+    while st.complete == 0 && st.bad == 0 {
+        // ---- A. 吃尾 CRLF ----
+        if st.pend == 0 {
+            if st.pos + 2 > n {
+                return st                   // 尾 CRLF 未收全
+            }
+            if mem_load8(buf, base + st.pos) != 13 ||
+               mem_load8(buf, base + st.pos + 1) != 10 {
+                st.bad = 1
+                return st
+            }
+            st.pos = st.pos + 2
+            st.pend = 0 - 1
+        }
+        // ---- B. 读 size 行 ----
+        if st.pend < 0 {
+            st = _ck_sz(buf, base, st.pos, n, st)
+            if st.sz == 0 - 1 {
+                return st                   // size 行未收全
+            }
+            if st.sz == 0 - 2 {
+                st.bad = 1
+                return st
+            }
+            st.pos = st.npos
+            if st.sz == 0 {
+                st.complete = 1             // 结尾块；trailer 忽略
+                return st
+            }
+            st.pend = st.sz
+            st.done = 0
+        }
+        // ---- C. 搬数据（有多少搬多少） ----
+        let avail = n - st.pos
+        if avail <= 0 {
+            return st                       // 还没收到数据
+        }
+        let mut take = avail
+        if take > st.pend {
+            take = st.pend
+        }
+        _bappend(bo, buf + base + st.pos, take)
+        st.pos = st.pos + take
+        st.pend = st.pend - take
+        st.done = st.done + take
+    }
+    return st
+}
+
+// ---------------------------------------------------------------------------
+// 接收循环（明文 / TLS 共用）
+// ---------------------------------------------------------------------------
+
+// 一次 recv：tls != 0 走 tls_read_app（seq 递增），否则 tcp_recv。
+// 返回本次字节；空串 = 对端关闭。seq 由调用方经 vec[int] 传入传出
+// （单元素可变盒——Quelmara 没有 inout 参数）。
+fn _recv_once(fd: int, tls: int, tr: TlsClientResult, seqbox: vec[int]) -> str {
+    if tls == 0 {
+        return tcp_recv(fd, HTTPC_CHUNK)
+    }
+    let s = seqbox.get(0)
+    let part = tls_read_app(tr, s)
+    if len(part) > 0 {
+        seqbox.set(0, s + 1)
+    }
+    return part
+}
+
+fn _recv_loop(fd: int, tls: int, tr: TlsClientResult) -> HttpResponse {
+    let rx = _bnew(HTTPC_CHUNK * 4)         // 收到的原始字节
+    let body = _bnew(HTTPC_CHUNK * 4)       // 解出的 body
+    let seqbox = vec[int].new(1)
+    seqbox.push(0)
+    let mut hd = _parse_head(0, 0)          // 占位
+    let mut have_head = 0
+    let mut scanned = 0                     // 头块扫描游标
+    let mut ck = _ck_new()
+    let mut done = 0
+    let mut closed_early = 0
+    while done == 0 {
+        // ---- 1. 收一段 ----
+        let part = _recv_once(fd, tls, tr, seqbox)
+        let closed = len(part) == 0
+        if closed == 0 {
+            _bappend_str(rx, part)
+        }
+        // ---- 2. 头块：只在第一次凑齐时解析 ----
+        if have_head == 0 {
+            let he = _bhead_end(rx, scanned)
+            if he < 0 {
+                let n = _blen(rx)
+                scanned = n - 3
+                if scanned < 0 {
+                    scanned = 0
+                }
+                if closed == 1 {
+                    closed_early = 1        // 头都没收齐
+                    break
+                }
+            } else {
+                hd = _parse_head(rx, he)
+                if hd.ok == 0 {
+                    closed_early = 1        // 病态头块
+                    break
+                }
+                have_head = 1
+                scanned = he
+            }
+        }
+        if have_head == 1 {
+            let avail = _blen(rx) - hd.body_at
+            if hd.framing == 1 {
+                // ---- content-length ----
+                let mut take = avail
+                if take > hd.clen {
+                    take = hd.clen
+                }
+                if avail >= hd.clen {
+                    _bappend(body, _bptr(rx) + hd.body_at, hd.clen)
+                    done = 1
+                } else {
+                    if closed == 1 {
+                        _bappend(body, _bptr(rx) + hd.body_at, take)
+                        closed_early = 1
+                        done = 1
+                    }
+                }
+            }
+            if hd.framing == 2 && done == 0 {
+                // ---- chunked：增量，只喂新到的一段 ----
+                // 注意传 `_bptr(rx)` 而不是 `rx`：解码器要的是**数据指针**，
+                // 不是 {ptr,cap,len} 句柄。
+                ck = _ck_feed(_bptr(rx), hd.body_at, _blen(rx) - hd.body_at, ck, body)
+                if ck.complete == 1 || ck.bad == 1 {
+                    done = 1
+                } else {
+                    if closed == 1 {
+                        closed_early = 1
+                        done = 1
+                    }
+                }
+            }
+            if hd.framing == 0 {
+                // ---- 无 framing：读到对端关闭 ----
+                if closed == 1 {
+                    _bappend(body, _bptr(rx) + hd.body_at, avail)
+                    closed_early = 1
+                    done = 1
+                }
+            }
+        }
+        if closed == 1 && done == 0 {
+            closed_early = 1
+            break
+        }
+        if _blen(rx) > HTTPC_MAX_BYTES {
+            closed_early = 1
+            break                           // 上限保护
+        }
+    }
+    // ---- 收尾 ----
+    if have_head == 0 {
+        _bfree(rx)
+        _bfree(body)
+        return httpc_bad_response()
+    }
+    let mut complete = 0
+    if hd.framing == 1 && closed_early == 0 && _blen(body) >= hd.clen {
+        complete = 1
+    }
+    if hd.framing == 2 && ck.complete == 1 && ck.bad == 0 {
+        complete = 1
+    }
+    let b = _bslice(body, 0, _blen(body))
+    _bfree(rx)
+    _bfree(body)
+    let mut ckflag = 0
+    if hd.framing == 2 {
+        ckflag = 1
+    }
+    return httpc_make_response(hd.status, hd.reason, hd.head, b, complete, ckflag)
+}
+
+// ---------------------------------------------------------------------------
+// 公开 API
+// ---------------------------------------------------------------------------
 
 /// 明文 HTTP GET（Windows）。http:// 走 TCP；https:// 转 httpc_get_tls。
 pub fn httpc_get(url: str) -> HttpResponse {
@@ -49,10 +481,10 @@ pub fn httpc_get(url: str) -> HttpResponse {
     }
     let fd = tcp_connect(u.host, u.port)
     let req = httpc_build_request("GET", url, vec[str].new(2), "")
-    tcp_send(fd, req)
-    let buf = _recv_until_complete(fd)
+    send_all(fd, req)
+    let r = _recv_loop(fd, 0, tls_client_err("none"))
     tcp_close(fd)
-    return httpc_parse_response(buf)
+    return r
 }
 
 /// HTTPS GET（Windows，TLS 1.3）。seq 从 0 起逐条 +1。
@@ -67,25 +499,9 @@ pub fn httpc_get_tls(url: str) -> HttpResponse {
     }
     let req = httpc_build_request("GET", url, vec[str].new(2), "")
     tls_send_app(r0, 0, req)
-    let mut buf = ""
-    let mut seq = 0
-    let mut guard = 0
-    while guard < 4096 {
-        let part = tls_read_app(r0, seq)
-        if len(part) == 0 {
-            break
-        }
-        buf = buf + part
-        seq = seq + 1
-        if str_find(buf, "\r\n\r\n") >= 0 {
-            let r = httpc_parse_response(buf)
-            if r.complete == 1 {
-                break
-            }
-        }
-        guard = guard + 1
-    }
-    return httpc_parse_response(buf)
+    let r = _recv_loop(r0.fd, 1, r0)
+    tcp_close(r0.fd)
+    return r
 }
 
 /// 跟随重定向的 GET：最多 max_hops 跳（超出返回最后一个 3xx 响应）。

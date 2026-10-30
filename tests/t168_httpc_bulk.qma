@@ -1,0 +1,212 @@
+// t168_httpc_bulk.qma —— HTTP 客户端接收大响应（v3.12）
+//
+// 关键回归：v1.48 起的接收循环是
+//     buf = buf + part;  r = parse(buf)
+// 两层 O(n²)——每轮复制已收到的全部字节，且每轮把整个缓冲区从头重解析。
+// 2 MB 响应（8 KB 分块 = 256 轮）实测直接 `heap_limit_mb exceeded`。
+// 老用例 t92_httpc 的响应只有 12 字节，轮数根本不够暴露它。
+//
+// 5 个场景：
+//   [1] content-length 1 MB      —— 基本路径，内容逐段抽样比对
+//   [2] content-length 4 MB      —— 老实现跑不完的形状
+//   [3] chunked 1 MB / 8 KB 块   —— 增量状态机 + 跨 recv 边界的大块
+//   [4] chunked 4 MB / 8 KB 块   —— 同上，放大
+//   [5] content-length 不足      —— 对端提前关闭：complete=0 但 body 是已收部分
+//
+// 抽样比对：1 KB 抽一次。4 MB 全字节比要 400 万次 mem_load8，太慢；
+// 1 KB 步长足以发现"错位 / 截断 / 重复 / 丢块"这四类典型损坏。
+module t168
+
+import std.httpc
+import std.httpc_net
+import std.net
+import std.str
+
+const KB = 1024
+
+fn make_body(n: int) -> str {
+    let v = vec[int].new(n)
+    let mut i = 0
+    while i < n {
+        v.push(65 + (i % 26))
+        i = i + 1
+    }
+    return str_from_bytes(v)
+}
+
+fn check_pattern(s: str, n: int) -> int {
+    if len(s) != n {
+        return 1
+    }
+    let mut bad = 0
+    let mut i = 0
+    while i < n {
+        if s[i] != 65 + (i % 26) {
+            bad = bad + 1
+        }
+        i = i + KB
+    }
+    // 末字节单独查（扩容 / 边界最容易漏）
+    if n > 0 {
+        if s[n - 1] != 65 + ((n - 1) % 26) {
+            bad = bad + 1
+        }
+    }
+    return bad
+}
+
+// 小写十六进制
+fn hex_of(v: int) -> str {
+    if v == 0 {
+        return "0"
+    }
+    let digs = "0123456789abcdef"
+    let tmp = vec[int].new(16)
+    let mut x = v
+    while x > 0 {
+        tmp.push(x % 16)
+        x = x / 16
+    }
+    let out = vec[int].new(16)
+    let mut k = len(tmp) - 1
+    while k >= 0 {
+        out.push(digs[tmp.get(k)])
+        k = k - 1
+    }
+    return str_from_bytes(out)
+}
+
+// 把 body 按 8 KB 一块编成 chunked 流（8 KB 刻意小于/大于 recv 缓冲都覆盖）
+fn build_ck(body: str) -> str {
+    let n = len(body)
+    let parts = vec[str].new(8)
+    let mut off = 0
+    while off < n {
+        let mut take = 8192
+        if off + take > n {
+            take = n - off
+        }
+        parts.push(hex_of(take) + "\r\n" + substr(body, off, take) + "\r\n")
+        off = off + take
+    }
+    parts.push("0\r\n\r\n")
+    return str_join(parts, "")
+}
+
+// ---- 服务端：每个场景一个连接 ----
+//
+// 端口按场景分配（45910 起），一个 spawn 服务一段，客户端依次取。
+// 用 send_all 而不是 send：4 MB 单次 send 必然短写。
+
+fn serve_cl(c: int, body: str, n: int, short: int) {
+    let mut req = ""
+    while true {
+        let p = recv(c, 4096)
+        if len(p) == 0 {
+            break
+        }
+        req = req + p
+        if str_find(req, "\r\n\r\n") >= 0 {
+            break
+        }
+    }
+    send_all(c, "HTTP/1.1 200 OK\r\nContent-Length: " + n.to_str() + "\r\nConnection: close\r\n\r\n")
+    if short == 1 {
+        send_all(c, substr(body, 0, n / 2))   // 只发一半就关
+    } else {
+        send_all(c, body)
+    }
+    close_conn(c)
+}
+
+fn serve_ck(c: int, wire: str) {
+    let mut req = ""
+    while true {
+        let p = recv(c, 4096)
+        if len(p) == 0 {
+            break
+        }
+        req = req + p
+        if str_find(req, "\r\n\r\n") >= 0 {
+            break
+        }
+    }
+    send_all(c, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+    send_all(c, wire)
+    close_conn(c)
+}
+
+fn server(port: int, body: str, n: int, mode: int, wire: str) -> int {
+    let l = listen(port)
+    let c = accept(l)
+    if mode == 0 {
+        serve_cl(c, body, n, 0)
+    } else {
+        if mode == 1 {
+            serve_ck(c, wire)
+        } else {
+            serve_cl(c, body, n, 1)
+        }
+    }
+    close_conn(l)
+    return 0
+}
+
+fn fetch(port: int, body: str, n: int, mode: int, wire: str) -> HttpResponse {
+    let h = spawn server(port, body, n, mode, wire)
+    sleep_ms(150)
+    let r = httpc_get("http://127.0.0.1:" + port.to_str() + "/bulk")
+    join(h)
+    return r
+}
+
+fn main() {
+    // ---- [1] content-length 1 MB ----
+    let n1 = 1024 * KB
+    let b1 = make_body(n1)
+    let r1 = fetch(45910, b1, n1, 0, "")
+    assert(r1.status == 200, "[1] status")
+    assert(r1.complete == 1, "[1] complete")
+    assert(len(r1.body) == n1, "[1] body len")
+    assert(check_pattern(r1.body, n1) == 0, "[1] content")
+
+    // ---- [2] content-length 4 MB（老实现 heap_limit_mb exceeded）----
+    let n2 = 4096 * KB
+    let b2 = make_body(n2)
+    let r2 = fetch(45911, b2, n2, 0, "")
+    assert(r2.status == 200, "[2] status")
+    assert(r2.complete == 1, "[2] complete")
+    assert(len(r2.body) == n2, "[2] body len")
+    assert(check_pattern(r2.body, n2) == 0, "[2] content")
+
+    // ---- [3] chunked 1 MB / 8 KB 块 ----
+    let n3 = 1024 * KB
+    let b3 = make_body(n3)
+    let r3 = fetch(45912, b3, n3, 1, build_ck(b3))
+    assert(r3.status == 200, "[3] status")
+    assert(r3.chunked == 1, "[3] chunked flag")
+    assert(r3.complete == 1, "[3] complete")
+    assert(len(r3.body) == n3, "[3] body len")
+    assert(check_pattern(r3.body, n3) == 0, "[3] content")
+
+    // ---- [4] chunked 4 MB / 8 KB 块 ----
+    let n4 = 4096 * KB
+    let b4 = make_body(n4)
+    let r4 = fetch(45913, b4, n4, 1, build_ck(b4))
+    assert(r4.status == 200, "[4] status")
+    assert(r4.chunked == 1, "[4] chunked flag")
+    assert(r4.complete == 1, "[4] complete")
+    assert(len(r4.body) == n4, "[4] body len")
+    assert(check_pattern(r4.body, n4) == 0, "[4] content")
+
+    // ---- [5] content-length 不足：对端提前关闭 ----
+    let n5 = 256 * KB
+    let b5 = make_body(n5)
+    let r5 = fetch(45914, b5, n5, 2, "")
+    assert(r5.status == 200, "[5] status")
+    assert(r5.complete == 0, "[5] 短读必须 complete=0")
+    assert(len(r5.body) == n5 / 2, "[5] body 是已收部分")
+    assert(check_pattern(r5.body, n5 / 2) == 0, "[5] 前缀内容")
+
+    print("httpc bulk ok")
+}
