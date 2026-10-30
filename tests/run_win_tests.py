@@ -225,6 +225,10 @@ def test_tcp_batch():
     # 而 `check_suspicious_loops` 当时就在报警。挂住正是它要测的失败模式，
     # 所以给短超时而不是默认 600 s。
     case_selfcheck_to("spin_wait", "tests/t169_spin_wait.qma", 60)
+    # WaitGroup 的 park 唤醒（v3.15）：长等待从 sleep 片（约 15.6–25 ms）改成
+    # WaitOnAddress，唤醒延迟降到微秒级且 CPU 归零。夹具钉住"唤醒必须真的
+    # 发生"（漏唤醒时 lag ≥ 1000 ms 兜底超时）。等待 300 ms，必须 > yield 段。
+    case_selfcheck_to("wg_park", "tests/t170_wg_park.qma", 120)
 
 
 def test_http_e2e():

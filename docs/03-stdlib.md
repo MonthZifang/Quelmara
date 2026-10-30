@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-67 个模块，**570 个公开函数**（另有 590 个内部函数）
+67 个模块，**570 个公开函数**（另有 594 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -67,7 +67,7 @@
 | `std/sse` | Server-Sent Events 服务端 | 0 / 20 |
 | `std/staticfile` | 静态文件服务的安全解析层（URL 解码 / 目录穿越防护 / index 补全 / Cache-Control / ETag / Range 解析） | 9 / 14 |
 | `std/str` | 字符串工具集 | 26 / 30 |
-| `std/sync` | 自旋锁 / Treiber 无锁栈 / WaitGroup | 11 / 11 |
+| `std/sync` | 自旋锁 / Treiber 无锁栈 / WaitGroup | 11 / 15 |
 | `std/time` | 时间便捷层 | 0 / 2 |
 | `std/timer` | 轮询式定时器（mem 块上的二叉最小堆；无后台线程 / 无回调，主循环 poll） | 5 / 9 |
 | `std/tls13` | TLS 1.3 密钥调度（HKDF-Expand-Label）+ AEAD 记录层 | 23 / 29 |
@@ -1685,6 +1685,20 @@ fn str_pad_left(s: str, width: int, pad: str) -> str
 fn mutex_new() -> int
 /// 获取锁：atomic_cas 抢 0→1，失败时前 128 次 spin_hint、之后 thread_yield，直到抢到。
 /// **不是 futex park**：长等待靠让出时间片，不睡眠。
+/// **v3.15 的负结果：锁不用 park，这是实测结论，不是没做。**
+/// 第一版把长等待换成 `WaitOnAddress`（与 `wg_wait` 同样的改法），16 线程 ×
+/// 20 万次加锁从 **281 ms 掉到 1568 ms（慢 5.6×）**。加"先 yield 1024 次再
+/// park"的门槛后仍有 855 ms（慢 3×）。原因不是 park 慢，而是**判据在原理上
+/// 缺信息**：
+///   * 这个基准的临界区约 88 ns，整个基准才 281 ms；
+///   * 每个线程等待锁的时间被切成很多小段（每次等几十 µs），
+///     而"已经等多久"这个代理判据无法区分"马上就好"与"要等很久"；
+///   * 一旦跨过门槛就付 ~400 ns 的 `WaitOnAddress` + 解锁侧的
+///     `WakeByAddressAll`，比"再 yield 一次（~5.5 µs，但能立刻抢到）"还亏，
+///     因为 park 的唤醒要经过内核调度器，而 yield 的对手通常就在同一个核上。
+/// **park 只对"等待时长 ≫ 系统调用开销"有利**，而锁的等待时长在拿锁瞬间
+/// 是不可知的。WaitGroup 不一样：它的等待时长由调用方决定（等一批任务），
+/// 动辄几十毫秒到几秒，且**只等一次**，不在热循环里 —— 那才是 park 的战场。
 fn mutex_lock(m: int)
 /// 释放锁（mem_store_rel，release 语义）；x86 下就是普通 mov，AArch64 用 STLR。
 fn mutex_unlock(m: int)
@@ -1712,13 +1726,20 @@ fn wg_new() -> int
 fn wg_add(w: int, n: int)
 /// 计数减 1；减到 0 时等待方才能通过 wg_wait。
 fn wg_done(w: int)
-/// 阻塞到计数归零：先纯自旋（64 次）→ 让出时间片（到 1088 次）→ 每轮 sleep 1 ms。
-/// 计数归零时 wg_done 之前的写对这里可见（atomic 全屏障）。
-/// 退避参数（全部来自本机实测，不是拍脑袋）：
-///   spin_hint  ≈ 4 ns      → 64 次 ≈ 0.3 µs，覆盖"马上就好"的等待
-///   thread_yield ≈ 5.5 µs  → 1024 次 ≈ 5.6 ms，覆盖"毫秒级"的等待
-///   sleep_ms(1) ≈ 25 ms    → 本机（Windows 默认 15.6 ms 时钟片 + VBS）
-///   所以睡眠段只在等待超过 ~5 ms 后才进，短等待不会被拉长到 25 ms。
+/// 阻塞到计数归零（v3.15：长等待 park，不再靠 sleep 片）。
+/// 三段退避：
+///   1. 前 64 次 `spin_hint`（≈0.3 µs）—— "马上就好"的等待不该付系统调用；
+///   2. 再 1024 次 `thread_yield`（≈5.6 ms）—— 毫秒级等待，让出但不睡；
+///   3. 之后 `WaitOnAddress` park —— 真正睡眠，CPU 归零，唤醒延迟微秒级。
+/// **v3.15 之前第 3 段是 `sleep_ms(1)`，本机实际约 25 ms**（Windows 默认
+/// 15.6 ms 时钟片 + VBS 的抖动），所以长等待的唤醒会晚 25 ms。这是
+/// `07-gaps.md` §5 登记的那条缺口，本版收口。
+/// **为什么不需要额外的锁**：`WaitOnAddress(w, &cmp, 8, ms)` 的语义是
+/// "若 *w == cmp 才睡，否则立即返回"，内核在同一个临界区里完成"比较 + 入队"。
+/// 我们把 cmp 设成**刚刚读到的非零值**，于是：
+///   * 若 wg_done 已经把计数减到 0，*w != cmp → 立即返回，重新检查，退出循环；
+///   * 若我们真的睡下去了，那 wg_done 的 `_WakeByAddressAll` 一定能把我们叫醒。
+/// 两种情况都不丢唤醒，所以循环里只要"读值 → 若非零则 park → 回头重读"。
 fn wg_wait(w: int)
 ```
 

@@ -1,0 +1,104 @@
+// t170_wg_park.qma —— WaitGroup 的 park 唤醒（v3.15）
+//
+// 背景：v3.15 之前 `wg_wait` 的第 3 段退避是 `sleep_ms(1)`，本机实际约
+// 15.6–25 ms（Windows 默认时钟片 + VBS），所以长等待的唤醒会晚一个时钟片。
+// v3.15 改成 `WaitOnAddress` park：CPU 归零，唤醒延迟降到微秒级。
+//
+// 这个夹具钉住四件事 —— 都是**实现过程中真的踩坏过**的：
+//   [1] 唤醒**必须真的发生**，不能靠兜底超时
+//       （第一版加了"有没有人在睡"的判据，漏唤醒，lag ≈ 953 ms）
+//   [2] 唤醒延迟必须显著小于兜底超时（1000 ms）
+//   [3] 计数归零的**内存可见性**：wg_done 之前的写，wg_wait 返回后必须看得到
+//   [4] 多次 wg_wait / 多 worker 的常规路径不变
+//
+// 判据用**忙等**而不是 sleep_ms 定时刻：sleep 粒度 15.6 ms 会把被测的
+// 唤醒延迟整个淹掉（第一版探针就栽在这里，测出来的是 sleep 抖动）。
+//
+// **等待时长必须 > 退避的 yield 段（64 spin + 1024 yield ≈ 5.6 ms）**，
+// 否则 `wg_wait` 根本进不到 park 那一段，测的就不是 park。
+// 第一版夹具用 200 ms 等，注回"漏唤醒"bug 之后**仍然通过** —— 因为
+// worker 完成时等待方还停在 yield 段里（yield 每轮都重新读计数），
+// 根本不需要被唤醒。改成 300 ms 后 bug 才暴露（见下）。
+module t170
+
+import std.sync
+
+const ST_DONE_NS = 20
+const BUDGET_US = 500000          // 唤醒延迟上限（500 ms，远小于 1000 ms 兜底）
+const WAIT_MS = 300               // 必须 > yield 段（≈5.6 ms），确保进到 park
+
+fn worker(w: int, target_ns: int, payload: int, slot: int) -> int {
+    while now_ns() < target_ns {
+        spin_hint()
+    }
+    // 先写 payload（验证可见性），再 wg_done
+    mem_store64(slot, 0, payload)
+    mem_store64(static_word(ST_DONE_NS), 0, now_ns())
+    wg_done(w)
+    return 0
+}
+
+fn main() {
+    // ---- [1][2] 唤醒必须发生且及时 ----
+    let w = wg_new()
+    wg_add(w, 1)
+    let slot = mem_alloc(8)
+    mem_store64(slot, 0, 0)
+    let t0 = now_ns()
+    let h = spawn worker(w, t0 + WAIT_MS * 1000000, 4242, slot)
+    wg_wait(w)
+    let t_wake = now_ns()
+    join(h)
+    let t_done = mem_load64(static_word(ST_DONE_NS), 0)
+    let lag_us = (t_wake - t_done) / 1000
+    assert(mem_load64(w, 0) == 0, "[1] 计数归零")
+    assert(lag_us >= 0, "[1] 时序合理")
+    // 兜底超时是 1000 ms；若靠超时醒来，lag 会 ≥ 1000 ms
+    assert(lag_us < BUDGET_US, "[2] 必须是真唤醒，不是兜底超时")
+
+    // ---- [3] 内存可见性：wg_done 之前的写必须可见 ----
+    assert(mem_load64(slot, 0) == 4242, "[3] wg_done 之前的写对 wg_wait 后可见")
+
+    // ---- [4a] 多个 worker，最后一个归零才放行 ----
+    let w2 = wg_new()
+    let n = 4
+    wg_add(w2, n)
+    let hs = vec[int].new(n)
+    let t1 = now_ns()
+    let mut i = 0
+    while i < n {
+        // 每个 worker 错开 30 ms 完成
+        hs.push(spawn worker(w2, t1 + (50 + i * 30) * 1000000, 100 + i, slot))
+        i = i + 1
+    }
+    wg_wait(w2)
+    let mut k = 0
+    while k < n {
+        join(hs.get(k))
+        k = k + 1
+    }
+    assert(mem_load64(w2, 0) == 0, "[4a] 多 worker 计数归零")
+
+    // ---- [4b] 计数已是 0 时 wg_wait 立即返回（不 park）----
+    let w3 = wg_new()
+    let t2 = now_ns()
+    wg_wait(w3)
+    let t3 = now_ns()
+    assert((t3 - t2) / 1000 < 50000, "[4b] 已归零时立即返回")
+
+    // ---- [4c] 反复 spawn/join 不泄漏、不挂住 ----
+    let mut round = 0
+    while round < 20 {
+        let w4 = wg_new()
+        wg_add(w4, 2)
+        let ha = spawn worker(w4, now_ns() + 2000000, 1, slot)
+        let hb = spawn worker(w4, now_ns() + 2000000, 2, slot)
+        wg_wait(w4)
+        join(ha)
+        join(hb)
+        assert(mem_load64(w4, 0) == 0, "[4c] 每轮计数归零")
+        round = round + 1
+    }
+
+    print("wg park ok")
+}
