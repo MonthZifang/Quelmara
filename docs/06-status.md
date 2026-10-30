@@ -2510,6 +2510,54 @@ x86-64 直接跑 → `syscall ok`；AArch64 走模拟器 → `syscall ok`。
 **仍有的限制**（`07-gaps.md` §5）：编号**架构相关**而语言**没有条件编译**，
 同一份源码没法自动选对编号。futex 本身仍未做 —— 本版只补地基。
 
+### 3.69 编译期目标探测 + Linux futex park（v3.19）
+
+v3.18 补了 `syscall` 之后，Linux futex 只剩"编号架构相关"一条障碍。
+v3.19 加两个**编译期常量**内建：
+
+```quelmara
+target_os()   -> 1 = Linux / 2 = Windows
+target_arch() -> 1 = x86_64 / 2 = aarch64
+```
+
+**折叠证据**（`--dump-ir`，同一份源码两个目标）：
+
+| 目标 | IR 里的比较 | 运行期调用 |
+|---|---|---|
+| `--target win` | `('jcc', 'ne', ('imm', 2), ('imm', 2), ...)` | 无 |
+| `--target arm64` | `('jcc', 'ne', ('imm', 1), ('imm', 2), ...)` | 无 |
+
+`__str_from_i64` 的参数直接是 `('imm', 2)` / `('imm', 1)` —— 常量已折叠，
+不是运行期算出来的。
+
+**它们不是条件编译**（实测）：`@ffi` 在 ELF 后端是**声明期**硬失败，
+`if target_os() == 2 { ... }` 守卫救不了声明本身。所以跨平台 park 只能拆文件：
+
+| 文件 | 后端 | 实现 |
+|---|---|---|
+| `std/park` | 仅 Windows PE | `WaitOnAddress`（`@ffi`） |
+| `std/park_linux` | 仅 Linux | `futex(2)`（`syscall`） |
+
+同一组 API（`park_available` / `park_on` / `wake_all` / `wake_one`），
+调用方按目标 import。
+
+**顺带发现 `irdiff` 契约要扩展**：加完这两个内建后，任何用它们选常量的源码
+都会被判 IR 分叉（两个后端返回不同立即数）。这不是 bug —— `irdiff` 原本只
+归一化 `syscall` 编号（"唯一允许的架构差异"），现在多了一类。新增
+`TARGET_IMM_RE` **只匹配特征形态**（`jcc` 里两个 `imm` 做 `ne`/`eq` 比较）。
+四条单元判据确认没过度归一化：target 形态相同 ✅ / 普通常量仍可分叉 ✅ /
+变量比较不受影响 ✅ / syscall 归一化未退化 ✅。
+
+| 命令 | 结果 |
+|---|---|
+| `build t172_park_linux --target native` | 编过（16617 B，ELF x86_64） |
+| `build t172_park_linux --target win` | **编译期 fail-fast** |
+| `python tests/irdiff.py` | **PASS=108 FAIL=0 SKIP=92** |
+| `python tests/run_win_tests.py` | **PASS=333 FAIL=0 SKIP=0** |
+
+**`t172` 只接 CI linux job 的 x86-64**：AArch64 没有 `spawn`，
+而 park 验证必须有第二个线程唤醒。是能力边界，不是遗漏。
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |

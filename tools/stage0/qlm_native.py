@@ -3229,6 +3229,41 @@ class Lower:
             d = fn.new_v()
             fn.emit("cpuid_sha", d)
             return d
+        if name == "target_os" and name not in self.fns_ast:
+            # target_os() -> int：**编译期常量**，当前目标 OS（v3.19）。
+            #   1 = Linux（native / arm64 后端）
+            #   2 = Windows（win 后端）
+            #
+            # 为什么需要它：`syscall`（v3.18）的**调用号是架构/OS 相关的**
+            # （futex 在 x86-64 Linux 是 202、AArch64 Linux 是 98；Windows 上
+            # 根本没有这个调用），而语言没有条件编译。标准库要写"按目标选实现"
+            # 只能靠运行期判断 —— 但运行期判断救不了"这段代码在 Windows 上
+            # 根本编不过"（`@ffi` 在 ELF 上是声明期硬失败，反过来 `syscall`
+            # 在 PE 上是声明期硬失败）。
+            #
+            # 所以这个内建返回**编译期立即数**，配合 `const` 使用，让
+            # "选哪个分支"在**编译期**就定下来：
+            #
+            #     const IS_LINUX = target_os() == 1
+            #     if IS_LINUX { ... 走 syscall ... } else { ... 走 @ffi ... }
+            #
+            # **边界**：这只是"编译期常量 + 常量折叠"，不是真正的条件编译 ——
+            # **两个分支的代码仍然都要能编过**。它解决的是"选对常量"，
+            # 不解决"某个分支在这个后端根本不存在"。真正的条件编译
+            # （按目标整段剔除）仍未做，见 07-gaps §4。
+            if len(e[2]) != 0:
+                raise SyntaxError("target_os() 不接受实参")
+            return ("imm", 2 if self.platform == "windows" else 1)
+        if name == "target_arch" and name not in self.fns_ast:
+            # target_arch() -> int：**编译期常量**，当前目标架构（v3.19）。
+            #   1 = x86_64   2 = aarch64
+            #
+            # 与 target_os 配对：系统调用编号**同时**取决于 OS 与架构
+            # （同样是 Linux，futex 在 x86-64 是 202、AArch64 是 98）。
+            # 两者都给定，调用方才能拼出正确的常量。
+            if len(e[2]) != 0:
+                raise SyntaxError("target_arch() 不接受实参")
+            return ("imm", 2 if self.arch == "aarch64" else 1)
         if name == "cpu_aes" and name not in self.fns_ast:
             # cpu_aes() -> int：AES-NI 特征位（CPUID leaf 1 ECX[25]，v1.31）。
             # 1 = 支持（走 aesenc 快路径），0 = 降级 T-table 软件实现。

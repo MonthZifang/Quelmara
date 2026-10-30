@@ -1,0 +1,73 @@
+// t172_park_linux.qma —— Linux 的 futex park（v3.19）
+//
+// 与 t170（Windows 的 WaitOnAddress park）配对：同一组断言，不同后端。
+//
+// 验证：
+//   [1] 注入 futex 实现后，wg_wait 能被真唤醒（不是靠超时）
+//   [2] 唤醒延迟远小于兜底超时
+//   [3] 内存可见性（wg_done 之前的写对 wg_wait 后可见）
+//   [4] 反复 spawn/join 不挂住
+//
+// 边界：**仅 Linux**。Windows 上编译期 fail-fast（syscall 不支持）。
+// 执行级验证：x86-64 直接跑（CI linux job）；AArch64 走模拟器（futex 未实现，
+// 会返回 -ENOSYS，park_on 返回 0，wg_wait 靠退避兜底 —— 那也算"不挂住"）。
+module t172
+
+import std.park_linux
+import std.sync
+
+const ST_DONE_NS = 20
+const WAIT_MS = 300
+
+fn worker(w: int, target_ns: int, slot: int) -> int {
+    while now_ns() < target_ns {
+        spin_hint()
+    }
+    mem_store64(slot, 0, 4242)
+    mem_store64(static_word(ST_DONE_NS), 0, now_ns())
+    wg_done(w)
+    return 0
+}
+
+fn main() {
+    // [0] 注入 futex park
+    assert(park_available() == 1, "[0] std/park_linux 可用")
+    sync_set_park(park_on, wake_all)
+    assert(sync_has_park() == 1, "[0] 注入成功")
+
+    // [1][2] 唤醒必须发生且及时
+    let w = wg_new()
+    wg_add(w, 1)
+    let slot = mem_alloc(8)
+    mem_store64(slot, 0, 0)
+    let t0 = now_ns()
+    let h = spawn worker(w, t0 + WAIT_MS * 1000000, slot)
+    wg_wait(w)
+    let t_wake = now_ns()
+    join(h)
+    let t_done = mem_load64(static_word(ST_DONE_NS), 0)
+    let lag_us = (t_wake - t_done) / 1000
+    assert(mem_load64(w, 0) == 0, "[1] 计数归零")
+    assert(lag_us >= 0, "[1] 时序合理")
+    // 兜底超时是 1000 ms；若靠超时醒来，lag 会 >= 1000 ms
+    assert(lag_us < 500000, "[2] 必须是真唤醒，不是兜底超时")
+
+    // [3] 内存可见性
+    assert(mem_load64(slot, 0) == 4242, "[3] wg_done 之前的写可见")
+
+    // [4] 反复 spawn/join
+    let mut round = 0
+    while round < 10 {
+        let w4 = wg_new()
+        wg_add(w4, 2)
+        let ha = spawn worker(w4, now_ns() + 2000000, slot)
+        let hb = spawn worker(w4, now_ns() + 2000000, slot)
+        wg_wait(w4)
+        join(ha)
+        join(hb)
+        assert(mem_load64(w4, 0) == 0, "[4] 每轮计数归零")
+        round = round + 1
+    }
+
+    print("park linux ok")
+}

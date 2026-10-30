@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-68 个模块，**576 个公开函数**（另有 595 个内部函数）
+69 个模块，**580 个公开函数**（另有 597 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -53,6 +53,7 @@
 | `std/p256` | NIST P-256 域运算 + ECDSA 验签（TLS 证书签名） | 2 / 45 |
 | `std/p384` | NIST P-384（secp384r1）ECDSA 验签（12 limb Montgomery + Jacobian，SHA-384 摘要；v2.99） | 2 / 47 |
 | `std/park` | 线程 park 原语：WaitOnAddress / WakeByAddress（仅 Windows PE；由 std/sync 注入使用） | 4 / 7 |
+| `std/park_linux` | 线程 park 原语：futex(2)（仅 Linux；与 std/park 同一组 API，由 std/sync 注入使用） | 4 / 6 |
 | `std/path` | 路径处理（join / clean / dir / base / ext / stem；'/' 与 '\' 都认） | 7 / 9 |
 | `std/rand` | xorshift64* 伪随机 | 4 / 5 |
 | `std/regex` | 正则引擎（回溯 VM）：字面/./字符类/转义类/量词 *+?{n,m}/交替/分组(?:)/锚点 ^$；compile+match/full/exec/find/replace[_all]，步数上限防病态回溯 | 7 / 24 |
@@ -1357,6 +1358,24 @@ fn wake_all(p: int)
 /// 边界：**不知道它会不会立刻又睡回去**。如果被唤醒的线程因为条件仍不满足
 /// 而重新 park，其余等待者就收不到这次唤醒 —— 所以只有在「唤醒一个就够」
 /// （单等待者、或条件对任一等待者都成立）时才用它。多等待者用 `wake_all`。
+fn wake_one(p: int)
+```
+
+### `std/park_linux.qma`
+
+线程 park 原语：futex(2)（仅 Linux；与 std/park 同一组 API，由 std/sync 注入使用）
+
+```quelmara
+/// 本后端有没有真正的 park。`std/park_linux` 能编过就一定有，恒为 1。
+fn park_available() -> int
+/// 把 p 上的 8 字节值 park 到「不再等于 `want`」为止。
+/// 返回 1 = 被唤醒（或被 `-EAGAIN` 立即返回），0 = 出错。
+/// **`ms` 被忽略**：本实现是无限等待（见文件头）。谓词复查由调用方负责，
+/// 所以"无限等待"不会挂死 —— `std/sync.wg_wait` 醒来后会重新读计数。
+fn park_on(p: int, want: int, ms: int) -> int
+/// 唤醒所有在 p 上 park 的线程（`FUTEX_WAKE` 传 INT_MAX）。
+fn wake_all(p: int)
+/// 唤醒一个在 p 上 park 的线程。
 fn wake_one(p: int)
 ```
 
