@@ -34,11 +34,16 @@ const SSE_SCAN = 7
 
 const SSE_DEFAULT_CONNS = 100000
 
-fn sse_serve(port: int, backlog: int, on_sub: int) -> int {
+/// 启动 SSE 服务（连接上限取 `SSE_DEFAULT_CONNS`）。
+///
+/// 阻塞：acceptor 占住调用线程直到进程退出，一个进程只能起一个服务。
+/// `on_sub` 是订阅回调（`fn(fd: int) -> int`），返回 0 表示断开该连接。
+pub fn sse_serve(port: int, backlog: int, on_sub: int) -> int {
     return sse_serve_max(port, backlog, on_sub, SSE_DEFAULT_CONNS)
 }
 
-fn sse_serve_max(port: int, backlog: int, on_sub: int,
+/// 同 `sse_serve`，但显式指定连接上限。
+pub fn sse_serve_max(port: int, backlog: int, on_sub: int,
                  max_conns: int) -> int {
     let st = conn_state_new(max_conns, 80)
     mem_store64(st, ST_H0, on_sub)
@@ -47,22 +52,32 @@ fn sse_serve_max(port: int, backlog: int, on_sub: int,
 }
 
 fn _sse_st() -> int {
-    return mem_load64(static_word(0), 0)
+    let st = mem_load64(static_word(0), 0)
+    if st == 0 {
+        // v3.26：同 std/ws —— 起服务前查统计不该解引用空指针。
+        st = conn_state_new(1, 80)
+        mem_store64(static_word(0), 0, st)
+    }
+    return st
 }
 
-fn sse_accepted() -> int {
+/// 累计 accept 的连接数（起服务前调用返回 0，不会崩）。
+pub fn sse_accepted() -> int {
     return conn_accepted(_sse_st())
 }
 
-fn sse_closed() -> int {
+/// 累计关闭的连接数。
+pub fn sse_closed() -> int {
     return conn_closed(_sse_st())
 }
 
-fn sse_subs() -> int {
+/// 累计订阅数（每个 SSE 连接算一次订阅）。
+pub fn sse_subs() -> int {
     return conn_msgs(_sse_st())
 }
 
-fn sse_events_out() -> int {
+/// 累计发出的字节数（事件流总字节）。
+pub fn sse_events_out() -> int {
     return conn_bytes_out(_sse_st())
 }
 
@@ -130,8 +145,8 @@ fn sse_on_data(fd: int, data: str) -> int {
     mem_store64(p, SSE_STATE, 1)
     mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
     let h = mem_load64(st, ST_H0)
-    let rc = h(fd)
-    if rc == 0 {
+    let hr = h(fd)
+    if hr == 0 {
         return 0
     }
     return 1
@@ -166,8 +181,8 @@ fn _sse_find_head(buf: int, from: int, n: int) -> int {
 // 事件发送（可在 on_sub / 任意 reactor 回调里调用）
 // ---------------------------------------------------------------------------
 
-// 完整事件：event 字段 + data（多行拆分）+ 可选 id，空行收尾。
-fn sse_event_ext(fd: int, event: str, data: str, id: str) -> int {
+/// 完整事件：event 字段 + data（多行拆分）+ 可选 id，空行收尾。
+pub fn sse_event_ext(fd: int, event: str, data: str, id: str) -> int {
     let st = _sse_st()
     let mut out = ""
     if len(event) > 0 {
@@ -193,29 +208,30 @@ fn sse_event_ext(fd: int, event: str, data: str, id: str) -> int {
     return 0
 }
 
-fn sse_event(fd: int, event: str, data: str) -> int {
+/// 发一个带事件名的消息（浏览器 addEventListener(event) 收到）。
+pub fn sse_event(fd: int, event: str, data: str) -> int {
     return sse_event_ext(fd, event, data, "")
 }
 
-// 纯 data 事件（浏览器 e.data）
-fn sse_data(fd: int, data: str) -> int {
+/// 纯 data 事件（浏览器 e.data）
+pub fn sse_data(fd: int, data: str) -> int {
     return sse_event_ext(fd, "", data, "")
 }
 
-// 带事件 id（浏览器断线重连会带 Last-Event-ID）
-fn sse_event_id(fd: int, event: str, data: str, id: str) -> int {
+/// 带事件 id（浏览器断线重连会带 Last-Event-ID）
+pub fn sse_event_id(fd: int, event: str, data: str, id: str) -> int {
     return sse_event_ext(fd, event, data, id)
 }
 
-// 重连间隔（毫秒）。建流后先发一次，浏览器据此重连。
-fn sse_retry(fd: int, ms: int) -> int {
+/// 重连间隔（毫秒）。建流后先发一次，浏览器据此重连。
+pub fn sse_retry(fd: int, ms: int) -> int {
     let out = "retry: " + ms.to_str() + "\n\n"
     conn_send_str(_sse_st(), fd, out)
     return 0
 }
 
-// 心跳注释行：不产生事件，但让中间代理不掐空闲连接
-fn sse_comment(fd: int, text: str) -> int {
+/// 心跳注释行：不产生事件，但让中间代理不掐空闲连接
+pub fn sse_comment(fd: int, text: str) -> int {
     conn_send_str(_sse_st(), fd, ": " + text + "\n\n")
     return 0
 }
@@ -224,7 +240,10 @@ fn sse_comment(fd: int, text: str) -> int {
 // 广播：遍历槽位层活跃连接，逐个推送（O(活跃连接数) 次 mem_load64 + send）
 // ---------------------------------------------------------------------------
 
-fn sse_broadcast_ext(event: str, data: str, id: str) -> int {
+/// 向**所有**活跃订阅者广播带事件名与 id 的消息。
+///
+/// O(活跃连接数)：遍历槽位层逐个 send，没有额外索引。
+pub fn sse_broadcast_ext(event: str, data: str, id: str) -> int {
     let st = _sse_st()
     let slab = mem_load64(st, ST_SLAB)
     let cap = slab_cap(slab)
@@ -240,6 +259,7 @@ fn sse_broadcast_ext(event: str, data: str, id: str) -> int {
     return 0
 }
 
-fn sse_broadcast(event: str, data: str) -> int {
+/// 向所有活跃订阅者广播（不带 id）。
+pub fn sse_broadcast(event: str, data: str) -> int {
     return sse_broadcast_ext(event, data, "")
 }

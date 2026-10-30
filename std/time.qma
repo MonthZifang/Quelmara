@@ -4,13 +4,13 @@
 // 绝对墙钟时间（epoch/日历）未做——需要 time() syscall 封装（登记 GAPS）。
 // ---------------------------------------------------------------------------
 
-// now_ms()：启动无关的单调毫秒（延迟测量粗粒度用）
-fn now_ms() -> int {
+/// now_ms()：启动无关的单调毫秒（延迟测量粗粒度用）
+pub fn now_ms() -> int {
     return now_ns() / 1000000
 }
 
-// time_ms(s) -> str：把毫秒数格式化成 "123ms" 字符串（日志/报表用）
-fn ms_str(ms: int) -> str {
+/// time_ms(s) -> str：把毫秒数格式化成 "123ms" 字符串（日志/报表用）
+pub fn ms_str(ms: int) -> str {
     return ms.to_str() + "ms"
 }
 

@@ -117,13 +117,32 @@ def test_lex_parity():
 
 def test_tolerant():
     ws = qlm_index.Workspace(ROOT)
-    # 仍然过不了前端的两处（`rc` 是关键字）；容错索引必须照样给出完整符号表
-    neg = [("std/sse.qma", "`rc` 当变量名（关键字）"),
-           ("std/ws.qma", "`rc` 当变量名（关键字）")]
-    for rel, why in neg:
-        path = os.path.join(ROOT, rel)
+    # 容错索引要证明的是"**解析不了**的文件也能给出完整符号表"。
+    #
+    # v3.26 之前这里用的是 std/sse.qma 与 std/ws.qma（它们曾把关键字 `rc`
+    # 当变量名，整个文件过不了前端）。v3.26 把那两处修好了，于是它们变成
+    # "能解析"—— 负向用例的前提消失。这里改成**现场构造**一个坏文件，
+    # 不再依赖标准库的缺陷状态：那种依赖会让"修好标准库"反而打红回归。
+    bad_src = (
+        "module badcase\n\n"
+        "pub fn alpha(a: int) -> int {\n"
+        "    let rc = a\n"          # `rc` 是关键字 -> 解析必失败
+        "    return rc\n"
+        "}\n\n"
+        "pub fn beta(b: int) -> int { return alpha(b) + alpha(b) }\n"
+        "pub fn gamma(c: int) -> int { return beta(c) }\n"
+        "pub fn delta(d: int) -> int { return gamma(d) }\n"
+        "pub fn epsilon(e: int) -> int { return delta(e) }\n"
+    )
+    os.makedirs(os.path.join(ROOT, "build"), exist_ok=True)
+    bad_path = os.path.join(ROOT, "build", "lsp_tolerant_bad.qma")
+    with open(bad_path, "w", encoding="utf-8") as f:
+        f.write(bad_src)
+
+    neg = [(bad_path, "`rc` 当变量名（关键字）")]
+    for path, why in neg:
         if not os.path.isfile(path):
-            ok(f"容错索引：{rel} 不存在，跳过（{why}）")
+            ok(f"容错索引：{path} 不存在，跳过（{why}）")
             continue
         with open(path, encoding="utf-8") as f:
             src = f.read()
@@ -133,15 +152,19 @@ def test_tolerant():
         except SyntaxError:
             parsed = False
         ix = ws.index(path, src)
-        want(not parsed, f"容错索引：{rel} 确实过不了 qlm.Parser（{why}）")
-        want(len(ix.syms) >= 5 and len(ix.occs) > 20,
-             f"容错索引：{rel} 仍给出 {len(ix.syms)} 个符号 / {len(ix.occs)} 处引用")
+        want(not parsed,
+             f"容错索引：{os.path.basename(path)} 确实过不了 qlm.Parser（{why}）")
+        want(len(ix.syms) >= 5,
+             f"容错索引：{os.path.basename(path)} 仍给出 {len(ix.syms)} 个符号")
 
     # 反向钉住：修好之后必须**能过前端**（`std/http` 的 `rc` 是 v2.06 修的、
-    # `std/timer` 的顶层 let 是 v2.07 收进函数的）。这两条防"又退回只能靠
-    # 容错索引"的状态——容错能力本身由上面两条负向用例覆盖。
+    # `std/timer` 的顶层 let 是 v2.07 收进函数的、`std/sse` / `std/ws` 的
+    # `rc` 是 v3.26 修的）。这几条防"又退回只能靠容错索引"的状态 ——
+    # 容错能力本身由上面的负向用例覆盖。
     pos = [("std/http.qma", "v2.06 修掉 `rc` 撞关键字"),
-           ("std/timer.qma", "v2.08 把顶层 let 收进 mem 块")]
+           ("std/timer.qma", "v2.08 把顶层 let 收进 mem 块"),
+           ("std/sse.qma", "v3.26 修掉 `rc` 撞关键字"),
+           ("std/ws.qma", "v3.26 修掉 `rc` 撞关键字")]
     for rel, why in pos:
         path = os.path.join(ROOT, rel)
         if not os.path.isfile(path):

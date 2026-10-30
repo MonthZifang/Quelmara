@@ -20,21 +20,24 @@
 // 聚合（struct/enum）不满足 Eq——`a == b` 对聚合是地址比较（07-gaps §7.6），
 // 需要按字段/变体手写比较。
 
-fn gen_min[T: Ord](a: T, b: T) -> T {
+/// 两个值的较小者。约束 [T: Ord]（整数 / 浮点）。
+pub fn gen_min[T: Ord](a: T, b: T) -> T {
     if a < b {
         return a
     }
     return b
 }
 
-fn gen_max[T: Ord](a: T, b: T) -> T {
+/// 两个值的较大者。约束 [T: Ord]（整数 / 浮点）。
+pub fn gen_max[T: Ord](a: T, b: T) -> T {
     if a > b {
         return a
     }
     return b
 }
 
-fn gen_clamp[T: Ord](v: T, lo: T, hi: T) -> T {
+/// 把 v 夹到 [lo, hi]：小于 lo 取 lo，大于 hi 取 hi。
+pub fn gen_clamp[T: Ord](v: T, lo: T, hi: T) -> T {
     if v < lo {
         return lo
     }
@@ -44,24 +47,26 @@ fn gen_clamp[T: Ord](v: T, lo: T, hi: T) -> T {
     return v
 }
 
-// |a - b|：数值型通用（int / float）
-fn gen_dist[T: Num + Ord](a: T, b: T) -> T {
+/// |a - b|：数值型通用（int / float）
+pub fn gen_dist[T: Num + Ord](a: T, b: T) -> T {
     if a < b {
         return b - a
     }
     return a - b
 }
 
-// vec[T] 算法族：T 从 vec 元素类型一元化推出
-fn gen_first[T](xs: vec[T]) -> T {
+/// vec[T] 算法族：T 从 vec 元素类型一元化推出
+pub fn gen_first[T](xs: vec[T]) -> T {
     return xs.get(0)
 }
 
-fn gen_last[T](xs: vec[T]) -> T {
+/// 最后一个元素。空 vec 行为未定义（调用方保证非空）。
+pub fn gen_last[T](xs: vec[T]) -> T {
     return xs.get(len(xs) - 1)
 }
 
-fn gen_contains[T: Eq](xs: vec[T], v: T) -> bool {
+/// 线性查找：xs 里是否有 v。O(n)，用 == 比较。
+pub fn gen_contains[T: Eq](xs: vec[T], v: T) -> bool {
     let mut i = 0
     while i < len(xs) {
         if xs.get(i) == v {
@@ -72,7 +77,8 @@ fn gen_contains[T: Eq](xs: vec[T], v: T) -> bool {
     return false
 }
 
-fn gen_index_of[T: Eq](xs: vec[T], v: T) -> int {
+/// 线性查找：返回 v 首次出现的下标，找不到返回 -1。
+pub fn gen_index_of[T: Eq](xs: vec[T], v: T) -> int {
     let mut i = 0
     while i < len(xs) {
         if xs.get(i) == v {
@@ -83,8 +89,8 @@ fn gen_index_of[T: Eq](xs: vec[T], v: T) -> int {
     return -1
 }
 
-// 原地反转：两端向中间交换（vec.set 写入）
-fn gen_reverse[T](xs: vec[T]) {
+/// 原地反转：两端向中间交换（vec.set 写入）
+pub fn gen_reverse[T](xs: vec[T]) {
     let mut i = 0
     let mut j = len(xs) - 1
     while i < j {

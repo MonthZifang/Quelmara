@@ -514,61 +514,57 @@ fn main() {
 - 回归：`tests/t128_mainret.qma`（if / while / 被调 void 函数三条早退路径），
   由 `run_win_tests.py` 的 `case_output` 检查**退出码 0**——只测输出测不出来。
 
-### 7.13 待修：6 个标准库模块没有 `pub` 导出，其中 2 个连解析都过不去（v2.01 审计 / v2.08 重测）
+### 7.13 ✅ 已修（v3.26）：标准库 6 个模块外部一个函数都调不到
 
-写文档时为了核对"哪些模块真能用"，逐个 `import` 了一遍（命令见下），结果和
-`03-stdlib.md` 的 ✅ 标记对不上：
+v2.01 审计发现、v2.08 只修了一部分，其余一直挂到 v3.26。重新跑完整审计
+（70 个模块逐个 import + 构建）后三类问题都收了。
 
-```bash
-# 每个模块生成一个只 import 它的空程序，构建一次
-python - <<'EOF'
-import os, subprocess, sys
-for dp, _, fns in os.walk('std'):
-    for fn in sorted(fns):
-        if not fn.endswith('.qma'): continue
-        mod = os.path.join(dp, fn)[:-4].replace('\\', '/').replace('/', '.')
-        p = 'build/_audit.qma'
-        open(p, 'w').write(f"module t\nimport {mod}\nfn main() {{ print(\"x\") }}\n")
-        r = subprocess.run([sys.executable, 'tools/stage0/qlm_cli.py', 'build', p,
-                            '--target', 'win', '-o', 'build/_audit.exe'],
-                           capture_output=True, text=True)
-        if r.returncode: print(mod, (r.stdout + r.stderr).strip().splitlines()[-1])
-EOF
-```
+**A. 两个模块连解析都过不去**
 
-**已修的部分**（v2.08 重测：`std/` 下每个模块逐个 `import` 复核）
-
-| 模块 | 修法 | 证据 |
+| 文件 | 症状 | 原因 |
 |---|---|---|
-| `std/ds` | 10 → **13 个 `pub`**，补全 `///`，新增 `rb_clear` / `rb_free` / `heap_len`；堆上浮/下沉改"挖洞" | `tests/t129_ds.qma`（15 组断言）+ `bench/ds_bench.qma` |
-| `std/timer` | **重写**：四个顶层 `let` → mem 块 + `static_word(13)/(14)`；`now_ms()`（不存在）→ `now_ns()`；4 → **5 个 `pub`**；`timer_poll` 从"每次 O(n) 扫平行数组"改成 O(log n) 弹堆 | `tests/t131_timer.qma`（7 组）+ `bench/timer_bench.qma` |
-| `std/http`、`std/net/core` | v2.10（并行轨）：`http` 的 `let rc` 改名 + 29 个 API 补 `pub`/`///` + 路由表与中间件链；`net/core` 18 → **22 个 `pub`**（跨模块读不了的 `ST_*` / `SLOT_RECVLEN` 常量改成访问器——`const` 不能 `pub`，语法只允许 `fn/struct/enum/interface`） | `tests/t130_router_dispatch.qma` + `tests/http_router_test.py`（20 项 E2E）+ `bench/http_router_bench.qma` |
+| `std/sse.qma:133` | `期望 NAME，得到 'rc'` | `let rc = h(fd)` —— `rc` 是**关键字**（`rc[T]`） |
+| `std/ws.qma:180`（另 373/401 同） | 同上 | 同上 |
 
-**A. 两个模块解析失败**（`import` 就报错，连符号表都建不起来）
+`std/http.qma:243` 早就留了注释"`rc` 是关键字，别用作变量名"，但 sse/ws
+的作者没看到。改名 `rc` → `hr`（共 5 处）。
 
-| 文件:行 | 症状 | 原因 |
+**B. 六个模块 0 个 `pub` 导出**
+
+`std/core`(4) / `std/gen`(9) / `std/serialize`(10) / `std/sse`(14) /
+`std/time`(2) / `std/ws`(11) —— 全部补 `pub`，并补 `///` 文档
+（`doc --missing` 门禁要求）。
+
+`std/gen` 是泛型库（`fn gen_min[T: Ord](a: T, b: T) -> T`），普通正则匹配
+不到 `[` 前面的部分，批量脚本要单独处理。
+
+**C. 跨模块调了非 pub 函数**
+
+`std/ws` 握手要 `b64_encode(sha1_str(key + WS_GUID), 20)` —— 要的是
+**原始 20 字节摘要**，而 `std/sha1` 只导出 `sha1_hex`（40 位十六进制）。
+给 `sha1_str` 加 `pub`。
+
+**结果**
+
+| 项 | 前 | 后 |
 |---|---|---|
-| `std/sse.qma:132` | `期望 NAME，得到 'rc'` | `let rc = h(fd)`——`rc` 是**关键字**（`rc[T]` 类型构造） |
-| `std/ws.qma:179`（另 372/400 同） | 同上 | 同上 |
+| 能编译的模块 | 68 / 70 | **70 / 70** |
+| 有 pub 导出的模块 | 64 / 70 | **70 / 70** |
+| 公开函数总数 | 584 | **635** |
 
-**B. 六个模块 0 个 `pub` 导出**（能 import，但用户代码一引用就编译失败）
+**门禁**：`tools/dev/check_std_import.py`（已挂进 `run_win_tests.py`）。
+判据两条：① 能否单独 import 并构建；② **有顶层函数却一个 `pub` 都没有**。
 
-`std/core`（4 个函数）/ `std/gen`（9）/ `std/serialize`（10）/ `std/sse`（20）/ `std/time`（2）/
-`std/ws`（24）——合计 **69 个顶层函数**。`03-stdlib.md` §1 总览的"公开 / 全部"列里显示
-`0 / N` 的就是这批。
+第二条是关键 —— v2.01 那次审计只看了"能不能构建"，所以 `ws`/`sse` 那种
+"能编译但全私有"的情况一直没被抓住。**能编译 ≠ 能用**。
 
-- 复现：`import std.core` 后调 `abs(-3)` → `SyntaxError: 引用了非 pub 声明（1 处）：'abs' <- core.qma`。
-- 根因：v1.43 把 std 全库改成 `pub fn` 的那一轮**漏了这批文件**（`gen_stdlib_doc.py` 里
-  v1.47 的注释记的是"把 271 个 pub API 全部漏出"，说明当时只核对了"有 pub 的那部分"）。
-  之后再没人 import 过它们，所以一直没暴露——`run_win_tests.py` 不构建 `examples/`。
-- 连带：`examples/ws_demo.qma` / `sse_demo.qma` 仍构建不过（先撞 A 的解析错，修掉再撞 B 的
-  可见性错）；`std/core` 是 `std/log` / `std/rand` / `std/sse` / `std/ws` 的共同依赖，补它的
-  `pub` 能一次解开四个模块的引用问题（**下一版就做它**）。
+**顺带修掉**：起服务前调 `ws_accepted()` / `sse_accepted()` 会
+`0xC0000005`（`_wst()` 读 `static_word(0)` 得 0，再传给 `conn_accepted(0)`
+解引用空指针）。改成惰性建空状态块。
 
-**下一版顺序**：① `sse`/`ws` 的 `rc` → `rcv`（3 处）；② `std/core` 的 4 个声明补 `pub` + `///`
-（解开 log/rand/sse/ws 的引用）；③ 余下 5 个模块 65 个声明补 `pub` + `///`；④ 把
-`examples/{ws_demo,sse_demo}.qma` 与 `std/timer` 的冒烟构建纳入 `run_win_tests.py`——
-**坏了这么久没人发现，就是因为没人编它**。
+**教训（写进流程）**：`tests/lsp_test.py` 原先把 `std/sse.qma` / `std/ws.qma`
+当作"解析失败"的负向样本 —— 修好它们反而打红回归。**别拿真实缺陷当测试
+前提**，负向样本要现场构造。
 
 ### 7.14 待查：调用实参类型不匹配不报错，静默按位重解释（v2.07 发现）
 

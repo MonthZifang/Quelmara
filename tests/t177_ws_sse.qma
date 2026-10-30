@@ -1,0 +1,64 @@
+// t177_ws_sse.qma —— ws / sse 终于能被外部调用了（v3.26）
+//
+// 背景：这两个模块从 v1.x 就存在，但**所有函数都没有 `pub`**，
+// 所以外部一个也调不到。更糟的是 std/ws 里还用了 `let rc = ...`，
+// 而 `rc` 是语言关键字（`rc[T]`）—— 整个模块**连解析都过不去**。
+// v2.01 的审计记过这件事，一直挂到 v3.26 才修。
+//
+// 这个夹具验证的是"修完之后真的能用"，不是"能编译"：
+// 编译通过只说明语法对了，能不能调到才是真问题。
+//
+// 不真起服务（阻塞 acceptor + 端口会拖慢回归），验证公开 API 的
+// 纯函数部分与握手摘要计算。
+
+import std.core
+import std.ws
+import std.sse
+import std.sha1
+import std.b64
+
+fn main() {
+    // ---- [1] ws 的公开函数确实可调（编译期就是证明：不 pub 会报错） ----
+    // ws_accepted/ws_closed/ws_msgs 读的是状态块，没起服务时是 0
+    if ws_accepted() != 0 {
+        print("FAIL: ws_accepted 未起服务时非 0")
+        return
+    }
+    if ws_closed() != 0 {
+        print("FAIL: ws_closed 未起服务时非 0")
+        return
+    }
+    if ws_msgs() != 0 {
+        print("FAIL: ws_msgs 未起服务时非 0")
+        return
+    }
+
+    // ---- [2] sse 的公开函数同样可调 ----
+    if sse_accepted() != 0 {
+        print("FAIL: sse_accepted 未起服务时非 0")
+        return
+    }
+    if sse_subs() != 0 {
+        print("FAIL: sse_subs 未起服务时非 0")
+        return
+    }
+    if sse_events_out() != 0 {
+        print("FAIL: sse_events_out 未起服务时非 0")
+        return
+    }
+
+    // ---- [3] ws 握手摘要：RFC 6455 的标准样例 ----
+    // key = "dGhlIHNhbXBsZSBub25jZQ=="
+    // 期望 Sec-WebSocket-Accept = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+    let key = "dGhlIHNhbXBsZSBub25jZQ=="
+    // RFC 6455 的固定 GUID（ws 模块里是私有常量，这里写字面量）
+    let dig = sha1_str(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+    let accept = b64_encode(dig, 20)
+    mem_free(dig, 20)
+    if accept != "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" {
+        print("FAIL: ws 握手 accept = " + accept)
+        return
+    }
+
+    print("PASS: ws / sse 公开 API 可用，握手摘要符合 RFC 6455")
+}

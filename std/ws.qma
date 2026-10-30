@@ -59,13 +59,18 @@ const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 // 服务入口
 // ---------------------------------------------------------------------------
 
-fn ws_serve(port: int, backlog: int, on_open: int, on_message: int,
+/// 启动 WebSocket 服务（连接上限取 `WS_DEFAULT_CONNS`）。
+///
+/// 阻塞：acceptor 占住调用线程直到进程退出，所以一个进程只能起一个服务。
+/// 回调按 `fn(fd: int) -> int` 传函数指针，返回 0 表示断开该连接。
+pub fn ws_serve(port: int, backlog: int, on_open: int, on_message: int,
             on_close: int) -> int {
     return ws_serve_max(port, backlog, on_open, on_message, on_close,
                         WS_DEFAULT_CONNS)
 }
 
-fn ws_serve_max(port: int, backlog: int, on_open: int, on_message: int,
+/// 同 `ws_serve`，但显式指定连接上限（槽位按此预分配，超出直接拒绝）。
+pub fn ws_serve_max(port: int, backlog: int, on_open: int, on_message: int,
                 on_close: int, max_conns: int) -> int {
     let st = conn_state_new(max_conns, 80)
     mem_store64(st, ST_H0, on_open)
@@ -76,28 +81,42 @@ fn ws_serve_max(port: int, backlog: int, on_open: int, on_message: int,
     return net_serve(port, backlog, ws_on_connect, ws_on_data, ws_on_close)
 }
 
-fn ws_accepted() -> int {
+/// 累计 accept 的连接数（起服务前调用返回 0，不会崩）。
+pub fn ws_accepted() -> int {
     return conn_accepted(_wst())
 }
 
-fn ws_closed() -> int {
+/// 累计关闭的连接数。
+pub fn ws_closed() -> int {
     return conn_closed(_wst())
 }
 
-fn ws_msgs() -> int {
+/// 累计收到的完整消息数（一帧一条，分片已合并）。
+pub fn ws_msgs() -> int {
     return conn_msgs(_wst())
 }
 
-fn ws_bytes_in() -> int {
+/// 累计收到的字节数（含握手与帧头）。
+pub fn ws_bytes_in() -> int {
     return conn_bytes_in(_wst())
 }
 
-fn ws_bytes_out() -> int {
+/// 累计发出的字节数（含握手与帧头）。
+pub fn ws_bytes_out() -> int {
     return conn_bytes_out(_wst())
 }
 
 fn _wst() -> int {
-    return mem_load64(static_word(0), 0)
+    let st = mem_load64(static_word(0), 0)
+    if st == 0 {
+        // v3.26：起服务之前 `static_word(0)` 是 0，而所有统计函数都直接
+        // 拿它去 `conn_*(st)` —— 那会解引用空指针，进程访问违例
+        // （0xC0000005）。外部调用方在 `ws_serve` 前查统计是很自然的事，
+        // 不该崩。这里惰性建一个空状态块，语义就是"还没连过"。
+        st = conn_state_new(1, 80)
+        mem_store64(static_word(0), 0, st)
+    }
+    return st
 }
 
 // ---------------------------------------------------------------------------
@@ -177,8 +196,8 @@ fn _handshake(st: int, p: int, fd: int) -> int {
     conn_shift(p, k + 4)
     mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
     let h = mem_load64(st, ST_H0)
-    let rc = h(fd)
-    if rc == 0 {
+    let hr = h(fd)
+    if hr == 0 {
         return 0
     }
     if mem_load64(p, SLOT_RECVLEN) > 0 {
@@ -370,8 +389,8 @@ fn _frames(st: int, p: int, fd: int) -> int {
                 let msg = mem_str(buf + pay, plen)
                 _drop_frame(p, off, pay, plen)
                 mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
-                let rc = h_msg(fd, msg)
-                if rc == 0 {
+                let hr = h_msg(fd, msg)
+                if hr == 0 {
                     return 0
                 }
                 continue
@@ -398,8 +417,8 @@ fn _frames(st: int, p: int, fd: int) -> int {
                 mem_store64(p, WS_FOP, 0)
                 mem_store64(p, WS_MLEN, 0)
                 mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
-                let rc = h_msg(fd, msg)
-                if rc == 0 {
+                let hr = h_msg(fd, msg)
+                if hr == 0 {
                     return 0
                 }
                 continue
@@ -473,20 +492,23 @@ fn _ws_frame_raw(fd: int, op: int, payload: int, n: int) -> int {
     return w
 }
 
-fn ws_send(fd: int, data: str) -> int {
+/// 发一条文本帧（opcode 0x1）。返回实际发出的字节数。
+pub fn ws_send(fd: int, data: str) -> int {
     return _ws_frame_raw(fd, WS_OP_TEXT, data, len(data))
 }
 
-fn ws_send_bin(fd: int, data: str) -> int {
+/// 发一条二进制帧（opcode 0x2）。
+pub fn ws_send_bin(fd: int, data: str) -> int {
     return _ws_frame_raw(fd, WS_OP_BIN, data, len(data))
 }
 
-fn ws_ping(fd: int, data: str) -> int {
+/// 发 ping 帧（opcode 0x9）；对端应回 pong，由 `_frames` 自动处理。
+pub fn ws_ping(fd: int, data: str) -> int {
     return _ws_frame_raw(fd, WS_OP_PING, data, len(data))
 }
 
-// 主动关闭：发 close 帧（对端回 close 后 reactor 收尾调 on_close）
-fn ws_close(fd: int, code: int) -> int {
+/// 主动关闭：发 close 帧（对端回 close 后 reactor 收尾调 on_close）
+pub fn ws_close(fd: int, code: int) -> int {
     let buf = mem_alloc(2)
     mem_store8(buf, 0, (code >> 8) & 255)
     mem_store8(buf, 1, code & 255)

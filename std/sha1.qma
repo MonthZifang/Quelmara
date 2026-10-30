@@ -82,9 +82,14 @@ fn sha1_block(state: int, block: int, w: int) -> int {
     return 0
 }
 
-// sha1_str(s) -> int：返回 20 字节摘要缓冲区指针（大端序，含 0 字节，
-// 不能当 str 用；要字符串请走 sha1_hex / b64_encode）
-fn sha1_str(s: str) -> int {
+/// sha1_str(s) -> int：返回 20 字节摘要缓冲区指针（大端序，含 0 字节，
+/// 不能当 str 用；要字符串请走 sha1_hex / b64_encode）
+///
+/// v3.26：加 `pub` —— `std/ws` 的握手要的是**原始摘要**
+/// （`b64_encode(dig, 20)`），`sha1_hex` 只给 40 位十六进制，拿不到字节。
+/// 此前 `ws` 直接调了这个非 pub 函数，导致整个模块**连解析都过不去**
+/// （v2.01 审计记过，一直挂着没修）。
+pub fn sha1_str(s: str) -> int {
     let n = len(s)
     // 填充后长度：n + 1 + pad + 8，向上取 64 的倍数
     let total = ((n + 9 + 63) / 64) * 64
