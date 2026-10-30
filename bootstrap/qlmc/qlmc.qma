@@ -603,6 +603,7 @@ struct P {
     stt: vec[int]       // struct 表：stt[0]=个数，每个 struct 占 ST_STRIDE 字
     fdll: vec[str]      // @ffi 的 DLL 名（与 fsym 平行）
     fsym: vec[str]      // @ffi 的符号名
+    is_lib: int         // v3.37：1 = 编库（不要求 main、不发入口）
 }
 
 fn _st_base(si: int) -> int {
@@ -2692,6 +2693,7 @@ struct Ctx {
     rt_pos: vec[int]
     fdll: vec[str]      // @ffi 的 DLL 名（与 fsym 平行）
     fsym: vec[str]      // @ffi 的符号名
+    is_lib: int         // v3.37：1 = 编库（不要求 main、不发入口）
 }
 
 // 单个函数的编译状态。结构体按值传，**标量字段改了不会回传**，
@@ -2789,6 +2791,10 @@ const RT_ITOF = 20      // int -> f64
 const RT_FTOI = 21      // f64 -> int（向零截断）
 const RT_FNEG = 22      // f64 取负（翻符号位，不是对地址取负）
 const RT_F64FMT = 23    // f64 -> 十进制文本（写进调用方给的缓冲，返回长度）
+// v3.37：mem_chr(p, n, byte) -> 下标 / -1（找不到）
+// std/ 有 5 个模块用它（http 头解析、str_find、csv 等），是当前最大单项。
+const RT_MEMCHR = 24
+const RT_COUNT = 25      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
 
 fn _slot_disp(slot: int) -> int {
     return -8 * (slot + 1)
@@ -8975,6 +8981,57 @@ fn _gen_i64_fmt(ctx: Ctx) {
 /// 口径与 stage-0 一致：返回 `a[i] - b[i]`（不是 -1/0/1），全等返回 0。
 /// stage-0 那边是 8 字节字比较 + 差异字逐字节定位（快但等价），这里就用
 /// 朴素字节循环——语义完全相同，自举阶段优先要"对"，性能留给之后。
+/// __memchr(rcx = p, rdx = n, r8 = byte) -> 首个等于 byte 的下标，找不到 -1
+///
+/// v3.37：std/ 有 5 个模块用它（http 头解析、str_find、csv…）。
+/// 朴素字节循环，语义与 stage-0 的 __memchr 一致（返回下标，不是指针）。
+fn _gen_memchr(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_MEMCHR, len(code))
+    let ltop = _newlab(labs)
+    let lfound = _newlab(labs)
+    let lnone = _newlab(labs)
+    _b(code, 0x45)                             // xor r9d, r9d（i = 0）
+    _b(code, 0x31)
+    _b(code, 0xC9)
+    _setlab(labs, code, ltop)
+    // cmp r9, rdx：39 /r 是 cmp r/m, r，所以 reg=rdx(010)、rm=r9(001)
+    // => ModRM = 11 010 001 = 0xD1；REX.W|R（0x4C，R 扩展 reg 到 rdx 不需要，
+    //    但 rm=r9 需要 REX.B）—— 实际需要的是 0x49（W|B）。
+    _b(code, 0x49)                             // cmp r9, rdx
+    _b(code, 0x39)
+    _b(code, 0xD1)
+    let p0 = _jcc(code, 0x83)                  // jae .none
+    _addfix(ctx.fixes, p0, lnone, FK_LAB)
+    _b(code, 0x42)                             // movzx eax, byte [rcx + r9]
+    _b(code, 0x0F)
+    _b(code, 0xB6)
+    _b(code, 0x04)
+    _b(code, 0x09)                             // SIB: scale=1, index=r9, base=rcx
+    _b(code, 0x44)                             // cmp eax, r8d
+    _b(code, 0x39)
+    _b(code, 0xC0)
+    let p1 = _jcc(code, 0x84)                  // je .found
+    _addfix(ctx.fixes, p1, lfound, FK_LAB)
+    _b(code, 0x49)                             // inc r9
+    _b(code, 0xFF)
+    _b(code, 0xC1)
+    let p2 = _jmp(code)
+    _addfix(ctx.fixes, p2, ltop, FK_LAB)
+    _setlab(labs, code, lfound)
+    _b(code, 0x4C)                             // mov rax, r9
+    _b(code, 0x89)
+    _b(code, 0xC8)
+    _ret(code)
+    _setlab(labs, code, lnone)
+    _b(code, 0x48)                             // mov rax, -1
+    _b(code, 0xC7)
+    _b(code, 0xC0)
+    _w32(code, -1)
+    _ret(code)
+}
+
 fn _gen_memcmp(ctx: Ctx) {
     let code: vec[int] = ctx.code
     let labs: vec[int] = ctx.labs
@@ -10104,6 +10161,27 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         let n = _lower_expr(fc, nd.c)
         return _bi_mem_str(fc, p, n)
     }
+    // v3.37：mem_chr(p, n, byte) -> int（首个匹配字节的下标，找不到 -1）
+    if bn == "mem_chr" {
+        let p = _lower_expr(fc, nd.b)
+        let n = _lower_expr(fc, nd.c)
+        let bv = _lower_expr(fc, nd.n)
+        _ir_emit(fc, OP_ARG, 0, p, 0, 0)
+        _ir_emit(fc, OP_ARG, 0, n, 0, 1)
+        _ir_emit(fc, OP_ARG, 0, bv, 0, 2)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_MEMCHR)
+        return d
+    }
+    // v3.37：str_from_mem(data, n) -> str
+    // 与 mem_str(p, n) 语义完全相同（从内存区间拷 n 字节、补 NUL、
+    // 带长度头）。stage-0 里两者是分开的内建，std/ 用 str_from_mem 更多。
+    if bn == "str_from_mem" {
+        let p = _lower_expr(fc, nd.b)
+        let n = _lower_expr(fc, nd.c)
+        return _bi_mem_str(fc, p, n)
+    }
     // v3.36：mem_load32(p, i) -> int（读第 i 个 4 字节，零扩展）
     // 与 mem_load64 同构，只是宽度 4。std/crc32 / crc64 用它。
     if bn == "mem_load32" {
@@ -10919,8 +10997,21 @@ fn _gen_alloc(ctx: Ctx) {
 }
 
 /// 入口：sub rsp,0x28 -> call main -> ExitProcess(rax)
+///
+/// v3.37：**lib 模式**（ctx.is_lib）下不发真正的入口，只放一条 `ret`。
+/// 为什么仍要放点什么：PE 的 AddressOfEntryPoint 必须指向 .text 内的
+/// 合法位置（不能是 0 / 越界），否则某些加载器会拒绝映像。一条 `ret`
+/// 既满足这个约束，又保证"即使真被执行也立刻返回"（不会跑飞）。
+///
+/// 库的真实用途是被别的产物链接 —— qlmc 目前没有链接器，所以 lib 模式的
+/// 现实价值是**验证 std/ 的模块能编译**（把"没有 main"这一类阻塞消掉），
+/// 为后续的链接支持铺路。
 fn _gen_entry(ctx: Ctx) {
     let code: vec[int] = ctx.code
+    if ctx.is_lib == 1 {
+        _ret(code)                          // 0xC3
+        return
+    }
     _sub_rsp(code, 0x28)
     let p = _call_rel(code)
     _addfix(ctx.fixes, p, -1, 0)           // id -1 = main
@@ -11192,14 +11283,21 @@ fn _target_of(ctx: Ctx, id: int, kind: int, rdata_rva: int, bss_rva: int,
               iat: vec[int]) -> int {
     if kind == FK_FN {
         if id == -1 {
+            // v3.37：lib 模式不发入口（_gen_entry 已提前 return），
+            // 所以这里不该被问到 -1。真问到了说明有别的路径依赖 main，
+            // 给一个明确的诊断而不是去查 main 然后报"没有 main"。
+            if ctx.is_lib == 1 {
+                eprint("qlmc: lib 模式下仍有代码引用入口点（内部错误）")
+                exit(2)
+            }
             let mi = _name_id_ro(ctx, "main")
             if mi < 0 {
-                eprint("qlmc: 没有 main")
+                eprint("qlmc: 没有 main（编库请加 -lib）")
                 exit(2)
             }
             let fi = _fn_index_ctx(ctx, mi)
             if fi < 0 {
-                eprint("qlmc: 没有 main")
+                eprint("qlmc: 没有 main（编库请加 -lib）")
                 exit(2)
             }
             return ctx.fnpos.get(fi)
@@ -11640,6 +11738,11 @@ fn main() {
     let src = a[1]
     let mut out = "build/qlmc_out.exe"
     let mut want = 0
+    // v3.37：-lib —— 编库（不要求 main、不发入口）。
+    // std/ 有 30 个模块只是"没有 main"，加上这个模式它们立刻从
+    // "失败"变成"能编"。产物仍是 PE，只是 AddressOfEntryPoint 指向
+    // 一段 ret 桩（Windows 不会执行它，因为它是 DLL/被链接用）。
+    let mut is_lib = 0
     let mut i = 2
     while i < len(a) {
         if a[i] == "-o" && i + 1 < len(a) {
@@ -11647,6 +11750,9 @@ fn main() {
         }
         if a[i] == "-j" && i + 1 < len(a) {
             want = a[i + 1].to_int()
+        }
+        if a[i] == "-lib" {
+            is_lib = 1
         }
         i = i + 1
     }
@@ -11745,10 +11851,10 @@ fn main() {
     }
     let nl = vec[int].new(1)
     nl.push(0)
-    // 运行库例程位置表：RT_PINT..RT_F64FMT 共 24 个（加例程时这里要一起改）
-    let rt_pos = vec[int].new(24)
+    // 运行库例程位置表：RT_PINT..RT_COUNT-1（加例程时改 RT_COUNT 即可）
+    let rt_pos = vec[int].new(RT_COUNT)
     si = 0
-    while si < 24 {
+    while si < RT_COUNT {
         rt_pos.push(0)
         si = si + 1
     }
@@ -11763,7 +11869,8 @@ fn main() {
     let ctx = Ctx { code: code, labs: labs, fixes: fixes, nodes: nodes,
                     names: names, strs: strs, fns: fns, fnpos: fnpos,
                     rdata: rdata, strpos: strpos, str_true: s_true, str_false: s_false,
-                    nl: nl, rt_pos: rt_pos, fdll: fdll, fsym: fsym }
+                    nl: nl, rt_pos: rt_pos, fdll: fdll, fsym: fsym,
+                    is_lib: is_lib }
 
     // **入口必须落在 .text 偏移 0**（AddressOfEntryPoint 恒等于 TEXT_RVA）
     _gen_entry(ctx)
@@ -11779,7 +11886,8 @@ fn main() {
     _gen_join(ctx)
     _gen_spawn(ctx)
     _gen_eprint_str(ctx)
-    _gen_memcmp(ctx)
+    _gen_memchr(ctx)
+_gen_memcmp(ctx)
     _gen_i64_fmt(ctx)
     _gen_str_to_int(ctx)
     _gen_fparse(ctx)

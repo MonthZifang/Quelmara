@@ -1,0 +1,57 @@
+// t181_qlmc_lib.qma —— qlmc 的 lib 模式与 mem_chr（v3.37）
+//
+// ## 为什么需要它
+//
+// v3.36 把 qlmc 编 std/ 的阻塞从 35 项降到 12 项，但覆盖率仍是 **0/70** ——
+// 因为最大的一类是"没有 main"（30 个模块），而 qlmc 只做 program、
+// 不做 lib。v3.37 加了 `-lib`，覆盖率跳到 **37/70**。
+//
+// ## lib 模式的语义
+//
+//   qlmc build X.qma -lib -o out.exe
+//
+// * 不要求 main；
+// * 不发真正的入口，只放一条 `ret`（PE 的 AddressOfEntryPoint 必须指向
+//   .text 内的合法位置，不能是 0/越界）；
+// * 产物仍是合法 PE，只是没有可执行语义。
+//
+// ## 这个夹具验什么
+//
+// 1. `mem_chr` 的语义（v3.37 新增内建，std/ 5 个模块用它）：
+//    返回**下标**不是指针，找不到返回 -1，`n` 是上界（不含）。
+// 2. 库模块**能编**（由 Python 侧 case 验证，因为需要调用 qlmc）。
+//
+// 注意：本夹具自己**有 main**，所以用 stage-0 与 qlmc 都能编 ——
+// 这样可以对拍两边行为。
+module t181_qlmc_lib
+
+fn main() {
+    // ---- [1] mem_chr 基本语义 ----
+    let p = str_alloc(8)
+    mem_store8(p, 0, 97)        // 'a'
+    mem_store8(p, 1, 98)        // 'b'
+    mem_store8(p, 2, 99)        // 'c'
+    mem_store8(p, 3, 0)
+
+    assert(mem_chr(p, 4, 97) == 0, "找到第 0 字节")
+    assert(mem_chr(p, 4, 98) == 1, "找到第 1 字节")
+    assert(mem_chr(p, 4, 99) == 2, "找到第 2 字节")
+    assert(mem_chr(p, 4, 122) == -1, "找不到返回 -1")
+
+    // ---- [2] n 是上界（不含） ----
+    // 只看前 2 字节：'c' 在 index 2，超出上界，必须找不到
+    assert(mem_chr(p, 2, 99) == -1, "n 是上界，index 2 不在 [0,2)")
+    assert(mem_chr(p, 3, 99) == 2, "n=3 时 index 2 在内")
+
+    // ---- [3] 边界：n = 0 必须找不到（不能越界读） ----
+    assert(mem_chr(p, 0, 97) == -1, "n=0 找不到")
+
+    // ---- [4] 重复字节返回**第一个** ----
+    let q = str_alloc(8)
+    mem_store8(q, 0, 120)
+    mem_store8(q, 1, 121)
+    mem_store8(q, 2, 120)
+    assert(mem_chr(q, 4, 120) == 0, "重复字节返回第一个下标")
+
+    print("PASS: qlmc lib 模式与 mem_chr 语义正确")
+}
