@@ -113,10 +113,13 @@ def handshake(sock):
     return status, hdrs, rest, key
 
 
-def make_frame(opcode, payload, mask=True):
-    """按 RFC 6455 组一帧（客户端发必须掩码）。"""
+def make_frame(opcode, payload, mask=True, fin=True):
+    """按 RFC 6455 组一帧（客户端发必须掩码）。
+
+    `fin=False` 表示分片的非末帧（FIN=0），用于测 continuation frame。
+    """
     n = len(payload)
-    hdr = bytes([0x80 | opcode])
+    hdr = bytes([(0x80 if fin else 0x00) | opcode])
     if n < 126:
         hdr += bytes([(0x80 if mask else 0) | n])
     elif n < 65536:
@@ -158,6 +161,32 @@ def recv_frame(sock, timeout=5.0):
     return opcode, payload
 
 
+def safe_send(sock, data):
+    """sendall 的**不抛异常**版本：连接被重置时返回 False。
+
+    服务端遇到协议错误会主动 close（RFC 6455 要求），这时客户端再发就是
+    ConnectionResetError。端到端脚本要把"连接被重置"当成一条失败判据
+    报出来，而不是崩栈。
+    """
+    try:
+        sock.sendall(data)
+        return True
+    except OSError:
+        return False
+
+
+def safe_recv(sock, timeout=5.0):
+    """recv_frame 的**不抛异常**版本：超时/断开返回 (None, None)。
+
+    端到端脚本里"收不到"本身就是一条失败判据，不该让整个脚本崩掉 ——
+    崩掉会丢掉前面已经通过的断言，也看不出是哪一条失败的。
+    """
+    try:
+        return recv_frame(sock, timeout)
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
 def main():
     global PORT
     src = os.path.join(ROOT, "examples", "ws_demo.qma")
@@ -191,7 +220,7 @@ def main():
             bad(f"收 on_open 推送失败：{e}")
 
         # ---- [2] 文本帧往返 ----
-        sock.sendall(make_frame(0x1, b"ping-quelmara"))
+        safe_send(sock, make_frame(0x1, b"ping-quelmara"))
         op, payload = recv_frame(sock)
         if op == 0x1 and payload == b"ping-quelmara":
             ok("文本帧 echo 正确（掩码已解开）")
@@ -200,7 +229,7 @@ def main():
 
         # ---- [3] 长文本（走 16 位长度档） ----
         long_msg = ("Q" * 300).encode()
-        sock.sendall(make_frame(0x1, long_msg))
+        safe_send(sock, make_frame(0x1, long_msg))
         op, payload = recv_frame(sock)
         if op == 0x1 and payload == long_msg:
             ok(f"长文本帧（{len(long_msg)} B）echo 正确")
@@ -209,7 +238,7 @@ def main():
 
         # ---- [4] 二进制帧 ----
         blob = bytes(range(256))
-        sock.sendall(make_frame(0x2, blob))
+        safe_send(sock, make_frame(0x2, blob))
         op, payload = recv_frame(sock)
         if op == 0x2 and payload == blob:
             ok("二进制帧 echo 正确（256 B 全字节）")
@@ -220,7 +249,7 @@ def main():
         # 发同一内容两次，掩码 key 不同；echo 必须都是明文
         for i in range(2):
             msg = f"mask-check-{i}".encode()
-            sock.sendall(make_frame(0x1, msg))
+            safe_send(sock, make_frame(0x1, msg))
             op, payload = recv_frame(sock)
             if payload != msg:
                 bad(f"第 {i+1} 次掩码解密错误：{payload!r}")
@@ -228,7 +257,146 @@ def main():
         else:
             ok("两次不同掩码 key 都能正确解出明文")
 
+        # ---- [6] 分片消息（continuation frame） ----
+        # RFC 6455 5.4：首帧 opcode=TEXT + FIN=0，后续帧 opcode=CONT(0)，
+        # 末帧 FIN=1。服务端必须把三片拼成一条消息再回调。
+        parts = [b"frag-one|", b"frag-two|", b"frag-three"]
+        safe_send(sock, make_frame(0x1, parts[0], fin=False))
+        safe_send(sock, make_frame(0x0, parts[1], fin=False))
+        safe_send(sock, make_frame(0x0, parts[2], fin=True))
+        want = b"".join(parts)
+        op, payload = safe_recv(sock)
+        if payload is None:
+            bad("分片消息收不到（连接可能已卡死）")
+        elif payload == want:
+            ok(f"分片消息拼接正确（3 片 -> {len(want)} B）")
+        else:
+            bad(f"分片拼接错误：got={payload!r} want={want!r}")
+
+        # ---- [7] 分片消息的类型取首帧 opcode ----
+        # 首帧是二进制(0x2)、续帧是 CONT(0)。服务端回调里 ws_last_op()
+        # 必须返回 2（首帧类型），而不是 0（续帧的 CONT）。
+        # 这一条如果错了，分片发来的二进制会被当文本回，客户端解出乱码。
+        blob2 = bytes(range(64))
+        safe_send(sock, make_frame(0x2, blob2[:20], fin=False))
+        safe_send(sock, make_frame(0x0, blob2[20:], fin=True))
+        op, payload = safe_recv(sock)
+        if payload is None:
+            bad("分片二进制消息收不到")
+        elif op == 0x2 and payload == blob2:
+            ok("分片二进制消息的 opcode 取首帧（回的是二进制帧）")
+        else:
+            bad(f"分片二进制类型错：op={op}（应为 2）len={len(payload)}")
+
+        # ---- [8] 分片 + ping 穿插（控制帧可以夹在分片中间） ----
+        # RFC 6455 5.4 允许控制帧穿插在分片之间，且不打断分片序列
+        safe_send(sock, make_frame(0x1, b"inter-", fin=False))
+        safe_send(sock, make_frame(0x9, b"mid-ping"))          # ping 夹在中间
+        safe_send(sock, make_frame(0x0, b"leaved", fin=True))
+        # 先可能收到 pong（ping 的回应），再收到拼接后的消息
+        got_pong = False
+        got_msg = None
+        for _ in range(3):
+            op, payload = safe_recv(sock)
+            if payload is None:
+                break
+            if op == 0xA:
+                got_pong = True
+                continue
+            got_msg = (op, payload)
+            break
+        if got_pong and got_msg and got_msg[1] == b"inter-leaved":
+            ok("分片中间穿插 ping：pong 已回，消息仍正确拼接")
+        elif got_msg and got_msg[1] == b"inter-leaved":
+            ok("分片中间穿插 ping：消息正确拼接（pong 未单独回，可接受）")
+        else:
+            bad(f"分片+ping 穿插：pong={got_pong} msg={got_msg!r}")
+
+        # ---- [9] 分片之后连接仍然可用（v3.28 修的死锁回归钉） ----
+        # 这条钉住一个严重缺陷：分片完成时 `_drop_frame(p, total, ...)` 的
+        # keep_to 写成了 total，把已消费的消息本体留在缓冲区；下一帧又从
+        # off=0 解析，于是**永远读不出帧头**，连接就此卡死。
+        # 症状是"用过一次分片之后，这条连接再也收不到任何消息"。
+        safe_send(sock, make_frame(0x1, b"post-", fin=False))
+        safe_send(sock, make_frame(0x0, b"frag", fin=True))
+        try:
+            op, payload = recv_frame(sock)
+        except Exception as e:  # noqa: BLE001
+            bad(f"分片消息本身就收不到（连接卡死）：{e}")
+            payload = None
+        if payload is not None and payload != b"post-frag":
+            bad(f"分片后第一条消息就错了：{payload!r}")
+        elif payload == b"post-frag":
+            # 关键：紧接着再发一个**普通单帧**，必须还能收到
+            safe_send(sock, make_frame(0x1, b"still-alive"))
+            try:
+                op, payload = recv_frame(sock, timeout=3)
+                if payload == b"still-alive":
+                    ok("分片之后连接仍可用（下一帧能收到）")
+                else:
+                    bad(f"分片后收到的内容不对：{payload!r}")
+            except Exception as e:  # noqa: BLE001
+                bad(f"分片之后连接卡死（收不到下一帧）：{e}")
+
+        # ---- [10] close 握手（v3.28 补） ----
+        # RFC 6455 5.5.1：客户端发 close，服务端必须回一个 close 帧，
+        # 然后关闭 TCP。这条代码路径与分片那条同源 —— 写了但从没跑过。
+        safe_send(sock, make_frame(0x8, struct.pack(">H", 1000)))
+        op, payload = safe_recv(sock, timeout=3)
+        if op is None:
+            bad("close 握手：没收到服务端的 close 帧")
+        elif op == 0x8:
+            code = struct.unpack(">H", payload[:2])[0] if len(payload) >= 2 else -1
+            if code == 1000:
+                ok("close 握手正确（服务端回 close，code 回显 1000）")
+            else:
+                ok(f"close 握手回了 close 帧（code={code}，非回显但可接受）")
+        else:
+            bad(f"close 握手：服务端回的不是 close 帧（op={op}）")
+
+        # 服务端应随后关闭连接
+        try:
+            sock.settimeout(3)
+            tail = sock.recv(4096)
+            if tail == b"":
+                ok("close 之后服务端关闭了连接")
+            else:
+                bad(f"close 之后还收到数据：{tail!r}")
+        except (socket.timeout, OSError):
+            ok("close 之后连接已断开（重置）")
+
         sock.close()
+
+        # ---- [11] 错误路径：未掩码的客户端帧必须被拒（close 1002） ----
+        # RFC 6455 5.1：客户端发的帧必须掩码。这些错误路径代码各 2-4 行，
+        # 与分片同源 —— 写了但从没跑过。用新连接测，不污染上面那条。
+        s2 = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+        handshake(s2)
+        safe_recv(s2)                       # on_open 推送
+        safe_send(s2, make_frame(0x1, b"no-mask", mask=False))
+        op, payload = safe_recv(s2, timeout=3)
+        if op == 0x8:
+            code = struct.unpack(">H", payload[:2])[0] if len(payload) >= 2 else -1
+            ok(f"未掩码的客户端帧被拒（close code={code}）") if code == 1002 \
+                else bad(f"未掩码帧被拒但 code={code}（期望 1002）")
+        else:
+            bad(f"未掩码的客户端帧没被拒（op={op}）")
+        s2.close()
+
+        # ---- [12] 错误路径：分片进行中又来新数据帧（close 1002） ----
+        s3 = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+        handshake(s3)
+        safe_recv(s3)
+        safe_send(s3, make_frame(0x1, b"start", fin=False))
+        safe_send(s3, make_frame(0x1, b"another", fin=True))   # 分片未完成
+        op, payload = safe_recv(s3, timeout=3)
+        if op == 0x8:
+            code = struct.unpack(">H", payload[:2])[0] if len(payload) >= 2 else -1
+            ok(f"分片未完成时的新数据帧被拒（close code={code}）") if code == 1002 \
+                else bad(f"被拒但 code={code}（期望 1002）")
+        else:
+            bad(f"分片未完成时的新数据帧没被拒（op={op}）")
+        s3.close()
     finally:
         proc.kill()
         try:
