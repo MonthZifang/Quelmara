@@ -8,7 +8,7 @@
 
 ## 1. 模块总览
 
-67 个模块，**570 个公开函数**（另有 594 个内部函数）
+68 个模块，**576 个公开函数**（另有 595 个内部函数）
 
 <!-- overview:begin -->
 | 模块 | 一句话 | 公开 / 全部 |
@@ -52,6 +52,7 @@
 | `std/net/udp` | UDP 封装与地址解析 | 2 / 3 |
 | `std/p256` | NIST P-256 域运算 + ECDSA 验签（TLS 证书签名） | 2 / 45 |
 | `std/p384` | NIST P-384（secp384r1）ECDSA 验签（12 limb Montgomery + Jacobian，SHA-384 摘要；v2.99） | 2 / 47 |
+| `std/park` | 线程 park 原语：WaitOnAddress / WakeByAddress（仅 Windows PE；由 std/sync 注入使用） | 4 / 7 |
 | `std/path` | 路径处理（join / clean / dir / base / ext / stem；'/' 与 '\' 都认） | 7 / 9 |
 | `std/rand` | xorshift64* 伪随机 | 4 / 5 |
 | `std/regex` | 正则引擎（回溯 VM）：字面/./字符类/转义类/量词 *+?{n,m}/交替/分组(?:)/锚点 ^$；compile+match/full/exec/find/replace[_all]，步数上限防病态回溯 | 7 / 24 |
@@ -67,7 +68,7 @@
 | `std/sse` | Server-Sent Events 服务端 | 0 / 20 |
 | `std/staticfile` | 静态文件服务的安全解析层（URL 解码 / 目录穿越防护 / index 补全 / Cache-Control / ETag / Range 解析） | 9 / 14 |
 | `std/str` | 字符串工具集 | 26 / 30 |
-| `std/sync` | 自旋锁 / Treiber 无锁栈 / WaitGroup | 11 / 15 |
+| `std/sync` | 自旋锁 / Treiber 无锁栈 / WaitGroup（零 @ffi，park 由调用方注入） | 13 / 15 |
 | `std/time` | 时间便捷层 | 0 / 2 |
 | `std/timer` | 轮询式定时器（mem 块上的二叉最小堆；无后台线程 / 无回调，主循环 poll） | 5 / 9 |
 | `std/tls13` | TLS 1.3 密钥调度（HKDF-Expand-Label）+ AEAD 记录层 | 23 / 29 |
@@ -1335,6 +1336,30 @@ fn p384_on_curve(pub_x: str, pub_y: str) -> int
 fn ecdsa_p384_verify(pub_x: str, pub_y: str, hash: str, r_sig: str, s_sig: str) -> int
 ```
 
+### `std/park.qma`
+
+线程 park 原语：WaitOnAddress / WakeByAddress（仅 Windows PE；由 std/sync 注入使用）
+
+```quelmara
+/// 本后端有没有真正的 park。`std/park` 能编过就一定有，恒为 1。
+fn park_available() -> int
+/// 把 p 上的 8 字节值 park 到「不再等于 `want`」为止，最多 ms 毫秒。
+/// 调用方契约：调用前把「当前值」读进 `want`。**不必**先确认谓词仍成立 ——
+/// `WaitOnAddress` 自己会比：`*p != want` 时立即返回。
+/// 返回 1 = 被唤醒，0 = 超时。
+/// **语义保证（这是它比自旋正确的地方）**：「比较 `*p == want`」与「进入睡眠」
+/// 由内核在同一个临界区里完成，所以不存在「刚检查完、还没睡下去，别人就
+/// Wake 了」的丢失唤醒窗口。调用方只需「读值 → park → 回头重读」。
+fn park_on(p: int, want: int, ms: int) -> int
+/// 唤醒所有在 p 上 park 的线程。没有等待者时是安全的空操作（约 300–400 ns）。
+fn wake_all(p: int)
+/// 唤醒一个在 p 上 park 的线程。
+/// 边界：**不知道它会不会立刻又睡回去**。如果被唤醒的线程因为条件仍不满足
+/// 而重新 park，其余等待者就收不到这次唤醒 —— 所以只有在「唤醒一个就够」
+/// （单等待者、或条件对任一等待者都成立）时才用它。多等待者用 `wake_all`。
+fn wake_one(p: int)
+```
+
 ### `std/path.qma`
 
 路径处理（join / clean / dir / base / ext / stem；'/' 与 '\' 都认）
@@ -1677,9 +1702,16 @@ fn str_pad_left(s: str, width: int, pad: str) -> str
 
 ### `std/sync.qma`
 
-自旋锁 / Treiber 无锁栈 / WaitGroup
+自旋锁 / Treiber 无锁栈 / WaitGroup（零 @ffi，park 由调用方注入）
 
 ```quelmara
+/// 注入 park/wake 实现（传 0 表示恢复纯退避）。
+/// 典型用法（Windows）：`import std.park` 之后
+/// `sync_set_park(park_on, wake_all)`。
+/// 非 Windows 后端不 import `std.park` 即可 —— 本模块照样编得过。
+fn sync_set_park(park_fn: int, wake_fn: int)
+/// 当前有没有注入 park 实现（1 = 有）。
+fn sync_has_park() -> int
 /// 新建一把锁（8 字节堆块，0=未锁 / 1=已锁），返回锁句柄。
 /// 锁对象不自动回收：用完自己 mem_free。
 fn mutex_new() -> int
@@ -1726,19 +1758,20 @@ fn wg_new() -> int
 fn wg_add(w: int, n: int)
 /// 计数减 1；减到 0 时等待方才能通过 wg_wait。
 fn wg_done(w: int)
-/// 阻塞到计数归零（v3.15：长等待 park，不再靠 sleep 片）。
+/// 阻塞到计数归零。
 /// 三段退避：
 ///   1. 前 64 次 `spin_hint`（≈0.3 µs）—— "马上就好"的等待不该付系统调用；
 ///   2. 再 1024 次 `thread_yield`（≈5.6 ms）—— 毫秒级等待，让出但不睡；
-///   3. 之后 `WaitOnAddress` park —— 真正睡眠，CPU 归零，唤醒延迟微秒级。
-/// **v3.15 之前第 3 段是 `sleep_ms(1)`，本机实际约 25 ms**（Windows 默认
-/// 15.6 ms 时钟片 + VBS 的抖动），所以长等待的唤醒会晚 25 ms。这是
-/// `07-gaps.md` §5 登记的那条缺口，本版收口。
-/// **为什么不需要额外的锁**：`WaitOnAddress(w, &cmp, 8, ms)` 的语义是
+///   3. 之后：**注入过 park 就 park**（CPU 归零、唤醒 µs 级），
+///      否则退回 `sleep_ms(1)`（本机实际约 15.6–25 ms 一个片）。
+/// 第 3 段的行为取决于调用方有没有 `sync_set_park(park_on, wake_all)`：
+/// 不注入时本函数仍正确，只是长等待的唤醒晚一个时钟片。这是 v3.16 为了
+/// 让本模块在非 PE 后端可编译而做的取舍（见文件头）。
+/// **为什么 park 不需要额外的锁**：`WaitOnAddress(w, &cmp, 8, ms)` 的语义是
 /// "若 *w == cmp 才睡，否则立即返回"，内核在同一个临界区里完成"比较 + 入队"。
 /// 我们把 cmp 设成**刚刚读到的非零值**，于是：
 ///   * 若 wg_done 已经把计数减到 0，*w != cmp → 立即返回，重新检查，退出循环；
-///   * 若我们真的睡下去了，那 wg_done 的 `_WakeByAddressAll` 一定能把我们叫醒。
+///   * 若我们真的睡下去了，那 wg_done 的 wake 一定能把我们叫醒。
 /// 两种情况都不丢唤醒，所以循环里只要"读值 → 若非零则 park → 回头重读"。
 fn wg_wait(w: int)
 ```

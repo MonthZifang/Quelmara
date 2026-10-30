@@ -79,7 +79,7 @@
 | 平台 | 状态 | 前置 |
 |---|---|---|
 | Windows PE32+ | ✅ 主平台 | — |
-| Linux ELF64 | ✅ 构建级（CI 执行） | ~~**`tcp_*` 内建没有 Linux 实现**~~ ✅ **v2.92**：`tcp_listen/accept/send/recv/close` 本来就有 raw syscall 路径，缺的只有 `tcp_connect`（派发里一句无条件的 windows 检查 + 运行库里一个提前 `return` 跳过了后续生成器）。现在 Linux 上 `listen/accept/send/recv/connect` 全链路可用，`tests/run_native_tests.sh [24]` 有真 socket 自环。**边界**：只支持 IPv4 点分字面量，域名显式 fail-fast（Linux resolver 要 dlopen nsswitch 插件，与"无 libc"定位冲突）；`tcp_listen6` 仍 Windows-only。**v3.15 新增一条**：`std/sync` 接了 `WaitOnAddress`（`@ffi`），于是它在非 PE 后端是**声明期硬失败** —— 之前 `std/sync` 只用内建、能在 native 编译，现在不能了。要恢复得先做 Linux 的 `futex` 路径（§5） |
+| Linux ELF64 | ✅ 构建级（CI 执行） | ~~**`tcp_*` 内建没有 Linux 实现**~~ ✅ **v2.92**：`tcp_listen/accept/send/recv/close` 本来就有 raw syscall 路径，缺的只有 `tcp_connect`（派发里一句无条件的 windows 检查 + 运行库里一个提前 `return` 跳过了后续生成器）。现在 Linux 上 `listen/accept/send/recv/connect` 全链路可用，`tests/run_native_tests.sh [24]` 有真 socket 自环。**边界**：只支持 IPv4 点分字面量，域名显式 fail-fast（Linux resolver 要 dlopen nsswitch 插件，与"无 libc"定位冲突）；`tcp_listen6` 仍 Windows-only。**v3.15 曾把 `std/sync` 钉死在 PE**（`WaitOnAddress` 的 `@ffi` 直接写进模块），**v3.16 已恢复**：park 搬到 `std/park`（只编 PE），`std/sync` 回到零 `@ffi` + 注入式，native/arm64 重新可编、CI 的 `[7]` 段（`t122_syncport` 跑 A64 模拟器）恢复绿。Linux 侧要真 park 仍需 `futex` 路径（§5） |
 | Linux io_uring | ✅ | 5.1+ 内核 |
 | AArch64 | 🟡 模拟器执行级 | 需补 chan/map/spawn/SHA（**atomic/acquire-release 已接**，v1.98）；~~vtable~~ ✅ v1.97（`tests/a64_iface_test.py` 执行级 7 用例） |
 | macOS Mach-O + kqueue | ❌ | 新后端 + 新事件层。**连带后果（v2.58 实测）**：`--target native` 在 Darwin 上产的仍是 **ELF64**，执行直接 `OSError: [Errno 8] Exec format error` —— 所以 CI 的基准矩阵在 macOS 上**只有 C/Go/Python**，quelmara 没有数字。要补这一列，得先有 Mach-O 后端 |

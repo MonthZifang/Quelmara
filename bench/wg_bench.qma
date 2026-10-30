@@ -2,12 +2,16 @@
 //
 // 同一个等待（worker 睡 200 ms 后 wg_done）跑两遍：
 //   A) 纯自旋：while 计数 != 0 { spin_hint() }      —— v1.85 及以前 wg_wait 的做法
-//   B) 退避：std/sync 的 wg_wait（自旋 → 让出 → 睡 1 ms）
+//   B) 退避：std/sync 的 wg_wait（自旋 → 让出 → park / 睡 1 ms）
 // 判据不是墙钟（两者都是 ~200 ms），而是**进程 CPU 时间 / 墙钟**：
 //   自旋 ≈ 1.0（整核跑满），退避 ≈ 0（核还回去）。
 // cpu_ns() 读的是进程累计 CPU 时间（内核+用户态），now_ns() 是单调墙钟。
+//
+// v3.16：park 实现搬到 `std/park`（含 @ffi，只编 Windows PE），
+// 这里显式注入，让 B 组走真正的 park 而不是退回 sleep 片。
 module bench_wg
 
+import std.park
 import std.sync
 
 fn worker(w: int, ms: int) -> int {
@@ -33,6 +37,9 @@ fn spin_wait(w: int) {
 
 fn main() {
     let ms = 200
+
+    // v3.16：注入 park（不注入的话 B 组会退回 sleep 片，测的就不是 park 了）
+    sync_set_park(park_on, wake_all)
 
     // ---- A) 纯自旋 ----
     let w1 = wg_new()

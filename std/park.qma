@@ -1,0 +1,69 @@
+// std/park.qma —— 线程 park 原语（v3.16）
+//
+// 为什么单独一个模块：park 需要 `@ffi`，而 `@ffi` 只在 **Windows PE** 后端
+// 实现（ELF 后端产静态可执行文件、无动态链接器，外部符号无处解析）。
+// v3.15 把 `WaitOnAddress` 直接写进 `std/sync`，导致 `std/sync` 在
+// `--target native` / `--target arm64` 上**声明期硬失败** —— 而它之前能在
+// 两个后端编译，CI 的 `t122_syncport`（a64 执行级）当场会红。
+//
+// 拆开之后：
+//   * `std/sync` 保持零 `@ffi`、跨平台可编译（没有 park 时退回纯退避）；
+//   * 想要 park 的调用方显式 `import std.park`（只有 Windows PE 能编）。
+//
+// 边界：
+//   * **仅 Windows PE**。Linux 的 `futex(FUTEX_WAIT/WAKE)` 未做（登记
+//     07-gaps §5），AArch64 没有线程（`spawn` 不支持），park 在那边无意义。
+//   * `park_available()` 恒为 1 —— 能编译到这里的后端一定支持。
+
+@ffi("KernelBase.dll", "WaitOnAddress")
+fn _WaitOnAddress(addr: int, compare: int, size: int, ms: int) -> bool
+
+@ffi("KernelBase.dll", "WakeByAddressAll")
+fn _WakeByAddressAll(addr: int)
+
+@ffi("KernelBase.dll", "WakeByAddressSingle")
+fn _WakeByAddressSingle(addr: int)
+
+// WaitOnAddress 要求 compare 与 addr 是**不同的指针**（同一块内存会永远相等，
+// 等于永远不睡）。用 static_word 而不是每次 mem_alloc：park 是热路径。
+// 索引 30 空闲（3/4/5/7/30/31 未被 std/ 其它模块占用）。
+const PARK_CMP_SLOT = 30
+
+/// 本后端有没有真正的 park。`std/park` 能编过就一定有，恒为 1。
+pub fn park_available() -> int {
+    return 1
+}
+
+/// 把 p 上的 8 字节值 park 到「不再等于 `want`」为止，最多 ms 毫秒。
+///
+/// 调用方契约：调用前把「当前值」读进 `want`。**不必**先确认谓词仍成立 ——
+/// `WaitOnAddress` 自己会比：`*p != want` 时立即返回。
+///
+/// 返回 1 = 被唤醒，0 = 超时。
+///
+/// **语义保证（这是它比自旋正确的地方）**：「比较 `*p == want`」与「进入睡眠」
+/// 由内核在同一个临界区里完成，所以不存在「刚检查完、还没睡下去，别人就
+/// Wake 了」的丢失唤醒窗口。调用方只需「读值 → park → 回头重读」。
+pub fn park_on(p: int, want: int, ms: int) -> int {
+    let cmp = static_word(PARK_CMP_SLOT)
+    mem_store64(cmp, 0, want)
+    let woke = _WaitOnAddress(p, cmp, 8, ms)
+    if woke {
+        return 1
+    }
+    return 0
+}
+
+/// 唤醒所有在 p 上 park 的线程。没有等待者时是安全的空操作（约 300–400 ns）。
+pub fn wake_all(p: int) {
+    _WakeByAddressAll(p)
+}
+
+/// 唤醒一个在 p 上 park 的线程。
+///
+/// 边界：**不知道它会不会立刻又睡回去**。如果被唤醒的线程因为条件仍不满足
+/// 而重新 park，其余等待者就收不到这次唤醒 —— 所以只有在「唤醒一个就够」
+/// （单等待者、或条件对任一等待者都成立）时才用它。多等待者用 `wake_all`。
+pub fn wake_one(p: int) {
+    _WakeByAddressSingle(p)
+}
