@@ -464,7 +464,7 @@ print(g.to_str())        // 实测 1.407002e+14（不是 2.25）
 - 回归：`tests/t123_derive_enum.qma`（f64 字段往返 / 精度）、`tests/bad/derive_f32.qma`；
   负向 `to_float(str)` 的形态由 `tests/bad/` 之外的编译器检查保证（见 §7.10 上方代码）。
 
-### 7.11 待查：非 UTF-8 源文件抛 `UnicodeDecodeError`（v1.83 fuzz 发现）
+### 7.11 ✅ 已修（v3.32）：非 UTF-8 源文件抛 `UnicodeDecodeError`（v1.83 fuzz 发现）
 
 写模糊测试时撞到的**既有**问题（与 fuzz 无关，任何 `quelmara build` 都一样）：
 
@@ -472,20 +472,43 @@ print(g.to_str())        // 实测 1.407002e+14（不是 2.25）
 # 一个 GBK 编码的源文件（或任何非 UTF-8 字节）
 python tools/stage0/qlm_cli.py build gbk.qma --target win
 # 实测：Python 回溯 UnicodeDecodeError: 'utf-8' codec can't decode byte 0xe5 ...
-# 期望：一行干净诊断（"不是合法 UTF-8 源码 @ 字节 N"）+ 退出码 2
 ```
 
-- 根因：`qlm.py` 的 `parse_file()` / `_consts_of()` 用
-  `open(path, encoding="utf-8")` 直接读，解码异常没转成项目统一的 fail-fast
-  （`SyntaxError` + 中文提示）。
-- 影响面：Windows 上编辑器默认存 GBK 的用户第一次编译就会看到 Python 回溯；
-  工具链侧也无法把"编码错"和"编译器崩了"分开统计——`qlm_fuzz.py` 目前把
-  `UnicodeDecodeError` 归到 `bug`，变异器主动只改 ASCII 字节来避开它。
-- 下一步：加一个 `read_source_text(path)` 把 `UnicodeDecodeError` 转成
-  `SyntaxError`（与 `require_source()` 同风格），三处读源码的点都换过去；
-  之后 fuzz 分类器可以把"编码错"单列一类。
-- 为什么没顺手修：这三处读点在语言轨正在改的文件里（`qlm.py`），
-  本版只做工具链，不制造合并冲突。
+**四个问题叠在一起**：没有文件名（多文件构建时不知道是哪个）、
+没有行号（`position 45` 是字节偏移不是行列）、不是 `SyntaxError`
+（CLI 只捕这个）、没有可操作建议。
+
+根因：`qlm.py` 的 `parse_file()` / `_consts_of()` 用
+`open(path, encoding="utf-8")` 直接读，解码异常没转成项目统一的 fail-fast。
+
+**v3.32 修法**：加 `read_source(path)`，两处读点都换过去。它做三件事：
+
+1. 解码失败 -> `SyntaxError`，带文件名与 `行:列`
+   （用出错字节之前的内容算，不解码整段）；
+2. 剥掉 UTF-8 BOM（否则词法器报"非法字符 '\ufeff'"，用户看不出 BOM 在哪）；
+3. 给出可操作建议（GBK/ANSI 保存、UTF-16）。
+
+同时在 `qlm_cli.main()` 加统一诊断出口 —— 以前**单源构建**路径不捕
+`SyntaxError`，用户看到整段 traceback；而**多源并行**路径（`_build_unit`）
+反而捕得干净。"单源比多源难读"没有任何道理。现在只捕 `SyntaxError`
+（语言层错误，预期内），其它异常仍带 traceback 抛出。
+
+实测输出：
+
+```
+[qlm] 编译错误：bad.qma:3:4: 源文件不是合法的 UTF-8（字节 0xff 无法解码）。
+常见原因：编辑器按 GBK/ANSI 保存，或存成了 UTF-16。请转成 UTF-8（无 BOM）。
+```
+
+夹具 `tests/encoding_diag_test.py`（6 项），已挂进 `run_win_tests.py`。
+
+**仍遗留**：其它入口（`tokfmt` / `qlm_doc` / `qlm_dbg` / `qlm_dbinfo` /
+`qlm_lsp`）仍是裸 `open(..., encoding="utf-8")`。它们不是编译主路径，
+用户遇到编码问题的概率低得多；要统一收口属于清理工作，不影响正确性。
+
+**fuzz 分类器**（`qlm_fuzz.py` 把 `UnicodeDecodeError` 归到 `bug`、
+变异器只改 ASCII 字节避开它）现在可以放宽了 —— 编码错误已经单列为
+`SyntaxError`，不会再被当成编译器崩溃。本版未动 fuzz，留待后续。
 
 ### 7.12 已修（v1.102）：void 函数里的空 `return` 污染进程退出码
 

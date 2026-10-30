@@ -2947,7 +2947,39 @@ v2.07 在 `std/net/addr` 就踩过这个：`str_find_from` 实参写反 → SIGS
 全量回归全绿（数字见本版 CHANGELOG）。
 
 顺带修正 4 条过期文档条目 —— **文档里的"待修"会过期**，审计脚本
-留在 `build/audit_gaps.py`，下次复核直接跑。
+留在 `tools/dev/audit_gaps.py`，下次复核直接跑。
+
+### 3.82 非 UTF-8 源文件抛裸异常 + 单源构建打 traceback（v3.32）
+
+v3.31 复核确认 §7.11 仍存在。它其实是**两个问题叠在一起**：
+
+**问题一**：非 UTF-8 源文件抛裸 `UnicodeDecodeError`：
+
+```
+'utf-8' codec can't decode byte 0xff in position 45: invalid start byte
+```
+
+没有文件名、没有行号（`position 45` 是字节偏移）、不是 `SyntaxError`、
+没有可操作建议。
+
+**问题二**：因为不是 `SyntaxError`，单源构建路径不捕获它，用户看到
+**整段 Python traceback**。有意思的是多源并行路径（`_build_unit`）反而
+捕得干净 —— "单源比多源难读"没有任何道理。
+
+修法：`read_source(path)` 统一读源码（解码失败转 `SyntaxError` 带
+`文件:行:列`、剥 UTF-8 BOM、给可操作建议）+ `main()` 统一诊断出口
+（只捕 `SyntaxError`；其它异常仍带 traceback —— 那是编译器自己的 bug，
+藏起来更难查）。
+
+改后：
+
+```
+[qlm] 编译错误：bad.qma:3:4: 源文件不是合法的 UTF-8（字节 0xff 无法解码）。
+常见原因：编辑器按 GBK/ANSI 保存，或存成了 UTF-16。请转成 UTF-8（无 BOM）。
+```
+
+夹具 `tests/encoding_diag_test.py`（6 项，含"带 BOM 的文件能编译**并运行**"
+—— BOM 若被当普通字符喂给词法器，编译期就挂，所以运行成功才说明真剥掉了）。
 
 ## 4. 自举
 

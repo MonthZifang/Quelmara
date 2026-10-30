@@ -208,6 +208,29 @@ def case_selfcheck_to(name, src, seconds):
         else bad(f"{name} 失败 rc={rc} stderr={stderr[-200:]!r}")
 
 
+def case_encoding_diag():
+    """源文件编码错误诊断 + CLI 诊断出口（v3.32，收 §7.11）。
+
+    跑 tests/encoding_diag_test.py：非 UTF-8 源文件必须给带文件名/行列的
+    SyntaxError（不是裸 UnicodeDecodeError），带 BOM 的文件必须能编译，
+    CLI 对各类编译错误都输出一行诊断且无 traceback。
+    """
+    script = os.path.join(ROOT, "tests", "encoding_diag_test.py")
+    if not os.path.exists(script):
+        skip("encoding_diag_test.py 不存在，跳过")
+        return
+    r = subprocess.run([sys.executable, script], cwd=ROOT,
+                       capture_output=True, text=True, errors="replace",
+                       timeout=600)
+    if r.returncode == 0 and "ENCODING_DIAG: PASS=" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines()
+                if ln.startswith("ENCODING_DIAG:")]
+        ok(f"源文件编码诊断：{line[-1] if line else 'ok'}")
+    else:
+        bad(f"源文件编码诊断失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
 def case_arg_types():
     """调用点标量类型比对（v3.31，收 §7.14）。
 
@@ -1501,6 +1524,11 @@ def main():
     # 夹具验"不误伤"，这个 case 验"错误必须拦下"。
     case_selfcheck_to("arg_types", "tests/t179_arg_types.qma", 60)
     case_arg_types()
+
+    # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
+    # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），
+    # 单源构建还打整段 traceback。
+    case_encoding_diag()
 
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])

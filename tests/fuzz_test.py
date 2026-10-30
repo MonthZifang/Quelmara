@@ -107,12 +107,25 @@ def main():
     ok(f"语法错 -> rejected（{detail[:40]}）") if kind == "rejected" \
         else bad(f"语法错被判 {kind}")
 
+    # v3.32：非 UTF-8 源文件**不再是 bug**。
+    #
+    # 以前 `parse_file()` 直接 `open(..., encoding="utf-8")`，解码失败抛裸
+    # `UnicodeDecodeError`，分类器把它归到 `bug`（编译器崩了）。v3.32 加了
+    # `read_source()`，把解码错误转成 `SyntaxError` —— 那是**设计好的
+    # fail-fast**，按分类器自己的定义就该是 `rejected`。
+    #
+    # 这条断言以前把"缺陷存在"当成测试前提，修好它反而打红回归。
+    # 与 v3.26 那次的教训同源：**别拿真实缺陷当测试前提**。
     enc_src = os.path.join("build", "fuzz", "cls_enc.qma")
     with open(enc_src, "wb") as f:
         f.write(b"fn main() {\n    print(\"\xff\xfe\")\n}\n")
     kind, detail = qlm_fuzz._compile_frontend(enc_src)
-    ok(f"非 UTF-8 -> bug（{detail.split(':')[0]}）") if kind == "bug" \
-        else bad(f"非 UTF-8 被判 {kind}")
+    if kind == "rejected":
+        ok(f"非 UTF-8 -> rejected（{detail[:50]}）")
+    elif kind == "bug":
+        bad(f"非 UTF-8 仍被判 bug（v3.32 应转成 SyntaxError）：{detail[:60]}")
+    else:
+        bad(f"非 UTF-8 被判 {kind}（期望 rejected）")
 
     # ---- 4. 端到端 ----
     r = subprocess.run([sys.executable, CLI, "fuzz", SEED_SRC,
