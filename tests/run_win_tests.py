@@ -380,6 +380,57 @@ def test_reactor_dualstack():
             f"{r.stdout[-400:]}{r.stderr[-300:]}")
 
 
+def test_ws_e2e():
+    """WebSocket 端到端（v3.27）：真握手 + 真收发帧。
+
+    `std/ws` 在 v3.26 之前**外部一个函数都调不到**（全私有 + 关键字冲突），
+    修完之后也只是"能编译"。这个脚本用 Python 手写客户端（不依赖第三方库）
+    走完整 RFC 6455：握手摘要、掩码解算、16 位长度档、文本/二进制分派。
+
+    端口 18150（`ws_demo.qma`），与 8092（http_router / reactor 双栈）
+    和 8093（sse_demo）都错开。
+    """
+    if not IS_WIN:
+        skip("WebSocket E2E：非 Windows 平台（服务端运行时仅 PE）")
+        return
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/ws_e2e_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=300)
+    if r.returncode == 2:
+        skip("WebSocket E2E：18150 已被占用，跳过")
+    elif r.returncode == 0 and "WS_E2E: PASS=" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines() if ln.startswith("WS_E2E:")]
+        ok(f"WebSocket E2E：{line[-1] if line else 'ok'}")
+    else:
+        bad(f"WebSocket E2E 失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
+def test_sse_e2e():
+    """SSE 端到端（v3.27）：真订阅 + 真收事件流。
+
+    与 ws 同源问题：v3.26 之前调不到。SSE 的坑全在线上格式 ——
+    响应头、`retry:` 毫秒值、事件块以空行结尾、`event:`/`data:` 字段。
+    夹具用 spawn 起的 pusher 线程广播 tick，顺便验证跨线程推送。
+    """
+    if not IS_WIN:
+        skip("SSE E2E：非 Windows 平台（服务端运行时仅 PE）")
+        return
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/sse_e2e_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=300)
+    if r.returncode == 2:
+        skip("SSE E2E：8093 已被占用，跳过")
+    elif r.returncode == 0 and "SSE_E2E: PASS=" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines() if ln.startswith("SSE_E2E:")]
+        ok(f"SSE E2E：{line[-1] if line else 'ok'}")
+    else:
+        bad(f"SSE E2E 失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
 def test_log_streams():
     """std/log 的通道分流：stdout 只有 out-line*，stderr 只有 err-line。"""
     out = os.path.join(ROOT, "build", "win_log_streams.exe")
@@ -1433,6 +1484,10 @@ def main():
     test_http_e2e()
     test_gzip_http_e2e()
     test_reactor_dualstack()
+    # v3.27：ws / sse 在 v3.26 之前调不到，修完后从没验证过"真的能跑"。
+    # 这两个脚本走完整线上协议（握手 / 帧 / 事件流格式）。
+    test_ws_e2e()
+    test_sse_e2e()
 
     print("-" * 52)
     print(f"PASS={PASS} FAIL={FAIL} SKIP={SKIP}")
