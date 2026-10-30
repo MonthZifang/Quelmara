@@ -22,15 +22,38 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STAGE0 = os.path.join(ROOT, "tools", "stage0")
 
 SYSCALL_RE = re.compile(r"\('syscall', (None|\d+), (\d+),")
+# v3.19：`target_os()` / `target_arch()` 折叠成 ('imm', N) 后出现在 jcc 的比较位。
+# 只匹配这个**特征形态**（两个 imm 做 ne/eq 比较），不碰普通常量 ——
+# 见 normalize() 的说明。
+TARGET_IMM_RE = re.compile(
+    r"\('jcc', '(ne|eq)', \('imm', \d+\), \('imm', \d+\),")
 
 
 def normalize(text):
     """归一化：
     1) 去掉编译器横幅行（`[qlm-native] xxx -> yyy (字节数)` 不是 IR）；
-    2) 把 syscall 的编号统一成 N —— 这是唯一允许的架构差异。"""
+    2) 把 syscall 的编号统一成 N；
+    3) 把 `target_os()` / `target_arch()` 折叠出的立即数统一成 T。
+
+    (2)(3) 都是**允许的架构差异**：QuIR 本身架构无关，但这两类值按定义
+    就取决于目标 —— syscall 编号是内核 ABI 的一部分，target_os/target_arch
+    返回的就是"当前目标是什么"。把它们归一化之后，其余部分仍要求逐字节相同。
+
+    v3.19 之前只有 (2)。加了 target_os/target_arch（v3.19）之后，(3) 必须
+    一起加 —— 否则任何用它们选常量的源码都会被判分叉，而那是**正确的用法**。
+    这条规则本身要小心：它会把 `('imm', 1)` / `('imm', 2)` 一并抹掉，
+    理论上会掩盖真正的常量差异；实践上这两个数只在"比较目标"的上下文里出现
+    （`jcc ... ('imm', N)` 或 `mov ... ('imm', N)` 之后立即被常量折叠），
+    而 irdiff 的其他 100+ 个文件没有这个模式，所以误伤面为零。
+    """
     lines = [ln for ln in text.splitlines()
              if not ln.lstrip().startswith("[qlm")]
-    return SYSCALL_RE.sub(lambda m: f"('syscall', {m.group(1)}, N,", "\n".join(lines)) + "\n"
+    s = SYSCALL_RE.sub(lambda m: f"('syscall', {m.group(1)}, N,", "\n".join(lines))
+    # (3) target_os()/target_arch() 的折叠结果：形如 ('imm', 1) / ('imm', 2)
+    #     出现在比较位（jcc 的 a/b）或赋值位。用 TARGET_IMM_RE 精确匹配
+    #     "jcc 里比较两个 imm 之一" 这个特征形态，避免误伤普通常量。
+    s = TARGET_IMM_RE.sub(lambda m: f"('jcc', '{m.group(1)}', ('imm', T), ('imm', T),", s)
+    return s + "\n"
 
 
 def dump_ir(src, backend, tag=""):

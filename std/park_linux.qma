@@ -1,0 +1,93 @@
+// std/park_linux.qma —— Linux 的线程 park 原语（v3.19）
+//
+// 与 `std/park`（Windows，`WaitOnAddress`）配对：**同一组 API、不同实现**。
+// 调用方按目标 import 其中一个（语言没有条件编译，`@ffi` 与 `syscall` 又各自
+// 在对方的后端上是声明期硬失败，所以只能拆文件）。
+//
+// 用 `futex(2)` 实现：
+//   futex(uaddr, FUTEX_WAIT, val, NULL, NULL, 0)
+//     —— 若 *uaddr == val 则睡到被 FUTEX_WAKE 叫醒；否则立即返回 -EAGAIN。
+//   futex(uaddr, FUTEX_WAKE, n, ...)
+//     —— 叫醒最多 n 个等待者，返回实际叫醒数。
+//
+// **与 Windows 版的关键差异**：
+//   * `WaitOnAddress` 的 compare 是"另一个指针里的值"，`futex` 的 val 是
+//     **直接传的整数**。所以 `park_on(p, want, ms)` 的语义一样，但实现里
+//     不需要单独的 compare 槽。
+//   * `futex` 的 timeout 是 `struct timespec *`（相对时间）。本模块传 NULL =
+//     **永久等待**，`ms` 参数被忽略 —— 这是刻意的：Quelmara 没有可靠的
+//     相对时间构造手段（`now_ns` 是单调时钟，但拼 timespec 要两条 store +
+//     一次换算），而调用方（`std/sync` 的 `wg_wait`）本来就用"谓词复查"兜底，
+//     不依赖 park 超时。**要超时支持得补 timespec 构造**，登记 07-gaps。
+//   * `futex` 的返回值：0 = 被唤醒 / -EAGAIN = 值不匹配（未睡）/
+//     -EINTR = 被信号打断。**三者都算"返回了"**，所以这里把 `>= 0` 与
+//     `-EAGAIN` 都当"被唤醒"，只有真出错（其它负值）才返回 0。
+//
+// 边界：
+//   * **仅 Linux（native / arm64）**。系统调用编号见下（架构相关）。
+//   * AArch64 没有线程（`spawn` 不支持），park 在那边只是"立即返回"。
+//   * 无超时（见上），无 `FUTEX_PRIVATE_FLAG`（跨进程共享内存也能用，
+//     代价是内核要多查一次 inode）。
+
+// ---- 系统调用编号（架构相关）----
+//
+// futex：x86-64 = 202、AArch64 = 98。
+// `syscall` 的调用号必须是**编译期常量**，所以不能写成
+// `syscall(pick(), ...)` —— 只能各写一次、按 `target_arch()` 选。
+const FUTEX_X64 = 202
+const FUTEX_A64 = 98
+
+// futex 操作码（低 7 位是命令，高位是 flag）
+const FUTEX_WAIT = 0
+const FUTEX_WAKE = 1
+
+// -EAGAIN（Linux errno 11）：值不匹配，没睡
+const EAGAIN = 11
+
+fn _futex_wait(p: int, val: int) -> int {
+    if target_arch() == 2 {
+        return syscall(FUTEX_A64, p, FUTEX_WAIT, val, 0, 0, 0)
+    }
+    return syscall(FUTEX_X64, p, FUTEX_WAIT, val, 0, 0, 0)
+}
+
+fn _futex_wake(p: int, n: int) -> int {
+    if target_arch() == 2 {
+        return syscall(FUTEX_A64, p, FUTEX_WAKE, n, 0, 0, 0)
+    }
+    return syscall(FUTEX_X64, p, FUTEX_WAKE, n, 0, 0, 0)
+}
+
+/// 本后端有没有真正的 park。`std/park_linux` 能编过就一定有，恒为 1。
+pub fn park_available() -> int {
+    return 1
+}
+
+/// 把 p 上的 8 字节值 park 到「不再等于 `want`」为止。
+///
+/// 返回 1 = 被唤醒（或被 `-EAGAIN` 立即返回），0 = 出错。
+/// **`ms` 被忽略**：本实现是无限等待（见文件头）。谓词复查由调用方负责，
+/// 所以"无限等待"不会挂死 —— `std/sync.wg_wait` 醒来后会重新读计数。
+pub fn park_on(p: int, want: int, ms: int) -> int {
+    // 注意：futex 只比较 **32 位**（int）。我们的计数是 64 位，但
+    // 等待方传的 `want` 是"刚读到的非零值"，低 32 位足够区分
+    // （计数从 N 减到 0 时低 32 位必变）。这是 futex 的固有约束。
+    let r = _futex_wait(p, want)
+    if r == 0 {
+        return 1                        // 被 FUTEX_WAKE 叫醒
+    }
+    if r == 0 - EAGAIN {
+        return 1                        // 值已经变了，没睡 —— 等价于"被唤醒"
+    }
+    return 0                            // -EINTR 或其它错误
+}
+
+/// 唤醒所有在 p 上 park 的线程（`FUTEX_WAKE` 传 INT_MAX）。
+pub fn wake_all(p: int) {
+    _futex_wake(p, 2147483647)
+}
+
+/// 唤醒一个在 p 上 park 的线程。
+pub fn wake_one(p: int) {
+    _futex_wake(p, 1)
+}

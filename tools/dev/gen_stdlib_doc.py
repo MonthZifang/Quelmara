@@ -76,6 +76,7 @@ DESC = {
     "std/sha512.qma": "SHA-512 / SHA-384（变体 IV 复用压缩函数）+ HMAC-SHA512",
     "std/sort.qma": "快速排序与有序性检查",
     "std/park.qma": "线程 park 原语：WaitOnAddress / WakeByAddress（仅 Windows PE；由 std/sync 注入使用）",
+    "std/park_linux.qma": "线程 park 原语：futex(2)（仅 Linux；与 std/park 同一组 API，由 std/sync 注入使用）",
     "std/sse.qma": "Server-Sent Events 服务端",
     "std/str.qma": "字符串工具集",
     "std/sync.qma": "自旋锁 / Treiber 无锁栈 / WaitGroup（零 @ffi，park 由调用方注入）",

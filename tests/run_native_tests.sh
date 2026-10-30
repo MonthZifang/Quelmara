@@ -103,6 +103,13 @@ $NAT2 build tests/t171_syscall.qma -o build/t171_a64 >/dev/null 2>&1
 out=$(timeout 600 python3 tests/a64_emu.py build/t171_a64 2>/dev/null | tail -1)
 [ "$out" = "syscall ok" ] && ok "a64 t171 syscall => syscall ok" \
   || bad "a64 t171 syscall [$out]"
+# v3.19：Linux 的 futex park（std/park_linux），与 Windows 的 WaitOnAddress 配对。
+# **只接 x86-64**：AArch64 没有 spawn（`spawn 目前仅支持 x86_64 后端`），
+# 而 park 的验证必须有第二个线程来唤醒。这不是遗漏，是能力边界。
+$NAT build tests/t172_park_linux.qma -o build/t172_nat >/dev/null 2>&1
+out=$(timeout 300 build/t172_nat 2>/dev/null | tail -1)
+[ "$out" = "park linux ok" ] && ok "t172 futex park（x86-64）=> park linux ok" \
+  || bad "t172 futex park [$out]"
 
 echo "[8] 语言 v0.2：break/continue + struct（双后端交叉验证）"
 for t in tests/t8.qma tests/t9.qma tests/t10.qma tests/t11.qma; do
