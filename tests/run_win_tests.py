@@ -1292,6 +1292,13 @@ def main():
     # 放在 [3k] 之后：同属网络栈，端口 18120 与 TCP 那批（18073–18097）不冲突。
     case_selfcheck_to("udp6", "tests/t173_udp6.qma", 60)
 
+    # v3.22：双栈下的 peer_ip（v4 映射地址还原 / v6 文本 / 端口）。
+    # v3.21 把 reactor 改成 AF_INET6 双栈后，所有连接的对端地址都以
+    # sockaddr_in6 返回；`addr_text` 的 `::ffff:` 还原是 v2.07 写的，
+    # 但**从来没有夹具在真实双栈连接上验证过** —— 这里补上。
+    # 端口 18130，与 t173（18120）和 TCP 那批（18073–18097）都不冲突。
+    case_selfcheck_to("peer_ip", "tests/t174_peer_ip.qma", 60)
+
     print("== [4] 多核：CreateThread + 共享内存归约 ==")
     case_output("parfor_sum", "examples/parfor_sum.qma", ["11519999978"])
     case_selfcheck("prime_parallel", "examples/prime_parallel.qma")

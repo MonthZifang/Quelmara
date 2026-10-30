@@ -1,0 +1,177 @@
+// t174_peer_ip.qma —— 双栈 reactor 下的 peer_ip / peer_port（v3.22）
+//
+// 背景：v3.21 把 reactor 改成 AF_INET6 双栈后，**所有连接的对端地址都以
+// sockaddr_in6 返回**（family = 23）。IPv4 客户端在双栈 socket 上表现为
+// `::ffff:a.b.c.d` 映射地址。
+//
+// `std/net/addr` 的 `addr_text` 里有还原逻辑（fam==23 且 `::ffff:` 前缀
+// → 点分四段），v2.07 写的，但**从来没有夹具在真实双栈连接上验证过**。
+// 本夹具补这个空白。
+//
+// 三个场景：
+//   [1] IPv4 客户端连双栈监听 → peer_ip 必须是点分（不是 ::ffff:...）
+//   [2] IPv6 客户端连双栈监听 → peer_ip 必须是 IPv6 文本
+//   [3] peer_port 在两个家族下都合理（> 0 且 != 监听端口）
+//
+// 用阻塞式 listen6 而不是 reactor：reactor 的回调里拿 fd 也能测，
+// 但 listen6 更直接（同一个双栈 socket 语义，少一层 IOCP 干扰）。
+module t174
+
+import std.net
+import std.net.addr
+import std.str
+
+const PORT = 18130
+
+// 结果块（堆上，跨线程传指针）：
+//   [0]=v4 ip 指针  [1]=v4 ip 长度  [2]=v4 port
+//   [3]=v6 ip 指针  [4]=v6 ip 长度  [5]=v6 port
+//
+// **为什么不用 static_word**：`static_word(i)` 的注释写"共 32 个"，
+// 实现是 `i << 3` 直接加到静态区基址、**没有上限检查**
+// （`qlm_native.py` 的 `static_word` 分支）。第一版我用 120–123 传长度，
+// 那是**写到静态区之外**的未定义行为 —— 只是刚好没踩到别的数据。
+// 堆块是正确做法：生命周期由调用方控制，也不占那 32 个全局槽。
+const RB_IP4_P = 0
+const RB_IP4_N = 1
+const RB_IP4_PORT = 2
+const RB_IP6_P = 3
+const RB_IP6_N = 4
+const RB_IP6_PORT = 5
+
+fn record_ip(rb: int, base: int, fd: int) {
+    let ip = peer_ip(fd)
+    let p = peer_port(fd)
+    mem_store64(rb, base + 0, str_ptr(ip))
+    mem_store64(rb, base + 1, len(ip))
+    mem_store64(rb, base + 2, p)
+}
+
+fn server(l: int, rb: int) -> int {
+    // [1] 第一个连接（IPv4 客户端）
+    let c1 = accept(l)
+    record_ip(rb, RB_IP4_P, c1)
+    tcp_send(c1, "ok")
+    tcp_close(c1)
+    // [2] 第二个连接（IPv6 客户端）
+    let c2 = accept(l)
+    record_ip(rb, RB_IP6_P, c2)
+    tcp_send(c2, "ok")
+    tcp_close(c2)
+    tcp_close(l)
+    return 0
+}
+
+// 客户端：连上去，读一个字节
+fn client_v4() -> int {
+    let c = tcp_connect("127.0.0.1", PORT)
+    let r = recv(c, 16)
+    tcp_close(c)
+    if len(r) > 0 {
+        return 1
+    }
+    return 0
+}
+
+fn client_v6() -> int {
+    let c = tcp_connect("::1", PORT)
+    let r = recv(c, 16)
+    tcp_close(c)
+    if len(r) > 0 {
+        return 1
+    }
+    return 0
+}
+
+fn read_rb_str(rb: int, base: int) -> str {
+    let p = mem_load64(rb, base + 0)
+    let n = mem_load64(rb, base + 1)
+    if p == 0 || n <= 0 {
+        return ""
+    }
+    return mem_str(p, n)
+}
+
+// 造一个 20 字节 raw 视图（与 tcp_peer_raw 的输出同布局）：
+//   [0..1]=port 网络序、[2]=family、[3]=保留 0、[4..19]=地址（大端）
+fn mk_raw(fam: int, bytes: [16]int) -> str {
+    let v = vec[int].new(24)
+    v.push(0)
+    v.push(0)
+    v.push(fam)
+    v.push(0)
+    let mut i = 0
+    while i < 16 {
+        v.push(bytes[i])
+        i = i + 1
+    }
+    return str_from_bytes(v)
+}
+
+fn main() {
+    // 结果块：6 个 8 字节槽（见文件头的 RB_* 常量）
+    let rb = mem_alloc(48)
+    mem_zero(rb, 48)
+
+    // 双栈监听：listen6（AF_INET6 + IPV6_V6ONLY=0）
+    let l = listen6(PORT)
+
+    let hs = spawn server(l, rb)
+    sleep_ms(150)
+
+    // 先 v4 再 v6（服务端按顺序 accept）
+    let h4 = spawn client_v4()
+    join(h4)
+    let h6 = spawn client_v6()
+    join(h6)
+    join(hs)
+
+    let ip4 = read_rb_str(rb, RB_IP4_P)
+    let ip6 = read_rb_str(rb, RB_IP6_P)
+    let p4 = mem_load64(rb, RB_IP4_PORT)
+    let p6 = mem_load64(rb, RB_IP6_PORT)
+
+    // ---- [1] IPv4 客户端：必须还原成点分，不能是 ::ffff: ----
+    assert(len(ip4) > 0, "[1] 必须拿到 v4 peer_ip")
+    assert(str_find(ip4, "::") < 0, "[1] v4 peer_ip 不该是 IPv6 形式（映射地址未还原）")
+    assert(ip4 == "127.0.0.1", "[1] v4 peer_ip 必须是 127.0.0.1")
+
+    // ---- [2] IPv6 客户端：必须是 IPv6 文本 ----
+    assert(len(ip6) > 0, "[2] 必须拿到 v6 peer_ip")
+    assert(str_find(ip6, ":") >= 0, "[2] v6 peer_ip 必须含冒号")
+    assert(ip6 == "::1", "[2] v6 peer_ip 必须是 ::1")
+
+    // ---- [3] 端口合理 ----
+    assert(p4 > 0, "[3] v4 peer_port > 0")
+    assert(p4 != PORT, "[3] v4 peer_port 不该等于监听端口")
+    assert(p6 > 0, "[3] v6 peer_port > 0")
+    assert(p6 != PORT, "[3] v6 peer_port 不该等于监听端口")
+
+    // ---- [4] addr_text 的纯函数形态（与网络解耦）----
+    //
+    // 上面 [1][2] 证明"端到端对"，这里证明"还原逻辑本身对"。
+    // 两者不能互相替代：网络跑通不代表还原对（可能恰好都是 v4），
+    // 还原对也不代表 getpeername 给的对。
+    //
+    // [4a] ::ffff:127.0.0.1 → 必须还原成点分
+    let m4 = mk_raw(23, [0,0,0,0,0,0,0,0,0,0,255,255,127,0,0,1])
+    assert(addr_text(m4) == "127.0.0.1", "[4a] ::ffff: 映射必须还原")
+
+    // [4b] ::1 → 走 ip6_format
+    let m6 = mk_raw(23, [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1])
+    assert(addr_text(m6) == "::1", "[4b] 真 v6 走 ip6_format")
+
+    // [4c] family=2 的 v4 原始形态
+    let m2 = mk_raw(2, [10,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0])
+    assert(addr_text(m2) == "10.0.0.5", "[4c] v4 直接点分")
+
+    // [4d] **关键负向**：真 v6 地址不能被误判成映射地址
+    let md = mk_raw(23, [0x20,0x01,0x0d,0xb8,0,0,0,0,0,0,0,0,0,0,0,1])
+    let td = addr_text(md)
+    assert(td != "0.0.0.1", "[4d] 不该把 2001:db8::1 误判成映射地址")
+    assert(str_find(td, ":") >= 0, "[4d] 真 v6 必须含冒号")
+
+    print("v4_ip=" + ip4 + " v4_port=" + p4.to_str())
+    print("v6_ip=" + ip6 + " v6_port=" + p6.to_str())
+    print("peer_ip ok")
+}
