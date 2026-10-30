@@ -2794,7 +2794,13 @@ const RT_F64FMT = 23    // f64 -> 十进制文本（写进调用方给的缓冲�
 // v3.37：mem_chr(p, n, byte) -> 下标 / -1（找不到）
 // std/ 有 5 个模块用它（http 头解析、str_find、csv 等），是当前最大单项。
 const RT_MEMCHR = 24
-const RT_COUNT = 25      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
+// v3.38：mem_diff(p1, p2, n) -> 首个不同字节的下标 / n（全等）
+// std/ 的 gzip deflate（LZ77 匹配长度）与逐字节 diff 用它。
+const RT_MEMDIFF = 25
+// v3.38：mem_xchg(addr, val) -> old（原子交换，xchg 隐含 LOCK）
+// std/net 的多 io 线程自旋锁靠它。
+const RT_MEMXCHG = 26
+const RT_COUNT = 27      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
 
 fn _slot_disp(slot: int) -> int {
     return -8 * (slot + 1)
@@ -8985,6 +8991,71 @@ fn _gen_i64_fmt(ctx: Ctx) {
 ///
 /// v3.37：std/ 有 5 个模块用它（http 头解析、str_find、csv…）。
 /// 朴素字节循环，语义与 stage-0 的 __memchr 一致（返回下标，不是指针）。
+/// __memdiff(rcx = a, rdx = b, r8 = n) -> 首个不同字节的下标，全等返回 n
+///
+/// v3.38：gzip deflate 的 LZ77 匹配长度用它（返回公共前缀长度）。
+/// 朴素字节循环，语义与 stage-0 的 __memdiff 一致。
+fn _gen_memdiff(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_MEMDIFF, len(code))
+    let ltop = _newlab(labs)
+    let ldiff = _newlab(labs)
+    _b(code, 0x45)                             // xor r9d, r9d（i = 0）
+    _b(code, 0x31)
+    _b(code, 0xC9)
+    _setlab(labs, code, ltop)
+    // cmp r9, r8（i >= n -> 全等，返回 n）
+    _b(code, 0x4D)                             // REX.W|B：rm=r9 需要 B
+    _b(code, 0x39)
+    _b(code, 0xC1)                             // cmp r9, r8
+    let p0 = _jcc(code, 0x83)                  // jae .diff（此时 r9 == n）
+    _addfix(ctx.fixes, p0, ldiff, FK_LAB)
+    _b(code, 0x42)                             // movzx eax, byte [rcx + r9]
+    _b(code, 0x0F)
+    _b(code, 0xB6)
+    _b(code, 0x04)
+    _b(code, 0x09)                             // SIB: base=rcx, index=r9
+    _b(code, 0x46)                             // movzx r10d, byte [rdx + r9]
+    _b(code, 0x0F)
+    _b(code, 0xB6)
+    _b(code, 0x14)
+    _b(code, 0x0A)                             // SIB: base=rdx, index=r9
+    _b(code, 0x44)                             // cmp eax, r10d
+    _b(code, 0x39)
+    _b(code, 0xD0)
+    let p1 = _jcc(code, 0x85)                  // jne .diff
+    _addfix(ctx.fixes, p1, ldiff, FK_LAB)
+    _b(code, 0x49)                             // inc r9
+    _b(code, 0xFF)
+    _b(code, 0xC1)
+    let p2 = _jmp(code)
+    _addfix(ctx.fixes, p2, ltop, FK_LAB)
+    _setlab(labs, code, ldiff)
+    _b(code, 0x4C)                             // mov rax, r9（r9 就是答案：n 或首个不同处）
+    _b(code, 0x89)
+    _b(code, 0xC8)
+    _ret(code)
+}
+
+/// __memxchg(rcx = addr, rdx = val) -> old
+///
+/// v3.38：原子交换。x86-64 的 xchg [mem], reg **隐含 LOCK**，
+/// 不需要额外的 lock 前缀。std/net 的多 io 线程自旋锁靠它。
+fn _gen_memxchg(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    ctx.rt_pos.set(RT_MEMXCHG, len(code))
+    // mov rax, rdx   （待换入的值）
+    _b(code, 0x48)
+    _b(code, 0x89)
+    _b(code, 0xD0)
+    // xchg [rcx], rax  => 48 87 01（REX.W | 87 /r，ModRM=00 000 001 = [rcx], rax）
+    _b(code, 0x48)
+    _b(code, 0x87)
+    _b(code, 0x01)
+    _ret(code)
+}
+
 fn _gen_memchr(ctx: Ctx) {
     let code: vec[int] = ctx.code
     let labs: vec[int] = ctx.labs
@@ -10160,6 +10231,30 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         let p = _lower_expr(fc, nd.b)
         let n = _lower_expr(fc, nd.c)
         return _bi_mem_str(fc, p, n)
+    }
+    // v3.38：mem_diff(p1, p2, n) -> int（首个不同字节的下标，全等返回 n）
+    if bn == "mem_diff" {
+        let p1 = _lower_expr(fc, nd.b)
+        let p2 = _lower_expr(fc, nd.c)
+        let nv = _lower_expr(fc, nd.n)
+        _ir_emit(fc, OP_ARG, 0, p1, 0, 0)
+        _ir_emit(fc, OP_ARG, 0, p2, 0, 1)
+        _ir_emit(fc, OP_ARG, 0, nv, 0, 2)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_MEMDIFF)
+        return d
+    }
+    // v3.38：mem_xchg(addr, val) -> int（原子交换，返回旧值）
+    if bn == "mem_xchg" {
+        let a = _lower_expr(fc, nd.b)
+        let v = _lower_expr(fc, nd.c)
+        _ir_emit(fc, OP_ARG, 0, a, 0, 0)
+        _ir_emit(fc, OP_ARG, 0, v, 0, 1)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_MEMXCHG)
+        return d
     }
     // v3.37：mem_chr(p, n, byte) -> int（首个匹配字节的下标，找不到 -1）
     if bn == "mem_chr" {
@@ -11887,6 +11982,8 @@ fn main() {
     _gen_spawn(ctx)
     _gen_eprint_str(ctx)
     _gen_memchr(ctx)
+_gen_memdiff(ctx)
+_gen_memxchg(ctx)
 _gen_memcmp(ctx)
     _gen_i64_fmt(ctx)
     _gen_str_to_int(ctx)

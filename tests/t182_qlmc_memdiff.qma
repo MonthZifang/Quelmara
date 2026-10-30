@@ -1,0 +1,67 @@
+// t182_qlmc_memdiff.qma —— qlmc 的 mem_diff / mem_xchg（v3.38）
+//
+// ## 为什么需要它
+//
+// 这两个内建在 std/ 里各被 2 个模块使用（gzip deflate 的 LZ77 匹配长度、
+// std/net 的多 io 线程自旋锁）。它们是手写机器码实现的，**错了不会崩，
+// 只会静默算错** —— 所以必须有已知答案钉住。
+//
+// ## 语义（与 stage-0 对齐）
+//
+//   mem_diff(p1, p2, n) -> 首个不同字节的下标；全等返回 n（= 公共前缀长度）
+//   mem_xchg(addr, val) -> 旧值；写回 val（x86-64 的 xchg [mem],reg 隐含 LOCK）
+//
+// ## 边界要点
+//
+// * `mem_diff` 的返回值是 **n 或更小**，不是 -1；
+// * `mem_diff(a, b, 0)` 必须返回 0（不读内存）；
+// * `mem_xchg` 返回值是**旧值**，且必须真的写进去。
+module t182_qlmc_memdiff
+
+fn main() {
+    // ---- [1] mem_diff：前缀相同，第 3 字节不同 ----
+    let a = str_alloc(8)
+    let b = str_alloc(8)
+    mem_store8(a, 0, 1)
+    mem_store8(a, 1, 2)
+    mem_store8(a, 2, 3)
+    mem_store8(b, 0, 1)
+    mem_store8(b, 1, 2)
+    mem_store8(b, 2, 9)
+    assert(mem_diff(a, b, 3) == 2, "第 2 字节不同")
+    assert(mem_diff(a, b, 2) == 2, "只看前 2 字节则全等，返回 n=2")
+    assert(mem_diff(a, b, 0) == 0, "n=0 返回 0（不读内存）")
+
+    // ---- [2] 全等返回 n（不是 -1） ----
+    let c = str_alloc(8)
+    mem_store8(c, 0, 1)
+    mem_store8(c, 1, 2)
+    assert(mem_diff(a, c, 2) == 2, "全等返回 n=2")
+    assert(mem_diff(a, c, 1) == 1, "全等返回 n=1")
+
+    // ---- [3] 第 0 字节就不同 ----
+    let d = str_alloc(8)
+    mem_store8(d, 0, 99)
+    assert(mem_diff(a, d, 4) == 0, "第 0 字节不同返回 0")
+
+    // ---- [4] mem_xchg：返回旧值 + 真的写进去 ----
+    let w = mem_alloc(16)
+    mem_store64(w, 0, 111)
+    let old = mem_xchg(w, 222)
+    assert(old == 111, "mem_xchg 返回旧值 111")
+    assert(mem_load64(w, 0) == 222, "mem_xchg 写入新值 222")
+
+    // 再换一次，确认可重复
+    let old2 = mem_xchg(w, 333)
+    assert(old2 == 222, "第二次返回旧值 222")
+    assert(mem_load64(w, 0) == 333, "第二次写入 333")
+
+    // ---- [5] mem_xchg 在"值为 0"的槽上也正确 ----
+    let z = mem_alloc(8)
+    mem_store64(z, 0, 0)
+    let oldz = mem_xchg(z, 7)
+    assert(oldz == 0, "旧值为 0")
+    assert(mem_load64(z, 0) == 7, "新值为 7")
+
+    print("PASS: mem_diff / mem_xchg 语义正确")
+}
