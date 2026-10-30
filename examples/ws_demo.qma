@@ -8,8 +8,16 @@ fn on_open(fd: int) -> int {
 }
 
 fn on_msg(fd: int, data: str) -> int {
-    // echo：文本原样回；binary 加前缀回
-    ws_send(fd, data)
+    // echo：按**收到的帧类型**回（文本回文本、二进制回二进制）。
+    //
+    // `on_message` 的签名是 `fn(fd, data)`，里面没有 opcode —— 得用
+    // `ws_last_op()` 查（v3.27 新增）。不查的话二进制帧会被当成文本回，
+    // 客户端按二进制解出来就是乱码。
+    if ws_last_op() == 2 {
+        ws_send_bin(fd, data)
+    } else {
+        ws_send(fd, data)
+    }
     return 1
 }
 
@@ -18,6 +26,6 @@ fn on_close(fd: int) -> int {
 }
 
 fn main() {
-    print("ws echo listening on 8092")
-    ws_serve(8092, 512, on_open, on_msg, on_close)
+    print("ws echo listening on 18150")
+    ws_serve(18150, 512, on_open, on_msg, on_close)
 }

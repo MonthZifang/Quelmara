@@ -55,6 +55,17 @@ const WS_DEFAULT_CONNS = 100000
 const WS_DEFAULT_MAX_MSG = 1048576    // 单条消息上限 1MB
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+// v3.27：当前帧的 opcode 落在状态块第 13 个槽（ST_AUX 是 12，
+// 状态块 128 字节 = 16 槽，13-15 空闲）。
+//
+// 为什么需要它：`on_message` 的签名是 `fn(fd, data)`，**没有 opcode**，
+// 于是用户拿到一条消息时无法区分它是文本帧还是二进制帧 ——
+// `_frames` 里 `op == WS_OP_TEXT || op == WS_OP_BIN` 合并分派，
+// 两者都走同一个回调。回调用 `ws_last_op()` 查即可。
+//
+// 不改回调签名是有意的：那会让所有现有 ws 代码编译失败。
+const WS_OP_W = 13
+
 // ---------------------------------------------------------------------------
 // 服务入口
 // ---------------------------------------------------------------------------
@@ -104,6 +115,18 @@ pub fn ws_bytes_in() -> int {
 /// 累计发出的字节数（含握手与帧头）。
 pub fn ws_bytes_out() -> int {
     return conn_bytes_out(_wst())
+}
+
+/// **当前正在处理的消息**是文本帧还是二进制帧（v3.27）。
+///
+/// 返回 `1` = 文本帧、`2` = 二进制帧；在 `on_message` 回调里调用才有意义。
+/// 分片消息返回**首帧**的类型。
+///
+/// 为什么需要它：`on_message` 的签名是 `fn(fd, data)`，没有 opcode，
+/// 不查这个函数就没法区分文本与二进制。不改回调签名是为了不破坏
+/// 已有代码。
+pub fn ws_last_op() -> int {
+    return mem_load64(_wst(), WS_OP_W)
 }
 
 fn _wst() -> int {
@@ -389,6 +412,8 @@ fn _frames(st: int, p: int, fd: int) -> int {
                 let msg = mem_str(buf + pay, plen)
                 _drop_frame(p, off, pay, plen)
                 mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
+                // v3.27：把 opcode 留给回调查（文本帧 1 / 二进制帧 2）
+                mem_store64(st, WS_OP_W, op)
                 let hr = h_msg(fd, msg)
                 if hr == 0 {
                     return 0
@@ -417,6 +442,9 @@ fn _frames(st: int, p: int, fd: int) -> int {
                 mem_store64(p, WS_FOP, 0)
                 mem_store64(p, WS_MLEN, 0)
                 mem_store64(st, ST_MSGS, mem_load64(st, ST_MSGS) + 1)
+                // v3.27：分片消息的类型取**首帧**的 opcode（fop），
+                // 续帧一律是 CONT，不能拿它当类型
+                mem_store64(st, WS_OP_W, fop)
                 let hr = h_msg(fd, msg)
                 if hr == 0 {
                     return 0
