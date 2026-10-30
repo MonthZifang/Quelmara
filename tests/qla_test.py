@@ -27,6 +27,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "tools", "stage0", "qlm_cli.py")
@@ -413,6 +414,43 @@ def sec_d():
         check("布局" in str(exc), "同名类型布局冲突报错")
 
 
+def test_singleton_size_mismatch():
+    """进程级单例的**尺寸**不同必须拒绝链接（v3.24）。
+
+    v3.23 把 `static` 从 32 字扩到 64 字。编译器指纹通常能兜住这件事
+    （改了编译器 -> 指纹变 -> 更早的检查就报错），但它只保证"同一份
+    编译器"，不保证"同一块尺寸"。同指纹不同尺寸时，链接后代码按 64 字
+    写就会踩到下一个全局块 —— 链接期是唯一能拦住它的地方。
+    """
+    import copy
+
+    d = tempfile.mkdtemp(prefix="qla_sz_")
+    try:
+        write(os.path.join(d, "s1.qma"),
+              "module s1\n\nfn main() { mem_store64(static_word(63), 0, 1) }\n")
+        a, _m, _c = qlm_pe.emit_archive(os.path.join(d, "s1.qma"))
+        b, _m, _c = qlm_pe.emit_archive(os.path.join(d, "s1.qma"))
+
+        if a.special.get("static") is None:
+            skip("档案里没有 static 单例，跳过尺寸检查用例")
+            return
+
+        # 指纹对齐，只把 static 块砍回 32 字（模拟旧编译器）
+        c = copy.copy(b)
+        c.compiler = a.compiler
+        c.unit = "<shrunk>"
+        c.globals = list(c.globals)
+        c.globals[c.special["static"]] = c.globals[c.special["static"]][:32 * 8]
+
+        try:
+            qlm_qla.merge([a, c])
+            bad("同名单例尺寸不同竟然链接成功（会错位踩内存）")
+        except qlm_qla.LinkError as exc:
+            check("尺寸" in str(exc), "进程级单例尺寸不同拒绝链接")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # [E] CLI
 # ---------------------------------------------------------------------------
@@ -452,6 +490,7 @@ def main():
     sec_b()
     sec_c()
     sec_d()
+    test_singleton_size_mismatch()
     sec_e()
     print(f"\nQLA: PASS={PASS} FAIL={FAIL}")
     return 0 if FAIL == 0 else 1
