@@ -10661,6 +10661,53 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
         _ir_emit(fc, OP_CONST, d, 0, 0, 0)
         return d
     }
+    if m == "pop" {
+        // v3.39：vec.pop() -> 末元素（长度减 1）。与 stage-0 的 __vec_pop 一致：
+        //   if (len <= 0) fail-fast;
+        //   len--; return buf[len];
+        // std/ 的 ds / json / path / regex 四个模块都用到它。
+        if nd.c >= 0 {
+            eprint("qlmc: pop() 不接受实参")
+            exit(2)
+        }
+        let len = _vec_field(fc, h, 8)
+        // 空 vec：len <= 0 必须 fail-fast（与 stage-0 一致，不能静默读越界）
+        let lfail = _newlab(fc.labs)
+        let lok = _newlab(fc.labs)
+        let zero = _vnew(fc)
+        fc.vty.set(zero, TY_INT)
+        _ir_emit(fc, OP_CONST, zero, 0, 0, 0)
+        // 条件是 len > 0 才继续；否则走死路
+        _ir_emit(fc, OP_JCMP, 0x8F, len, zero, lok)   // jg → 继续
+        _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
+        let onex = _vnew(fc)
+        fc.vty.set(onex, TY_INT)
+        _ir_emit(fc, OP_CONST, onex, 0, 0, 1)
+        _ir_emit(fc, OP_EXIT, 0, onex, 0, 0)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
+        // 新长度 = len - 1
+        let one = _vnew(fc)
+        fc.vty.set(one, TY_INT)
+        _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+        let nl = _vnew(fc)
+        fc.vty.set(nl, TY_INT)
+        _ir_emit(fc, OP_SUB, nl, len, one, 0)
+        let lp = _vnew(fc)
+        fc.vty.set(lp, TY_INT)
+        _ir_emit(fc, OP_ADDRF, lp, h, 0, 8)
+        _ir_emit(fc, OP_STORE, 0, lp, nl, 8)
+        // 读 buf[len-1]
+        let data = _vec_field(fc, h, 0)
+        let addr = _vec_elem_addr(fc, data, nl, stride)
+        let d = _vnew(fc)
+        fc.vty.set(d, et)
+        if eagg {
+            _ir_emit(fc, OP_MOV, d, addr, 0, 0)
+        } else {
+            _ir_emit(fc, OP_LOAD, d, addr, 0, 8)
+        }
+        return d
+    }
     if m == "set" {
         if nd.n < 0 {
             eprint("qlmc: set 需要两个实参")
@@ -10681,7 +10728,7 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
         _ir_emit(fc, OP_CONST, d, 0, 0, 0)
         return d
     }
-    eprint("qlmc: vec 只支持 .push(x) / .get(i) / .set(i,x) / .len() / .clear()")
+    eprint("qlmc: vec 只支持 .push(x) / .get(i) / .set(i,x) / .len() / .clear() / .pop()")
     exit(2)
     return 0
 }

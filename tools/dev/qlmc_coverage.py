@@ -49,7 +49,8 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 # v3.36: 0   （只有 program 模式，30 个模块卡在"没有 main"）
 # v3.37: 37  （加了 -lib 模式 + mem_chr / str_from_mem 内建）
 # v3.38: 39  （加 mem_diff / mem_xchg）
-BASELINE = 39
+# v3.39: 43  （加 vec.pop()）
+BASELINE = 43
 
 QLMC_SRC = "bootstrap/qlmc/qlmc.qma"
 QLMC_EXE = os.path.join("build", "_qlmc_cov.exe")

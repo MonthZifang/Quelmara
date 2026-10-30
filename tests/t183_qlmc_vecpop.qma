@@ -1,0 +1,68 @@
+// t183_qlmc_vecpop.qma —— qlmc 的 vec.pop()（v3.39）
+//
+// ## 为什么需要它
+//
+// std/ 的 ds / json / path / regex 四个模块都用 `.pop()`，而 qlmc 之前
+// 只支持 push/get/set/len/clear。加上 pop 后覆盖率 39 → 43。
+//
+// ## 语义（与 stage-0 的 __vec_pop 对齐）
+//
+//   v.pop() -> 末元素；长度减 1
+//   空 vec 上 pop 必须 **fail-fast**（stage-0 的 qlm_vec_fail）
+//
+// ## 边界要点
+//
+// * 返回的是**末元素**，不是首元素；
+// * 长度必须真的减 1（pop 之后 len 变小）；
+// * 连续 pop 按逆序取出；
+// * pop 到只剩 1 个元素时 get(0) 仍是原首元素；
+// * 空 vec 上 pop 不能静默读越界 —— 必须非 0 退出（由 Python 侧 case 验）。
+module t183_qlmc_vecpop
+
+fn main() {
+    // ---- [1] 基本：pop 返回末元素、长度减 1 ----
+    let v = vec[int].new(8)
+    v.push(10)
+    v.push(20)
+    v.push(30)
+    assert(len(v) == 3, "push 3 个后 len = 3")
+    assert(v.pop() == 30, "pop 返回末元素 30")
+    assert(len(v) == 2, "pop 后 len = 2")
+    assert(v.pop() == 20, "再 pop 返回 20")
+    assert(len(v) == 1, "len = 1")
+    assert(v.get(0) == 10, "剩下的首元素仍是 10")
+    assert(v.pop() == 10, "pop 最后一个返回 10")
+    assert(len(v) == 0, "len = 0")
+
+    // ---- [2] pop 之后可以继续 push（长度与数据都一致） ----
+    v.push(77)
+    assert(len(v) == 1, "重新 push 后 len = 1")
+    assert(v.get(0) == 77, "push 进去的是 77")
+    assert(v.pop() == 77, "pop 回来 77")
+
+    // ---- [3] 连续 push/pop 交替，验证没有残留 ----
+    let w = vec[int].new(4)
+    let mut i = 0
+    while i < 4 {
+        w.push(i * 100)
+        i = i + 1
+    }
+    assert(w.pop() == 300, "300")
+    assert(w.pop() == 200, "200")
+    w.push(999)
+    assert(w.pop() == 999, "push 后立刻 pop 得 999")
+    assert(w.pop() == 100, "剩下 100")
+    assert(w.pop() == 0, "最后 0")
+    assert(len(w) == 0, "清空")
+
+    // ---- [4] vec[str] 上的 pop（非聚合元素也要走同一条路径） ----
+    let s = vec[str].new(4)
+    s.push("aa")
+    s.push("bb")
+    assert(len(s) == 2, "vec[str] len = 2")
+    assert(s.pop() == "bb", "vec[str] pop 得 bb")
+    assert(len(s) == 1, "vec[str] len = 1")
+    assert(s.get(0) == "aa", "剩下 aa")
+
+    print("PASS: vec.pop() 语义正确")
+}
