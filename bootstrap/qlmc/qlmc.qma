@@ -156,6 +156,15 @@ const P_MINUSEQ = 38
 const P_STAREQ = 39
 const P_SLASHEQ = 40
 const P_PERCENTEQ = 41
+// v3.50：位运算 / 移位的复合赋值。`std/http.qma` 用 `flags |= HP_F_TE`，
+// 以前直接报"期望表达式"。**id 从 42 起**（41 是 P_PERCENTEQ；29..36 被
+// 位运算和 P_AT 占着，别再往那段塞）。
+const P_AMPEQ = 42      // &=
+const P_PIPEEQ = 43     // |=
+const P_CARETEQ = 44    // ^=
+const P_SHLEQ = 45      // <<=
+const P_SHREQ = 46      // >>=
+const P_USHREQ = 47     // >>>=
 const P_AT = 29
 // 位运算与移位（v2.28）。优先级照 stage-0（Quelmara 自己的定义，见 SPEC §2.4）：
 //   ||  <  &&  <  |  <  ^  <  &  <  == !=  <  < <= > >=  <  << >> >>>  <  + -  <  * / %
@@ -221,6 +230,16 @@ const S_PRINT = 15   // a = 值
 const S_EXIT = 16    // a = 值
 const S_EXPR = 17
 const S_FOR = 18       // a = 循环变量名，b = lo，c = hi，n = 体
+// v3.50：`for k in <集合>`（遍历 vec）。a = 循环变量名，b = 集合表达式，
+// n = 体。**只做 vec** —— map 遍历要 cap/state/key_at 三个运行时例程，
+// 本版没做（见 07-gaps §7.40）。
+// **25 不是 19**：19 已经被 `S_BREAK` 占了。v3.50 第一版写成 19，
+// 于是 `break` 被当成 `S_FOREACH` 降级 —— qlmc 编译自己时报
+// "quelmara: vec index out of bounds"（拿 break 节点当集合表达式去求值）。
+// 这是本项目**第三次**因为「常量编号撞车」浪费轮次（前两次：`I_CREATE`
+// 其实是 CreateThread、`_op_name` 表错位）。加新 opcode 后必须
+// `Select-String '^const S_'` 全表核一遍。
+const S_FOREACH = 25
 const S_BREAK = 19
 const S_CONTINUE = 20
 const S_ASG_FIELD = 21   // a = 基址，b = 字段名 id，c = 值
@@ -535,8 +554,27 @@ fn lex(src: str, toks: vec[Tok]) -> int {
         // **一律直接比字节，不要用 substr**：substr 会分配一个新串，而这段代码
         // 对**每个字符**都跑一次——v2.28 实测，每字符一次 substr 让 96 KB 的输入
         // 从 16 ms 涨到 54 ms（3.3×），还白吃掉一堆堆。
+        // 三字符：`>>>=` / `<<=` / `>>=`。
+        // **必须排在 `<<` / `>>` 的两字符判定之前** —— 否则 `a <<= 2` 会被切成
+        // `a <<` + `=`，赋值静默消失（v3.50 实测：`<<=` 以前报"期望表达式"）。
+        if c == 62 && i + 3 < n && src[i + 1] == 62 && src[i + 2] == 62 &&
+           src[i + 3] == 61 {
+            _tok(toks, T_PUNCT, P_USHREQ, "", line)
+            i = i + 4
+            continue
+        }
         if c == 62 && i + 2 < n && src[i + 1] == 62 && src[i + 2] == 62 {
             _tok(toks, T_PUNCT, P_USHR, "", line)
+            i = i + 3
+            continue
+        }
+        if c == 60 && i + 2 < n && src[i + 1] == 60 && src[i + 2] == 61 {
+            _tok(toks, T_PUNCT, P_SHLEQ, "", line)
+            i = i + 3
+            continue
+        }
+        if c == 62 && i + 2 < n && src[i + 1] == 62 && src[i + 2] == 61 {
+            _tok(toks, T_PUNCT, P_SHREQ, "", line)
             i = i + 3
             continue
         }
@@ -557,6 +595,9 @@ fn lex(src: str, toks: vec[Tok]) -> int {
             else if c == 42 && d2 == 61 { pid = P_STAREQ }
             else if c == 47 && d2 == 61 { pid = P_SLASHEQ }
             else if c == 37 && d2 == 61 { pid = P_PERCENTEQ }
+            else if c == 38 && d2 == 61 { pid = P_AMPEQ }
+            else if c == 124 && d2 == 61 { pid = P_PIPEEQ }
+            else if c == 94 && d2 == 61 { pid = P_CARETEQ }
             else if c == 60 && d2 == 60 { pid = P_SHL }
             else if c == 62 && d2 == 62 { pid = P_SHR }
             if pid != 0 {
@@ -616,7 +657,15 @@ struct P {
     strs: vec[str]
     fns: vec[Fn]
     cname: vec[int]     // const 名字 id
-    cval: vec[int]      // const 值（本版只支持整型字面量）
+    cval: vec[int]      // const 的整型值（cisk=1 时无意义）
+    // v3.50：字符串 const。`cisk[i]` = 1 表示第 i 个 const 是**字符串**，
+    // 此时 `cstr[i]` 是它在 `strs` 里的下标，`cval[i]` 无意义。
+    //
+    // 为什么不用一个 `vec[str]` 直接存值：`const` 的整型路径要能引用字符串
+    // 常量以外的所有常量，混在一起会让 `_fold` 的类型判断变成"猜"。分开两张
+    // 平行表最省事，也和 `cname`/`cval` 的现有形状一致。
+    cisk: vec[int]
+    cstr: vec[int]
     stt: vec[int]       // struct 表：stt[0]=个数，每个 struct 占 ST_STRIDE 字
     fdll: vec[str]      // @ffi 的 DLL 名（与 fsym 平行）
     fsym: vec[str]      // @ffi 的符号名
@@ -1576,6 +1625,12 @@ fn _primary(p: P, pos: vec[int]) -> int {
         if !_is_p(p, pos, P_LPAREN) {
             let ci = _const_idx(p, nid)
             if ci >= 0 {
+                // v3.50：字符串常量替换成 E_STR（与直接写字面量等价）。
+                // 必须先判 `cisk` —— 字符串常量的 `cval` 是占位的 0，
+                // 照着建 `E_NUM` 会静默变成整数 0，那是**错编**而不是报错。
+                if p.cisk.get(ci) == 1 {
+                    return _postfix(p, pos, _node(p, E_STR, p.cstr.get(ci), -1, -1))
+                }
                 return _postfix(p, pos, _node(p, E_NUM, p.cval.get(ci), -1, -1))
             }
         }
@@ -1670,7 +1725,16 @@ fn _stmt(p: P, pos: vec[int]) -> int {
         }
         _adv(pos)
         let lo = _expr(p, pos)
-        _eat_p(p, pos, P_DOTDOT)
+        // `for k in lo..hi` 与 `for k in <集合>` 的唯一区别就是后面跟不跟 `..`。
+        // stage-0 也是这么分的（`if self.at("SYM", "..")`）。
+        if !_is_p(p, pos, P_DOTDOT) {
+            let body = _block(p, pos)
+            let id = _node(p, S_FOREACH, _name_id(p, nm.s), lo, -1)
+            p.nodes.set(id, Node { op: S_FOREACH, a: _name_id(p, nm.s), b: lo,
+                                   c: -1, n: body, slot: 0, ty: TY_INT, nx: -1 })
+            return id
+        }
+        _adv(pos)
         let hi = _expr(p, pos)
         let body = _block(p, pos)
         let id = _node(p, S_FOR, _name_id(p, nm.s), lo, hi)
@@ -1722,7 +1786,10 @@ fn _stmt(p: P, pos: vec[int]) -> int {
     let ct = _cur(p, pos)
     if ct.k == T_PUNCT && (ct.n == P_PLUSEQ || ct.n == P_MINUSEQ ||
                            ct.n == P_STAREQ || ct.n == P_SLASHEQ ||
-                           ct.n == P_PERCENTEQ) {
+                           ct.n == P_PERCENTEQ || ct.n == P_AMPEQ ||
+                           ct.n == P_PIPEEQ || ct.n == P_CARETEQ ||
+                           ct.n == P_SHLEQ || ct.n == P_SHREQ ||
+                           ct.n == P_USHREQ) {
         let cop = ct.n
         _adv(pos)
         let rhs0 = _expr(p, pos)
@@ -1731,6 +1798,12 @@ fn _stmt(p: P, pos: vec[int]) -> int {
         if cop == P_STAREQ { bop = P_STAR }
         if cop == P_SLASHEQ { bop = P_SLASH }
         if cop == P_PERCENTEQ { bop = P_PERCENT }
+        if cop == P_AMPEQ { bop = P_AMP }
+        if cop == P_PIPEEQ { bop = P_PIPE }
+        if cop == P_CARETEQ { bop = P_CARET }
+        if cop == P_SHLEQ { bop = P_SHL }
+        if cop == P_SHREQ { bop = P_SHR }
+        if cop == P_USHREQ { bop = P_USHR }
         let bin = _node(p, E_BIN, bop, v, rhs0)
         let lv0 = p.nodes.get(v)
         if lv0.op == E_VAR {
@@ -1841,9 +1914,11 @@ fn _fn(p: P, pos: vec[int], ffi_idx: int) {
 /// 顶层：`module x` 忽略；`import` 本版不支持；`fn` 逐个解析。
 fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
          fns: vec[Fn], cname: vec[int], cval: vec[int], stt: vec[int],
-         imports: vec[str], fdll: vec[str], fsym: vec[str]) -> int {
+         imports: vec[str], fdll: vec[str], fsym: vec[str],
+         cisk: vec[int], cstr: vec[int]) -> int {
     let p = P { toks: toks, nodes: nodes, names: names, strs: strs, fns: fns,
-                cname: cname, cval: cval, stt: stt, fdll: fdll, fsym: fsym }
+                cname: cname, cval: cval, stt: stt, fdll: fdll, fsym: fsym,
+                cisk: cisk, cstr: cstr }
     let pos = vec[int].new(1)
     pos.push(0)
     while _cur(p, pos).k != T_EOF {
@@ -2041,12 +2116,31 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
             // 初值可以是**常量表达式**（v2.30）：先用正常表达式解析（优先级自然
             // 与语言一致），再用 `_fold` 在解析期折成一个整数；折不动的 fail-fast。
             let e = _expr(p, pos)
+            // v3.50：**字符串常量**。`const S = "abc"` 与 stage-0 同口径
+            // （`parse_const_value` 返回 `("str", val)`）。引用处直接替换成
+            // `E_STR` 节点，语义等价于在每处写字面量 —— 这正是 const 的本意。
+            //
+            // 注意判断顺序：先看 `E_STR`，再走 `_fold`。`_fold` 遇到 `E_STR`
+            // 会 fail-fast（"const 初值必须是编译期可求值的整型表达式"），
+            // 所以不能让它先跑。
+            if p.nodes.get(e).op == E_STR {
+                p.cname.push(_name_id(p, nm.s))
+                p.cval.push(0)
+                p.cisk.push(1)
+                p.cstr.push(p.nodes.get(e).a)
+                if _is_p(p, pos, P_SEMI) {
+                    _adv(pos)
+                }
+                continue
+            }
             let cv = _fold(p, pos, e)
             if _is_p(p, pos, P_SEMI) {
                 _adv(pos)
             }
             p.cname.push(_name_id(p, nm.s))
             p.cval.push(cv)
+            p.cisk.push(0)
+            p.cstr.push(0)
             continue
         }
         _fail(p, pos, "顶层期望 fn / const / struct")
@@ -4780,10 +4874,21 @@ fn _lower_cond(fc: FnCtx, nid: int, lab: int, if_false: int) {
 
 fn _loop_push(fc: FnCtx, cont: int, brk: int) {
     let d = fc.cells.get(C_LD)
-    if len(fc.loops) > d * 2 {
+    // **必须 `> d*2 + 1`，不是 `> d*2`**：`set(d*2+1)` 要求长度至少
+    // `d*2+2`。原来写 `> d*2`，当 `len == d*2+1`（奇数长度）时会走 set
+    // 分支并越界 —— 而"奇数长度"正是**嵌套循环里内层刚 pop 完**的常态。
+    //
+    // v3.50 实测的崩溃链：`for k in 0..3 { if k == 1 { break } }`
+    // → qlmc 自己在编译期报 "quelmara: vec index out of bounds"。
+    // 这个 bug 一直存在，只是回归里从没有"循环里带 break"的组合。
+    if len(fc.loops) > d * 2 + 1 {
         fc.loops.set(d * 2, cont)
         fc.loops.set(d * 2 + 1, brk)
     } else {
+        // 长度不够：补齐到 d*2 再成对 push，避免留下奇数长度
+        while len(fc.loops) < d * 2 {
+            fc.loops.push(0)
+        }
         fc.loops.push(cont)
         fc.loops.push(brk)
     }
@@ -4914,7 +5019,13 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
         let hi = _lower_expr(fc, nd.c)
         // **上界必须钉进变量**：临时值的活跃区间不跨循环回边，下一轮比较会读到
         // 被别的临时值覆盖的寄存器（v2.17 实测：`for k in 0..3` 死循环）。
-        let hiv = _new_var(fc, -1, TY_INT)
+        // **内部变量的 nid 不能用 -1**：`_try_var` / `_find_var` 拿 -1 当
+        // "找不到"的哨兵，`_new_var(fc, -1, ...)` 会把 -1 塞进 `fc.vmap`，
+        // 于是循环体里任何一次 `_try_var(fc, -1)` 都会命中这个内部变量。
+        // v3.50 实测：`for k in 0..3 { if k == 1 { break } }` 让 qlmc 自己
+        // 在编译期崩成 "quelmara: vec index out of bounds" —— 这是**既有
+        // bug**，只是回归里从没有"range 循环 + break"的组合。
+        let hiv = _new_var(fc, -2, TY_INT)
         _ir_emit(fc, OP_MOV, hiv, hi, 0, 0)
         let iv = _new_var(fc, nd.a, TY_INT)
         _ir_emit(fc, OP_MOV, iv, lo, 0, 0)
@@ -4931,6 +5042,72 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
         fc.vty.set(one, TY_INT)
         _ir_emit(fc, OP_CONST, one, 0, 0, 1)
         _ir_emit(fc, OP_ADD, iv, iv, one, 0)
+        _ir_emit(fc, OP_JMP, 0, 0, 0, ltop)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, lend)
+        return
+    }
+    if nd.op == S_FOREACH {
+        // `for k in v`：遍历 vec。形状照 `_bi_vec_foreach` 的既有约定 ——
+        // vec 句柄布局是 [0]=data、[8]=len、[16]=cap。
+        //
+        // **句柄必须钉进变量**：临时值的活跃区间不跨循环回边，下一轮
+        // 重新读 [h+0]/[h+8] 会读到被覆盖的寄存器（`S_FOR` 的上界注释里
+        // 记过同一个坑，v2.17 的 `for k in 0..3` 死循环）。
+        let hv = _lower_expr(fc, nd.b)
+        let hty = fc.vty.get(hv)
+        if hty < TY_VEC || hty >= TY_MAP {
+            eprint("qlmc: for k in ... 目前只支持遍历 vec")
+            exit(2)
+        }
+        let elem = hty - TY_VEC
+        // **内部变量不能传 `nid = -1`**。`_try_var` 用 -1 当"找不到"的
+        // 哨兵（`_find_var` 找不到也返回 -1），而 `_new_var(fc, -1, ...)`
+        // 会把 -1 塞进 `fc.vmap`，于是循环体里任何一次 `_try_var(fc, -1)`
+        // 都会命中这个内部变量，拿到错误的 vreg。v3.50 实测：`for k in v`
+        // 里带 `break` 时 qlmc 自己在编译期崩成
+        // "quelmara: vec index out of bounds"（`break` 路径要走 `_try_var`）。
+        //
+        // 用一个**不可能出现的负 id**（-2）做内部变量，避开哨兵。
+        let hp = _new_var(fc, -2, TY_INT)
+        _ir_emit(fc, OP_MOV, hp, hv, 0, 0)
+        let data = _pin(fc, _vec_field(fc, hp, 0))
+        let nlen = _pin(fc, _vec_field(fc, hp, 8))
+        // **下标必须是独立变量**：循环变量 `iv` 在体里装的是**元素值**，
+        // 拿它当下标会让回边的 i+1 从元素值出发（`for k in v` 里 v 的元素
+        // 若是 100，第二轮就从 100 开始读）。
+        let idx = _new_var(fc, -3, TY_INT)
+        let zero = _vnew(fc)
+        fc.vty.set(zero, TY_INT)
+        _ir_emit(fc, OP_CONST, zero, 0, 0, 0)
+        _ir_emit(fc, OP_MOV, idx, zero, 0, 0)
+        // **循环变量必须是元素类型**：str 元素的值就是数据指针，标成
+        // TY_INT 会让下游按整数处理（实测 `for w in vec[str]` 打印出
+        // 5368718456 而不是 "x"）。
+        let iv = _new_var(fc, nd.a, elem)
+        let ltop = _newlab(fc.labs)
+        let lcont = _newlab(fc.labs)
+        let lend = _newlab(fc.labs)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, ltop)
+        _ir_emit(fc, OP_JCMP, 0x8D, idx, nlen, lend)     // jge：i >= len 就退出
+        _loop_push(fc, lcont, lend)
+        // 元素值：str 元素是数据块里的指针（读 8 字节即得 str 值），
+        // int 同理；聚合元素本版不支持（要 memcpy 进局部变量）。
+        if elem != TY_INT && elem != TY_STR {
+            eprint("qlmc: for k in vec 目前只支持 int / str 元素")
+            exit(2)
+        }
+        let ea = _vec_elem_addr(fc, data, idx, 8)
+        let ev = _vnew(fc)
+        fc.vty.set(ev, elem)
+        _ir_emit(fc, OP_LOAD, ev, ea, 0, 8)
+        _ir_emit(fc, OP_MOV, iv, ev, 0, 0)
+        _lower_block(fc, nd.n, ep)
+        _loop_pop(fc)
+        _ir_emit(fc, OP_LAB, 0, 0, 0, lcont)
+        let one = _vnew(fc)
+        fc.vty.set(one, TY_INT)
+        _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+        _ir_emit(fc, OP_ADD, idx, idx, one, 0)
         _ir_emit(fc, OP_JMP, 0, 0, 0, ltop)
         _ir_emit(fc, OP_LAB, 0, 0, 0, lend)
         return
@@ -14129,6 +14306,8 @@ fn main() {
     let fns = vec[Fn].new(8)
     let cname = vec[int].new(8)
     let cval = vec[int].new(8)
+    let cisk = vec[int].new(8)
+    let cstr = vec[int].new(8)
     let stt = vec[int].new(TBL_SIZE)
     let mut ti = 0
     while ti < TBL_SIZE {
@@ -14138,7 +14317,8 @@ fn main() {
     let imports = vec[str].new(4)
     let fdll = vec[str].new(4)
     let fsym = vec[str].new(4)
-    parse(toks, nodes, names, strs, fns, cname, cval, stt, imports, fdll, fsym)
+    parse(toks, nodes, names, strs, fns, cname, cval, stt, imports, fdll, fsym,
+          cisk, cstr)
 
     // 装载 import 的模块：同一个模块只装一次，装的过程中可能又收集到新的 import
     let loaded = vec[str].new(4)
@@ -14164,7 +14344,8 @@ fn main() {
             let mt = _read_text(mpath)
             let mtk = vec[Tok].new(256)
             lex(mt, mtk)
-            parse(mtk, nodes, names, strs, fns, cname, cval, stt, imports, fdll, fsym)
+            parse(mtk, nodes, names, strs, fns, cname, cval, stt, imports, fdll,
+                  fsym, cisk, cstr)
         }
         ii = ii + 1
     }

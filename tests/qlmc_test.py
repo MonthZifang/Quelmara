@@ -63,6 +63,12 @@ CASES = [
     ("s26_alias", "tests/selfhost/s26_alias.qma"),
     ("s27_modind", "tests/selfhost/s27_modind.qma"),
     ("s28_compound", "tests/selfhost/s28_compound.qma"),
+    # v3.50：字符串 const / 位运算复合赋值 / for k in vec。
+    # **必须是差分用例**（stage-0 与 qlmc 各编一次、输出逐字节比较）：
+    # 这三项都改的是语义，光"能编过"说明不了算得对 —— 尤其
+    # `S_FOREACH` 第一版编号与 `S_BREAK` 撞车时，代码能编出来但
+    # break 被当集合求值，只有差分能抓住。
+    ("s29_syntax", "tests/t194_qlmc_syntax.qma"),
 ]
 
 npass = 0
