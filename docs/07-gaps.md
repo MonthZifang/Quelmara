@@ -1578,7 +1578,7 @@ quelmara: vec index out of bounds (fail-fast)
 而"奇数长度"正是嵌套循环里内层刚 pop 完的常态。已改成 `> d * 2 + 1`
 并在长度不足时补齐到偶数。
 
-### 7.39 待修：qlmc 不支持**跨模块 const**
+### 7.39 已修（v3.52）：qlmc 不支持**跨模块 const**
 
 **现象**：`import m` 之后引用 `m` 里声明的 `pub const MX = 42`，qlmc 报
 `未定义变量 MX`。`std/ws`（`ST_H0`）、`std/sse`（`ST_H0`）两个模块卡在这里。
@@ -1590,10 +1590,18 @@ quelmara: vec index out of bounds (fail-fast)
 stage-0 用**两遍解析**解决（`load_program` 第一遍收集各文件 const，
 第二遍带着全集重解析，见 `qlm.py` 的 `consts=` 种子参数）。qlmc 没有这一层。
 
-**修法方向**：把 `parse` 拆成两遍 —— 第一遍只扫顶层 `const`（跳过函数体），
-把所有文件的 const 都收进 `cname`/`cval`/`cisk`/`cstr`；第二遍正常解析，
-此时 `_const_idx` 能命中任意模块的 const。注意第一遍必须**按声明序**，
-因为 `const B = A + 1` 依赖 `A` 已定义。
+**修法（v3.52 已落地）**：三段式解析 —— `_prescan_imports` 先收路径，
+循环装载各模块（先 `_prescan_consts` 再 `_prescan_imports`），最后统一 `parse`。
+
+**踩到的坑**：`parse` 的 const 分支原来是**无条件 `p.cname.push(...)`**，
+而预扫描已登记过一遍，于是表里出现重复项 —— `_const_idx` 返回第一项
+（预扫描只认简单字面量），复杂初值的真实结果永远读不到。后果是**静默错编**：
+stage-2 产物与 stage-1 不等价，且它编任何文件都报 `编译缓冲不够`。
+改成 upsert 后恢复。
+
+**顺带发现**：stage-0 本身**不支持**跨模块 const（连 `pub const` 都不认），
+所以这个特性是 qlmc 独有的，只能做自检不能做差分（见 `tests/modconst_test.py`）。
+方向很重要：这里 qlmc 比 stage-0 强，不为"能差分"把它弄坏。
 
 ### 7.40 待修：qlmc 不支持 `for k in <map>`
 

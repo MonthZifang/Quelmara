@@ -1,0 +1,17 @@
+const MC_INT = 42
+const MC_STR = "hello"
+const MC_EMPTY = ""
+const MC_NEG = -7
+const MC_HEX = 0xC96C5795
+
+pub fn mc_add(a: int) -> int {
+    return a + MC_INT
+}
+
+pub fn mc_cat(s: str) -> str {
+    return s + MC_STR
+}
+
+pub fn mc_len() -> int {
+    return len(MC_STR)
+}

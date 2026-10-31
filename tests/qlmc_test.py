@@ -73,6 +73,11 @@ CASES = [
     # **这条必须是差分用例**：bug 只在寄存器分配把 LEN 的结果分到 r12
     # 时出现，光"能编过"完全看不出来 —— stage-0 一直是对的。
     ("s30_strlen", "tests/t195_qlmc_strlen.qma"),
+    # v3.52：跨模块 const + str 切片。
+    # **必须是差分用例**：str 切片返回的是**新串**（不是视图），
+    # 长度头 / NUL / ABI 必须对 —— 否则下游 len() 与拼接会读到原串的
+    # 长度，那是静默错而不是崩，光"能编过"完全看不出来。
+    ("s31_strslice", "tests/t196_qlmc_strslice.qma"),
 ]
 
 npass = 0

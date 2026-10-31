@@ -1911,6 +1911,208 @@ fn _fn(p: P, pos: vec[int], ffi_idx: int) {
                     body: body, nbody: 0, nlocals: ffi_idx })
 }
 
+/// 跳到匹配的 `}`（`pos` 指向 `{`；返回时指向配对的 `}` 之后）。
+///
+/// 只数字符花括号 —— 字符串里的 `{` 不会出现在 `toks` 里（词法器已经把
+/// 整个字面量收成一个 `T_STR` 记号），所以不需要额外处理转义。
+fn _skip_brace(p: P, pos: vec[int]) {
+    if !_is_p(p, pos, P_LBRACE) {
+        return
+    }
+    let mut depth = 0
+    while _cur(p, pos).k != T_EOF {
+        if _is_p(p, pos, P_LBRACE) {
+            depth = depth + 1
+        } else if _is_p(p, pos, P_RBRACE) {
+            depth = depth - 1
+            if depth <= 0 {
+                _adv(pos)
+                return
+            }
+        }
+        _adv(pos)
+    }
+}
+
+/// **第零遍**：只收 `import` 路径（v3.52，收 §7.39）。
+///
+/// 为什么需要单独一趟：原来的顺序是「parse 主文件 → 再装载 import」，
+/// 于是主文件里引用被 import 模块的 const 时，那个 const 还没进表 ——
+/// `parse` 把它解析成 `E_VAR`（普通变量引用），后面再怎么补 const 表
+/// 也没用（节点已经定型了）。
+fn _prescan_imports(toks: vec[Tok], imports: vec[str]) {
+    let p = P { toks: toks, nodes: vec[Node].new(1), names: vec[str].new(1),
+                strs: vec[str].new(1), fns: vec[Fn].new(1),
+                cname: vec[int].new(1), cval: vec[int].new(1),
+                stt: vec[int].new(1), fdll: vec[str].new(1),
+                fsym: vec[str].new(1), is_lib: 0,
+                cisk: vec[int].new(1), cstr: vec[int].new(1) }
+    let pos = vec[int].new(1)
+    pos.push(0)
+    while _cur(p, pos).k != T_EOF {
+        let t = _cur(p, pos)
+        if t.k == T_KW && t.n == K_IMPORT {
+            _adv(pos)
+            let nm = _cur(p, pos)
+            if nm.k != T_NAME {
+                _adv(pos)
+                continue
+            }
+            _adv(pos)
+            let mut path = nm.s
+            while _is_p(p, pos, P_DOT) {
+                _adv(pos)
+                let seg = _cur(p, pos)
+                if seg.k != T_NAME {
+                    break
+                }
+                _adv(pos)
+                path = path + "/" + seg.s
+            }
+            if _cur(p, pos).k == T_STR {
+                _adv(pos)                     // 版本要求，跳过
+            }
+            imports.push(path)
+            continue
+        }
+        if t.k == T_KW && t.n == K_FN {
+            while _cur(p, pos).k != T_EOF && !_is_p(p, pos, P_LBRACE) {
+                _adv(pos)
+            }
+            _skip_brace(p, pos)
+            continue
+        }
+        if t.k == T_KW && (t.n == K_STRUCT || t.n == K_ENUM) {
+            while _cur(p, pos).k != T_EOF && !_is_p(p, pos, P_LBRACE) {
+                _adv(pos)
+            }
+            _skip_brace(p, pos)
+            continue
+        }
+        _adv(pos)
+    }
+}
+
+/// **第一遍**：只收集顶层 `const`（v3.52，收 §7.39）。
+///
+/// 预扫描只认两种初值：**字符串字面量**与**单个整数字面量**（可带前置 `-`）。
+/// 复杂表达式整条跳过，留给第二遍 `parse`。
+///
+/// 为什么不用 `_expr` + `_fold`：`_expr` 会一路解析到表达式结束，而 qlmc
+/// 自己的源码有 9 万多个 token —— v3.51 实测在主文件的预扫描上越界崩
+/// （`vec index out of bounds`）。预扫描的职责只是"让**跨文件**引用能命中"，
+/// 而同一文件内的 const 引用本来就按声明序可见（第二遍 `parse` 处理）。
+fn _prescan_consts(toks: vec[Tok], nodes: vec[Node], names: vec[str],
+                   strs: vec[str], cname: vec[int], cval: vec[int],
+                   cisk: vec[int], cstr: vec[int]) {
+    let p = P { toks: toks, nodes: nodes, names: names, strs: strs,
+                fns: vec[Fn].new(1), cname: cname, cval: cval,
+                stt: vec[int].new(1), fdll: vec[str].new(1),
+                fsym: vec[str].new(1), is_lib: 0, cisk: cisk, cstr: cstr }
+    let pos = vec[int].new(1)
+    pos.push(0)
+    while _cur(p, pos).k != T_EOF {
+        let t = _cur(p, pos)
+        if t.k == T_NAME && t.s == "pub" {
+            _adv(pos)
+            continue
+        }
+        if t.k == T_KW && t.n == K_MODULE {
+            while _cur(p, pos).k != T_EOF && _cur(p, pos).line == t.line {
+                _adv(pos)
+            }
+            continue
+        }
+        if t.k == T_KW && t.n == K_IMPORT {
+            while _cur(p, pos).k != T_EOF && _cur(p, pos).line == t.line {
+                _adv(pos)
+            }
+            continue
+        }
+        if t.k == T_KW && t.n == K_CONST {
+            _adv(pos)
+            let nm = _cur(p, pos)
+            if nm.k != T_NAME {
+                while _cur(p, pos).k != T_EOF && _cur(p, pos).line == t.line {
+                    _adv(pos)
+                }
+                continue
+            }
+            _adv(pos)
+            if _is_p(p, pos, P_COLON) {
+                _adv(pos)
+                _adv(pos)                     // 类型标注
+            }
+            if !_is_p(p, pos, P_ASSIGN) {
+                while _cur(p, pos).k != T_EOF && _cur(p, pos).line == t.line {
+                    _adv(pos)
+                }
+                continue
+            }
+            _adv(pos)
+            // 字符串字面量
+            if _cur(p, pos).k == T_STR {
+                let st = _cur(p, pos)
+                _adv(pos)
+                if _is_p(p, pos, P_SEMI) {
+                    _adv(pos)
+                }
+                if _const_idx(p, _name_id(p, nm.s)) < 0 {
+                    p.cname.push(_name_id(p, nm.s))
+                    p.cval.push(0)
+                    p.cisk.push(1)
+                    p.cstr.push(_str_id(p, st.s))
+                }
+                continue
+            }
+            // 单个整数字面量（可带前置 -）
+            let mut neg = 0
+            if _is_p(p, pos, P_MINUS) {
+                neg = 1
+                _adv(pos)
+            }
+            let tv = _cur(p, pos)
+            if tv.k == T_NUM {
+                _adv(pos)
+                let mut cv = tv.n
+                if neg == 1 {
+                    cv = 0 - cv
+                }
+                if _is_p(p, pos, P_SEMI) {
+                    _adv(pos)
+                }
+                if _const_idx(p, _name_id(p, nm.s)) < 0 {
+                    p.cname.push(_name_id(p, nm.s))
+                    p.cval.push(cv)
+                    p.cisk.push(0)
+                    p.cstr.push(0)
+                }
+                continue
+            }
+            // 其它形态：整条跳过（不跨行）
+            while _cur(p, pos).k != T_EOF && _cur(p, pos).line == t.line {
+                _adv(pos)
+            }
+            continue
+        }
+        if t.k == T_KW && t.n == K_FN {
+            while _cur(p, pos).k != T_EOF && !_is_p(p, pos, P_LBRACE) {
+                _adv(pos)
+            }
+            _skip_brace(p, pos)
+            continue
+        }
+        if t.k == T_KW && (t.n == K_STRUCT || t.n == K_ENUM) {
+            while _cur(p, pos).k != T_EOF && !_is_p(p, pos, P_LBRACE) {
+                _adv(pos)
+            }
+            _skip_brace(p, pos)
+            continue
+        }
+        _adv(pos)
+    }
+}
+
 /// 顶层：`module x` 忽略；`import` 本版不支持；`fn` 逐个解析。
 fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
          fns: vec[Fn], cname: vec[int], cval: vec[int], stt: vec[int],
@@ -2123,11 +2325,27 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
             // 注意判断顺序：先看 `E_STR`，再走 `_fold`。`_fold` 遇到 `E_STR`
             // 会 fail-fast（"const 初值必须是编译期可求值的整型表达式"），
             // 所以不能让它先跑。
+            // **必须"有则更新、无则追加"**，不能无条件 push（v3.52）。
+            //
+            // 预扫描（`_prescan_consts`）已经把本文件的 const 登记过一遍，
+            // 这里再 push 会让表里出现**重复项**：`_const_idx` 返回第一次
+            // 出现的下标（预扫描登记的那份），而预扫描只认简单字面量 ——
+            // 复杂初值的真实结果在第二份里，永远不会被读到。
+            //
+            // v3.52 实测：不改这里的话 stage-2 会编出行为不同的编译器
+            // （30/30 组产物不等价、且它编任何文件都报"编译缓冲不够"）。
             if p.nodes.get(e).op == E_STR {
-                p.cname.push(_name_id(p, nm.s))
-                p.cval.push(0)
-                p.cisk.push(1)
-                p.cstr.push(p.nodes.get(e).a)
+                let si = _const_idx(p, _name_id(p, nm.s))
+                if si < 0 {
+                    p.cname.push(_name_id(p, nm.s))
+                    p.cval.push(0)
+                    p.cisk.push(1)
+                    p.cstr.push(p.nodes.get(e).a)
+                } else {
+                    p.cval.set(si, 0)
+                    p.cisk.set(si, 1)
+                    p.cstr.set(si, p.nodes.get(e).a)
+                }
                 if _is_p(p, pos, P_SEMI) {
                     _adv(pos)
                 }
@@ -2137,10 +2355,17 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
             if _is_p(p, pos, P_SEMI) {
                 _adv(pos)
             }
-            p.cname.push(_name_id(p, nm.s))
-            p.cval.push(cv)
-            p.cisk.push(0)
-            p.cstr.push(0)
+            let vi = _const_idx(p, _name_id(p, nm.s))
+            if vi < 0 {
+                p.cname.push(_name_id(p, nm.s))
+                p.cval.push(cv)
+                p.cisk.push(0)
+                p.cstr.push(0)
+            } else {
+                p.cval.set(vi, cv)
+                p.cisk.set(vi, 0)
+                p.cstr.set(vi, 0)
+            }
             continue
         }
         _fail(p, pos, "顶层期望 fn / const / struct")
@@ -4689,6 +4914,12 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
     }
     if nd.op == E_SLICE {
         let bty = _ty_of_expr(fc, nd.a)
+        // v3.52：**str 切片的结果是 str，不是 slice 视图**。
+        // 不这样报的话 `let t = s[0..5]` 会被当成聚合赋值，报
+        // "聚合赋值两侧类型不一致"（dst 是 TY_STR、src 报 TY_SLICE+TY_INT）。
+        if bty == TY_STR {
+            return TY_STR
+        }
         if bty >= TY_SLICE && bty < TY_ARRAY {
             return bty
         }
@@ -9906,9 +10137,97 @@ fn _slice_check(fc: FnCtx, i: int, n: int) {
     _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
 }
 
+/// `s[lo..hi]` 对 **str** 返回一个新串（v3.52）。
+///
+/// 为什么不能复用"视图"那条路径：Quelmara 的 str 值**本身就是数据指针**，
+/// 长度藏在 `p-8` 的 8 字节头里。返回 (ptr,len) 视图会破坏这个 ABI ——
+/// 下游任何 `len()` / 拼接都会读 `ptr-8`，拿到的是**原串**的长度。
+///
+/// 所以 str 切片必须**拷一份**。算法逐句对齐 stage-0 的
+/// `qlm_native.py` str 切片分支：
+///
+/// ```
+/// cnt = hi - lo
+/// h   = __alloc(cnt + 9)        // 8 字节头 + cnt 数据 + 1 NUL
+/// buf = h + 8                   // 数据指针
+/// __memcpy(buf, s + lo, cnt)
+/// h[0] = cnt                    // 长度前缀
+/// buf[cnt] = 0                  // NUL
+/// ```
+///
+/// **注意 `h` 是块基址、`buf = h+8` 是数据指针**：`RT_ALLOC` 返回块基址
+/// （见 `_bi_read_text` 里同样的 `dp = buf + 8`）。
+fn _lower_str_slice(fc: FnCtx, nd: Node) -> int {
+    let sv = _pin(fc, _lower_expr(fc, nd.a))
+    let lo = _pin(fc, _lower_expr(fc, nd.b))
+    let hi = _pin(fc, _lower_expr(fc, nd.c))
+    // 原串长度：`OP_LEN` 就是读 `[a-8]`
+    let slen = _vnew(fc)
+    fc.vty.set(slen, TY_INT)
+    _ir_emit(fc, OP_LEN, slen, sv, 0, 0)
+    // lo <= hi 且 hi <= slen
+    let l1 = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x87, lo, hi, l1)
+    let l2 = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x87, hi, slen, l2)
+    let lok = _newlab(fc.labs)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, lok)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, l1)
+    let one = _map_const(fc, 1)
+    _ir_emit(fc, OP_EXIT, 0, one, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, l2)
+    let one2 = _map_const(fc, 1)
+    _ir_emit(fc, OP_EXIT, 0, one2, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
+    // cnt = hi - lo
+    let cnt = _vnew(fc)
+    fc.vty.set(cnt, TY_INT)
+    _ir_emit(fc, OP_SUB, cnt, hi, lo, 0)
+    // h = alloc(cnt + 9)
+    let nine = _map_const(fc, 9)
+    let n1 = _vnew(fc)
+    fc.vty.set(n1, TY_INT)
+    _ir_emit(fc, OP_ADD, n1, cnt, nine, 0)
+    _ir_emit(fc, OP_ARG, 0, n1, 0, 0)
+    let h = _vnew(fc)
+    fc.vty.set(h, TY_INT)
+    _ir_emit(fc, OP_CALLRT, h, 0, 0, RT_ALLOC)
+    let hp = _pin(fc, h)
+    // buf = h + 8
+    let eight = _map_const(fc, 8)
+    let buf = _vnew(fc)
+    fc.vty.set(buf, TY_INT)
+    _ir_emit(fc, OP_ADD, buf, hp, eight, 0)
+    let bufp = _pin(fc, buf)
+    // sp = s + lo
+    let sp = _vnew(fc)
+    fc.vty.set(sp, TY_INT)
+    _ir_emit(fc, OP_ADD, sp, sv, lo, 0)
+    // memcpy(buf, sp, cnt) —— 运行时长度用 OP_MEMCPYN（OP_COPY 只吃 imm）
+    _ir_emit(fc, OP_MEMCPYN, cnt, bufp, sp, 0)
+    // h[0] = cnt（长度前缀，即 buf-8）
+    _ir_emit(fc, OP_STORE, 0, hp, cnt, 8)
+    // buf[cnt] = 0
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    let ep = _vnew(fc)
+    fc.vty.set(ep, TY_INT)
+    _ir_emit(fc, OP_ADD, ep, bufp, cnt, 0)
+    _ir_emit(fc, OP_STORE8, 0, ep, z, 0)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_STR)
+    _ir_emit(fc, OP_MOV, d, bufp, 0, 0)
+    return d
+}
+
 /// `a[lo..hi]`：数组 / vec / 切片都能切，结果是一个 (ptr, len) 视图
 fn _lower_slice(fc: FnCtx, nd: Node) -> int {
     let bty = _ty_of_expr(fc, nd.a)
+    // v3.52：str 切片返回**新串**，走独立路径（不能返回视图）
+    if bty == TY_STR {
+        return _lower_str_slice(fc, nd)
+    }
     let mut elem = TY_INT
     let mut base = 0
     let mut blen = 0
@@ -14328,12 +14647,30 @@ fn main() {
     let imports = vec[str].new(4)
     let fdll = vec[str].new(4)
     let fsym = vec[str].new(4)
-    parse(toks, nodes, names, strs, fns, cname, cval, stt, imports, fdll, fsym,
-          cisk, cstr)
 
-    // 装载 import 的模块：同一个模块只装一次，装的过程中可能又收集到新的 import
+    // ===================================================================
+    // v3.52（§7.39）：**三段式解析**，为的是让跨模块 const 能用。
+    //
+    // 原来的顺序是「parse 主文件 → 再装载 import」。问题：`parse` 会把
+    // const 引用**当场**折成 `E_NUM`/`E_STR` 节点，而主文件 parse 时被
+    // import 模块的 const 还没进表 —— `MX` 被定型成 `E_VAR`（普通变量），
+    // 之后补 const 表也没用（节点已定型），最后报"未定义变量 MX"。
+    //
+    // 现在：
+    //   0. 扫主文件的 import 路径
+    //   1. 循环装载：每个模块先收 const、再收它的 import，直到集合不增长
+    //      （**只预扫描，不 parse**）
+    //   2. 收主文件的 const
+    //   3. 最后统一 parse —— 此时所有 const 都在表里
+    // ===================================================================
+    _prescan_imports(toks, imports)
+
     let loaded = vec[str].new(4)
     let dir = _dir_of(src)
+    // 待解析的模块**源码文本**（与 loaded 平行）。
+    // 存文本而不是 `vec[vec[Tok]]`：嵌套 vec 会撞 §7.18 的类型码区间，
+    // 而"再 lex 一遍"的代价只是一次线性扫描，可接受。
+    let msrc = vec[str].new(4)
     let mut ii = 0
     while ii < len(imports) {
         let mod = imports.get(ii)
@@ -14355,10 +14692,26 @@ fn main() {
             let mt = _read_text(mpath)
             let mtk = vec[Tok].new(256)
             lex(mt, mtk)
-            parse(mtk, nodes, names, strs, fns, cname, cval, stt, imports, fdll,
-                  fsym, cisk, cstr)
+            _prescan_consts(mtk, nodes, names, strs, cname, cval, cisk, cstr)
+            _prescan_imports(mtk, imports)
+            msrc.push(mt)
         }
         ii = ii + 1
+    }
+
+    // 主文件的 const 最后收 —— 它可能引用任意模块的 const
+    _prescan_consts(toks, nodes, names, strs, cname, cval, cisk, cstr)
+
+    // 第 3 步：统一 parse（此时 const 表已完整）
+    parse(toks, nodes, names, strs, fns, cname, cval, stt, imports, fdll, fsym,
+          cisk, cstr)
+    let mut mi = 0
+    while mi < len(msrc) {
+        let mtk2 = vec[Tok].new(256)
+        lex(msrc.get(mi), mtk2)
+        parse(mtk2, nodes, names, strs, fns, cname, cval, stt, imports, fdll,
+              fsym, cisk, cstr)
+        mi = mi + 1
     }
 
     if cmd == "dump" {

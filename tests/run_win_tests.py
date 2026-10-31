@@ -368,6 +368,31 @@ def case_udp6_send_e2e():
             f"{r.stdout[-400:]}{r.stderr[-300:]}")
 
 
+def case_modconst():
+    """跨模块 const 自检（v3.52，收 §7.39）。
+
+    **为什么是自检而不是差分**：stage-0 本身不支持跨模块 const
+    （`未定义变量 MC_INT`），而且连 `pub const` 都不认。所以这个特性是
+    qlmc 独有的，没有"两边逐字节对比"的基准。
+
+    方向很重要：这里 qlmc 比 stage-0 强，不去为了"能差分"而把 qlmc
+    也弄坏 —— 那等于把语言缺陷固化进自举链（同 §7.41 的口径）。
+    """
+    if not IS_WIN:
+        skip("跨模块 const：非 Windows 平台（qlmc 仅 PE）")
+        return
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/modconst_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=300)
+    if r.returncode == 0 and "modconst: PASS=" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines() if "modconst: PASS=" in ln]
+        ok(f"跨模块 const：{line[-1].strip() if line else 'ok'}")
+    else:
+        bad(f"跨模块 const 失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
 def case_irdump():
     """`qlmc irdump` 工具的回归（v3.45）。
 
@@ -1772,6 +1797,8 @@ def main():
     case_udp_send_e2e()
     # v3.49：UDP over IPv6 发送侧（顺带钉住 `\xNN` 字面量转义）
     case_udp6_send_e2e()
+    # v3.52：跨模块 const（stage-0 不支持，只能自检）
+    case_modconst()
 
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），
