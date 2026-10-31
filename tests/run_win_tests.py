@@ -313,6 +313,30 @@ def case_udp_e2e():
             f"{r.stdout[-400:]}{r.stderr[-300:]}")
 
 
+def case_irdump():
+    """`qlmc irdump` 工具的回归（v3.45）。
+
+    这是查手写 IR 缺陷的**唯一手段** —— 它自己坏了会让人误判成
+    "目标函数的 IR 就是这样"。v3.44 的 `udp_sendto` 崩溃就是缺了它
+    才耗掉 40 轮，所以工具本身必须有回归。
+    """
+    script = os.path.join(ROOT, "tests", "irdump_test.py")
+    if not os.path.exists(script):
+        skip("irdump_test.py 不存在，跳过")
+        return
+    r = subprocess.run([sys.executable, script], cwd=ROOT,
+                       capture_output=True, text=True, errors="replace",
+                       timeout=300)
+    if r.returncode == 2:
+        skip("irdump：build/qlmc.exe 不存在，跳过")
+    elif r.returncode == 0 and "IRDUMP: PASS=" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines() if "IRDUMP: PASS=" in ln]
+        ok(f"irdump 工具：{line[-1].strip() if line else 'ok'}")
+    else:
+        bad(f"irdump 工具失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
 def case_encoding_diag():
     """源文件编码错误诊断 + CLI 诊断出口（v3.32，收 §7.11）。
 
@@ -1680,6 +1704,8 @@ def main():
     case_peer_e2e()
     # v3.44：UDP 接收侧内建（open / bind / recvfrom / recvfrom_to）
     case_udp_e2e()
+    # v3.45：irdump 工具（查手写 IR 缺陷的唯一手段，自己也要有回归）
+    case_irdump()
 
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），
