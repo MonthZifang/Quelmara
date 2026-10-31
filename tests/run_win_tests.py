@@ -233,6 +233,35 @@ def case_selfcheck_to(name, src, seconds):
         else bad(f"{name} 失败 rc={rc} stderr={stderr[-200:]!r}")
 
 
+def case_net_e2e():
+    """qlmc 网络内建端到端（v3.42）。
+
+    `tests/t186_qlmc_tcp.qma` 是个**服务端**：listen -> accept -> recv ->
+    send -> close，它会阻塞在 accept 上等客户端，所以不能走
+    `case_selfcheck_to`（那条路径没人连它，直接挂到超时）。
+
+    真正验证"收发对了"的是 `tests/net_e2e_test.py`：它拉起这个 exe，
+    用 Python 当客户端连接、发 `hello`、收回显，再断言两边输出。
+    **Python 端是独立实现** —— 这正是差分口径，能同时钉住 IAT 槽位、
+    sockaddr_in 布局、htons 字节序、fail-fast 判定。
+    """
+    if not IS_WIN:
+        skip("网络内建 E2E：非 Windows 平台（服务端运行时仅 PE）")
+        return
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/net_e2e_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=300)
+    if r.returncode == 2:
+        skip("网络内建 E2E：39471 已被占用，跳过")
+    elif r.returncode == 0 and "net e2e: PASS=" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines() if "net e2e:" in ln]
+        ok(f"网络内建 E2E：{line[-1].strip() if line else 'ok'}")
+    else:
+        bad(f"网络内建 E2E 失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
 def case_encoding_diag():
     """源文件编码错误诊断 + CLI 诊断出口（v3.32，收 §7.11）。
 
@@ -1591,6 +1620,11 @@ def main():
     case_selfcheck_to("qlmc_strptr", "tests/t184_qlmc_strptr.qma", 60)
     # v3.41：qlmc 能否通过 @ffi 调 Winsock —— 决定网络内建走源码还是改 IAT
     case_selfcheck_to("qlmc_winsock", "tests/t185_qlmc_winsock.qma", 60)
+    # v3.42：网络内建端到端。
+    # **不能用 case_selfcheck_to**：t186 会阻塞在 tcp_accept 上等客户端，
+    # 没人连它就一直挂着。这里交给 net_e2e_test.py —— 它自己拉起 exe、
+    # 用 Python 当客户端连接、发报文、收回显，再断言两边的输出。
+    case_net_e2e()
 
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），

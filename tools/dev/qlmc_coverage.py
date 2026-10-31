@@ -51,7 +51,9 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 # v3.38: 39  （加 mem_diff / mem_xchg）
 # v3.39: 43  （加 vec.pop()）
 # v3.40: 44  （加 str_ptr / target_arch）
-BASELINE = 44
+# v3.42: 45  （加 tcp_listen / tcp_accept / tcp_send / tcp_send_n / tcp_recv /
+#              tcp_close —— ws2_32 的 IAT 槽位 + sockaddr_in 构造）
+BASELINE = 45
 
 QLMC_SRC = "bootstrap/qlmc/qlmc.qma"
 QLMC_EXE = os.path.join("build", "_qlmc_cov.exe")
