@@ -3813,6 +3813,40 @@ stage-0 用**墓碑**（状态槽写 2）解决，但它的布局是每槽 3 字
 `BASELINE` 56 → **58**，回归 PASS=369 FAIL=0，自举 30/30 不动点成立。
 
 
+### 3.106 `args()` 源码级预置注入：覆盖率 58 → 59（v3.56）
+
+`args()` 要做"取命令行 → 跳过 argv[0] → 按空白/引号切分 → mem_str →
+push"，三十多行控制流。展开成 IR 会撑爆 `_lower_builtin` 的 416 格帧槽
+（那里已有 21 个内建分支），而自举 stage-2 对帧槽极其敏感。
+
+**做法**：检测到源码里有独立的 `args(` 调用，就把预置实现 lex 成 token
+**拼到用户 token 流最前面**；`args()` 本身在 `_lower_builtin` 里降级成
+一条 `OP_CALL`，目标是 `_qlm_args_impl`。
+
+**三个踩过的坑**：
+
+1. **扫原始文本 → 破不动点**。第一版用子串匹配找 `args(`，而 qlmc 自己的
+   源码里有 9 处「注释里写着 `args()`」—— 编 qlmc 自己时也注入了预置，
+   stage-2/stage-3 不一致。改成扫 `lex` 之后的 token 流（注释和字符串
+   已不是 `T_NAME`）。
+2. **`len(args())` 的类型推断**。`_ty_of_expr` 对 `E_CALL` 走
+   `_fn_index(nd.a)`，但 `args` 的函数实体叫 `_qlm_args_impl` ——
+   `_fn_index(args)` 是 -1，类型推断掉到"未知"。而 `let a = args(); len(a)`
+   正常（走 `fc.vty`）—— **"嵌套调用才失败"最容易漏测**。
+3. **空串参数**。`argv = ["", "x"]` 时 stage-0 给 `n=1`、qlmc 给 `n=2`。
+   stage-0 数 token 用 `inword` 标志，空串不产生 token；改成 `blen > 0`
+   才 push。
+
+**测试**：`t200` + `args_e2e_test.py`，PASS=10。7 组 argv（空表 / 含空格 /
+`--flag=value` / 空串 / 5 个参数）。Python 端直接传 argv 不经过 shell。
+
+**一个反直觉的期望值**：Windows 的 `GetCommandLineA` 把带引号的参数原样
+返回（含反斜杠），所以 `'"a b"'` 在**两边**都解析成 `\a` / `b\` 两个 token
+—— stage-0 也是这样。所以测试不写死"正确值"，拿 stage-0 当基准做差分。
+
+`BASELINE` 58 → **59**，回归 PASS=369 → **370**，自举 30/30 不动点成立。
+
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |

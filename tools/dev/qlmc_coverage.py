@@ -63,7 +63,8 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 # v3.54: 56  （tcp_connect + tcp_send_n_to + tcp_recv_to —— 解开 std/net 与
 #              std/net/udp6；getaddrinfo 链表遍历 + SO_SNDTIMEO/SO_RCVTIMEO）
 # v3.55: 58  （for k in map + map.del —— 解开 std/kv 与 std/set）
-BASELINE = 58
+# v3.56: 59  （args() 源码级预置注入 —— 解开 std/cli）
+BASELINE = 59
 
 QLMC_SRC = "bootstrap/qlmc/qlmc.qma"
 QLMC_EXE = os.path.join("build", "_qlmc_cov.exe")

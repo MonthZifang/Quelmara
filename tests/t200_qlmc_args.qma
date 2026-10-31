@@ -1,0 +1,23 @@
+import std.core
+
+// v3.56：`args()` 端到端夹具
+//
+// `args()` 在 qlmc 里走**源码级预置注入**：检测到源码里出现独立的
+// `args(` 调用，就把 `ARGS_PRELUDE` 那段实现 lex 成 token 拼在用户源码
+// 前面，`args()` 本身降级成对 `_qlm_args_impl()` 的普通调用。
+//
+// 为什么不在 IR 层内联：那要做"取命令行 → 跳过 argv[0] → 按空白/引号
+// 切分 → mem_str → push"三十多行控制流，会撑爆 `_lower_builtin` 的
+// 416 格帧槽。
+fn main() {
+    let a = args()
+    print("n=" + len(a).to_str())
+    let mut i = 0
+    while i < len(a) {
+        print("a" + i.to_str() + "=" + a[i])
+        i = i + 1
+    }
+    // 嵌套形态也要能编（`len(args())` 依赖 `_ty_of_expr` 对 args 的类型推断）
+    print("n2=" + len(args()).to_str())
+    print("done")
+}
