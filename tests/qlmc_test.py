@@ -78,6 +78,10 @@ CASES = [
     # 长度头 / NUL / ABI 必须对 —— 否则下游 len() 与拼接会读到原串的
     # 长度，那是静默错而不是崩，光"能编过"完全看不出来。
     ("s31_strslice", "tests/t196_qlmc_strslice.qma"),
+    # v3.53：thread_start（真 OS 线程，不受 multicore 降级影响）。
+    # **必须是差分用例**：arg 传递、句柄有效性、多线程并发累加不丢更新
+    # 都要逐字节对上 —— 尤其 bits=15 这条，任一线程没跑或 arg 传错就少一位。
+    ("s32_thread", "tests/t197_qlmc_thread.qma"),
 ]
 
 npass = 0

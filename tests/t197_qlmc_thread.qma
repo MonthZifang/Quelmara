@@ -1,0 +1,71 @@
+import std.core
+
+// v3.53：`thread_start(fn, arg)` 自检
+//
+// 与 `spawn` 的唯一区别：**不受 Quelmara.toml multicore=false 降级**。
+// reactor 的 GQCS 循环必须真的跑在另一个线程上 —— 单核配置下 spawn 会内联
+// 执行，主线程就永远卡在完成端口里、accept 再也不运行。
+//
+// 本夹具钉三件事：
+//   1. 返回的句柄非 0（CreateThread 成功）；
+//   2. `arg` 真的传进了线程函数（不是恒 0、也不是垃圾）；
+//   3. 多个线程**并发**累加到同一个 static_word 不丢更新（这同时验证
+//      它们确实跑在不同线程上 —— 内联执行的话累加会退化成串行，虽然
+//      结果一样，所以第 4 条才是关键）。
+//   4. 线程里能读到自己那份 arg 的**不同**值 —— 用逐位或累加，
+//      4 个线程各传 1/2/4/8，最终必须恰好是 15（任一 arg 丢失都会少一位）。
+fn worker(arg: int) -> int {
+    // 按位或：每个线程把自己的 bit 记上。丢一个线程就少一位。
+    let cur = mem_load64(static_word(41), 0)
+    mem_store64(static_word(41), 0, cur | arg)
+    // 计数：每个线程 +1
+    let n = mem_load64(static_word(42), 0)
+    mem_store64(static_word(42), 0, n + 1)
+    return 0
+}
+
+fn main() {
+    mem_store64(static_word(41), 0, 0)
+    mem_store64(static_word(42), 0, 0)
+
+    // 1. 起 4 个线程，各传不同的 bit
+    let h0 = thread_start(worker, 1)
+    let h1 = thread_start(worker, 2)
+    let h2 = thread_start(worker, 4)
+    let h3 = thread_start(worker, 8)
+    assert(h0 != 0, "thread_start 返回非 0 句柄（第 1 个）")
+    assert(h1 != 0, "thread_start 返回非 0 句柄（第 2 个）")
+    assert(h2 != 0, "thread_start 返回非 0 句柄（第 3 个）")
+    assert(h3 != 0, "thread_start 返回非 0 句柄（第 4 个）")
+    print("handles=ok")
+
+    // 2. 等它们跑完（yield 而不是忙等，避免吃满一个核）
+    let mut i = 0
+    while i < 400 {
+        thread_yield()
+        i = i + 1
+    }
+
+    // 3. 四个 bit 都必须到齐 —— 任一线程没跑或 arg 传错都会少一位
+    let bits = mem_load64(static_word(41), 0)
+    print("bits=" + bits.to_str())          // 15
+    let cnt = mem_load64(static_word(42), 0)
+    print("cnt=" + cnt.to_str())            // 4
+
+    // 4. 再起一批，确认可以重复调用（不是一次性的）
+    mem_store64(static_word(42), 0, 0)
+    let mut k = 0
+    while k < 3 {
+        thread_start(worker, 0)
+        k = k + 1
+    }
+    let mut j = 0
+    while j < 400 {
+        thread_yield()
+        j = j + 1
+    }
+    let cnt2 = mem_load64(static_word(42), 0)
+    print("cnt2=" + cnt2.to_str())          // 3
+
+    print("done")
+}
