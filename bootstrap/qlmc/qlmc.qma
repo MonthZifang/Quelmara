@@ -2107,21 +2107,26 @@ const I_YIELD = 12
 const I_FILETIME = 13
 const I_FILESIZE = 14
 const I_SLEEP = 15          // Sleep（sleep_ms 用）
-const I_WSASTART = 16
-const I_SOCKET = 17
-const I_BIND = 18
-const I_LISTEN = 19
-const I_ACCEPT = 20
-const I_SEND = 21
-const I_RECV = 22
-const I_CLOSESOCK = 23
+// v3.48：CreateFileA。**注意 `I_CREATE`(4) 其实是 CreateThread**（历史
+// 命名，spawn 用的），不要拿它调 CreateFileA —— v3.46 就是这么错的，
+// 结果 file_size 恒返回 0xFFFFFFFF。
+const I_CREATEFILE = 16
+const I_READFILE = 17       // ReadFile（read_text 用）
+const I_WSASTART = 18
+const I_SOCKET = 19
+const I_BIND = 20
+const I_LISTEN = 21
+const I_ACCEPT = 22
+const I_SEND = 23
+const I_RECV = 24
+const I_CLOSESOCK = 25
 // v3.43：tcp_peer_raw 要 getpeername
-const I_GETPEERNAME = 24
+const I_GETPEERNAME = 26
 // v3.44：UDP 三个内建要 sendto / recvfrom / setsockopt
-const I_SENDTO = 25
-const I_RECVFROM = 26
-const I_SETSOCKOPT = 27
-const I_USER = 28       // 用户 @ffi 符号从第 27 个 IAT 槽开始
+const I_SENDTO = 27
+const I_RECVFROM = 28
+const I_SETSOCKOPT = 29
+const I_USER = 30       // 用户 @ffi 符号从第 30 个 IAT 槽开始
 
 // ---------------------------------------------------------------------------
 // 字节发射
@@ -10626,6 +10631,14 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
     if bn == "tcp_peer_raw" {
         return _bi_tcp_peer_raw(fc, _lower_expr(fc, nd.b))
     }
+    // v3.48：read_text(path) -> str（整文件读入，失败 fail-fast）
+    if bn == "read_text" {
+        return _bi_read_text(fc, _lower_expr(fc, nd.b))
+    }
+    // v3.48：file_size(path) -> int（字节数，打不开返回 -1）
+    if bn == "file_size" {
+        return _bi_file_size(fc, _lower_expr(fc, nd.b))
+    }
     // v3.47：net_config(key) -> int（编译期常量）
     //
     // 0 = max_conns、1 = recv_buffer、2 = io_threads、3 = tcp_nodelay。
@@ -11993,6 +12006,236 @@ fn _bi_wall_ms(fc: FnCtx) -> int {
     return wms
 }
 
+/// read_text(path) -> str：整文件读入。
+///
+/// `CreateFileA` -> `GetFileSize` -> `alloc(size+9)` -> `ReadFile` ->
+/// 写长度头 -> 末尾 NUL -> `CloseHandle`。失败 **fail-fast**（读不到文件
+/// 是调用方的 bug，不是可恢复结果）。
+///
+/// 与 `file_size` 共用 `I_CREATEFILE`（**不是** `I_CREATE` —— 那个名字
+/// 其实是 CreateThread，v3.46 踩过）。
+///
+/// 单独成函数为了压 `_lower_builtin` 的帧槽。
+fn _bi_read_text(fc: FnCtx, pv0: int) -> int {
+    // CreateFileA 的 7 个实参，**每个一个独立 vreg**
+    let a1 = _vnew(fc)
+    fc.vty.set(a1, TY_INT)
+    _ir_emit(fc, OP_CONST, a1, 0, 0, 2147483648)   // GENERIC_READ
+    let a2 = _vnew(fc)
+    fc.vty.set(a2, TY_INT)
+    _ir_emit(fc, OP_CONST, a2, 0, 0, 1)            // FILE_SHARE_READ
+    let a3 = _vnew(fc)
+    fc.vty.set(a3, TY_INT)
+    _ir_emit(fc, OP_CONST, a3, 0, 0, 0)            // lpSecurityAttributes
+    let a4 = _vnew(fc)
+    fc.vty.set(a4, TY_INT)
+    _ir_emit(fc, OP_CONST, a4, 0, 0, 3)            // OPEN_EXISTING
+    let a5 = _vnew(fc)
+    fc.vty.set(a5, TY_INT)
+    _ir_emit(fc, OP_CONST, a5, 0, 0, 128)          // FILE_ATTRIBUTE_NORMAL
+    let a6 = _vnew(fc)
+    fc.vty.set(a6, TY_INT)
+    _ir_emit(fc, OP_CONST, a6, 0, 0, 0)            // hTemplateFile
+    let av = vec[int].new(7)
+    av.push(pv0)
+    av.push(a1)
+    av.push(a2)
+    av.push(a3)
+    av.push(a4)
+    av.push(a5)
+    av.push(a6)
+    let stk = _emit_call_args(fc, av, 0)
+    let h = _vnew(fc)
+    fc.vty.set(h, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, h, 0, 0, I_CREATEFILE)
+    _emit_call_free(fc, stk)
+    let hp = _pin(fc, h)
+    _net_fail_if_neg1(fc, hp, 9)
+    // GetFileSize(h, &high)
+    let hsz = _vnew(fc)
+    fc.vty.set(hsz, TY_INT)
+    _ir_emit(fc, OP_CONST, hsz, 0, 0, 8)
+    _ir_emit(fc, OP_ARG, 0, hsz, 0, 0)
+    let hbuf = _vnew(fc)
+    fc.vty.set(hbuf, TY_INT)
+    _ir_emit(fc, OP_CALLRT, hbuf, 0, 0, RT_ALLOC)
+    let hbp = _pin(fc, hbuf)
+    _ir_emit(fc, OP_ARG, 0, hp, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, hbp, 0, 1)
+    let sz = _vnew(fc)
+    fc.vty.set(sz, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, sz, 0, 0, I_FILESIZE)
+    let szp = _pin(fc, sz)
+    // buf = alloc(size + 9)
+    let nine = _vnew(fc)
+    fc.vty.set(nine, TY_INT)
+    _ir_emit(fc, OP_CONST, nine, 0, 0, 9)
+    let nsz = _vnew(fc)
+    fc.vty.set(nsz, TY_INT)
+    _ir_emit(fc, OP_ADD, nsz, szp, nine, 0)
+    _ir_emit(fc, OP_ARG, 0, nsz, 0, 0)
+    let buf = _vnew(fc)
+    fc.vty.set(buf, TY_INT)
+    _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
+    let bufp = _pin(fc, buf)
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    let dp = _vnew(fc)
+    fc.vty.set(dp, TY_INT)
+    _ir_emit(fc, OP_ADD, dp, bufp, eight, 0)
+    let dpp = _pin(fc, dp)
+    // got 缓冲（ReadFile 的 lpNumberOfBytesRead 输出）
+    let gsz = _vnew(fc)
+    fc.vty.set(gsz, TY_INT)
+    _ir_emit(fc, OP_CONST, gsz, 0, 0, 8)
+    _ir_emit(fc, OP_ARG, 0, gsz, 0, 0)
+    let gbuf = _vnew(fc)
+    fc.vty.set(gbuf, TY_INT)
+    _ir_emit(fc, OP_CALLRT, gbuf, 0, 0, RT_ALLOC)
+    let gbp = _pin(fc, gbuf)
+    // ReadFile(h, dp, size, got, NULL)
+    let b1 = _vnew(fc)
+    fc.vty.set(b1, TY_INT)
+    _ir_emit(fc, OP_CONST, b1, 0, 0, 0)
+    let av2 = vec[int].new(5)
+    av2.push(hp)
+    av2.push(dpp)
+    av2.push(szp)
+    av2.push(gbp)
+    av2.push(b1)
+    let stk2 = _emit_call_args(fc, av2, 0)
+    let okv = _vnew(fc)
+    fc.vty.set(okv, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, okv, 0, 0, I_READFILE)
+    _emit_call_free(fc, stk2)
+    let okp = _pin(fc, okv)
+    _net_fail_if_zero(fc, okp, 10)
+    // got = [gbp]；长度头 = got；末尾 NUL
+    let got = _vnew(fc)
+    fc.vty.set(got, TY_INT)
+    _ir_emit(fc, OP_LOAD, got, gbp, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, bufp, got, 8)
+    let zz = _vnew(fc)
+    fc.vty.set(zz, TY_INT)
+    _ir_emit(fc, OP_CONST, zz, 0, 0, 0)
+    let endp = _vnew(fc)
+    fc.vty.set(endp, TY_INT)
+    _ir_emit(fc, OP_ADD, endp, dpp, got, 0)
+    _ir_emit(fc, OP_STORE8, 0, endp, zz, 0)
+    // CloseHandle(h)
+    _ir_emit(fc, OP_ARG, 0, hp, 0, 0)
+    let chret = _vnew(fc)
+    fc.vty.set(chret, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, chret, 0, 0, I_CLOSE)
+    let out = _vnew(fc)
+    fc.vty.set(out, TY_STR)
+    _ir_emit(fc, OP_MOV, out, dpp, 0, 0)
+    return out
+}
+
+/// file_size(path) -> int：文件字节数，打不开返回 -1。
+///
+/// `CreateFileA` -> `GetFileSize` -> `CloseHandle`。打不开返回 -1 而
+/// **不 fail-fast**："文件不存在"是可恢复结果，`std/staticfile` 靠它给 404。
+///
+/// ## 为什么 7 个实参要各用独立 vreg
+///
+/// v3.46 试过复用同一个 `zero` 三次，结果 `CreateFileA` 恒失败
+/// （`file_size` 返回 `0xFFFFFFFF`）。irdump 对照 `@ffi` 7 参（已知可用）
+/// 才看清差别：**`@ffi` 路径的每个实参都是独立 vreg**
+/// （`7`/`8`/`9` 三个不同的 CONST），而复用同一个 vreg 时
+/// `_emit_call_args` 的 `_pin` 会给它算出不同的落点 —— 第 6/7 个实参
+/// 拿到的是过期的那个。
+///
+/// 所以这里显式建 7 个独立常量，形状与 `@ffi` 完全一致。
+///
+/// 单独成函数为了压 `_lower_builtin` 的帧槽。
+fn _bi_file_size(fc: FnCtx, pv0: int) -> int {
+    let p = pv0
+    // 7 个实参，**每个一个独立 vreg**（见上面的说明）
+    let a1 = _vnew(fc)
+    fc.vty.set(a1, TY_INT)
+    _ir_emit(fc, OP_CONST, a1, 0, 0, 2147483648)   // GENERIC_READ
+    let a2 = _vnew(fc)
+    fc.vty.set(a2, TY_INT)
+    _ir_emit(fc, OP_CONST, a2, 0, 0, 3)            // FILE_SHARE_READ|WRITE
+    let a3 = _vnew(fc)
+    fc.vty.set(a3, TY_INT)
+    _ir_emit(fc, OP_CONST, a3, 0, 0, 0)            // lpSecurityAttributes = NULL
+    let a4 = _vnew(fc)
+    fc.vty.set(a4, TY_INT)
+    _ir_emit(fc, OP_CONST, a4, 0, 0, 3)            // OPEN_EXISTING
+    let a5 = _vnew(fc)
+    fc.vty.set(a5, TY_INT)
+    _ir_emit(fc, OP_CONST, a5, 0, 0, 128)          // FILE_ATTRIBUTE_NORMAL
+    let a6 = _vnew(fc)
+    fc.vty.set(a6, TY_INT)
+    _ir_emit(fc, OP_CONST, a6, 0, 0, 0)            // hTemplateFile = NULL
+    let av = vec[int].new(7)
+    av.push(p)
+    av.push(a1)
+    av.push(a2)
+    av.push(a3)
+    av.push(a4)
+    av.push(a5)
+    av.push(a6)
+    let stk = _emit_call_args(fc, av, 0)
+    let h = _vnew(fc)
+    fc.vty.set(h, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, h, 0, 0, I_CREATEFILE)
+    _emit_call_free(fc, stk)
+    // INVALID_HANDLE_VALUE = -1：**先符号扩展再比**（Win64 的 -1 落在 rax 里
+    // 是 0x00000000FFFFFFFF，直接与 64 位 -1 比永远不等 —— v3.42 记过这个坑）
+    let hp = _pin(fc, h)
+    let lfail = _newlab(fc.labs)
+    let lok = _newlab(fc.labs)
+    let sh32 = _vnew(fc)
+    fc.vty.set(sh32, TY_INT)
+    let n32 = _vnew(fc)
+    fc.vty.set(n32, TY_INT)
+    _ir_emit(fc, OP_CONST, n32, 0, 0, 32)
+    _ir_emit(fc, OP_SHL, sh32, hp, n32, 0)
+    let se = _vnew(fc)
+    fc.vty.set(se, TY_INT)
+    _ir_emit(fc, OP_SAR, se, sh32, n32, 0)
+    let m1 = _vnew(fc)
+    fc.vty.set(m1, TY_INT)
+    _ir_emit(fc, OP_CONST, m1, 0, 0, -1)
+    _ir_emit(fc, OP_JCMP, 0x84, se, m1, lfail)     // je -> 失败
+    // GetFileSize(h, NULL)：第 2 参给真实 8 字节缓冲（它要往里写高位）
+    let hsz = _vnew(fc)
+    fc.vty.set(hsz, TY_INT)
+    _ir_emit(fc, OP_CONST, hsz, 0, 0, 8)
+    _ir_emit(fc, OP_ARG, 0, hsz, 0, 0)
+    let hbuf = _vnew(fc)
+    fc.vty.set(hbuf, TY_INT)
+    _ir_emit(fc, OP_CALLRT, hbuf, 0, 0, RT_ALLOC)
+    let hbp = _pin(fc, hbuf)
+    _ir_emit(fc, OP_ARG, 0, hp, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, hbp, 0, 1)
+    let sz = _vnew(fc)
+    fc.vty.set(sz, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, sz, 0, 0, I_FILESIZE)
+    let szp = _pin(fc, sz)
+    // CloseHandle(h)
+    _ir_emit(fc, OP_ARG, 0, hp, 0, 0)
+    let chret = _vnew(fc)
+    fc.vty.set(chret, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, chret, 0, 0, I_CLOSE)
+    let out = _vnew(fc)
+    fc.vty.set(out, TY_INT)
+    _ir_emit(fc, OP_MOV, out, szp, 0, 0)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, lok)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
+    let nf = _vnew(fc)
+    fc.vty.set(nf, TY_INT)
+    _ir_emit(fc, OP_CONST, nf, 0, 0, -1)
+    _ir_emit(fc, OP_MOV, out, nf, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
+    return out
+}
+
 /// udp_bind(fd, port) -> 0：把 UDP socket 绑到 `0.0.0.0:port`。
 ///
 /// 服务端侧必须有它（客户端由系统分配临时端口，不需要 bind）。
@@ -12095,6 +12338,22 @@ fn _net_fail_if_neg1(fc: FnCtx, v: int, code: int) {
     _ir_emit(fc, OP_CONST, m1, 0, 0, -1)
     // 不等于 -1 就跳过死路
     _ir_emit(fc, OP_JCMP, 0x85, se, m1, lok)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
+    let cd = _vnew(fc)
+    fc.vty.set(cd, TY_INT)
+    _ir_emit(fc, OP_CONST, cd, 0, 0, code)
+    _ir_emit(fc, OP_EXIT, 0, cd, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
+}
+
+/// 为 0 即失败（ReadFile 用：它返回 BOOL，0 = 失败）。
+fn _net_fail_if_zero(fc: FnCtx, v: int, code: int) {
+    let lfail = _newlab(fc.labs)
+    let lok = _newlab(fc.labs)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    _ir_emit(fc, OP_JCMP, 0x85, v, z, lok)   // jne -> 成功
     _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
     let cd = _vnew(fc)
     fc.vty.set(cd, TY_INT)
@@ -12838,6 +13097,10 @@ fn _reg_k32b(dsym: vec[str], ddll: vec[int]) {
     ddll.push(0)
     dsym.push("Sleep")
     ddll.push(0)
+    dsym.push("CreateFileA")
+    ddll.push(0)
+    dsym.push("ReadFile")
+    ddll.push(0)
 }
 
 fn _reg_ws2(dsym: vec[str], ddll: vec[int]) {
@@ -13046,6 +13309,8 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     iat.set(I_FILETIME, rdata_rva + iatb.get(0) + 88)
     iat.set(I_FILESIZE, rdata_rva + iatb.get(0) + 96)
     iat.set(I_SLEEP, rdata_rva + iatb.get(0) + 104)
+    iat.set(I_CREATEFILE, rdata_rva + iatb.get(0) + 112)
+    iat.set(I_READFILE, rdata_rva + iatb.get(0) + 120)
     iat.set(I_STRTOD, rdata_rva + iatb.get(2))
     iat.set(I_WSPRINTF, rdata_rva + iatb.get(1))
     // v3.42：ws2_32 的槽位（DLL 索引 3，组内顺序与 `_reg_ws2` 里一致）。
@@ -13056,7 +13321,7 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     // `build_rdata` 的帧槽**正好卡在 416 格上限**，摊开写会多要一格，
     // 自举 stage-2 立刻编不过自己（v3.42 实测）。循环只多两个变量。
     //
-    // **I_WSASTART..I_SETSOCKOPT 必须连续**（16..27）—— 这条循环靠它推。
+    // **I_WSASTART..I_SETSOCKOPT 必须连续**（18..29）—— 这条循环靠它推。
     let mut wi = 0
     while wi < I_USER - I_WSASTART {
         iat.set(I_WSASTART + wi, rdata_rva + iatb.get(3) + wi * 8)
