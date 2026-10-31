@@ -3847,6 +3847,44 @@ push"，三十多行控制流。展开成 IR 会撑爆 `_lower_builtin` 的 416 
 `BASELINE` 58 → **59**，回归 PASS=369 → **370**，自举 30/30 不动点成立。
 
 
+### 3.107 `map[K]V.new()` 容量可省略：覆盖率 59 → 60（v3.57）
+
+本版原计划做 `xmm_load`（挡 `std/aes` + `std/tls13`），评估后发现它**不是一个
+内建，而是一整条 SIMD 轨道**：`std/aes` 需要 12 个内建
+（`xmm_load`/`xmm_store`/`xmm_mov`/`xmm_pxor`/`pand`/`por`/`pshufb`/
+`pclmulqdq`/`aesenc`/`aesenclast`/`cpu_aes`/`cpu_pclmul`），且涉及新增 SSE
+指令编码路径、XMM 寄存器分配、AES-NI 编码 —— 与前面几个内建不同量级。
+
+`TlsClientResult`（挡 2 个）也走不通：它依赖 `std/tls_client` 先能编，而
+`std/tls_client` 自己卡在 `xmm_mov`。**这条链是死结，必须等 SIMD 轨道。**
+
+转向 `std/session`：独立、纯解析问题。
+
+**问题**：qlmc 的 `map.new` 解析强制 `_expr` 读容量，`map[str]str.new()`
+直接报"期望表达式"。而 stage-0 的 `qlm.py` 注释写着 "cap 须 2 的幂，
+**省略默认 16**" —— 基准一直允许省略。
+
+**修复**：`RPAREN` 前就停，容量缺省时建 `E_NUM 16` 节点。
+
+**测试**：`s34_mapnew` 差分用例，10 行输出逐字节一致。四条判据：
+省略容量能 set/get/has、装 12 个键（`cnt=12`/`sum=78`，证明默认 16 够用
+而不是退化成 1）、显式 `new(4)` 仍生效、结构体字面量里能用。
+
+**写测试时撞到三个 qlmc 缺口**（都不在本版范围）：
+
+1. `s.a.set(...)`（结构体字段上直接调方法）报"期望表达式"；
+2. `struct` 必须前置声明（stage-0 允许先用在声明前）；
+3. `print(bool)` / `bool.to_str()` 格式不同 —— stage-0 给 `true`/`false`、
+   qlmc 给 `1`/`0`。
+
+前两个是真实缺口值得后续补，第三个是既有差异需决定以哪边为准。
+
+**剩余 10 个模块里 4 个（40%）卡在 SIMD** —— 要再往前推必须专门做一版
+SIMD 支持，那是下一个真正的大件。
+
+`BASELINE` 59 → **60**，回归 PASS=370 FAIL=0，自举 30/30 不动点成立。
+
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |

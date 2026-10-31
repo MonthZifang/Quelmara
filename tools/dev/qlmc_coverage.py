@@ -64,7 +64,8 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 #              std/net/udp6；getaddrinfo 链表遍历 + SO_SNDTIMEO/SO_RCVTIMEO）
 # v3.55: 58  （for k in map + map.del —— 解开 std/kv 与 std/set）
 # v3.56: 59  （args() 源码级预置注入 —— 解开 std/cli）
-BASELINE = 59
+# v3.57: 60  （map[K]V.new() 容量可省略（默认 16）—— 解开 std/session）
+BASELINE = 60
 
 QLMC_SRC = "bootstrap/qlmc/qlmc.qma"
 QLMC_EXE = os.path.join("build", "_qlmc_cov.exe")

@@ -1565,8 +1565,18 @@ fn _primary(p: P, pos: vec[int]) -> int {
         }
         _adv(pos)
         _eat_p(p, pos, P_LPAREN)
-        let cnt = _expr(p, pos)
+        // v3.57：**容量可以省略**，默认 16（与 stage-0 同口径：
+        // `qlm.py` 的注释写着 "cap 须 2 的幂，省略默认 16"）。
+        // 以前这里强制 `_expr`，于是 `map[str]str.new()` 直接报"期望表达式"
+        // —— `std/session` 就是这么写的。
+        let mut cnt = -1
+        if !_is_p(p, pos, P_RPAREN) {
+            cnt = _expr(p, pos)
+        }
         _eat_p(p, pos, P_RPAREN)
+        if cnt < 0 {
+            cnt = _node(p, E_NUM, 16, -1, -1)
+        }
         let id = _node(p, E_MAPNEW, kt, cnt, vt)
         return _postfix(p, pos, id)
     }

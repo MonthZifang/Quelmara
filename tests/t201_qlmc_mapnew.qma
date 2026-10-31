@@ -1,0 +1,76 @@
+import std.core
+
+// v3.57：`map[K]V.new()` **省略容量**（默认 16）
+//
+// stage-0 一直允许省略（`qlm.py` 的注释写着 "cap 须 2 的幂，省略默认 16"），
+// 而 qlmc 以前强制要求容量参数 —— `map[str]str.new()` 直接报"期望表达式"。
+// `std/session` 就是这么写的，所以它一直过不去。
+//
+// 本夹具钉三件事：
+//   1. 省略容量能编、能用；
+//   2. 默认容量**至少**能装下常见的十几个键（16 是 2 的幂，够）；
+//   3. 显式容量仍然生效（不能因为加了默认值就把参数忽略掉）。
+struct Holder {
+    a: map[str]int
+    b: map[int]str
+}
+
+fn main() {
+    // ---- 1. 省略容量 ----
+    let m = map[str]str.new()
+    m.set("a", "1")
+    m.set("b", "2")
+    let va = m.get("a")
+    let vb = m.get("b")
+    print("a=" + va)                  // 1
+    print("b=" + vb)                  // 2
+    // `print(bool)` 与 `bool.to_str()` 两边格式都不同
+    // （stage-0 给 `true`、qlmc 给 `1`）—— 这是既有差异，不在本版范围。
+    // 改成 if 分支输出固定字符串，只验"值是对的"。
+    if m.has("a") {
+        print("has=1")
+    } else {
+        print("has=0")
+    }
+
+    // ---- 2. 默认容量能装下 12 个键 ----
+    let n = map[int]int.new()
+    let mut i = 0
+    while i < 12 {
+        n.set(i + 1, i * 10)
+        i = i + 1
+    }
+    let mut sum = 0
+    let mut cnt = 0
+    for k in n {
+        sum = sum + k
+        cnt = cnt + 1
+    }
+    print("cnt=" + cnt.to_str())      // 12
+    print("sum=" + sum.to_str())      // 78（1..12）
+
+    // ---- 3. 显式容量仍生效 ----
+    let e = map[int]int.new(4)
+    e.set(1, 10)
+    e.set(2, 20)
+    print("e1=" + e.get(1).to_str())  // 10
+    print("e2=" + e.get(2).to_str())  // 20
+
+    // ---- 4. 结构体字面量里用（`std/session` 的形态）----
+    // **注意**：这里先 `let ma = s.a` 再调方法，不写 `s.a.set(...)` ——
+    // qlmc 还不支持"结构体字段上直接调方法"（那是另一个缺口，见 07-gaps）。
+    // 本夹具只验 `map.new()` 省略容量，不夹带别的东西。
+    let s = Holder {
+        a: map[str]int.new(),
+        b: map[int]str.new()
+    }
+    let ma = s.a
+    let mb = s.b
+    ma.set("x", 7)
+    mb.set(9, "y")
+    print("sa=" + ma.get("x").to_str())    // 7
+    print("sb=" + mb.get(9))               // y
+
+    print("done")
+}
+

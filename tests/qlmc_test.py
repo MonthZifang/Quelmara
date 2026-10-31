@@ -88,6 +88,10 @@ CASES = [
     # （v3.55 第一版就是这样：has(3) 返回 false、get(3) 返回 0，
     # 数据没丢但找不到）。只有逐行对比 stage-0 才能抓住。
     ("s33_mapiter", "tests/t199_qlmc_mapiter.qma"),
+    # v3.57：`map[K]V.new()` 省略容量（默认 16）。
+    # stage-0 一直允许省略（"cap 须 2 的幂，省略默认 16"），qlmc 以前强制
+    # 要求 —— `std/session` 的 `map[str]str.new()` 因此编不过。
+    ("s34_mapnew", "tests/t201_qlmc_mapnew.qma"),
 ]
 
 npass = 0
