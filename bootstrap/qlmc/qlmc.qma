@@ -11336,6 +11336,18 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         _ir_emit(fc, OP_CALLRT, cd, 0, 0, RT_ACAS)
         return cd
     }
+    // v3.53：thread_start(fn, arg) -> int（收 §7.40 的 thread_start 缺口）
+    //
+    // 与 `spawn` 的唯一区别：**不受 multicore 降级影响**。reactor 的 GQCS
+    // 循环必须真的跑在另一个线程上 —— 单核配置下 spawn 会内联执行，主线程
+    // 就永远卡在完成端口里、accept 再也不运行（stage-0 的注释里写着同一件事）。
+    //
+    // 实现直接复用 `RT_SPAWN` 的线程入口（它已经处理了 Win64 的栈对齐、
+    // 影子空间、非易失寄存器保存），只是块布局固定成 1 个实参。
+    if bn == "thread_start" {
+        return _bi_thread_start(fc, _lower_expr(fc, nd.b),
+                                _lower_expr(fc, nd.c))
+    }
     // v3.49：udp_sendto / udp_sendto6（重做，用 irdump 的 IAT 符号名复核）
     if bn == "udp_sendto" {
         let s0 = _lower_expr(fc, nd.b)
@@ -12171,6 +12183,99 @@ fn _bi_udp_open(fc: FnCtx, af: int) -> int {
     return s
 }
 
+
+/// `thread_start(fn, arg) -> int`：起一个真正的 OS 线程（v3.53）。
+///
+/// ## 与 `spawn` 的区别
+///
+/// `spawn` 在 `Quelmara.toml` 的 `multicore=false` 时会**内联执行**（同线程
+/// 直接调），而 `thread_start` **永远**起新线程。reactor 的 `GetQueuedCompletionStatus`
+/// 循环依赖这一点：内联的话主线程卡在完成端口里，`accept` 再也不运行。
+///
+/// ## 块布局（与 `RT_SPAWN` 的约定一致）
+///
+/// ```
+/// [+0]  返回值槽（线程写、join 读）
+/// [+8]  目标函数地址
+/// [+16] 实参个数 = 1
+/// [+24] 第 0 个实参
+/// ```
+///
+/// `RT_SPAWN` 已经处理好 Win64 的栈对齐、影子空间、非易失寄存器保存，
+/// 所以这里不重复实现线程入口 —— 只负责摆好块、调 `CreateThread`。
+///
+/// ## 返回值
+///
+/// 返回 `CreateThread` 的句柄（失败返回 0）。reactor 丢弃它，但保留是为了
+/// 将来能 join。**不返回 `spawn` 那种 [句柄, 块] 记录** —— `thread_start`
+/// 没有 join 语义，块要留给线程自己写返回值。
+fn _bi_thread_start(fc: FnCtx, fv: int, av: int) -> int {
+    // blk = alloc(32 + 8) —— 与 spawn 的 32 + 8*n（n=1）一致
+    let sz = _vnew(fc)
+    fc.vty.set(sz, TY_INT)
+    _ir_emit(fc, OP_CONST, sz, 0, 0, 40)
+    _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+    let blk = _vnew(fc)
+    fc.vty.set(blk, TY_INT)
+    _ir_emit(fc, OP_CALLRT, blk, 0, 0, RT_ALLOC)
+    let bp = _pin(fc, blk)
+    // [+0] 返回值槽 = 0
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    let a0 = _vnew(fc)
+    fc.vty.set(a0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a0, bp, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, a0, z, 8)
+    // [+8] 目标函数地址
+    let a1 = _vnew(fc)
+    fc.vty.set(a1, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a1, bp, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, a1, fv, 8)
+    // [+16] 实参个数 = 1
+    let one = _vnew(fc)
+    fc.vty.set(one, TY_INT)
+    _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+    let a2 = _vnew(fc)
+    fc.vty.set(a2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a2, bp, 0, 16)
+    _ir_emit(fc, OP_STORE, 0, a2, one, 8)
+    // [+24] 第 0 个实参
+    let a3 = _vnew(fc)
+    fc.vty.set(a3, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a3, bp, 0, 24)
+    _ir_emit(fc, OP_STORE, 0, a3, av, 8)
+    // CreateThread(0, 0, &__spawn_entry, blk, 0, 0)：后两个实参走栈
+    let entry = _vnew(fc)
+    fc.vty.set(entry, TY_INT)
+    _ir_emit(fc, OP_RTADDR, entry, 0, 0, RT_SPAWN)
+    let ep = _pin(fc, entry)
+    let z1 = _vnew(fc)
+    fc.vty.set(z1, TY_INT)
+    _ir_emit(fc, OP_CONST, z1, 0, 0, 0)
+    let z2 = _vnew(fc)
+    fc.vty.set(z2, TY_INT)
+    _ir_emit(fc, OP_CONST, z2, 0, 0, 0)
+    let z3 = _vnew(fc)
+    fc.vty.set(z3, TY_INT)
+    _ir_emit(fc, OP_CONST, z3, 0, 0, 0)
+    let z4 = _vnew(fc)
+    fc.vty.set(z4, TY_INT)
+    _ir_emit(fc, OP_CONST, z4, 0, 0, 0)
+    let cargs = vec[int].new(6)
+    cargs.push(z1)
+    cargs.push(z2)
+    cargs.push(ep)
+    cargs.push(bp)
+    cargs.push(z3)
+    cargs.push(z4)
+    let stk = _emit_call_args(fc, cargs, 0)
+    let h = _vnew(fc)
+    fc.vty.set(h, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, h, 0, 0, I_CREATE)
+    _emit_call_free(fc, stk)
+    return h
+}
 
 /// udp_sendto / udp_sendto6：发一个 datagram，返回发出的字节数。
 ///

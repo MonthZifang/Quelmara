@@ -57,7 +57,10 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 # v3.47: 48  （函数名作值 + OP_CALLV 间接调用 + atomic/spin/sleep/acq-rel
 #              + net_config —— 解开 std/sync 与 std/log 两个模块）
 # v3.48: 49  （file_size / read_text —— 解开 std/staticfile）
-BASELINE = 51
+# v3.49: 51  （udp_sendto / udp_sendto6 —— 解开 std/net/udp 与 std/net/udp6）
+# v3.52: 51  （跨模块 const + str 切片 —— 障碍前移但没解开模块）
+# v3.53: 54  （thread_start —— 一次解开 std/net/reactor + std/ws + std/sse）
+BASELINE = 54
 
 QLMC_SRC = "bootstrap/qlmc/qlmc.qma"
 QLMC_EXE = os.path.join("build", "_qlmc_cov.exe")
