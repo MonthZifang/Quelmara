@@ -2462,7 +2462,13 @@ const I_GETPEERNAME = 26
 const I_SENDTO = 27
 const I_RECVFROM = 28
 const I_SETSOCKOPT = 29
-const I_USER = 30       // 用户 @ffi 符号从第 30 个 IAT 槽开始
+// v3.54：tcp_connect 用（收 §7.40 的 tcp_connect 缺口）。
+// **必须紧接 I_SETSOCKOPT**：`build_rdata` 里那条 `while wi <
+// I_USER - I_WSASTART` 的循环靠 18..31 连续来推槽位。
+const I_GETADDRINFO = 30
+const I_FREEADDRINFO = 31
+const I_CONNECT = 32
+const I_USER = 33       // 用户 @ffi 符号从第 33 个 IAT 槽开始
 
 // ---------------------------------------------------------------------------
 // 字节发射
@@ -8323,10 +8329,10 @@ fn _emit_ir(fc: FnCtx, i: int) {
 /// 为什么需要它（v3.49）：`irdump` 原来只显示编号，而 v3.46 的
 /// `file_size` 崩溃正是把 `I_CREATE(4)` 当成 `CreateFileA` 用了 ——
 /// 它其实是 `CreateThread`。**有名字显示就不会再犯这个错。**
-const IAT_NAME_N = 30
+const IAT_NAME_N = 33
 
 fn _iat_names_str() -> str {
-    return "GetStdHandle,WriteFile,ExitProcess,wsprintfA,CreateThread,WaitForSingleObject,CloseHandle,GetFileAttributesA,QueryPerformanceCounter,QueryPerformanceFrequency,strtod,VirtualAlloc,SwitchToThread,GetSystemTimeAsFileTime,GetFileSize,Sleep,CreateFileA,ReadFile,WSAStartup,socket,bind,listen,accept,send,recv,closesocket,getpeername,sendto,recvfrom,setsockopt"
+    return "GetStdHandle,WriteFile,ExitProcess,wsprintfA,CreateThread,WaitForSingleObject,CloseHandle,GetFileAttributesA,QueryPerformanceCounter,QueryPerformanceFrequency,strtod,VirtualAlloc,SwitchToThread,GetSystemTimeAsFileTime,GetFileSize,Sleep,CreateFileA,ReadFile,WSAStartup,socket,bind,listen,accept,send,recv,closesocket,getpeername,sendto,recvfrom,setsockopt,getaddrinfo,freeaddrinfo,connect"
 }
 
 /// 取第 n 个 IAT 符号名（越界或用户 @ffi 返回空串）。
@@ -11197,6 +11203,19 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
     if bn == "tcp_send" {
         return _bi_tcp_send(fc, _lower_expr(fc, nd.b), _lower_expr(fc, nd.c))
     }
+    // v3.54：tcp_recv_to(fd, cap, ms) -> str（接收超时）
+    if bn == "tcp_recv_to" {
+        return _bi_tcp_recv_to(fc, _lower_expr(fc, nd.b),
+                               _lower_expr(fc, nd.c),
+                               _lower_expr(fc, nd.n))
+    }
+    // v3.54：tcp_send_n_to(fd, ptr, n, ms) -> 本次写出的字节数（发送超时）
+    if bn == "tcp_send_n_to" {
+        return _bi_tcp_send_n_to(fc, _lower_expr(fc, nd.b),
+                                 _lower_expr(fc, nd.c),
+                                 _lower_expr(fc, nd.n),
+                                 _lower_expr(fc, nd.slot))
+    }
     // v3.42：tcp_send_n(fd, ptr, n) -> 发送字节数（零拷贝，协议库缓冲池用）
     if bn == "tcp_send_n" {
         return _bi_tcp_send_n(fc, _lower_expr(fc, nd.b), _lower_expr(fc, nd.c), _lower_expr(fc, nd.n))
@@ -11335,6 +11354,15 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         fc.vty.set(cd, TY_INT)
         _ir_emit(fc, OP_CALLRT, cd, 0, 0, RT_ACAS)
         return cd
+    }
+    // v3.54：tcp_connect(host, port) -> fd（收 §7.40 的 tcp_connect 缺口）
+    //
+    // 比 tcp_listen 复杂得多：要走 getaddrinfo（系统 DNS + hosts），
+    // 再沿 ai_next 链表逐个尝试。Windows 对 "localhost" 常先给 ::1，
+    // 若服务端只监听 v4，不回溯就等于把原来的可用路径弄丢。
+    if bn == "tcp_connect" {
+        return _bi_tcp_connect(fc, _lower_expr(fc, nd.b),
+                               _lower_expr(fc, nd.c))
     }
     // v3.53：thread_start(fn, arg) -> int（收 §7.40 的 thread_start 缺口）
     //
@@ -11879,6 +11907,54 @@ fn _bi_tcp_send(fc: FnCtx, fd: int, sv: int) -> int {
 /// **单独成函数是为了压 `_lower_builtin` 的帧槽**：这些 IR 序列
 /// 要几十个临时值，内联会把 `_lower_builtin` 顶过 416 格上限，
 /// 自举 stage-2 就编不过自己。与 `_bi_mem_str` 同一个处理方式。
+/// `tcp_send_n_to(fd, ptr, n, ms) -> int`：带发送超时的零拷贝发送（v3.54）。
+///
+/// = `setsockopt(SO_SNDTIMEO, ms)` + `tcp_send_n(fd, ptr, n)`。
+///
+/// **`SO_SNDTIMEO` 是 0x1005**（`SO_RCVTIMEO` 是 0x1006）—— 差 1，写错就
+/// 静默变成"设了接收超时"，发送照样无限阻塞。
+///
+/// `ms = 0` 表示不限时（Win/Linux 语义一致：0 = 等到底，不是非阻塞）。
+/// 与 `_bi_tcp_send_n` 一样，`send` 返回 -1 时 fail-fast。
+fn _bi_tcp_send_n_to(fc: FnCtx, fd: int, ptr: int, n: int, ms: int) -> int {
+    // tv = alloc(16)，前 4 字节放 DWORD 毫秒（Win 的 timeval 是 DWORD,DWORD）
+    let tvsz = _vnew(fc)
+    fc.vty.set(tvsz, TY_INT)
+    _ir_emit(fc, OP_CONST, tvsz, 0, 0, 16)
+    _ir_emit(fc, OP_ARG, 0, tvsz, 0, 0)
+    let tv = _vnew(fc)
+    fc.vty.set(tv, TY_INT)
+    _ir_emit(fc, OP_CALLRT, tv, 0, 0, RT_ALLOC)
+    let tvp = _pin(fc, tv)
+    _ir_emit(fc, OP_STORE, 0, tvp, ms, 8)
+    // setsockopt(fd, SOL_SOCKET=0xFFFF, SO_SNDTIMEO=0x1005, tv, 4)
+    let lvl = _vnew(fc)
+    fc.vty.set(lvl, TY_INT)
+    _ir_emit(fc, OP_CONST, lvl, 0, 0, 65535)
+    let opt = _vnew(fc)
+    fc.vty.set(opt, TY_INT)
+    _ir_emit(fc, OP_CONST, opt, 0, 0, 4101)     // 0x1005 = SO_SNDTIMEO
+    let four = _vnew(fc)
+    fc.vty.set(four, TY_INT)
+    _ir_emit(fc, OP_CONST, four, 0, 0, 4)
+    let sav = vec[int].new(5)
+    sav.push(fd)
+    sav.push(lvl)
+    sav.push(opt)
+    sav.push(tvp)
+    sav.push(four)
+    let sstk = _emit_call_args(fc, sav, 0)
+    let sr = _vnew(fc)
+    fc.vty.set(sr, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, sr, 0, 0, I_SETSOCKOPT)
+    _emit_call_free(fc, sstk)
+    // setsockopt 失败也继续（设不上就退化成阻塞发，不致命）
+    let fdp = _pin(fc, fd)
+    let ptp = _pin(fc, ptr)
+    let np = _pin(fc, n)
+    return _bi_tcp_send_n(fc, fdp, ptp, np)
+}
+
 fn _bi_tcp_send_n(fc: FnCtx, fd: int, ptr: int, n: int) -> int {
     // **顺序故意保持"先发 ARG、后建 0"** —— 这是分配器 ARG 屏障的回归
     // 探针。分配器把 `OP_ARG imm>=2` 当跨调用屏障之后，这个 0 会被
@@ -11905,6 +11981,51 @@ fn _bi_tcp_send_n(fc: FnCtx, fd: int, ptr: int, n: int) -> int {
 /// **单独成函数是为了压 `_lower_builtin` 的帧槽**：这些 IR 序列
 /// 要几十个临时值，内联会把 `_lower_builtin` 顶过 416 格上限，
 /// 自举 stage-2 就编不过自己。与 `_bi_mem_str` 同一个处理方式。
+/// `tcp_recv_to(fd, cap, ms) -> str`：带接收超时的收包（v3.54）。
+///
+/// = `setsockopt(SO_RCVTIMEO=0x1006, ms)` + `tcp_recv(fd, cap)`。
+///
+/// **超时/出错返回空串，不 fail-fast** —— 与 `tcp_recv` 同口径：
+/// "对端暂时没发"是可恢复结果，服务端的事件循环靠它继续转。
+///
+/// 这条是 v3.08 的健壮性修复：没有它时对端不发东西会让 `recv` 无限阻塞，
+/// 实测 12 秒都不返回（退出码 124）。
+fn _bi_tcp_recv_to(fc: FnCtx, fd: int, cap: int, ms: int) -> int {
+    let tvsz = _vnew(fc)
+    fc.vty.set(tvsz, TY_INT)
+    _ir_emit(fc, OP_CONST, tvsz, 0, 0, 16)
+    _ir_emit(fc, OP_ARG, 0, tvsz, 0, 0)
+    let tv = _vnew(fc)
+    fc.vty.set(tv, TY_INT)
+    _ir_emit(fc, OP_CALLRT, tv, 0, 0, RT_ALLOC)
+    let tvp = _pin(fc, tv)
+    _ir_emit(fc, OP_STORE, 0, tvp, ms, 8)
+    let lvl = _vnew(fc)
+    fc.vty.set(lvl, TY_INT)
+    _ir_emit(fc, OP_CONST, lvl, 0, 0, 65535)
+    let opt = _vnew(fc)
+    fc.vty.set(opt, TY_INT)
+    _ir_emit(fc, OP_CONST, opt, 0, 0, 4102)     // 0x1006 = SO_RCVTIMEO
+    let four = _vnew(fc)
+    fc.vty.set(four, TY_INT)
+    _ir_emit(fc, OP_CONST, four, 0, 0, 4)
+    let sav = vec[int].new(5)
+    sav.push(fd)
+    sav.push(lvl)
+    sav.push(opt)
+    sav.push(tvp)
+    sav.push(four)
+    let sstk = _emit_call_args(fc, sav, 0)
+    let sr = _vnew(fc)
+    fc.vty.set(sr, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, sr, 0, 0, I_SETSOCKOPT)
+    _emit_call_free(fc, sstk)
+    // setsockopt 失败也继续（设不上就退化成阻塞收）
+    let fdp = _pin(fc, fd)
+    let cp = _pin(fc, cap)
+    return _bi_tcp_recv(fc, fdp, cp)
+}
+
 fn _bi_tcp_recv(fc: FnCtx, fd: int, cap: int) -> int {
     // 分配 cap+9：长度头 + 数据 + NUL
     let nine = _vnew(fc)
@@ -12183,6 +12304,331 @@ fn _bi_udp_open(fc: FnCtx, af: int) -> int {
     return s
 }
 
+
+/// `tcp_connect(host, port) -> fd`：客户端连接（v3.54）。
+///
+/// 算法逐句对齐 stage-0 的 `__tcp_connect`（`qlm_native.py`）：
+///
+/// ```
+/// WSAStartup(0x202, &wsa)
+/// hints = alloc(48)，清零
+///   hints[4]  = 0   (ai_family   = AF_UNSPEC —— v4/v6 都要)
+///   hints[8]  = 1   (ai_socktype = SOCK_STREAM)
+///   hints[12] = 6   (ai_protocol = IPPROTO_TCP)
+/// res = alloc(8)，*res = 0
+/// getaddrinfo(host, 0, hints, res)
+/// head = *res;  ai = head
+/// 循环:
+///   fam = ai[4]; sty = ai[8]; pro = ai[12]; alen = ai[16]
+///   sin = alloc(32); addr = ai[32]
+///   memcpy(sin, addr, alen)
+///   sin[2] = port>>8; sin[3] = port&255     ← 覆盖端口（网络序）
+///   cs = socket(fam, sty, pro)
+///   if cs == -1: goto retry
+///   if connect(cs, sin, alen) == -1: closesocket(cs); goto retry
+///   freeaddrinfo(head); return cs
+/// retry:
+///   ai = ai[40]                              ← ai_next
+///   if ai == 0: fail
+///   goto 循环
+/// ```
+///
+/// ## 两个 Win64 陷阱
+///
+/// 1. **`getaddrinfo` 的返回值必须判 != 0**（不是 < 0）。它的成功值是 0，
+///    失败是 EAI_* 正数。
+/// 2. **`socket` / `connect` 的返回值必须符号扩展**。`int` 返回值只写
+///    `eax`，`SOCKET_ERROR` 在 64 位寄存器里是 `0x00000000FFFFFFFF`，
+///    直接和 -1 比会永远不等 —— 必须 `shl 32` / `sar 32` 再比。
+fn _bi_tcp_connect(fc: FnCtx, host: int, port: int) -> int {
+    // ---- WSAStartup(0x202, &wsa) ----
+    let wsz = _vnew(fc)
+    fc.vty.set(wsz, TY_INT)
+    _ir_emit(fc, OP_CONST, wsz, 0, 0, 16)
+    _ir_emit(fc, OP_ARG, 0, wsz, 0, 0)
+    let wsa = _vnew(fc)
+    fc.vty.set(wsa, TY_INT)
+    _ir_emit(fc, OP_CALLRT, wsa, 0, 0, RT_ALLOC)
+    let wp = _pin(fc, wsa)
+    let ver = _vnew(fc)
+    fc.vty.set(ver, TY_INT)
+    _ir_emit(fc, OP_CONST, ver, 0, 0, 514)          // 0x202
+    _ir_emit(fc, OP_ARG, 0, ver, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, wp, 0, 1)
+    let ws = _vnew(fc)
+    fc.vty.set(ws, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, ws, 0, 0, I_WSASTART)
+    _net_fail_if_nonzero(fc, ws, 10)
+    // ---- hints = alloc(48)，清零 ----
+    let hsz = _vnew(fc)
+    fc.vty.set(hsz, TY_INT)
+    _ir_emit(fc, OP_CONST, hsz, 0, 0, 48)
+    _ir_emit(fc, OP_ARG, 0, hsz, 0, 0)
+    let hints = _vnew(fc)
+    fc.vty.set(hints, TY_INT)
+    _ir_emit(fc, OP_CALLRT, hints, 0, 0, RT_ALLOC)
+    let hp = _pin(fc, hints)
+    let z0 = _vnew(fc)
+    fc.vty.set(z0, TY_INT)
+    _ir_emit(fc, OP_CONST, z0, 0, 0, 0)
+    let z1 = _vnew(fc)
+    fc.vty.set(z1, TY_INT)
+    _ir_emit(fc, OP_CONST, z1, 0, 0, 0)
+    let z2 = _vnew(fc)
+    fc.vty.set(z2, TY_INT)
+    _ir_emit(fc, OP_CONST, z2, 0, 0, 0)
+    let z3 = _vnew(fc)
+    fc.vty.set(z3, TY_INT)
+    _ir_emit(fc, OP_CONST, z3, 0, 0, 0)
+    let z4 = _vnew(fc)
+    fc.vty.set(z4, TY_INT)
+    _ir_emit(fc, OP_CONST, z4, 0, 0, 0)
+    let z5 = _vnew(fc)
+    fc.vty.set(z5, TY_INT)
+    _ir_emit(fc, OP_CONST, z5, 0, 0, 0)
+    let p0 = _vnew(fc)
+    fc.vty.set(p0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p0, hp, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, p0, z0, 8)
+    let p1 = _vnew(fc)
+    fc.vty.set(p1, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p1, hp, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, p1, z1, 8)
+    let p2 = _vnew(fc)
+    fc.vty.set(p2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p2, hp, 0, 16)
+    _ir_emit(fc, OP_STORE, 0, p2, z2, 8)
+    let p3 = _vnew(fc)
+    fc.vty.set(p3, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p3, hp, 0, 24)
+    _ir_emit(fc, OP_STORE, 0, p3, z3, 8)
+    let p4 = _vnew(fc)
+    fc.vty.set(p4, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p4, hp, 0, 32)
+    _ir_emit(fc, OP_STORE, 0, p4, z4, 8)
+    let p5 = _vnew(fc)
+    fc.vty.set(p5, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p5, hp, 0, 40)
+    _ir_emit(fc, OP_STORE, 0, p5, z5, 8)
+    // ai_socktype = 1 @ 8、ai_protocol = 6 @ 12（用 STORE8，字段是 int 但低字节够）
+    let one = _vnew(fc)
+    fc.vty.set(one, TY_INT)
+    _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+    let s8 = _vnew(fc)
+    fc.vty.set(s8, TY_INT)
+    _ir_emit(fc, OP_ADDRF, s8, hp, 0, 8)
+    _ir_emit(fc, OP_STORE8, 0, s8, one, 0)
+    let six = _vnew(fc)
+    fc.vty.set(six, TY_INT)
+    _ir_emit(fc, OP_CONST, six, 0, 0, 6)
+    let s12 = _vnew(fc)
+    fc.vty.set(s12, TY_INT)
+    _ir_emit(fc, OP_ADDRF, s12, hp, 0, 12)
+    _ir_emit(fc, OP_STORE8, 0, s12, six, 0)
+    // ---- res = alloc(8); *res = 0 ----
+    let rsz = _vnew(fc)
+    fc.vty.set(rsz, TY_INT)
+    _ir_emit(fc, OP_CONST, rsz, 0, 0, 8)
+    _ir_emit(fc, OP_ARG, 0, rsz, 0, 0)
+    let res = _vnew(fc)
+    fc.vty.set(res, TY_INT)
+    _ir_emit(fc, OP_CALLRT, res, 0, 0, RT_ALLOC)
+    let rp = _pin(fc, res)
+    let rz = _vnew(fc)
+    fc.vty.set(rz, TY_INT)
+    _ir_emit(fc, OP_CONST, rz, 0, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, rp, rz, 8)
+    // ---- getaddrinfo(host, 0, hints, res) ----
+    let hpp = _pin(fc, host)
+    let zserv = _vnew(fc)
+    fc.vty.set(zserv, TY_INT)
+    _ir_emit(fc, OP_CONST, zserv, 0, 0, 0)
+    let gav = vec[int].new(4)
+    gav.push(hpp)
+    gav.push(zserv)
+    gav.push(hp)
+    gav.push(rp)
+    let gstk = _emit_call_args(fc, gav, 0)
+    let gr = _vnew(fc)
+    fc.vty.set(gr, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, gr, 0, 0, I_GETADDRINFO)
+    _emit_call_free(fc, gstk)
+    // **getaddrinfo 成功是 0，失败是 EAI_* 正数** —— 判 != 0
+    _net_fail_if_nonzero(fc, gr, 11)
+    // ---- head = *res ----
+    let head = _new_var(fc, -2, TY_INT)
+    _ir_emit(fc, OP_LOAD, head, rp, 0, 8)
+    let hd = _vnew(fc)
+    fc.vty.set(hd, TY_INT)
+    _ir_emit(fc, OP_MOV, hd, head, 0, 0)
+    _net_fail_if_zero(fc, hd, 12)
+    // ---- 端口高低字节（网络序），一次算好两个家族共用 ----
+    let m255 = _vnew(fc)
+    fc.vty.set(m255, TY_INT)
+    _ir_emit(fc, OP_CONST, m255, 0, 0, 255)
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    let two = _vnew(fc)
+    fc.vty.set(two, TY_INT)
+    _ir_emit(fc, OP_CONST, two, 0, 0, 2)
+    let three = _vnew(fc)
+    fc.vty.set(three, TY_INT)
+    _ir_emit(fc, OP_CONST, three, 0, 0, 3)
+    let hi = _vnew(fc)
+    fc.vty.set(hi, TY_INT)
+    _ir_emit(fc, OP_SHR, hi, port, eight, 0)
+    let hi2 = _vnew(fc)
+    fc.vty.set(hi2, TY_INT)
+    _ir_emit(fc, OP_AND, hi2, hi, m255, 0)
+    let lo = _vnew(fc)
+    fc.vty.set(lo, TY_INT)
+    _ir_emit(fc, OP_AND, lo, port, m255, 0)
+    // ---- 循环：ai 从 head 开始 ----
+    let ai = _new_var(fc, -3, TY_INT)
+    _ir_emit(fc, OP_MOV, ai, head, 0, 0)
+    let ltry = _newlab(fc.labs)
+    let lretry = _newlab(fc.labs)
+    let lok = _newlab(fc.labs)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, ltry)
+    // ai == 0 就失败（链表走完）
+    let aiv = _vnew(fc)
+    fc.vty.set(aiv, TY_INT)
+    _ir_emit(fc, OP_MOV, aiv, ai, 0, 0)
+    _net_fail_if_zero(fc, aiv, 13)
+    let aip = _pin(fc, aiv)
+    // fam = ai[4]（load8）、sty = ai[8]、pro = ai[12]、alen = ai[16]（load）
+    let f8 = _vnew(fc)
+    fc.vty.set(f8, TY_INT)
+    _ir_emit(fc, OP_ADDRF, f8, aip, 0, 4)
+    let fam = _vnew(fc)
+    fc.vty.set(fam, TY_INT)
+    _ir_emit(fc, OP_LOAD8, fam, f8, 0, 0)
+    let f8b = _vnew(fc)
+    fc.vty.set(f8b, TY_INT)
+    _ir_emit(fc, OP_ADDRF, f8b, aip, 0, 8)
+    let sty = _vnew(fc)
+    fc.vty.set(sty, TY_INT)
+    _ir_emit(fc, OP_LOAD8, sty, f8b, 0, 0)
+    let f12 = _vnew(fc)
+    fc.vty.set(f12, TY_INT)
+    _ir_emit(fc, OP_ADDRF, f12, aip, 0, 12)
+    let pro = _vnew(fc)
+    fc.vty.set(pro, TY_INT)
+    _ir_emit(fc, OP_LOAD8, pro, f12, 0, 0)
+    let f16 = _vnew(fc)
+    fc.vty.set(f16, TY_INT)
+    _ir_emit(fc, OP_ADDRF, f16, aip, 0, 16)
+    let alen = _pin(fc, _vnew(fc))
+    fc.vty.set(alen, TY_INT)
+    _ir_emit(fc, OP_LOAD, alen, f16, 0, 8)
+    // sin = alloc(32)
+    let ssz = _vnew(fc)
+    fc.vty.set(ssz, TY_INT)
+    _ir_emit(fc, OP_CONST, ssz, 0, 0, 32)
+    _ir_emit(fc, OP_ARG, 0, ssz, 0, 0)
+    let sin = _vnew(fc)
+    fc.vty.set(sin, TY_INT)
+    _ir_emit(fc, OP_CALLRT, sin, 0, 0, RT_ALLOC)
+    let sinp = _pin(fc, sin)
+    // addr = ai[32]（load），memcpy(sin, addr, alen)
+    let f32 = _vnew(fc)
+    fc.vty.set(f32, TY_INT)
+    _ir_emit(fc, OP_ADDRF, f32, aip, 0, 32)
+    let addr = _pin(fc, _vnew(fc))
+    fc.vty.set(addr, TY_INT)
+    _ir_emit(fc, OP_LOAD, addr, f32, 0, 8)
+    _ir_emit(fc, OP_MEMCPYN, alen, sinp, addr, 0)
+    // 端口覆盖：sin[2] = hi、sin[3] = lo
+    let q2 = _vnew(fc)
+    fc.vty.set(q2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, q2, sinp, 0, 2)
+    _ir_emit(fc, OP_STORE8, 0, q2, hi2, 0)
+    let q3 = _vnew(fc)
+    fc.vty.set(q3, TY_INT)
+    _ir_emit(fc, OP_ADDRF, q3, sinp, 0, 3)
+    _ir_emit(fc, OP_STORE8, 0, q3, lo, 0)
+    // cs = socket(fam, sty, pro)
+    let cav = vec[int].new(3)
+    cav.push(fam)
+    cav.push(sty)
+    cav.push(pro)
+    let cstk = _emit_call_args(fc, cav, 0)
+    let cs = _vnew(fc)
+    fc.vty.set(cs, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, cs, 0, 0, I_SOCKET)
+    _emit_call_free(fc, cstk)
+    // 符号扩展后判 -1
+    let csp = _pin(fc, _sext32(fc, cs))
+    let mone = _vnew(fc)
+    fc.vty.set(mone, TY_INT)
+    _ir_emit(fc, OP_CONST, mone, 0, 0, 0 - 1)
+    let csbad = _vnew(fc)
+    fc.vty.set(csbad, TY_INT)
+    _ir_emit(fc, OP_CMP, csbad, csp, mone, 0x94)      // sete
+    _ir_emit(fc, OP_JNZ, 0, csbad, 0, lretry)
+    // connect(cs, sin, alen)
+    let kav = vec[int].new(3)
+    kav.push(cs)
+    kav.push(sinp)
+    kav.push(alen)
+    let kstk = _emit_call_args(fc, kav, 0)
+    let cr = _vnew(fc)
+    fc.vty.set(cr, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, cr, 0, 0, I_CONNECT)
+    _emit_call_free(fc, kstk)
+    let crp = _pin(fc, _sext32(fc, cr))
+    let crbad = _vnew(fc)
+    fc.vty.set(crbad, TY_INT)
+    _ir_emit(fc, OP_CMP, crbad, crp, mone, 0x94)      // sete
+    _ir_emit(fc, OP_JNZ, 0, crbad, 0, lretry)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, lok)
+    // ---- retry：closesocket(cs) + ai = ai[40] ----
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lretry)
+    _ir_emit(fc, OP_ARG, 0, csp, 0, 0)
+    let _cs2 = _vnew(fc)
+    fc.vty.set(_cs2, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, _cs2, 0, 0, I_CLOSESOCK)
+    let f40 = _vnew(fc)
+    fc.vty.set(f40, TY_INT)
+    _ir_emit(fc, OP_ADDRF, f40, aip, 0, 40)
+    let nxt = _vnew(fc)
+    fc.vty.set(nxt, TY_INT)
+    _ir_emit(fc, OP_LOAD, nxt, f40, 0, 8)
+    _ir_emit(fc, OP_MOV, ai, nxt, 0, 0)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, ltry)
+    // ---- ok：freeaddrinfo(head) 后返回 ----
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
+    let hdp = _vnew(fc)
+    fc.vty.set(hdp, TY_INT)
+    _ir_emit(fc, OP_MOV, hdp, head, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, hdp, 0, 0)
+    let _fr = _vnew(fc)
+    fc.vty.set(_fr, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, _fr, 0, 0, I_FREEADDRINFO)
+    return cs
+}
+
+/// `int` 返回值符号扩展成 64 位（v3.54）。
+///
+/// Win64 的 `int` 返回值只写 `eax`，高 32 位是垃圾。`SOCKET_ERROR` 是 -1，
+/// 但在 64 位寄存器里表现为 `0x00000000FFFFFFFF` —— 直接和 -1 比永远不等。
+/// `shl 32` / `sar 32` 把低 32 位符号扩展上去，之后才能正确判 -1。
+///
+/// 这个坑在 v3.42 的 `tcp_listen` 上踩过（§7.x），是所有 Winsock
+/// `int` 返回值的通例。
+fn _sext32(fc: FnCtx, v: int) -> int {
+    let t32 = _vnew(fc)
+    fc.vty.set(t32, TY_INT)
+    _ir_emit(fc, OP_CONST, t32, 0, 0, 32)
+    let s1 = _vnew(fc)
+    fc.vty.set(s1, TY_INT)
+    _ir_emit(fc, OP_SHL, s1, v, t32, 0)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_SHR, d, s1, t32, 0)
+    return d
+}
 
 /// `thread_start(fn, arg) -> int`：起一个真正的 OS 线程（v3.53）。
 ///
@@ -13991,6 +14437,13 @@ fn _reg_ws2(dsym: vec[str], ddll: vec[int]) {
     dsym.push("recvfrom")
     ddll.push(3)
     dsym.push("setsockopt")
+    ddll.push(3)
+    // v3.54：tcp_connect（DNS + 地址链表遍历）
+    dsym.push("getaddrinfo")
+    ddll.push(3)
+    dsym.push("freeaddrinfo")
+    ddll.push(3)
+    dsym.push("connect")
     ddll.push(3)
 }
 

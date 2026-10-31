@@ -368,6 +368,33 @@ def case_udp6_send_e2e():
             f"{r.stdout[-400:]}{r.stderr[-300:]}")
 
 
+def case_tcp_connect_e2e():
+    """`tcp_connect` / `tcp_send_n_to` / `tcp_recv_to` 端到端（v3.54）。
+
+    三个内建都绕不开 Winsock 的两个坑：`int` 返回值必须符号扩展
+    （`SOCKET_ERROR` 在 64 位寄存器里是 `0x00000000FFFFFFFF`）；
+    `getaddrinfo` 成功是 0、失败是 EAI_* 正数（不是 < 0）。
+
+    Python 端同时监听 v4 与 v6 —— 只监听 v4 会让 `localhost`（Windows 常先
+    给 `::1`）走回退路径，那是另一个测试点，不该混进这条。
+    """
+    if not IS_WIN:
+        skip("tcp_connect E2E：非 Windows 平台（服务端运行时仅 PE）")
+        return
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/tcp_connect_e2e_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=300)
+    if r.returncode == 2:
+        skip("tcp_connect E2E：39520 已被占用，跳过")
+    elif r.returncode == 0 and "tcp_connect e2e: PASS=" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines() if "tcp_connect e2e:" in ln]
+        ok(f"tcp_connect E2E：{line[-1].strip() if line else 'ok'}")
+    else:
+        bad(f"tcp_connect E2E 失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
 def case_modconst():
     """跨模块 const 自检（v3.52，收 §7.39）。
 
@@ -1799,6 +1826,8 @@ def main():
     case_udp6_send_e2e()
     # v3.52：跨模块 const（stage-0 不支持，只能自检）
     case_modconst()
+    # v3.54：tcp_connect / tcp_send_n_to / tcp_recv_to（DNS + 超时）
+    case_tcp_connect_e2e()
 
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），

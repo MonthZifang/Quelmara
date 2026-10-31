@@ -3735,6 +3735,39 @@ qlmc 差分 **72 → 74**，主回归 367 → **368**，自举 30/30 不动点�
 自举 30/30 不动点成立。
 
 
+### 3.104 `tcp_connect` 系列：覆盖率 54 → 56（v3.54）
+
+`std/net` 与 `std/net/udp6` 的缺口是**串起来**的，补一个就前移到下一个：
+
+```
+tcp_connect -> tcp_send_n_to -> tcp_recv_to -> ✓
+```
+
+所以一次补三个。新增 IAT 槽 `I_GETADDRINFO=30` / `I_FREEADDRINFO=31` /
+`I_CONNECT=32`，`I_USER` 30 → 33（**必须紧接 `I_SETSOCKOPT`(29)**：
+`build_rdata` 那条 `while wi < I_USER - I_WSASTART` 的循环靠 18..32 连续推槽位）。
+
+**`tcp_connect` 要走 getaddrinfo + 链表遍历**：Windows 对 `"localhost"` 常先给
+`::1`，若服务端只监听 v4，不沿 `ai_next` 回退就等于把原来能用的路径弄丢。
+
+**两个 Win64 陷阱**：
+
+1. `int` 返回值必须**符号扩展**。`SOCKET_ERROR` 是 -1，但 `int` 返回只写
+   `eax`，在 64 位寄存器里是 `0x00000000FFFFFFFF` —— 直接和 -1 比永远不等。
+   新增 `_sext32`（`shl 32` / `sar 32`）统一处理。
+2. `getaddrinfo` 成功是 **0**、失败是 `EAI_*` **正数**，判 `!= 0` 而不是 `< 0`。
+
+**两个 `_to` 变体**都是 `setsockopt(超时)` + 原内建：`SO_SNDTIMEO = 0x1005`、
+`SO_RCVTIMEO = 0x1006`（**差 1，写错就静默变成设了接收超时**）。语义不同：
+`tcp_send_n_to` 失败 fail-fast，`tcp_recv_to` 超时返回空串（"对端暂时没发"
+是可恢复结果）。
+
+**验证**：`t198` + `tcp_connect_e2e_test.py`，PASS=7。Python 端**同时监听
+v4 与 v6** —— 只监听 v4 会让 `localhost` 走回退路径，那是另一个测试点。
+
+`BASELINE` 54 → **56**，回归 PASS=368 → **369**，自举 30/30 不动点成立。
+
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |
