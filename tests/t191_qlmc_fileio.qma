@@ -1,0 +1,31 @@
+import std.core
+
+// v3.48：file_size / read_text 自校验
+//
+// 两个都是文件 I/O 内建，用**真实文件**做端到端：
+//   1. file_size 对已知文件返回非负值；
+//   2. read_text 读出的长度与 file_size 一致；
+//   3. 不存在的文件：file_size 返回 -1（可恢复），read_text fail-fast。
+//
+// 第 3 条只测 file_size —— read_text 对缺失文件是 exit(2)，会把测试进程
+// 打死，所以放在独立夹具里（t192）。
+fn main() {
+    // 1) 已知文件
+    let n = file_size("README.md")
+    assert(n > 0, "README.md has positive size")
+
+    // 2) read_text 长度与 file_size 一致
+    let t = read_text("README.md")
+    assert(len(t) == n, "read_text length matches file_size")
+    assert(len(t) > 0, "read_text non-empty")
+
+    // 3) 内容自洽：README.md 是 UTF-8 文本，首字节应是可打印 ASCII
+    let c0 = t[0]
+    assert(c0 > 0 && c0 < 128, "first byte is ASCII")
+
+    // 4) 缺失文件返回 -1（不 fail-fast）
+    let bad = file_size("__no_such_file_xyz_98765__.txt")
+    assert(bad == -1, "missing file returns -1")
+
+    print("t191 ok")
+}

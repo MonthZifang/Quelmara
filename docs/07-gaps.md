@@ -1490,42 +1490,40 @@ Segmentation fault (exit 139)
 的循环上。重编 qlmc 要 2 分钟，40 轮 ≈ 80 分钟纯等待。
 **先花 20 分钟写 IR dump，比反复试错快得多。**
 
-### 7.37 待修：qlmc 的 `_emit_call_args` 对"同一 vreg 出现在多个实参位置"处理不一致（v3.46 发现，qlmc 侧）
+### 7.37 已修（v3.48）：`file_size` 恒失败 —— `I_CREATE` 名字误导，不是 `_pin` 的问题
 
-**现象**：实现 `file_size(path)`（`CreateFileA` 7 实参 + `GetFileSize` +
-`CloseHandle`）时，`CreateFileA` 恒失败，`file_size` 返回 `0xFFFFFFFF`。
+**原始现象**（v3.46）：实现 `file_size(path)` 时 `CreateFileA` 恒失败，
+`file_size` 返回 `0xFFFFFFFF`。
 
-**irdump 看到的**（`tests/_t3.qma` 的 `main`）：
+**v3.46 的错误归因**：当时 irdump 看到 `CreateFileA` 的第 6/7 个实参拿到
+同一个 vreg，于是判断成「`_emit_call_args` 对同一 vreg 出现在多个实参位置
+处理不一致」。**这是错的。**
 
-```
-STKARG a=36 imm=32    ← 第 5 实参（disp=3）
-STKARG a=33 imm=40    ← 第 6 实参（应为 0）
-STKARG a=33 imm=48    ← 第 7 实参（应为 0）
-ARG a=32 imm=0 / a=34 imm=1 / a=37 imm=2 / a=38 imm=3
-```
+**真根因**（v3.48）：`I_CREATE = 4` 指向 `iatb.get(0) + 24` = kernel32
+`slot[3]`，而导入表里 `slot[3]` 是 **`CreateThread`**。`I_CREATE` 是历史
+命名，它一直是 `CreateThread`（`spawn` 用的）—— **`CreateFileA` 从来不在
+内置导入表里**。
 
-第 6/7 个实参拿到**同一个 vreg `33`**，而第 4 个实参（源码里同样写 `zero`）
-拿到的是 `38`。源码里 `av.push(zero)` 出现了三次，引用的是同一个 vreg。
+所以 v3.46 的 `file_size` 实际是在调 `CreateThread(path, GENERIC_READ, ...)`，
+参数全错，返回 0 完全合理。加一条临时诊断打印返回值才看到是 **0**（不是
+`-1`，也不是有效句柄）—— `CreateFileA` 失败应当返回 `INVALID_HANDLE_VALUE`，
+返回 0 说明调用根本没到达它。
 
-**推测**：`_emit_call_args` 里对实参 2/3 做 `_pin`（第 3439-3447 行），
-`_pin` 内部 `_new_var` + `OP_MOV`。当**同一个 vreg 在多处被 pin**时，
-第二/三次的 `_pin` 结果与第一次不同 —— 或者优化器把重复常量折叠成了
-不同落点，导致某些位置拿到的是过期的 vreg。
+**修复**：新增 `I_CREATEFILE = 16`（真正的 `CreateFileA`）和
+`I_READFILE = 17`。`I_CREATE` 保留原名（改名会牵动 `spawn`），
+但在 `I_CREATEFILE` 旁写了注释警告。
 
-**已排除**（都试过，全部仍返回 `0xFFFFFFFF`）：
+**教训**：`irdump` 只显示 `CALLIAT imm=N`，**不显示 N 对应哪个 API** ——
+这是个工具缺口。怀疑 IR 生成之前，先核对 IAT 槽到底指向哪个符号。
 
-* 直接 `cmp rax, -1` → 漏检 Win64 的 `0x00000000FFFFFFFF`（已知坑）；
-* 加 `shl 32 / sar 32` 符号扩展再比；
-* `GetFileSize` 的第 2 参从 `NULL` 改成真实 8 字节缓冲；
-* 把 7 个实参里的重复 `zero` 改成三个独立 vreg。
+**这是本项目第二次因为「常量名与实际语义不符」浪费一整版**
+（上一次是 v3.45 的 `_op_name` 表错位）。两次都是「工具给出的信息看着
+合理、实际是错的」，然后据此推导出错误结论。
 
-**重启条件**：先用 `irdump` 对比 **`@ffi` 7 参（已知可用）**与**内建 7 参**
-的 IR 差异，重点看同一个 vreg 在多个实参位置出现时 `_pin` 的行为。
-如果确认是 `_pin` 的锅，修法可能是"pin 过的 vreg 缓存起来，多处引用同一份"。
-
-**注**：`file_size` 本身没有回退价值争议 —— 它的 API 组合
-（`CreateFileA` + `GetFileSize` + `CloseHandle`）是标准库多处需要的，
-所以这个坑值得修，而不是绕开。
+**改进建议**（未做）：`irdump` 对 `CALLIAT` 应该同时打印符号名，
+形如 `CALLIAT imm=16(CreateFileA)`。这需要一张 `I_* → 符号名` 表，
+与 `_reg_k32b` / `_reg_ws2` 的 push 顺序对齐 —— 又是一处"两处必须同步"，
+但收益是所有 IAT 相关的排查都不用再去 dump PE 导入表。
 
 ## 8. 推进顺序（2026-10-22 调整）平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
 当前顺序：

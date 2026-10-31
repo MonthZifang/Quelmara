@@ -3495,6 +3495,47 @@ a 是闭包值的地址）。`OP_CALLV` 同时登记进 `cp[]` 调用屏障。
 
 回归 PASS=364，自举 30/30 不动点成立。
 
+### 3.98 `file_size` / `read_text`：覆盖率 48 → 49（v3.48）
+
+v3.46 把 `file_size` 失败归因于「`_emit_call_args` 对同一 vreg 处理不一致」
+（§7.37）。**那个归因是错的**，这版找到了真根因。
+
+**真根因**：`I_CREATE = 4` 指向 kernel32 `slot[3]`，而导入表里 `slot[3]`
+是 **`CreateThread`**。`I_CREATE` 是历史命名，它一直是 `CreateThread`
+（`spawn` 用的）—— **`CreateFileA` 从来不在内置导入表里**。
+
+所以 v3.46 的 `file_size` 实际在调 `CreateThread(path, GENERIC_READ, ...)`，
+参数全错，返回 0 完全合理。加一条临时诊断打印返回值才看到是 **0**
+（不是 `-1`，也不是有效句柄）—— `CreateFileA` 失败应返回
+`INVALID_HANDLE_VALUE`，返回 0 说明调用根本没到达它。
+
+**修复**：新增 `I_CREATEFILE = 16` / `I_READFILE = 17`，ws2_32 后移到
+18..29，`I_USER` 30。`I_CREATE` 保留原名（改名会牵动 `spawn`），
+但在 `I_CREATEFILE` 旁写了警告注释。
+
+两个内建：
+
+| 内建 | 实现 | 失败语义 |
+|---|---|---|
+| `file_size(path)` | `CreateFileA` → `GetFileSize` → `CloseHandle` | 返回 **-1**（可恢复） |
+| `read_text(path)` | 同上 + `alloc(size+9)` + `ReadFile` + 写长度头 | **fail-fast**（退出码 9） |
+
+两种失败语义不同是**故意的**：`std/staticfile` 靠 `file_size` 的 -1 给 404，
+而 `read_text` 读不到文件是调用方的 bug。
+
+验证：`README.md` 的 `file_size=2486`、`read_text len=2486`，两者一致
+（与 PowerShell `Get-Item` 报的 2486 相符）。
+
+**教训**：`irdump` 只显示 `CALLIAT imm=N`，**不显示 N 对应哪个 API** ——
+这是工具缺口。**这是本项目第二次因为「常量名与实际语义不符」浪费一整版**
+（上一次是 v3.45 的 `_op_name` 表错位）。两次都是「工具给出的信息看着合理、
+实际是错的」，然后据此推导出错误结论。
+
+改进建议（未做）：`irdump` 对 `CALLIAT` 应同时打印符号名，形如
+`CALLIAT imm=16(CreateFileA)`。
+
+回归 PASS=365，自举 30/30 不动点成立。
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |
