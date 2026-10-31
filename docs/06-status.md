@@ -3355,6 +3355,41 @@ stage-1 2 789 376 B / stage-2 464 384 B / stage-3 464 384 B
 
 回归 PASS=360，自举不动点成立。
 
+### 3.94 UDP 接收侧四个内建落地；`udp_sendto` 未完成（v3.44）
+
+覆盖率 **46 / 70（没涨）**，如实记录原因。
+
+**落地并通过端到端验证的 7 个内建**：`udp_open` / `udp_open6` /
+`udp_bind` / `udp_recvfrom` / `udp_recvfrom6` / `udp_recvfrom_to` /
+`udp_recvfrom6_to`。配套 `I_USER` 21 → 24，新增 `I_SENDTO=21` /
+`I_RECVFROM=22` / `I_SETSOCKOPT=23`。
+
+最有价值的是超时语义：`udp_recvfrom_to(fd, cap, 300)` 在对端不发东西时
+**返回空串而不是永久阻塞** —— `dns` 查询循环靠它停下来。
+
+```
+[PASS] udp_recvfrom 收到第 1 个 datagram（alpha）
+[PASS] udp_recvfrom_to 收到第 2 个 datagram（bravo）
+[PASS] 超时（300ms）返回空串 —— 不挂死
+=== t188 udp e2e: PASS=5 FAIL=0 ===
+```
+
+**未完成**：`udp_sendto` / `udp_sendto6` 一调用就 `0xC0000005`，
+连函数体第一条指令都执行不到。同一份 `.qma` 用 stage-0 编出来
+PASS=5 FAIL=0，所以是 qlmc 的代码生成缺陷。已排除 IAT 槽位、栈实参偏移
+（三种写法）、寄存器冲突、帧大小、`OP_LEN`、字面量/拼接串、求值顺序。
+关键对照：qlmc 的 6 参用户函数调用正常，`udp_recvfrom_to` 内部的
+5 参 `setsockopt` + 6 参 `recvfrom` 也都正常，只有 `sendto` 崩。
+详见 `07-gaps.md` §7.36（重启条件：先做 IR dump 工具）。
+
+**覆盖率没涨的原因**：`std/net/udp.qma` 的 `udp_send_str` 里有
+`udp_sendto` 调用点，所以只要 import 这个模块就编不过。接收侧四个内建
+虽然全通，但没有模块只靠它们就能过。
+
+**方法教训**：这次在 `udp_sendto` 上花了约 40 轮，全程"猜假设 → 改代码 →
+重编 2 分钟 → 跑一次"。重编 qlmc 要 2 分钟，40 轮 ≈ 80 分钟纯等待。
+**先花 20 分钟写 IR dump，比反复试错快得多。**
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |
