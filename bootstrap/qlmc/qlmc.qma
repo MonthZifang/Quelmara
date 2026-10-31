@@ -2100,21 +2100,27 @@ const I_VALLOC = 11
 // 为什么不走用户 @ffi 通道：内建是**编译器发射**的，没有对应的 fn 记录
 // 可以承载 nlocals 槽号；直接给它们固定的内置槽更简单，也让
 // 哪些网络符号被内建依赖一目了然。
-const I_WSASTART = 12
-const I_SOCKET = 13
-const I_BIND = 14
-const I_LISTEN = 15
-const I_ACCEPT = 16
-const I_SEND = 17
-const I_RECV = 18
-const I_CLOSESOCK = 19
+// v3.46：thread_yield 要 SwitchToThread（kernel32）。
+// **必须放在 12，ws2_32 整体后移 1** —— 内置槽位按 DLL 分组连续，
+// 中间插别的 DLL 会打乱 `build_rdata` 里 `iatb.get(N) + k*8` 的推导。
+const I_YIELD = 12
+const I_FILETIME = 13
+const I_FILESIZE = 14
+const I_WSASTART = 15
+const I_SOCKET = 16
+const I_BIND = 17
+const I_LISTEN = 18
+const I_ACCEPT = 19
+const I_SEND = 20
+const I_RECV = 21
+const I_CLOSESOCK = 22
 // v3.43：tcp_peer_raw 要 getpeername
-const I_GETPEERNAME = 20
+const I_GETPEERNAME = 23
 // v3.44：UDP 三个内建要 sendto / recvfrom / setsockopt
-const I_SENDTO = 21
-const I_RECVFROM = 22
-const I_SETSOCKOPT = 23
-const I_USER = 24       // 用户 @ffi 符号从第 24 个 IAT 槽开始
+const I_SENDTO = 24
+const I_RECVFROM = 25
+const I_SETSOCKOPT = 26
+const I_USER = 27       // 用户 @ffi 符号从第 27 个 IAT 槽开始
 
 // ---------------------------------------------------------------------------
 // 字节发射
@@ -7769,7 +7775,7 @@ fn _emit_ir(fc: FnCtx, i: int) {
 ///
 /// 查表用 _op_name(i)：数第 i 个逗号之前有几个分隔符。
 fn _op_names_str() -> str {
-    return "NOP0,CONST,MOV,ADD,SUB,MUL,DIV,MOD,AND,OR,XOR,NEG,NOT,JMP,LAB,JZ,JNZ,CMP,PARAM,CALL,PRINT,EXIT,LEA,LEN,PARAM2,JCMP,ADDRV,ADDRF,ADDRX,LOAD,STORE,COPY,ZERO,CALLRT,RET,NZ,BNOT,SHL,SAR,SHR,CALLR,RTADDR,CALLIAT,SHL2,SAR2,SHR2,STKALLOC2,PARAMSTK,STKALLOC,STKARG,STKFREE,ADDRXN,RTADDR2,LOAD8,STORE8,FCMP,NOP,FBIN,ITOF,FTOI,FLOAD,FSTORE,CMPI,BINI,LOADD,LOADX,LOAD8D,LOAD8X,STORED,STOREX,STORE8D,STORE8X,LOAD8I,STORE8I,JCMPVLEN,JCMPSTR,F64IMM,JCMPI,BSSADDR"
+    return "NOP0,CONST,MOV,ADD,SUB,MUL,DIV,MOD,NEG,NOT,NZ,CMP,LAB,JMP,JZ,JNZ,ARG,CALL,CALLRT,RET,PRINT,EXIT,LEA,LEN,PARAM,JCMP,ADDRV,ADDRF,ADDRX,LOAD,STORE,COPY,ZERO,RETAGG,RETSRET,ZERON,CALLIAT,LEAFN,CALLR,MEMCPYN,AND,OR,XOR,SHL,SAR,SHR,BNOT,PARAMSTK,STKALLOC,STKARG,STKFREE,ADDRXN,RTADDR,LOAD8,STORE8,FCMP,NOP,BINI,CMPI,LOADD,LOADX,STORED,STOREX,LOAD8D,LOAD8X,STORE8D,STORE8X,FBIN,ITOF,FTOI,DIVC,LOAD8I,STORE8I,JCMPVLEN,JCMPSTR,FNEG,F64IMM,JCMPI,BSSADDR"
 }
 
 /// 取第 n 个 opcode 的名字（n 越界返回 ?n）。
@@ -10345,6 +10351,24 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         return v
     }
     // ---- 文件 / 时钟 ----
+    // v3.46：thread_yield() -> 0（让出时间片）
+    //
+    // 与 `spin_hint` 的分工：spin_hint 是"再等一会儿"（ns 级、不切线程），
+    // thread_yield 是"让别的线程先跑"（µs 级、会切上下文）。
+    // `std/net/reactor` 的退避等待靠它把 CPU 还回去。
+    if bn == "thread_yield" {
+        let yret = _vnew(fc)
+        fc.vty.set(yret, TY_INT)
+        _ir_emit(fc, OP_CALLIAT, yret, 0, 0, I_YIELD)
+        let yz = _vnew(fc)
+        fc.vty.set(yz, TY_INT)
+        _ir_emit(fc, OP_CONST, yz, 0, 0, 0)
+        return yz
+    }
+    // v3.46：wall_ms() -> int（真实墙钟毫秒，Unix epoch）
+    if bn == "wall_ms" {
+        return _bi_wall_ms(fc)
+    }
     if bn == "file_exists" {
         // GetFileAttributesA 返回 DWORD，INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF。
         // 64 位比较前先掩到 32 位，免得高 32 位的"未定义"把判断带偏。
@@ -11673,6 +11697,43 @@ fn _bi_tcp_listen6(fc: FnCtx, port: int) -> int {
     return s
 }
 
+/// wall_ms() -> int：真实墙钟毫秒（Unix epoch）。
+///
+/// 与单调的 `now_ns` 互补：wall 用于时间戳展示，单调用于测量。
+/// `GetSystemTimeAsFileTime` 填一个 64 位 FILETIME（单位 100ns，
+/// 起点 1601-01-01），减去 1601→1970 的差值再 /10000 得毫秒。
+///
+/// 单独成函数为了压 `_lower_builtin` 的帧槽。
+fn _bi_wall_ms(fc: FnCtx) -> int {
+    let wsz = _vnew(fc)
+    fc.vty.set(wsz, TY_INT)
+    _ir_emit(fc, OP_CONST, wsz, 0, 0, 8)
+    _ir_emit(fc, OP_ARG, 0, wsz, 0, 0)
+    let wbuf = _vnew(fc)
+    fc.vty.set(wbuf, TY_INT)
+    _ir_emit(fc, OP_CALLRT, wbuf, 0, 0, RT_ALLOC)
+    _ir_emit(fc, OP_ARG, 0, wbuf, 0, 0)
+    let wret = _vnew(fc)
+    fc.vty.set(wret, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, wret, 0, 0, I_FILETIME)
+    let wv = _vnew(fc)
+    fc.vty.set(wv, TY_INT)
+    _ir_emit(fc, OP_LOAD, wv, wbuf, 0, 8)
+    let wepoch = _vnew(fc)
+    fc.vty.set(wepoch, TY_INT)
+    _ir_emit(fc, OP_CONST, wepoch, 0, 0, 116444736000000000)
+    let wadj = _vnew(fc)
+    fc.vty.set(wadj, TY_INT)
+    _ir_emit(fc, OP_SUB, wadj, wv, wepoch, 0)
+    let wtenk = _vnew(fc)
+    fc.vty.set(wtenk, TY_INT)
+    _ir_emit(fc, OP_CONST, wtenk, 0, 0, 10000)
+    let wms = _vnew(fc)
+    fc.vty.set(wms, TY_INT)
+    _ir_emit(fc, OP_DIV, wms, wadj, wtenk, 0)
+    return wms
+}
+
 /// udp_bind(fd, port) -> 0：把 UDP socket 绑到 `0.0.0.0:port`。
 ///
 /// 服务端侧必须有它（客户端由系统分配临时端口，不需要 bind）。
@@ -12507,6 +12568,17 @@ fn _pad_to(buf: vec[int], n: int) {
 ///
 /// 单独成函数是为了压 `build_rdata` 的局部变量表：那边已经贴着 416 格上限，
 /// 8 个 `let`/`push` 摊开写会把自举 stage-2 顶爆。函数调用不占调用方的槽。
+/// 登记 v3.46 的 kernel32 导入（DLL 索引 0）。
+/// 顺序必须与 `I_YIELD` 一致。
+fn _reg_k32b(dsym: vec[str], ddll: vec[int]) {
+    dsym.push("SwitchToThread")
+    ddll.push(0)
+    dsym.push("GetSystemTimeAsFileTime")
+    ddll.push(0)
+    dsym.push("GetFileSize")
+    ddll.push(0)
+}
+
 fn _reg_ws2(dsym: vec[str], ddll: vec[int]) {
     dsym.push("WSAStartup")
     ddll.push(3)
@@ -12580,6 +12652,7 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     // **搬到独立函数 `_reg_ws2` 里**，不在这儿摊开写：`build_rdata` 的局部
     // 变量表已经到 416 格上限，每多一个 `let` 就多占一格 —— 8 个符号摊开
     // 写正好把自举 stage-2 顶爆（"需要 425 个槽"）。函数调用不占调用方的槽。
+    _reg_k32b(dsym, ddll)
     _reg_ws2(dsym, ddll)
     let mut k = 0
     while k < len(ctx.fsym) {
@@ -12708,6 +12781,9 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     iat.set(I_QPC, rdata_rva + iatb.get(0) + 56)
     iat.set(I_QPF, rdata_rva + iatb.get(0) + 64)
     iat.set(I_VALLOC, rdata_rva + iatb.get(0) + 72)
+    iat.set(I_YIELD, rdata_rva + iatb.get(0) + 80)
+    iat.set(I_FILETIME, rdata_rva + iatb.get(0) + 88)
+    iat.set(I_FILESIZE, rdata_rva + iatb.get(0) + 96)
     iat.set(I_STRTOD, rdata_rva + iatb.get(2))
     iat.set(I_WSPRINTF, rdata_rva + iatb.get(1))
     // v3.42：ws2_32 的槽位（DLL 索引 3，组内顺序与 `_reg_ws2` 里一致）。
@@ -12718,7 +12794,7 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     // `build_rdata` 的帧槽**正好卡在 416 格上限**，摊开写会多要一格，
     // 自举 stage-2 立刻编不过自己（v3.42 实测）。循环只多两个变量。
     //
-    // **I_WSASTART..I_GETPEERNAME 必须连续**（12..20）—— 这条循环靠它推。
+    // **I_WSASTART..I_SETSOCKOPT 必须连续**（15..26）—— 这条循环靠它推。
     let mut wi = 0
     while wi < I_USER - I_WSASTART {
         iat.set(I_WSASTART + wi, rdata_rva + iatb.get(3) + wi * 8)

@@ -3420,6 +3420,40 @@ PASS=5 FAIL=0，所以是 qlmc 的代码生成缺陷。已排除 IAT 槽位、�
 
 回归 PASS=362，自举 30/30 不动点成立。
 
+### 3.96 `thread_yield` / `wall_ms` 落地；`file_size` 未成（v3.46）
+
+覆盖率 **46/70（没涨）**，如实记录。
+
+**两个内建落地并通过性质断言**：
+
+| 内建 | 实现 | 验证 |
+|---|---|---|
+| `thread_yield()` | `SwitchToThread` | 单次 + 循环 5 次，不崩不卡 |
+| `wall_ms()` | `GetSystemTimeAsFileTime` → 减 1601→1970 差值 → `/10000` | 落在 2020–2100 区间、连续调用单调不减 |
+
+配套 `I_YIELD=12` / `I_FILETIME=13`（kernel32 组），ws2_32 后移到 15..26，
+`I_USER` 27。新增 `_reg_k32b` 登记函数（独立函数，避免 `build_rdata` 帧槽超限）。
+
+**顺带修了 `irdump` 的一个真 bug**：`_op_name` 的名字表整体错位 1
+（`OP_ARG(16)` 显示成 `JNZ`）。v3.45 用它排查 `udp_sendto` 时正是被这个
+误导过。修复方式改成**从源码的 `const OP_* = N` 直接生成**，不再手填。
+
+**`file_size` 失败（已回退）**：试了四个版本都返回 `0xFFFFFFFF` ——
+直接 `cmp rax,-1`（漏检 Win64 的 `0x00000000FFFFFFFF`）、加符号扩展、
+`GetFileSize` 第 2 参改成真实缓冲、7 个实参的重复 `zero` 改成独立 vreg。
+irdump 看到的现象：`CreateFileA` 的第 6/7 个实参拿到同一个 vreg（`33`），
+而第 4 个是 `38` —— 说明 `_emit_call_args` 的 `_pin` 对**同一个 vreg
+多次出现**时行为不一致。详见 `07-gaps.md` §7.37。
+
+**覆盖率没涨的原因**：三个目标模块各有**别的**缺口 ——
+`std/log` 缺 `f`、`std/net/reactor` 缺 `cb`（都是**函数值调用**）、
+`std/staticfile` 缺 `read_text`（本轮试过，让 qlmc 编译期崩溃，已回退）。
+
+**函数值调用是这三个模块的共同卡点**，也是 qlmc 子集的真实缺口，
+比单点内建性价比高得多，值得单独立项。
+
+回归 PASS=363，自举 30/30 不动点成立。
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |

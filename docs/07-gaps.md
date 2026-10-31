@@ -1490,6 +1490,43 @@ Segmentation fault (exit 139)
 的循环上。重编 qlmc 要 2 分钟，40 轮 ≈ 80 分钟纯等待。
 **先花 20 分钟写 IR dump，比反复试错快得多。**
 
+### 7.37 待修：qlmc 的 `_emit_call_args` 对"同一 vreg 出现在多个实参位置"处理不一致（v3.46 发现，qlmc 侧）
+
+**现象**：实现 `file_size(path)`（`CreateFileA` 7 实参 + `GetFileSize` +
+`CloseHandle`）时，`CreateFileA` 恒失败，`file_size` 返回 `0xFFFFFFFF`。
+
+**irdump 看到的**（`tests/_t3.qma` 的 `main`）：
+
+```
+STKARG a=36 imm=32    ← 第 5 实参（disp=3）
+STKARG a=33 imm=40    ← 第 6 实参（应为 0）
+STKARG a=33 imm=48    ← 第 7 实参（应为 0）
+ARG a=32 imm=0 / a=34 imm=1 / a=37 imm=2 / a=38 imm=3
+```
+
+第 6/7 个实参拿到**同一个 vreg `33`**，而第 4 个实参（源码里同样写 `zero`）
+拿到的是 `38`。源码里 `av.push(zero)` 出现了三次，引用的是同一个 vreg。
+
+**推测**：`_emit_call_args` 里对实参 2/3 做 `_pin`（第 3439-3447 行），
+`_pin` 内部 `_new_var` + `OP_MOV`。当**同一个 vreg 在多处被 pin**时，
+第二/三次的 `_pin` 结果与第一次不同 —— 或者优化器把重复常量折叠成了
+不同落点，导致某些位置拿到的是过期的 vreg。
+
+**已排除**（都试过，全部仍返回 `0xFFFFFFFF`）：
+
+* 直接 `cmp rax, -1` → 漏检 Win64 的 `0x00000000FFFFFFFF`（已知坑）；
+* 加 `shl 32 / sar 32` 符号扩展再比；
+* `GetFileSize` 的第 2 参从 `NULL` 改成真实 8 字节缓冲；
+* 把 7 个实参里的重复 `zero` 改成三个独立 vreg。
+
+**重启条件**：先用 `irdump` 对比 **`@ffi` 7 参（已知可用）**与**内建 7 参**
+的 IR 差异，重点看同一个 vreg 在多个实参位置出现时 `_pin` 的行为。
+如果确认是 `_pin` 的锅，修法可能是"pin 过的 vreg 缓存起来，多处引用同一份"。
+
+**注**：`file_size` 本身没有回退价值争议 —— 它的 API 组合
+（`CreateFileA` + `GetFileSize` + `CloseHandle`）是标准库多处需要的，
+所以这个坑值得修，而不是绕开。
+
 ## 8. 推进顺序（2026-10-22 调整）平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
 当前顺序：
 
