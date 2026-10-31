@@ -2106,21 +2106,22 @@ const I_VALLOC = 11
 const I_YIELD = 12
 const I_FILETIME = 13
 const I_FILESIZE = 14
-const I_WSASTART = 15
-const I_SOCKET = 16
-const I_BIND = 17
-const I_LISTEN = 18
-const I_ACCEPT = 19
-const I_SEND = 20
-const I_RECV = 21
-const I_CLOSESOCK = 22
+const I_SLEEP = 15          // Sleep（sleep_ms 用）
+const I_WSASTART = 16
+const I_SOCKET = 17
+const I_BIND = 18
+const I_LISTEN = 19
+const I_ACCEPT = 20
+const I_SEND = 21
+const I_RECV = 22
+const I_CLOSESOCK = 23
 // v3.43：tcp_peer_raw 要 getpeername
-const I_GETPEERNAME = 23
+const I_GETPEERNAME = 24
 // v3.44：UDP 三个内建要 sendto / recvfrom / setsockopt
-const I_SENDTO = 24
-const I_RECVFROM = 25
-const I_SETSOCKOPT = 26
-const I_USER = 27       // 用户 @ffi 符号从第 27 个 IAT 槽开始
+const I_SENDTO = 25
+const I_RECVFROM = 26
+const I_SETSOCKOPT = 27
+const I_USER = 28       // 用户 @ffi 符号从第 27 个 IAT 槽开始
 
 // ---------------------------------------------------------------------------
 // 字节发射
@@ -2676,6 +2677,18 @@ const OP_F64IMM = 76      // dst(f64) = imm 的位模式
 // dst = jcc 码、a = 左操作数、b = 常量、imm = 目标标签。
 const OP_JCMPI = 77
 const OP_BSSADDR = 78  // dst = &bss[imm]（lea rip + FK_BSS 重定位）
+// v3.47：dst = call a（a **就是**代码地址，不是闭包值的地址）。
+//
+// 与 OP_CALLR 的区别：CALLR 做 `r11 = [a]; call r11`（a 是闭包值的
+// 地址，取出来的 [a] 才是 code）；CALLV 直接 `call a`。
+//
+// 为什么需要：std/sync 把注入的 park 实现存在**int 变量**里
+// （`let f = mem_load64(static_word(SLOT), 0)`），然后 `f(...)` 调用。
+// 函数值在 Quelmara 里就是代码地址，存进 int 之后直接调用即可，
+// 不需要闭包那层间接（见 02-language.md §4）。
+const OP_CALLV = 79
+// v3.47：`pause` 指令（spin_hint）。自旋循环里降功耗、避免流水线清空。
+const OP_SPIN = 80
 
 struct Ir {
     op: int
@@ -2830,7 +2843,15 @@ const RT_MEMDIFF = 25
 // v3.38：mem_xchg(addr, val) -> old（原子交换，xchg 隐含 LOCK）
 // std/net 的多 io 线程自旋锁靠它。
 const RT_MEMXCHG = 26
-const RT_COUNT = 27      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
+// v3.47：atomic_add(addr, v) -> old（`lock xadd [rcx], rdx`）
+// atomic_cas(addr, expect, new) -> old（`lock cmpxchg [rcx], rdx`）
+//
+// std/sync 的自旋锁、std/log 的计数、std/net/reactor 的队列序号都靠它们。
+// 两个都是**单指令原子**，比 stage-0 的 LL-SC 循环简单得多（x86 有硬件
+// 支持的 lock 前缀指令）。
+const RT_AADD = 27
+const RT_ACAS = 28
+const RT_COUNT = 29      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
 
 fn _slot_disp(slot: int) -> int {
     return -8 * (slot + 1)
@@ -3965,6 +3986,29 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         return d0
     }
     if nd.op == E_VAR {
+        // v3.47：**函数名直接作值**（`02-language.md` §4）。
+        //
+        // 语义：函数值就是代码地址。`let f = twice` 之后 `f(...)` 就是
+        // 间接调用；也可以存进 int / struct 字段 / static_word 槽再取出来。
+        //
+        // 以前这里直接 `_var_id`，遇到函数名就报 "未定义变量 twice" ——
+        // 于是「函数名作值」这条语言语义在 qlmc 上根本没有实现。
+        // std/sync 的 park 注入、std/log 的回调、std/net/reactor 的 cb
+        // 三个模块都卡在这上面。
+        //
+        // 先试变量：**局部变量遮蔽同名函数**（词法作用域优先），所以
+        // 变量路径必须在前。
+        let fni0 = _fn_index(fc, nd.a)
+        let vi0 = -1
+        if fni0 >= 0 {
+            vi0 = _try_var(fc, nd.a)
+        }
+        if fni0 >= 0 && vi0 < 0 {
+            let dfn = _vnew(fc)
+            fc.vty.set(dfn, TY_INT)
+            _ir_emit(fc, OP_LEAFN, dfn, 0, 0, fni0)
+            return dfn
+        }
         let v = _var_id(fc, nd.a)
         let ty = fc.vty.get(v)
         if _ty_is_agg(ty) {
@@ -4097,6 +4141,34 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         if fi < 0 {
             // 不是顶层函数：可能是闭包变量
             let cv = _try_var(fc, nd.a)
+            // v3.47：**int 变量里存函数地址**也能直接调用。
+            //
+            // 这是 Quelmara 的既定语义（`02-language.md` §4）：函数值就是
+            // 代码地址，存进 int 之后 `f(...)` 就是 `call f`。
+            // `std/sync` 的 park 注入正是这个形状：
+            //   let f = mem_load64(static_word(SLOT), 0)
+            //   f(p, want, ms)
+            // 以前只认 TY_FN（闭包），于是报 "未定义函数 f"。
+            //
+            // 与闭包路径的差别：闭包要 `OP_ADDRV` 取聚合地址再 `call [a]`；
+            // 这里 `f` 的值**本身**就是代码地址，直接 `OP_CALLV`。
+            if cv >= 0 && fc.vty.get(cv) == TY_INT {
+                let av2 = _call_args(fc, nd)
+                let vals2 = vec[int].new(2)
+                let mut ai2 = 0
+                while ai2 < len(av2) {
+                    vals2.push(_lower_expr(fc, av2.get(ai2)))
+                    ai2 = ai2 + 1
+                }
+                // 先把代码地址 pin 住（OP_ARG 会写 R8/R9，可能冲掉它）
+                let fv = _pin(fc, cv)
+                let stk2 = _emit_call_args(fc, vals2, 0)
+                let d2 = _vnew(fc)
+                fc.vty.set(d2, TY_INT)
+                _ir_emit(fc, OP_CALLV, d2, fv, 0, 0)
+                _emit_call_free(fc, stk2)
+                return d2
+            }
             if cv >= 0 && fc.vty.get(cv) == TY_FN {
                 let av = _call_args(fc, nd)
                 let vals = vec[int].new(2)
@@ -4441,6 +4513,15 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
         return TY_F64
     }
     if nd.op == E_VAR {
+        // v3.47：函数名作值 → 类型是 TY_INT（代码地址）。
+        // 先试变量（局部遮蔽优先），没有变量再看是不是函数。
+        let vv = _try_var(fc, nd.a)
+        if vv >= 0 {
+            return fc.vty.get(vv)
+        }
+        if _fn_index(fc, nd.a) >= 0 {
+            return TY_INT
+        }
         return fc.vty.get(_var_id(fc, nd.a))
     }
     if nd.op == E_FIELD {
@@ -6132,7 +6213,8 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int], csb: vec[int], lpm: vec[in
             // 跨 OP_MEMCPYN，于是 mem_str 返回的指针是垃圾 —— 而这个问题
             // 只在"qlmc 编自己"（寄存器压力大）时才暴露。
             if ins.op == OP_CALL || ins.op == OP_CALLRT || ins.op == OP_CALLIAT ||
-               ins.op == OP_CALLR || ins.op == OP_MEMCPYN || ins.op == OP_ZERON ||
+               ins.op == OP_CALLR || ins.op == OP_CALLV ||
+               ins.op == OP_MEMCPYN || ins.op == OP_ZERON ||
                ins.op == OP_COPY || ins.op == OP_RETAGG {
                 c = c + 1          // 都会清 caller-saved
             }
@@ -7256,6 +7338,23 @@ fn _emit_ir(fc: FnCtx, i: int) {
         }
         return
     }
+    if op == OP_SPIN {
+        _b(code, 0xF3)
+        _b(code, 0x90)                     // pause
+        return
+    }
+    if op == OP_CALLV {
+        // dst = call a：a 是代码地址本身（不是闭包值的地址）。
+        // 用 R11 做跳板：它在发射器里是保留的临时寄存器，不会被 vreg 占用。
+        _to_reg(fc, R11, ins.a)
+        _b(code, 0x41)                     // call r11
+        _b(code, 0xFF)
+        _b(code, 0xD3)
+        if ins.dst > 0 {
+            _store_rax(fc, fc.vloc.get(ins.dst))
+        }
+        return
+    }
     if op == OP_LEN {
         let dloc = fc.vloc.get(ins.dst)
         if dloc > 0 {
@@ -7775,7 +7874,7 @@ fn _emit_ir(fc: FnCtx, i: int) {
 ///
 /// 查表用 _op_name(i)：数第 i 个逗号之前有几个分隔符。
 fn _op_names_str() -> str {
-    return "NOP0,CONST,MOV,ADD,SUB,MUL,DIV,MOD,NEG,NOT,NZ,CMP,LAB,JMP,JZ,JNZ,ARG,CALL,CALLRT,RET,PRINT,EXIT,LEA,LEN,PARAM,JCMP,ADDRV,ADDRF,ADDRX,LOAD,STORE,COPY,ZERO,RETAGG,RETSRET,ZERON,CALLIAT,LEAFN,CALLR,MEMCPYN,AND,OR,XOR,SHL,SAR,SHR,BNOT,PARAMSTK,STKALLOC,STKARG,STKFREE,ADDRXN,RTADDR,LOAD8,STORE8,FCMP,NOP,BINI,CMPI,LOADD,LOADX,STORED,STOREX,LOAD8D,LOAD8X,STORE8D,STORE8X,FBIN,ITOF,FTOI,DIVC,LOAD8I,STORE8I,JCMPVLEN,JCMPSTR,FNEG,F64IMM,JCMPI,BSSADDR"
+    return "NOP0,CONST,MOV,ADD,SUB,MUL,DIV,MOD,NEG,NOT,NZ,CMP,LAB,JMP,JZ,JNZ,ARG,CALL,CALLRT,RET,PRINT,EXIT,LEA,LEN,PARAM,JCMP,ADDRV,ADDRF,ADDRX,LOAD,STORE,COPY,ZERO,RETAGG,RETSRET,ZERON,CALLIAT,LEAFN,CALLR,MEMCPYN,AND,OR,XOR,SHL,SAR,SHR,BNOT,PARAMSTK,STKALLOC,STKARG,STKFREE,ADDRXN,RTADDR,LOAD8,STORE8,FCMP,NOP,BINI,CMPI,LOADD,LOADX,STORED,STOREX,LOAD8D,LOAD8X,STORE8D,STORE8X,FBIN,ITOF,FTOI,DIVC,LOAD8I,STORE8I,JCMPVLEN,JCMPSTR,FNEG,F64IMM,JCMPI,BSSADDR,CALLV,SPIN"
 }
 
 /// 取第 n 个 opcode 的名字（n 越界返回 ?n）。
@@ -9256,6 +9355,47 @@ fn _gen_memxchg(ctx: Ctx) {
     _ret(code)
 }
 
+/// atomic_add(addr, v) -> 旧值：`lock xadd [rcx], rdx`。
+///
+/// 实参约定（与其它 RT 例程一致）：`rcx` = 地址、`rdx` = 增量。
+/// `lock xadd [rcx], rdx` 把 `[rcx]` 的旧值写进 rdx、并把 `[rcx] += rdx`
+/// 原子完成。所以返回时把 rdx 搬到 rax 即可。
+fn _gen_atomic_add(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    ctx.rt_pos.set(RT_AADD, len(code))
+    _b(code, 0xF0)                             // lock
+    _b(code, 0x48)                             // REX.W
+    _b(code, 0x0F)                             // xadd [rcx], rdx = 0F C1 /r
+    _b(code, 0xC1)
+    _b(code, 0x11)                             // ModRM=00 010 001 => [rcx], rdx
+    // 旧值现在在 rdx 里，搬到 rax 当返回值
+    _b(code, 0x48)
+    _b(code, 0x89)
+    _b(code, 0xD0)                             // mov rax, rdx
+    _ret(code)
+}
+
+/// atomic_cas(addr, expect, new) -> 旧值：`lock cmpxchg [rcx], rdx`。
+///
+/// `cmpxchg` 的语义固定：比较 `rax` 与 `[rcx]`，相等则写 rdx、否则把
+/// `[rcx]` 读进 rax。所以：
+///   * 进来时要把 `expect` 搬进 **rax**（不是 rcx）；
+///   * 实参约定 `rcx` = 地址、`rdx` = 新值、`r8` = expect。
+///   * 返回时 rax 已经是旧值，直接 ret。
+fn _gen_atomic_cas(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    ctx.rt_pos.set(RT_ACAS, len(code))
+    _b(code, 0x4C)                             // mov rax, r8 = 4C 89 C0
+    _b(code, 0x89)
+    _b(code, 0xC0)
+    _b(code, 0xF0)                             // lock
+    _b(code, 0x48)                             // REX.W
+    _b(code, 0x0F)                             // cmpxchg [rcx], rdx = 0F B1 /r
+    _b(code, 0xB1)
+    _b(code, 0x11)                             // ModRM=00 010 001 => [rcx], rdx
+    _ret(code)
+}
+
 fn _gen_memchr(ctx: Ctx) {
     let code: vec[int] = ctx.code
     let labs: vec[int] = ctx.labs
@@ -10485,6 +10625,125 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
     // v3.43：tcp_peer_raw(fd) -> str（对端地址的 20 字节原始视图）
     if bn == "tcp_peer_raw" {
         return _bi_tcp_peer_raw(fc, _lower_expr(fc, nd.b))
+    }
+    // v3.47：net_config(key) -> int（编译期常量）
+    //
+    // 0 = max_conns、1 = recv_buffer、2 = io_threads、3 = tcp_nodelay。
+    //
+    // **qlmc 没有 TOML 解析器**（那是 stage-0 的 `net_config` 干的事：
+    // 读根目录 Quelmara.toml 的 `[net]` 节）。这里用与 Quelmara.toml
+    // **当前值一致**的默认值，语义是"qlmc 编出来的 reactor 用默认配置"。
+    //
+    // 为什么不支持读配置：qlmc 的目标是"能编 std/"，不是"复刻 stage-0
+    // 的全部工程能力"。配置解析要一个 TOML 子集解析器 + 文件 I/O，
+    // 而它的唯一消费者就是这四个数字。等真有需求再做成 `-D key=value`。
+    if bn == "net_config" {
+        let kd = _vnew(fc)
+        fc.vty.set(kd, TY_INT)
+        // key 必须是编译期常量：这里直接看节点的字面量
+        let mut kv = 0
+        if nd.b >= 0 {
+            let kn = fc.nodes.get(nd.b)
+            if kn.op == E_NUM {
+                kv = kn.a
+            }
+        }
+        if kv == 0 {
+            _ir_emit(fc, OP_CONST, kd, 0, 0, 1000000)     // max_conns
+        } else if kv == 1 {
+            _ir_emit(fc, OP_CONST, kd, 0, 0, 4096)        // recv_buffer
+        } else if kv == 2 {
+            _ir_emit(fc, OP_CONST, kd, 0, 0, 1)           // io_threads（0=auto → 1）
+        } else {
+            _ir_emit(fc, OP_CONST, kd, 0, 0, 1)           // tcp_nodelay
+        }
+        return kd
+    }
+    // v3.47：sleep_ms(ms) -> 0（`Sleep`，阻塞当前线程）
+    //
+    // 与 thread_yield 的区别：yield 是"让出时间片、立刻可能回来"，
+    // sleep 是"至少等这么久"。`std/sync` 的退避等待用它。
+    if bn == "sleep_ms" {
+        let ms = _lower_expr(fc, nd.b)
+        _ir_emit(fc, OP_ARG, 0, ms, 0, 0)
+        let sr = _vnew(fc)
+        fc.vty.set(sr, TY_INT)
+        _ir_emit(fc, OP_CALLIAT, sr, 0, 0, I_SLEEP)
+        let sd = _vnew(fc)
+        fc.vty.set(sd, TY_INT)
+        _ir_emit(fc, OP_CONST, sd, 0, 0, 0)
+        return sd
+    }
+    // v3.47：mem_load_acq(addr) -> int / mem_store_rel(addr, v) -> 0
+    //
+    // x86-64 是 **TSO 内存模型**：普通 `mov` 读就是 acquire、普通 `mov` 写
+    // 就是 release（读不会被提前、写不会被推后）。所以这两个内建在
+    // x86-64 上是**零成本**的普通访存 —— 与 stage-0 同口径
+    // （那边 AArch64 才发 LDAR/STLR）。
+    //
+    // 它们的价值是把「发布-订阅」的意图写进源码：`std/sync` 的解锁用
+    // `mem_store_rel`，读者用 `mem_load_acq`，换架构时改内建即可。
+    if bn == "mem_load_acq" {
+        let la = _lower_expr(fc, nd.b)
+        let lad = _vnew(fc)
+        fc.vty.set(lad, TY_INT)
+        _ir_emit(fc, OP_LOAD, lad, la, 0, 8)
+        return lad
+    }
+    if bn == "mem_store_rel" {
+        let sa = _lower_expr(fc, nd.b)
+        let sv = _lower_expr(fc, nd.c)
+        _ir_emit(fc, OP_STORE, 0, sa, sv, 8)
+        let sd = _vnew(fc)
+        fc.vty.set(sd, TY_INT)
+        _ir_emit(fc, OP_CONST, sd, 0, 0, 0)
+        return sd
+    }
+    // v3.47：spin_hint() -> 0（`pause` 指令）
+    //
+    // 自旋循环里降功耗、避免流水线清空。与 thread_yield 的分工：
+    // spin_hint 是"再等一会儿"（ns 级、不切线程），thread_yield 是
+    // "让别的线程先跑"（µs 级、会切上下文）。
+    if bn == "spin_hint" {
+        _ir_emit(fc, OP_SPIN, 0, 0, 0, 0)
+        let sz = _vnew(fc)
+        fc.vty.set(sz, TY_INT)
+        _ir_emit(fc, OP_CONST, sz, 0, 0, 0)
+        return sz
+    }
+    // v3.47：atomic_add(addr, v) -> old / atomic_cas(addr, expect, new) -> old
+    //
+    // 都是**单指令原子**（`lock xadd` / `lock cmpxchg`），走运行库例程。
+    // `addr` 必须是 8 字节对齐（mem_alloc 产物或 static_word 槽）。
+    //
+    // 返回值是**旧值**，调用方比较判断成功与否 —— 与 stage-0 同口径。
+    if bn == "atomic_add" {
+        let aa = _lower_expr(fc, nd.b)
+        let av = _lower_expr(fc, nd.c)
+        let aa2 = _pin(fc, aa)
+        let av2 = _pin(fc, av)
+        _ir_emit(fc, OP_ARG, 0, aa2, 0, 0)
+        _ir_emit(fc, OP_ARG, 0, av2, 0, 1)
+        let ad = _vnew(fc)
+        fc.vty.set(ad, TY_INT)
+        _ir_emit(fc, OP_CALLRT, ad, 0, 0, RT_AADD)
+        return ad
+    }
+    if bn == "atomic_cas" {
+        let ca = _lower_expr(fc, nd.b)
+        let ce = _lower_expr(fc, nd.c)
+        let cn = _lower_expr(fc, nd.n)
+        let ca2 = _pin(fc, ca)
+        let ce2 = _pin(fc, ce)
+        let cn2 = _pin(fc, cn)
+        // 约定：rcx = 地址、rdx = 新值、r8 = expect
+        _ir_emit(fc, OP_ARG, 0, ca2, 0, 0)
+        _ir_emit(fc, OP_ARG, 0, cn2, 0, 1)
+        _ir_emit(fc, OP_ARG, 0, ce2, 0, 2)
+        let cd = _vnew(fc)
+        fc.vty.set(cd, TY_INT)
+        _ir_emit(fc, OP_CALLRT, cd, 0, 0, RT_ACAS)
+        return cd
     }
     // v3.44：UDP 三个内建（解 std/net/udp、udp6、dns 三个模块）
     if bn == "udp_open" {
@@ -12577,6 +12836,8 @@ fn _reg_k32b(dsym: vec[str], ddll: vec[int]) {
     ddll.push(0)
     dsym.push("GetFileSize")
     ddll.push(0)
+    dsym.push("Sleep")
+    ddll.push(0)
 }
 
 fn _reg_ws2(dsym: vec[str], ddll: vec[int]) {
@@ -12784,6 +13045,7 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     iat.set(I_YIELD, rdata_rva + iatb.get(0) + 80)
     iat.set(I_FILETIME, rdata_rva + iatb.get(0) + 88)
     iat.set(I_FILESIZE, rdata_rva + iatb.get(0) + 96)
+    iat.set(I_SLEEP, rdata_rva + iatb.get(0) + 104)
     iat.set(I_STRTOD, rdata_rva + iatb.get(2))
     iat.set(I_WSPRINTF, rdata_rva + iatb.get(1))
     // v3.42：ws2_32 的槽位（DLL 索引 3，组内顺序与 `_reg_ws2` 里一致）。
@@ -12794,7 +13056,7 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     // `build_rdata` 的帧槽**正好卡在 416 格上限**，摊开写会多要一格，
     // 自举 stage-2 立刻编不过自己（v3.42 实测）。循环只多两个变量。
     //
-    // **I_WSASTART..I_SETSOCKOPT 必须连续**（15..26）—— 这条循环靠它推。
+    // **I_WSASTART..I_SETSOCKOPT 必须连续**（16..27）—— 这条循环靠它推。
     let mut wi = 0
     while wi < I_USER - I_WSASTART {
         iat.set(I_WSASTART + wi, rdata_rva + iatb.get(3) + wi * 8)
@@ -13487,6 +13749,8 @@ fn main() {
     _gen_memchr(ctx)
 _gen_memdiff(ctx)
 _gen_memxchg(ctx)
+    _gen_atomic_add(ctx)
+    _gen_atomic_cas(ctx)
 _gen_memcmp(ctx)
     _gen_i64_fmt(ctx)
     _gen_str_to_int(ctx)

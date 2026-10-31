@@ -3454,6 +3454,47 @@ irdump 看到的现象：`CreateFileA` 的第 6/7 个实参拿到同一个 vreg�
 
 回归 PASS=363，自举 30/30 不动点成立。
 
+### 3.97 函数名作值 + int 间接调用：覆盖率 46 → 48（v3.47）
+
+按 v3.46 的结论做「函数值调用」这个共同卡点。`02-language.md` §4 写着
+「函数值就是代码地址」，qlmc 以前**两条都没实现**：
+
+| 语义 | 以前 | 现在 |
+|---|---|---|
+| `let f = twice` | `未定义变量 twice` | `OP_LEAFN` 取地址 |
+| `let f = <int>; f(...)` | `未定义函数 f` | 新 opcode `OP_CALLV = 79` |
+
+第一条在 `E_VAR` 的 lowering 加分支（先试变量，词法作用域优先；没有变量
+再看是不是函数），`_ty_of_expr` 同步改。第二条新增 `OP_CALLV`：
+`dst = call a`，`a` **就是**代码地址（`OP_CALLR` 是 `r11 = [a]; call r11`，
+a 是闭包值的地址）。`OP_CALLV` 同时登记进 `cp[]` 调用屏障。
+
+**为什么必须有第二条**：`std/sync` 的 park 注入是
+`let f = mem_load64(static_word(SLOT), 0)` 然后 `f(p, want, ms)` ——
+`f` 是 **TY_INT**，走不了闭包那条路。
+
+顺带补了 6 个内建（都是 `std/sync` / `std/log` 的依赖）：
+
+| 内建 | 实现 |
+|---|---|
+| `atomic_add(addr, v)` | `lock xadd [rcx], rdx`（手写机器码） |
+| `atomic_cas(addr, exp, new)` | `lock cmpxchg [rcx], rdx`（手写机器码） |
+| `spin_hint()` | `pause`（新 opcode `OP_SPIN = 80`） |
+| `sleep_ms(ms)` | `Sleep` |
+| `mem_load_acq` / `mem_store_rel` | 普通 `mov`（x86 TSO 零成本） |
+| `net_config(key)` | 编译期常量（见下） |
+
+`net_config` 的取舍：stage-0 读 `Quelmara.toml` 的 `[net]` 节，qlmc
+**没有 TOML 解析器**，所以用与当前配置一致的默认值
+（1000000 / 4096 / 1 / 1）。理由：解析要一个 TOML 子集 + 文件 I/O，
+而它唯一的消费者就是这四个数字。等真有需求再做 `-D key=value`。
+
+**覆盖率 46 → 48**：`std/sync.qma`（7168 B）和 `std/log.qma`（16384 B）
+现在都能编过。还剩 `std/net/reactor.qma` 卡在 `thread_start`（OS 线程
+入口 ABI，要 `CreateThread` + 参数块传递，成本明显高于本版所有其它内建）。
+
+回归 PASS=364，自举 30/30 不动点成立。
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |
