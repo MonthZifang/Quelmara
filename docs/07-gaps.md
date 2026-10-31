@@ -1464,8 +1464,27 @@ Segmentation fault (exit 139)
   `_emit_call_args` + `CALLIAT` 那一段。
 
 **重启条件**：~~先做 IR dump 工具~~ ✅ **v3.45 已完成**（`qlmc irdump`）。
-下一步：把 `_bi_udp_sendto` 与已知正常的 `_bi_udp_recvfrom` 各 dump
-一遍，逐条对比指令序列。
+
+**v3.45 用 irdump 复查得到的新证据**（比 v3.44 的排除表精确得多）：
+
+1. **IR 完全正确**：`ARG`×4 + `STKARG`×2（偏移 32/40）+ `STKALLOC 48`
+   + `CALLIAT imm=21` + `STKFREE 48`，顺序与 `_emit_call_args` 的
+   约定一致。
+2. **IAT 完全正确**：PE 导入表里 `sendto` 在 ws2_32 的 `slot[9]`，
+   即 `I_WSASTART + 9 = 21 = I_SENDTO`。
+3. **6 参 `@ffi` 带运行时值完全正常**：
+   `_va(0, 4096, 12288, 4, x, y)` → `p>0=1`、rc=0。
+   （v3.44 时我误判过：用 `CreateThread` 测崩溃了，但那是**我把
+   堆指针当成线程入口地址**，测试夹具写错，不是编译器的锅。）
+4. **`@ffi` 直接调 `sendto` 也成功**：`sent=3`、rc=0。
+5. 但**内建 `udp_sendto` 仍崩**，且机器码里找不到"`CALLIAT` 后紧跟
+   `add rsp,48`"的形状 —— 说明 `STKFREE` 在那条路径上没落到
+   预期位置。
+
+**下一步的切入点**：对比 `_bi_udp_sendto` 生成的 `CALLIAT` 目标 RVA
+与 `@ffi` 路径的差异（后者 `imm=26`，前者 `imm=21`，指向同一个
+`sendto` 但槽位不同 —— 检查 `iat[21]` 是否真被 `_reg_ws2` 的循环
+填上，以及 `STKFREE` 的 emit 是否被某个 pass 吃掉）。
 
 **方法教训**：这次花了约 40 轮在"猜假设 → 改代码 → 重编 2 分钟 → 跑一次"
 的循环上。重编 qlmc 要 2 分钟，40 轮 ≈ 80 分钟纯等待。
