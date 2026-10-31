@@ -3637,6 +3637,33 @@ v4 分支写的是 `ADDRF s4, ip, 0` 再 `COPY d4, s4, 4`。`sinp` 是
 回归 PASS=367 FAIL=0 SKIP=0，自举 30/30 不动点成立。
 
 
+### 3.101 `len()` 在 R12 上崩：`_len_of` 缺 SIB 字节（v3.51）
+
+**现象**：`print(len(s).to_str())` 崩 `0xC0000005`，但
+`print("x" + len(s).to_str())` 与 `let n = len(s); print(n.to_str())` 都正常。
+
+**两种写法的 IR 几乎逐行相同**，唯一差别是寄存器分配：
+前者把 `LEN` 的结果分到 **r12**（`_cs_reg(1)`），后者分到 r13。
+`--no-opt` / `-j1` 都照样崩，排除优化层与并行；stage-0 一直是对的。
+
+**根因**：`_len_of` 生成 `mov dst, [base-8]` 时用**裸 `_modrm`**。
+x86-64 里 `rm=100` 不表示"RSP 寄存器"，而是"后面跟一个 SIB 字节"。
+R12 的低 3 位正好是 4，于是本该是 disp8 的 `0xF8`（-8）被当成 SIB 吃掉，
+位移变成 0 —— 实际是 `mov r12, [r12]`，读字符串第一个字节当指针，立刻 AV。
+
+**修复**：改用 `_modrm_mem`（低 3 位是 4 时自动补 SIB）。
+
+**顺带审计了全部 9 处裸 `_modrm`**：只有 `_len_of` 是真 bug，其余 8 处的
+base 要么硬编码（`RBP` / `rm=5` / `RCX`），要么所有调用点都传 `RBP`。
+结论写进 CHANGELOG：`_modrm` 只在"base 一定是固定寄存器"时才安全，
+凡 base 来自 `_cs_reg()` / `_to_reg()` 的都必须走 `_modrm_mem`。
+
+**验证**：`tests/t195_qlmc_strlen.qma` 作为差分用例（`s30_strlen`），
+8 组形态、10 行输出与 stage-0 逐字节一致。qlmc 差分 **70 → 72**。
+
+回归 PASS=367 FAIL=0 SKIP=0，自举 30/30 不动点成立。
+
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |

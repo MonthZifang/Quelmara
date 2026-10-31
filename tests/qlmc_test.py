@@ -69,6 +69,10 @@ CASES = [
     # `S_FOREACH` 第一版编号与 `S_BREAK` 撞车时，代码能编出来但
     # break 被当集合求值，只有差分能抓住。
     ("s29_syntax", "tests/t194_qlmc_syntax.qma"),
+    # v3.51：`len()` 的机器码在 R12 上崩（`_len_of` 缺 SIB 字节）。
+    # **这条必须是差分用例**：bug 只在寄存器分配把 LEN 的结果分到 r12
+    # 时出现，光"能编过"完全看不出来 —— stage-0 一直是对的。
+    ("s30_strlen", "tests/t195_qlmc_strlen.qma"),
 ]
 
 npass = 0
