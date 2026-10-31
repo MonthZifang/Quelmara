@@ -3316,9 +3316,44 @@ stage-1 2 789 376 B / stage-2 464 384 B / stage-3 464 384 B
 不动点成立  sha256 3FCC4B18D151905E…
 ```
 
-剩余阻塞：`tcp_listen6` / `tcp_connect` / `tcp_*_to` / `tcp_peer_raw` /
+剩余阻塞：`tcp_listen6` / `tcp_connect` / `tcp_*_to` /
 `udp_*`（超时类要 `select`/`setsockopt`）；另有 `args` / `wall_ms` /
 `file_size` / `thread_yield` / `xmm_load` / `xmm_mov` / `syscall` 未做。
+
+### 3.93 `tcp_peer_raw`：覆盖率 45 → 46（v3.43）
+
+`std/net/addr.qma` 之前**只差这一个内建**（`peer_raw` / `peer_ip` /
+`peer_port` 三个公开函数都靠它），补上就通了。`I_USER` 20 → 21，
+新增 `I_GETPEERNAME = 20`；IAT 槽位循环从写死 8 改成
+`I_USER - I_WSASTART` 推导，加符号时不用再手改数字。
+
+返回 20 字节视图：`[0..1]` 端口网络序 | `[2]` family | `[3]` 0 | `[4..19]` 地址。
+
+这个内建是手写 IR，踩了**三个分配器陷阱**，每个都表现为"不崩、不报错、
+只是结果不对或挂死"：
+
+| # | 陷阱 | 症状 | 正解 |
+|---|---|---|---|
+| 1 | `OP_ARG` + `OP_CALLRT RT_MEMCPY` | 进程**挂死**（不崩不返回） | `RT_MEMCPY` 的实参搬运由 `OP_COPY` 自己做，改用 `OP_COPY` 一行 |
+| 2 | 常量定义在分支内部 | `dp` 变野指针 → 挂死 | 所有常量在分支前定义 |
+| 3 | 临时值跨 `OP_CALLRT` 存活 | 只把 `alloc(24)`→`alloc(28)`，`raw`/`dp` 差值就从 8 变成乱值 | 每个 alloc 后立刻用掉/存好 |
+
+第 2 条是**手写 IR 特有的**：语言层有 SSA 与支配关系检查会报"变量未定义"，
+手写 IR 里 `_vnew` 出来的临时值**永远"存在"**，没赋值就是垃圾。
+
+诊断靠**插桩**：按节点插 `OP_PRINT` 打标记 101..107，跑一次就知道停在哪两条
+之间（106 对应 `OP_CALLRT RT_MEMCPY`，一次定位）。比读代码猜快一个数量级。
+
+验证走字节级差分：`tests/peer_e2e_test.py` 用 `getsockname()` 拿客户端
+真实本地端口，再逐字节核对 —— 端口是随机分配的，这条断言真的在算。
+
+```
+[PASS] 端口网络序正确：214 122（本地端口 54906）
+[PASS] family == 2 / 对端地址 127.0.0.1
+=== t187 peer e2e: PASS=7 FAIL=0 ===
+```
+
+回归 PASS=360，自举不动点成立。
 
 ## 4. 自举
 

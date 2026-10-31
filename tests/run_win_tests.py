@@ -262,6 +262,30 @@ def case_net_e2e():
             f"{r.stdout[-400:]}{r.stderr[-300:]}")
 
 
+def case_peer_e2e():
+    """tcp_peer_raw 的字节级差分（v3.43）。
+
+    这个内建返回的是**手工拼出来的字节布局**（端口网络序 / family / 地址），
+    任何一处偏移错了都只是"读出垃圾数字"，不会崩 —— 所以必须有一个独立
+    实现的对端连上来，再用 Python 自己算一遍期望值逐字节比对。
+    """
+    if not IS_WIN:
+        skip("对端地址 E2E：非 Windows 平台（服务端运行时仅 PE）")
+        return
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/peer_e2e_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=300)
+    if r.returncode == 2:
+        skip("对端地址 E2E：39475 已被占用，跳过")
+    elif r.returncode == 0 and "peer e2e: PASS=" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines() if "peer e2e:" in ln]
+        ok(f"对端地址 E2E：{line[-1].strip() if line else 'ok'}")
+    else:
+        bad(f"对端地址 E2E 失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
 def case_encoding_diag():
     """源文件编码错误诊断 + CLI 诊断出口（v3.32，收 §7.11）。
 
@@ -1625,6 +1649,8 @@ def main():
     # 没人连它就一直挂着。这里交给 net_e2e_test.py —— 它自己拉起 exe、
     # 用 Python 当客户端连接、发报文、收回显，再断言两边的输出。
     case_net_e2e()
+    # v3.43：tcp_peer_raw 的字节级差分（端口网络序 / family / 地址布局）
+    case_peer_e2e()
 
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），
