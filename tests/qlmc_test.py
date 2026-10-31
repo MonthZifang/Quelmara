@@ -82,6 +82,12 @@ CASES = [
     # **必须是差分用例**：arg 传递、句柄有效性、多线程并发累加不丢更新
     # 都要逐字节对上 —— 尤其 bits=15 这条，任一线程没跑或 arg 传错就少一位。
     ("s32_thread", "tests/t197_qlmc_thread.qma"),
+    # v3.55：for k in map + map.del。
+    # **必须是差分用例**：map 遍历顺序未定义，但"集合内容"必须一致；
+    # del 尤其危险 —— 直接清 0 会切断探测链，排在后面的键静默找不到
+    # （v3.55 第一版就是这样：has(3) 返回 false、get(3) 返回 0，
+    # 数据没丢但找不到）。只有逐行对比 stage-0 才能抓住。
+    ("s33_mapiter", "tests/t199_qlmc_mapiter.qma"),
 ]
 
 npass = 0

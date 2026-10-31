@@ -1603,7 +1603,7 @@ stage-2 产物与 stage-1 不等价，且它编任何文件都报 `编译缓冲�
 所以这个特性是 qlmc 独有的，只能做自检不能做差分（见 `tests/modconst_test.py`）。
 方向很重要：这里 qlmc 比 stage-0 强，不为"能差分"把它弄坏。
 
-### 7.40 待修：qlmc 不支持 `for k in <map>`
+### 7.40 已修（v3.55）：qlmc 不支持 `for k in <map>`
 
 **现象**：`for k in m`（m 是 map）报 `qlmc: for k in ... 目前只支持遍历 vec`。
 `std/kv`、`std/set` 两个模块卡在这里。

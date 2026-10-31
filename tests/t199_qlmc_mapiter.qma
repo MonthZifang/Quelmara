@@ -1,0 +1,112 @@
+import std.core
+
+// v3.55：`for k in map` + `map.del(k)` 自检
+//
+// 这两件事是一起补的，因为 `std/kv` 与 `std/set` 同时需要：
+//   * `for k in m`（遍历键）
+//   * `m.del(k)`（删键）
+//
+// ## 遍历顺序未定义
+//
+// map 是**固定容量线性扫描**（槽序，不是插入序），所以 `for k in m`
+// 的顺序**未定义**。本夹具因此不假设顺序，只断言"集合内容"（和/计数）。
+//
+// ## del 不动探测链
+//
+// 只把该槽的键清 0，不搬移 —— 所以**遍历中途删除是安全的**。
+// `std/kv` 的 `_clear` 靠这一点（"先收键再删"其实是为了别的目的）。
+fn main() {
+    // ---- 1. int 键：和与计数 ----
+    let m = map[int]int.new(8)
+    m.set(1, 100)
+    m.set(2, 200)
+    m.set(3, 300)
+    let mut sum = 0
+    let mut cnt = 0
+    for k in m {
+        sum = sum + k
+        cnt = cnt + 1
+    }
+    print("sum=" + sum.to_str())          // 6
+    print("cnt=" + cnt.to_str())          // 3
+
+    // ---- 2. str 键 ----
+    let ms = map[str]int.new(8)
+    ms.set("a", 1)
+    ms.set("b", 2)
+    let mut c2 = 0
+    let mut has_a = 0
+    let mut has_b = 0
+    for k in ms {
+        c2 = c2 + 1
+        if k == "a" {
+            has_a = 1
+        }
+        if k == "b" {
+            has_b = 1
+        }
+    }
+    print("c2=" + c2.to_str())            // 2
+    print("keys=" + has_a.to_str() + has_b.to_str())   // 11
+
+    // ---- 3. 空 map 不进循环 ----
+    let e = map[int]int.new(4)
+    let mut z = 0
+    for k in e {
+        z = z + 1
+    }
+    print("empty=" + z.to_str())          // 0
+
+    // ---- 4. break / continue ----
+    let mut sk = 0
+    for k in m {
+        if k == 2 {
+            continue
+        }
+        sk = sk + k
+    }
+    print("skip2=" + sk.to_str())         // 4
+
+    // ---- 5. del：命中返回 1、未命中返回 0 ----
+    let r1 = m.del(2)
+    print("del_hit=" + r1.to_str())       // 1
+    let r2 = m.del(99)
+    print("del_miss=" + r2.to_str())      // 0
+
+    // ---- 6. del 之后遍历跳过空槽 ----
+    let mut s3 = 0
+    let mut c3 = 0
+    for k in m {
+        s3 = s3 + k
+        c3 = c3 + 1
+    }
+    print("after_del=" + s3.to_str())     // 4（只剩 1 和 3）
+    print("after_cnt=" + c3.to_str())     // 2
+    // **不用 m.len()**：stage-0 不支持（`map 未知方法 .len`），
+    // 而这里要做差分。方向是"qlmc 比 stage-0 强，不为能差分把它弄坏"，
+    // 所以用遍历计数代替。len() 本身由 s8_map 那批用例覆盖。
+
+    // ---- 7. has 与 del 一致 ----
+    if m.has(2) {
+        print("has2=1")
+    } else {
+        print("has2=0")                   // 0
+    }
+    if m.has(3) {
+        print("has3=1")                   // 1
+    } else {
+        print("has3=0")
+    }
+
+    // ---- 8. del 之后可以重新 set 同一个键 ----
+    m.set(2, 222)
+    let g = m.get(2)
+    print("reset=" + g.to_str())          // 222
+    let mut c4 = 0
+    for k in m {
+        c4 = c4 + 1
+    }
+    print("len_reset=" + c4.to_str())     // 3
+
+    print("done")
+}
