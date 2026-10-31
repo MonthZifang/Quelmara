@@ -3283,6 +3283,43 @@ assert(mem_load64(p - 8, 0) == 5)   // 长度头在 p-8
 **"验证决策前提"本身是产出** —— 若上一版直接去改 IAT 表，可能花掉一整版
 还引入风险；这次 20 分钟的验证直接排除了那条路。
 
+### 3.92 网络内建落地 + 分配器 ARG 屏障缺陷（v3.42）
+
+覆盖率 **44 → 45**（基线已上调）。按 v3.41 的路线 B 实现了 TCP 六个内建
+（`tcp_listen` / `tcp_accept` / `tcp_send` / `tcp_send_n` / `tcp_recv` /
+`tcp_close`），`I_USER` 12 → 20，`dnames` 加 `ws2_32.dll`。
+
+过程中挖出三个**结构性**缺陷，都不是"写错一行"：
+
+| # | 缺陷 | 症状 | 根因 |
+|---|---|---|---|
+| 1 | IAT 槽位漏填 | 一执行就 `0xC0000005`，`print` 都活不过 | 加 `dsym.push` 忘了加对应 `iat.set`，槽位留 0 → `call [0]` |
+| 2 | 分配器把实参寄存器当临时值 | `tcp_send_n` 恒返回 0，对端收不到 | `cp[]` 只把 `CALL` 当屏障，`OP_ARG` 不算；临时池 `R8/R9` 与第 3/4 实参寄存器重叠 |
+| 3 | 帧槽上限顶爆 | 自举 stage-2 编不过自己 | `build_rdata` 每条 `let` 占 1 格，已贴 416；加 8 个 `dsym.push` 推过去 |
+
+第 2 条是**通用缺陷**，只在手写 IR 的内建里暴露：用户函数的三参调用一直
+是对的（实参在 `CALL` 前搬完、区间含 `CALL`）。修复是把 `OP_ARG imm>=2`
+也算作跨调用屏障 —— 只对 `>= 2` 生效，因为 0/1 映到 `RCX`/`RDX`，不在临时池。
+
+第 3 条的正解不是加帧（帧 > 4 KB 要栈探测，§7.17）：先试过把上限
+416 → 424，报错**跟着涨**成"需要 425"，说明不是容量问题；加临时诊断才
+看清是 `build_rdata` 真的在用 424 格。正解是把 8 个符号注册搬进独立函数
+`_reg_ws2` —— 函数调用不占调用方的局部槽。
+
+验证走差分口径：`tests/t186_qlmc_tcp.qma` 是服务端（阻塞在 `accept`），
+由 `tests/net_e2e_test.py` 用 Python 当客户端连接、发报文、收回显，
+再断言两边输出。Python 端独立实现，能同时钉住 IAT 槽位、`sockaddr_in`
+布局、htons 字节序、fail-fast 判定。
+
+```
+stage-1 2 789 376 B / stage-2 464 384 B / stage-3 464 384 B
+不动点成立  sha256 3FCC4B18D151905E…
+```
+
+剩余阻塞：`tcp_listen6` / `tcp_connect` / `tcp_*_to` / `tcp_peer_raw` /
+`udp_*`（超时类要 `select`/`setsockopt`）；另有 `args` / `wall_ms` /
+`file_size` / `thread_yield` / `xmm_load` / `xmm_mov` / `syscall` 未做。
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |

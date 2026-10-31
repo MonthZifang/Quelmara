@@ -2096,7 +2096,19 @@ const I_QPF = 9
 const I_STRTOD = 10
 // v2.76：堆从 .bss 改成 VirtualAlloc 私有页（首次触碰 5.5 µs/页 → 1 µs/页）
 const I_VALLOC = 11
-const I_USER = 12       // 用户 @ffi 符号从第 12 个 IAT 槽开始
+// v3.42：网络内建要用的 ws2_32 符号（8 个）。
+// 为什么不走用户 @ffi 通道：内建是**编译器发射**的，没有对应的 fn 记录
+// 可以承载 nlocals 槽号；直接给它们固定的内置槽更简单，也让
+// 哪些网络符号被内建依赖一目了然。
+const I_WSASTART = 12
+const I_SOCKET = 13
+const I_BIND = 14
+const I_LISTEN = 15
+const I_ACCEPT = 16
+const I_SEND = 17
+const I_RECV = 18
+const I_CLOSESOCK = 19
+const I_USER = 20       // 用户 @ffi 符号从第 20 个 IAT 槽开始
 
 // ---------------------------------------------------------------------------
 // 字节发射
@@ -2763,6 +2775,12 @@ const MAX_VAR = 64          // 变量最多占 64 个寄存器位（其余落槽
 // v2.33：变量/聚合区从 256 提到 384——qlmc 自己的 build_rdata 要 257 格。
 // 帧仍是 4 KB（512 格），临时值溢出区剩 128 格（够用：同时活跃的临时值很少 >8）。
 // **不要再靠加帧来扩**：帧 > 4 KB 必须做栈探测（§7.17），qlmc 还没做。
+//
+// v3.42 的教训：`build_rdata` 已经贴着 416 格。加 ws2_32 的 8 个导入时
+// 别在那儿摊开写 `dsym.push`（每个 `let`/`push` 语句占一格），搬进
+// `_reg_ws2` 这种独立函数里 —— 函数调用不占调用方的局部变量槽。
+// 当时先试着把上限 416->424，结果报错数字跟着一起涨（"需要 425"），
+// 说明那根本不是容量问题，是函数真的在用 424 格。
 const SLOT_TEMP = 416
 const MAX_SLOT = 512
 
@@ -6105,6 +6123,30 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int], csb: vec[int], lpm: vec[in
                ins.op == OP_CALLR || ins.op == OP_MEMCPYN || ins.op == OP_ZERON ||
                ins.op == OP_COPY || ins.op == OP_RETAGG {
                 c = c + 1          // 都会清 caller-saved
+            }
+            // v3.42：**OP_ARG 也是一道屏障**。
+            //
+            // 实参寄存器是 RCX/RDX/R8/R9，而临时值池是 R8/R9/R10/R11 —— 两者
+            // 在 R8/R9 上**重叠**。一条 `OP_ARG k, v` 把 v 搬进实参寄存器之后，
+            // v 一直要活到 CALL 为止；但 v 的区间 (st,en] 里没有 CALL，`crosses`
+            // 算出来是 0，分配器就敢把它放进 R8。紧接着为第 4 个实参 CONST 的
+            // 那个 0 复用了同一个 R8，`mov r8, 0` 把第 3 个实参覆盖掉。
+            //
+            // 症状（v3.42 实测）：`tcp_send_n(conn, p, 10)` 编成
+            // `send(conn, p, 0, 0)`，返回 0 字节、对端收不到东西。用户函数的
+            // 三参调用不受影响（那边的实参在 CALL 前就搬完、区间含 CALL），
+            // 所以这个坑只在**内建手写 IR**里暴露 —— 而内建恰恰是最容易
+            // 把 CONST 写在 ARG 后面的地方。
+            //
+            // 把 ARG 也算成"跨调用屏障"，这些值就老实溢出到帧槽，不会占着
+            // 实参寄存器。
+            //
+            // 只对 **imm >= 2** 生效：`_out_arg_reg` 把 0/1 映到 RCX/RDX，
+            // 那两个不在临时池里，没有冲突，也就没必要付溢出的代价。
+            // 3 参以上的调用才会走到这里，而 3 参以上的内建/函数调用本来
+            // 就不是内层热路径。
+            if ins.op == OP_ARG && ins.imm >= 2 {
+                c = c + 1
             }
         }
         i = i + 1
@@ -10232,6 +10274,38 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         let n = _lower_expr(fc, nd.c)
         return _bi_mem_str(fc, p, n)
     }
+    // v3.42：tcp_listen(port) -> fd
+    //
+    // 与 stage-0 的 __tcp_listen 对齐：绑定 0.0.0.0:port 并监听，
+    // 失败一律 **fail-fast**（不是返回 -1）。
+    //
+    // 实现顺序：WSAStartup -> socket -> 构造 sockaddr_in -> bind -> listen。
+    // 注意 Win64 的 int 返回值**只写 eax**（高 32 位 0 扩展），
+    // 所以 SOCKET_ERROR 在 rax 里是 0x00000000FFFFFFFF 而不是 64 位 -1。
+    // 判失败要用「shl 32 / sar 32 符号扩展后与 -1 比较」，不能直接比 -1。
+    if bn == "tcp_listen" {
+        return _bi_tcp_listen(fc, _lower_expr(fc, nd.b))
+    }
+    // v3.42：tcp_close(fd) -> 0
+    if bn == "tcp_close" {
+        return _bi_tcp_close(fc, _lower_expr(fc, nd.b))
+    }
+    // v3.42：tcp_accept(fd) -> conn（阻塞等待；失败 fail-fast）
+    if bn == "tcp_accept" {
+        return _bi_tcp_accept(fc, _lower_expr(fc, nd.b))
+    }
+    // v3.42：tcp_send(fd, str) -> 发送字节数
+    if bn == "tcp_send" {
+        return _bi_tcp_send(fc, _lower_expr(fc, nd.b), _lower_expr(fc, nd.c))
+    }
+    // v3.42：tcp_send_n(fd, ptr, n) -> 发送字节数（零拷贝，协议库缓冲池用）
+    if bn == "tcp_send_n" {
+        return _bi_tcp_send_n(fc, _lower_expr(fc, nd.b), _lower_expr(fc, nd.c), _lower_expr(fc, nd.n))
+    }
+    // v3.42：tcp_recv(fd, cap) -> str（对端关闭返回**空串**，不是错误）
+    if bn == "tcp_recv" {
+        return _bi_tcp_recv(fc, _lower_expr(fc, nd.b), _lower_expr(fc, nd.c))
+    }
     // v3.39：str_ptr(s) -> int（str 的数据指针）
     // Quelmara 的 str 值**本身就是数据指针**（长度在 p-8），所以零成本：
     // 直接返回操作数。用途是把 str 喂给 tcp_send_n 这类零拷贝内建。
@@ -10510,6 +10584,329 @@ fn _bi_mem_str(fc: FnCtx, p: int, n: int) -> int {
         fc.vty.set(d, TY_STR)
     _ir_emit(fc, OP_MOV, d, dstp, 0, 0)
     return d
+}
+
+/// 网络内建的失败检查（v3.42）。
+///
+/// tcp_listen
+/// 绑定 0.0.0.0:port 并监听，失败 fail-fast。
+/// 实现顺序：WSAStartup -> socket -> 构造 sockaddr_in -> bind -> listen。
+///
+/// **单独成函数是为了压 `_lower_builtin` 的帧槽**：这些 IR 序列
+/// 要几十个临时值，内联会把 `_lower_builtin` 顶过 416 格上限，
+/// 自举 stage-2 就编不过自己。与 `_bi_mem_str` 同一个处理方式。
+fn _bi_tcp_listen(fc: FnCtx, port: int) -> int {
+    // WSAStartup(0x202, &wsa)：wsa 是 64 字节缓冲，内容不读
+    let wsa = _vnew(fc)
+    fc.vty.set(wsa, TY_INT)
+    _ir_emit(fc, OP_CONST, wsa, 0, 0, 64)
+    _ir_emit(fc, OP_ARG, 0, wsa, 0, 0)
+    let wh = _vnew(fc)
+    fc.vty.set(wh, TY_INT)
+    _ir_emit(fc, OP_CALLRT, wh, 0, 0, RT_ALLOC)
+    let ver = _vnew(fc)
+    fc.vty.set(ver, TY_INT)
+    _ir_emit(fc, OP_CONST, ver, 0, 0, 514)      // 0x0202
+    _ir_emit(fc, OP_ARG, 0, ver, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, wh, 0, 1)
+    let wr = _vnew(fc)
+    fc.vty.set(wr, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, wr, 0, 0, I_WSASTART)
+    // WSAStartup 失败：fail-fast
+    _net_fail_if_nonzero(fc, wr, 1)
+    // socket(AF_INET=2, SOCK_STREAM=1, 0)
+    let af = _vnew(fc)
+    fc.vty.set(af, TY_INT)
+    _ir_emit(fc, OP_CONST, af, 0, 0, 2)
+    _ir_emit(fc, OP_ARG, 0, af, 0, 0)
+    let typ = _vnew(fc)
+    fc.vty.set(typ, TY_INT)
+    _ir_emit(fc, OP_CONST, typ, 0, 0, 1)
+    _ir_emit(fc, OP_ARG, 0, typ, 0, 1)
+    let zero = _vnew(fc)
+    fc.vty.set(zero, TY_INT)
+    _ir_emit(fc, OP_CONST, zero, 0, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, zero, 0, 2)
+    let s = _vnew(fc)
+    fc.vty.set(s, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, s, 0, 0, I_SOCKET)
+    // socket 失败（符号扩展后 == -1）
+    _net_fail_if_neg1(fc, s, 2)
+    // sockaddr_in(16B)：family(2) | htons(port)<<16
+    let sin = _vnew(fc)
+    fc.vty.set(sin, TY_INT)
+    _ir_emit(fc, OP_CONST, sin, 0, 0, 16)
+    _ir_emit(fc, OP_ARG, 0, sin, 0, 0)
+    let sinb = _vnew(fc)
+    fc.vty.set(sinb, TY_INT)
+    _ir_emit(fc, OP_CALLRT, sinb, 0, 0, RT_ALLOC)
+    // htons：低字节与高字节交换
+    let lo = _vnew(fc)
+    fc.vty.set(lo, TY_INT)
+    let m255 = _vnew(fc)
+    fc.vty.set(m255, TY_INT)
+    _ir_emit(fc, OP_CONST, m255, 0, 0, 255)
+    _ir_emit(fc, OP_AND, lo, port, m255, 0)
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    let lo8 = _vnew(fc)
+    fc.vty.set(lo8, TY_INT)
+    _ir_emit(fc, OP_SHL, lo8, lo, eight, 0)
+    let hi = _vnew(fc)
+    fc.vty.set(hi, TY_INT)
+    _ir_emit(fc, OP_SHR, hi, port, eight, 0)
+    let hi2 = _vnew(fc)
+    fc.vty.set(hi2, TY_INT)
+    _ir_emit(fc, OP_AND, hi2, hi, m255, 0)
+    let hbe = _vnew(fc)
+    fc.vty.set(hbe, TY_INT)
+    _ir_emit(fc, OP_OR, hbe, lo8, hi2, 0)
+    // w0 = family(2) | htons(port)<<16
+    let six16 = _vnew(fc)
+    fc.vty.set(six16, TY_INT)
+    _ir_emit(fc, OP_CONST, six16, 0, 0, 16)
+    let sh16 = _vnew(fc)
+    fc.vty.set(sh16, TY_INT)
+    _ir_emit(fc, OP_SHL, sh16, hbe, six16, 0)
+    let two = _vnew(fc)
+    fc.vty.set(two, TY_INT)
+    _ir_emit(fc, OP_CONST, two, 0, 0, 2)
+    let w0 = _vnew(fc)
+    fc.vty.set(w0, TY_INT)
+    _ir_emit(fc, OP_OR, w0, sh16, two, 0)
+    let p0 = _vnew(fc)
+    fc.vty.set(p0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p0, sinb, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, p0, w0, 8)
+    let p8 = _vnew(fc)
+    fc.vty.set(p8, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p8, sinb, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, p8, zero, 8)
+    // bind(s, sin, 16)
+    _ir_emit(fc, OP_ARG, 0, s, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, sinb, 0, 1)
+    let n16 = _vnew(fc)
+    fc.vty.set(n16, TY_INT)
+    _ir_emit(fc, OP_CONST, n16, 0, 0, 16)
+    _ir_emit(fc, OP_ARG, 0, n16, 0, 2)
+    let br = _vnew(fc)
+    fc.vty.set(br, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, br, 0, 0, I_BIND)
+    _net_fail_if_neg1(fc, br, 3)
+    // listen(s, 128)
+    _ir_emit(fc, OP_ARG, 0, s, 0, 0)
+    let bl = _vnew(fc)
+    fc.vty.set(bl, TY_INT)
+    _ir_emit(fc, OP_CONST, bl, 0, 0, 128)
+    _ir_emit(fc, OP_ARG, 0, bl, 0, 1)
+    let lr = _vnew(fc)
+    fc.vty.set(lr, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, lr, 0, 0, I_LISTEN)
+    _net_fail_if_neg1(fc, lr, 4)
+    return s
+}
+
+/// tcp_close
+/// closesocket 的薄封装，恒返回 0。
+///
+/// **单独成函数是为了压 `_lower_builtin` 的帧槽**：这些 IR 序列
+/// 要几十个临时值，内联会把 `_lower_builtin` 顶过 416 格上限，
+/// 自举 stage-2 就编不过自己。与 `_bi_mem_str` 同一个处理方式。
+fn _bi_tcp_close(fc: FnCtx, fd: int) -> int {
+    _ir_emit(fc, OP_ARG, 0, fd, 0, 0)
+    let r = _vnew(fc)
+    fc.vty.set(r, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, r, 0, 0, I_CLOSESOCK)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+    return d
+}
+
+/// tcp_accept
+/// 阻塞等到一个连接；失败 fail-fast。
+///
+/// **单独成函数是为了压 `_lower_builtin` 的帧槽**：这些 IR 序列
+/// 要几十个临时值，内联会把 `_lower_builtin` 顶过 416 格上限，
+/// 自举 stage-2 就编不过自己。与 `_bi_mem_str` 同一个处理方式。
+fn _bi_tcp_accept(fc: FnCtx, fd: int) -> int {
+    _ir_emit(fc, OP_ARG, 0, fd, 0, 0)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, z, 0, 1)     // addr = NULL
+    _ir_emit(fc, OP_ARG, 0, z, 0, 2)     // addrlen = NULL
+    let c = _vnew(fc)
+    fc.vty.set(c, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, c, 0, 0, I_ACCEPT)
+    _net_fail_if_neg1(fc, c, 5)
+    return c
+}
+
+/// tcp_send
+/// 发一个 str（长度取 [s-8] 头）；SOCKET_ERROR 一律 fail-fast。
+///
+/// **单独成函数是为了压 `_lower_builtin` 的帧槽**：这些 IR 序列
+/// 要几十个临时值，内联会把 `_lower_builtin` 顶过 416 格上限，
+/// 自举 stage-2 就编不过自己。与 `_bi_mem_str` 同一个处理方式。
+fn _bi_tcp_send(fc: FnCtx, fd: int, sv: int) -> int {
+    // 长度 = [s-8]
+    let lp = _vnew(fc)
+    fc.vty.set(lp, TY_INT)
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    _ir_emit(fc, OP_SUB, lp, sv, eight, 0)
+    let n = _vnew(fc)
+    fc.vty.set(n, TY_INT)
+    _ir_emit(fc, OP_LOAD, n, lp, 0, 8)
+    _ir_emit(fc, OP_ARG, 0, fd, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, sv, 0, 1)
+    _ir_emit(fc, OP_ARG, 0, n, 0, 2)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, z, 0, 3)     // flags = 0
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, d, 0, 0, I_SEND)
+    // 与 stage-0 的 __tcp_send 对齐：SOCKET_ERROR 一律 fail-fast。
+    // 不检查的话错误码会被当成"发出去 4294967295 字节"，上层 send_all
+    // 的循环条件 n <= 0 永远不成立 → 死循环。
+    _net_fail_if_neg1(fc, d, 7)
+    return d
+}
+
+/// tcp_send_n
+/// 零拷贝发送（协议库缓冲池用）。
+///
+/// **单独成函数是为了压 `_lower_builtin` 的帧槽**：这些 IR 序列
+/// 要几十个临时值，内联会把 `_lower_builtin` 顶过 416 格上限，
+/// 自举 stage-2 就编不过自己。与 `_bi_mem_str` 同一个处理方式。
+fn _bi_tcp_send_n(fc: FnCtx, fd: int, ptr: int, n: int) -> int {
+    // **顺序故意保持"先发 ARG、后建 0"** —— 这是分配器 ARG 屏障的回归
+    // 探针。分配器把 `OP_ARG imm>=2` 当跨调用屏障之后，这个 0 会被
+    // 溢出到帧槽而不是复用 R8，实参不会再被覆盖。
+    // 要是哪天有人把 `_opt_alloc` 里那段屏障删了，t186 会立刻退回
+    // `send(fd, p, 0, 0)` → 回显空 → net_e2e_test 红。
+    _ir_emit(fc, OP_ARG, 0, fd, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, ptr, 0, 1)
+    _ir_emit(fc, OP_ARG, 0, n, 0, 2)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, z, 0, 3)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, d, 0, 0, I_SEND)
+    _net_fail_if_neg1(fc, d, 8)
+    return d
+}
+
+/// tcp_recv
+/// 收一段，返回 [len][bytes][NUL] 的 str；出错 fail-fast，对端关闭返回空串。
+///
+/// **单独成函数是为了压 `_lower_builtin` 的帧槽**：这些 IR 序列
+/// 要几十个临时值，内联会把 `_lower_builtin` 顶过 416 格上限，
+/// 自举 stage-2 就编不过自己。与 `_bi_mem_str` 同一个处理方式。
+fn _bi_tcp_recv(fc: FnCtx, fd: int, cap: int) -> int {
+    // 分配 cap+9：长度头 + 数据 + NUL
+    let nine = _vnew(fc)
+    fc.vty.set(nine, TY_INT)
+    _ir_emit(fc, OP_CONST, nine, 0, 0, 9)
+    let sz = _vnew(fc)
+    fc.vty.set(sz, TY_INT)
+    _ir_emit(fc, OP_ADD, sz, cap, nine, 0)
+    _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+    let buf = _vnew(fc)
+    fc.vty.set(buf, TY_INT)
+    _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
+    let dp = _vnew(fc)
+    fc.vty.set(dp, TY_INT)
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    _ir_emit(fc, OP_ADD, dp, buf, eight, 0)
+    _ir_emit(fc, OP_ARG, 0, fd, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, dp, 0, 1)
+    _ir_emit(fc, OP_ARG, 0, cap, 0, 2)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, z, 0, 3)
+    let got = _vnew(fc)
+    fc.vty.set(got, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, got, 0, 0, I_RECV)
+    // 失败（SOCKET_ERROR）→ **fail-fast**，与 stage-0 的 __tcp_recv 一致
+    // （那边 recv 出错就 net_fail，不静默归零）。
+    //
+    // 判失败必须先符号扩展：Win64 的 int 返回值只写 eax，-1 落在 rax 里
+    // 是 0x00000000FFFFFFFF（= +4294967295）。直接 `cmp rax, -1` 永远不等，
+    // 于是错误码被当成"收到 4294967295 字节"，长度头写脏、后面 str 全乱。
+    _net_fail_if_neg1(fc, got, 6)
+    // 写长度头
+    let hp = _vnew(fc)
+    fc.vty.set(hp, TY_INT)
+    _ir_emit(fc, OP_ADDRF, hp, buf, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, hp, got, 8)
+    // 末尾 NUL
+    let ep = _vnew(fc)
+    fc.vty.set(ep, TY_INT)
+    _ir_emit(fc, OP_ADD, ep, dp, got, 0)
+    _ir_emit(fc, OP_STORE8, 0, ep, z, 0)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_STR)
+    _ir_emit(fc, OP_MOV, d, dp, 0, 0)
+    return d
+}
+
+/// Win64 的 int 返回值**只写 eax**（高 32 位 0 扩展），所以
+/// `SOCKET_ERROR` 落在 rax 里是 `0x00000000FFFFFFFF` 而不是 64 位 -1。
+/// 直接与 -1 比较会漏检（stage-0 的注释里记着这个坑：bind/listen 失败
+/// 被放过，accept 才炸）。
+///
+/// 所以先 `shl 32 / sar 32` 做符号扩展，再与 -1 比较。
+fn _net_fail_if_neg1(fc: FnCtx, v: int, code: int) {
+    let lfail = _newlab(fc.labs)
+    let lok = _newlab(fc.labs)
+    let sh = _vnew(fc)
+    fc.vty.set(sh, TY_INT)
+    let n32 = _vnew(fc)
+    fc.vty.set(n32, TY_INT)
+    _ir_emit(fc, OP_CONST, n32, 0, 0, 32)
+    _ir_emit(fc, OP_SHL, sh, v, n32, 0)
+    let se = _vnew(fc)
+    fc.vty.set(se, TY_INT)
+    _ir_emit(fc, OP_SAR, se, sh, n32, 0)
+    let m1 = _vnew(fc)
+    fc.vty.set(m1, TY_INT)
+    _ir_emit(fc, OP_CONST, m1, 0, 0, -1)
+    // 不等于 -1 就跳过死路
+    _ir_emit(fc, OP_JCMP, 0x85, se, m1, lok)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
+    let cd = _vnew(fc)
+    fc.vty.set(cd, TY_INT)
+    _ir_emit(fc, OP_CONST, cd, 0, 0, code)
+    _ir_emit(fc, OP_EXIT, 0, cd, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
+}
+
+/// 非 0 即失败（WSAStartup 用：它返回错误码而不是 -1）。
+fn _net_fail_if_nonzero(fc: FnCtx, v: int, code: int) {
+    let lfail = _newlab(fc.labs)
+    let lok = _newlab(fc.labs)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    // 等于 0 就跳过死路
+    _ir_emit(fc, OP_JCMP, 0x84, v, z, lok)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
+    let cd = _vnew(fc)
+    fc.vty.set(cd, TY_INT)
+    _ir_emit(fc, OP_CONST, cd, 0, 0, code)
+    _ir_emit(fc, OP_EXIT, 0, cd, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
 }
 
 fn _lower_method(fc: FnCtx, nd: Node) -> int {
@@ -11212,6 +11609,32 @@ fn _pad_to(buf: vec[int], n: int) {
     }
 }
 
+/// v3.42：登记 ws2_32 的 8 个导入符号（DLL 索引 3）。
+///
+/// **顺序必须与 `I_WSASTART..I_CLOSESOCK` 一致** —— `build_rdata` 末尾按
+/// `I_WSASTART + wi` 算 IAT 槽位，错一个就是调错 API（表现为 0xC0000005）。
+///
+/// 单独成函数是为了压 `build_rdata` 的局部变量表：那边已经贴着 416 格上限，
+/// 8 个 `let`/`push` 摊开写会把自举 stage-2 顶爆。函数调用不占调用方的槽。
+fn _reg_ws2(dsym: vec[str], ddll: vec[int]) {
+    dsym.push("WSAStartup")
+    ddll.push(3)
+    dsym.push("socket")
+    ddll.push(3)
+    dsym.push("bind")
+    ddll.push(3)
+    dsym.push("listen")
+    ddll.push(3)
+    dsym.push("accept")
+    ddll.push(3)
+    dsym.push("send")
+    ddll.push(3)
+    dsym.push("recv")
+    ddll.push(3)
+    dsym.push("closesocket")
+    ddll.push(3)
+}
+
 fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     let rd: vec[int] = ctx.rdata
 
@@ -11220,8 +11643,9 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     dnames.push("kernel32.dll")
     dnames.push("user32.dll")
     dnames.push("msvcrt.dll")
-    let dsym = vec[str].new(8)
-    let ddll = vec[int].new(8)
+    dnames.push("ws2_32.dll")   // v3.42：索引 3，网络内建用
+    let dsym = vec[str].new(24)
+    let ddll = vec[int].new(24)
     dsym.push("GetStdHandle")
     ddll.push(0)
     dsym.push("WriteFile")
@@ -11250,6 +11674,12 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     ddll.push(2)
     dsym.push("wsprintfA")
     ddll.push(1)
+    // v3.42：ws2_32 的 8 个符号（DLL 索引 3）。
+    //
+    // **搬到独立函数 `_reg_ws2` 里**，不在这儿摊开写：`build_rdata` 的局部
+    // 变量表已经到 416 格上限，每多一个 `let` 就多占一格 —— 8 个符号摊开
+    // 写正好把自举 stage-2 顶爆（"需要 425 个槽"）。函数调用不占调用方的槽。
+    _reg_ws2(dsym, ddll)
     let mut k = 0
     while k < len(ctx.fsym) {
         let dn = ctx.fdll.get(k)
@@ -11379,6 +11809,18 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     iat.set(I_VALLOC, rdata_rva + iatb.get(0) + 72)
     iat.set(I_STRTOD, rdata_rva + iatb.get(2))
     iat.set(I_WSPRINTF, rdata_rva + iatb.get(1))
+    // v3.42：ws2_32 的 8 个槽位（DLL 索引 3，组内顺序与上面 dsym.push 一致）。
+    // **漏了这 8 行 = 槽位留 0 = CALLIAT 跳到地址 0**，表现是进程直接
+    // 0xC0000005 崩掉、连第一条 print 之后都活不过去（tcp_listen 踩过）。
+    //
+    // 写成循环而不是 8 条 `iat.set(I_XXX, rdata_rva + iatb.get(3) + N)`：
+    // `build_rdata` 的帧槽**正好卡在 416 格上限**，摊开写会多要一格，
+    // 自举 stage-2 立刻编不过自己（v3.42 实测）。循环只多两个变量。
+    let mut wi = 0
+    while wi < 8 {
+        iat.set(I_WSASTART + wi, rdata_rva + iatb.get(3) + wi * 8)
+        wi = wi + 1
+    }
     k = 0
     while k < len(ctx.fsym) {
         let g = I_USER + k
@@ -12004,7 +12446,11 @@ fn main() {
     }
     // IAT 槽表：内置 I_USER 个 + 用户 @ffi 符号。**用 I_USER 推，别再写死 4**——
     // 加内置符号时忘了改这里，表现是编译期 "vec index out of bounds"。
-    let iat = vec[int].new(I_USER)
+    //
+    // v3.42：初值容量写 0（不是 I_USER）。`build_rdata` 已经贴着 416 格的
+    // 帧上限，`vec[int].new(I_USER)` 在 I_USER 从 12 涨到 20 之后多要了一格，
+    // 直接把自举 stage-2 顶爆。容量只是预分配提示，push 会自己长。
+    let iat = vec[int].new(0)
     si = 0
     while si < I_USER + len(fsym) {
         iat.push(0)

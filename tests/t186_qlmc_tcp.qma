@@ -1,0 +1,24 @@
+import std.core
+
+// v3.42：网络内建端到端自检（listen -> accept -> recv -> send -> close）
+//
+// 端口从命令行拿不到（qlmc 子集里没有 args 内建），所以用固定端口 39471。
+// 由 tests/t186_qlmc_tcp.qma 配套的 Python 驱动 tests/net_e2e_test.py 拉起。
+fn main() {
+    let fd = tcp_listen(39471)
+    print("listening fd=" + fd.to_str())
+
+    let conn = tcp_accept(fd)
+    print("accepted conn=" + conn.to_str())
+
+    let msg = tcp_recv(conn, 256)
+    print("recv len=" + len(msg).to_str())
+    print("recv=" + msg)
+
+    let sent = tcp_send(conn, "echo:" + msg)
+    print("sent=" + sent.to_str())
+
+    tcp_close(conn)
+    tcp_close(fd)
+    print("done")
+}
