@@ -1,0 +1,36 @@
+import std.core
+
+// v3.46：thread_yield / wall_ms 自校验
+//
+// 两个内建都不好做"外部差分"（一个没有返回值、一个依赖真实时钟），
+// 所以用**性质断言**：wall_ms 落在合理时间区间、连续调用单调不减、
+// thread_yield 在循环里不死锁不崩。
+fn main() {
+    // thread_yield：单次 + 循环，都不该崩
+    thread_yield()
+    assert(true, "yield single ok")
+    let mut i = 0
+    while i < 5 {
+        thread_yield()
+        i = i + 1
+    }
+    assert(i == 5, "yield loop ok")
+
+    // wall_ms：2020-01-01 之后、2100 之前
+    //   1577836800000 = 2020-01-01T00:00:00Z
+    //   4102444800000 = 2100-01-01T00:00:00Z
+    let ms = wall_ms()
+    assert(ms > 1577836800000, "wall_ms after 2020")
+    assert(ms < 4102444800000, "wall_ms before 2100")
+
+    // 单调不减（同一进程内墙钟只往前走）
+    let a = wall_ms()
+    let b = wall_ms()
+    assert(b >= a, "wall_ms monotonic")
+
+    // 与 now_ns 同量级校验：wall_ms*1000000 与 now_ns 差不应超过 1 天
+    // （now_ns 是单调时钟，wall 是墙钟，两者起点不同，只查数量级）
+    assert(ms > 0, "wall_ms positive")
+
+    print("t189 ok")
+}

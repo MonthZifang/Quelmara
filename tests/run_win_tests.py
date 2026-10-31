@@ -1706,6 +1706,8 @@ def main():
     case_udp_e2e()
     # v3.45：irdump 工具（查手写 IR 缺陷的唯一手段，自己也要有回归）
     case_irdump()
+    # v3.46：thread_yield / wall_ms（性质断言：时间区间 + 单调性 + 不崩）
+    case_selfcheck_to("qlmc_time", "tests/t189_qlmc_time.qma", 60)
 
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），
