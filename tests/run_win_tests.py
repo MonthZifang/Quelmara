@@ -368,6 +368,32 @@ def case_udp6_send_e2e():
             f"{r.stdout[-400:]}{r.stderr[-300:]}")
 
 
+def case_args_e2e():
+    """`args()` 端到端差分（v3.56）。
+
+    qlmc 的 `args()` 走**源码级预置注入**：检测到源码里出现独立的 `args(`
+    调用，就把预置实现 lex 成 token 拼在用户源码前面。
+
+    **必须逐字比对 stage-0**：边界情况太多（空参数表、含空格的参数、引号、
+    `--flag=value`、空串参数）。其中一个反直觉的期望值：Windows 的
+    `GetCommandLineA` 会把带引号的参数原样返回（含反斜杠），所以
+    `'"a b"'` 在两边都解析成两个 token —— 拿 stage-0 当基准比写死"正确值"稳。
+    """
+    if not IS_WIN:
+        skip("args E2E：非 Windows 平台（GetCommandLineA 仅 PE）")
+        return
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/args_e2e_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=600)
+    if r.returncode == 0 and "args e2e: PASS=" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines() if "args e2e:" in ln]
+        ok(f"args E2E：{line[-1].strip() if line else 'ok'}")
+    else:
+        bad(f"args E2E 失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
 def case_tcp_connect_e2e():
     """`tcp_connect` / `tcp_send_n_to` / `tcp_recv_to` 端到端（v3.54）。
 
@@ -1828,6 +1854,8 @@ def main():
     case_modconst()
     # v3.54：tcp_connect / tcp_send_n_to / tcp_recv_to（DNS + 超时）
     case_tcp_connect_e2e()
+    # v3.56：args()（源码级预置注入）
+    case_args_e2e()
 
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），

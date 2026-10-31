@@ -4970,6 +4970,13 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
         if fi >= 0 {
             return fc.fns.get(fi).ret_t
         }
+        // v3.56：`args()` 在源码里写的是 `args`，但函数实体叫
+        // `_qlm_args_impl`（预置注入的）。所以 `_fn_index(args)` 是 -1，
+        // 类型推断会掉到"未知"分支 —— `len(args())` 因此报
+        // "len() 只支持 str 与 vec"。这里特判一下。
+        if fc.names.get(nd.a) == "args" {
+            return TY_VEC + TY_STR
+        }
     }
     if nd.op == E_BIN {
         // v2.38：算术里有一边是 f64 就整体是 f64（比较仍返回 int）。
@@ -11062,6 +11069,43 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         _ir_emit(fc, OP_CONST, d, 0, 0, 0)
         return d
     }
+    // v3.56：`args()` —— 改写成对预置实现 `_qlm_args_impl()` 的普通调用。
+    //
+    // 预置实现由 `ARGS_PRELUDE` 在 lex 阶段拼进 token 流（见那里的说明），
+    // 所以这里只要发一条 `OP_CALL` 就行，不需要展开三十行控制流。
+    //
+    // 判断条件里的 `_fn_index(fc, nd.a) < 0` 很关键：用户自己定义了
+    // `fn args()` 时，`_fn_index` 能找到，走用户函数（与 stage-0 同口径：
+    // 它也是 `name not in self.fns_ast` 才走内建）。
+    if bn == "args" && _fn_index(fc, nd.a) < 0 {
+        if nd.b >= 0 {
+            eprint("qlmc: args() 不接受实参")
+            exit(2)
+        }
+        // 按名字查 `_qlm_args_impl` 的函数序号（`_name_id` 要 P，
+        // 这里只有 FnCtx，所以直接扫 `fc.names` —— 与 `_name_id_ro` 同构）
+        let mut aimpl = -1
+        let mut ni = 0
+        while ni < len(fc.names) {
+            if fc.names.get(ni) == "_qlm_args_impl" {
+                aimpl = ni
+            }
+            ni = ni + 1
+        }
+        if aimpl < 0 {
+            eprint("qlmc: 内部错误：args 预置实现缺失")
+            exit(2)
+        }
+        let fi = _fn_index(fc, aimpl)
+        if fi < 0 {
+            eprint("qlmc: 内部错误：args 预置实现未注册为函数")
+            exit(2)
+        }
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_VEC + TY_STR)
+        _ir_emit(fc, OP_CALL, d, 0, 0, fi)
+        return d
+    }
     // ---- 内存 ----
     if bn == "mem_alloc" {
         let n = _lower_expr(fc, nd.b)
@@ -15274,6 +15318,89 @@ fn _is_blank(c: int) -> bool {
     return false
 }
 
+/// `args()` 的预置实现**源码**（v3.56）。
+///
+/// ## 为什么用源码注入而不是 IR 内建
+///
+/// `args()` 要做"取命令行 → 跳过 argv[0] → 按空白/引号切分 → 每段
+/// mem_str 成 str → push 进 vec[str]"。这是三十多行控制流，展开成 IR 会
+/// 撑爆 `_lower_builtin` 的 416 格帧槽（那里已经有 21 个内建的分支），
+/// 而自举 stage-2 对帧槽极其敏感。
+///
+/// 所以改成**源码级前置**：检测到用户用了 `args`，就把这段实现 lex 成
+/// token 再**拼到用户 token 流前面**。对 `parse` 来说它只是普通函数。
+///
+/// ## 为什么用 token 拼接而不是字符串拼接
+///
+/// Quelmara 的字符串字面量要转义换行和引号，三十行源码写成一行转义串
+/// 既难读又容易错。直接 `lex` 一段常量文本、再把两个 token 流接起来，
+/// 源码可以保持原样（多行、带注释）。
+///
+/// ## 为什么函数名是 `_qlm_args_impl`
+///
+/// `args` 这个名字要留给"识别触发点"：用户写 `args()` 时，
+/// `_lower_builtin` 把它改写成对 `_qlm_args_impl()` 的调用。这样用户自己
+/// 定义 `fn args()` 也不撞（那时 `_fn_index` 能找到，走用户函数）。
+const ARGS_PRELUDE = "@ffi(\"kernel32.dll\", \"GetCommandLineA\")\nfn _qlm_cmdline() -> int\nfn _qlm_is_blank(c: int) -> bool {\n    if c == 32 { return true }\n    if c == 9 { return true }\n    return false\n}\nfn _qlm_strlen_c(p: int) -> int {\n    let mut i = 0\n    while mem_load8(p, i) != 0 {\n        i = i + 1\n    }\n    return i\n}\nfn _qlm_args_impl() -> vec[str] {\n    let p = _qlm_cmdline()\n    let n = _qlm_strlen_c(p)\n    let out = vec[str].new(8)\n    let buf = mem_alloc(n + 1)\n    let mut i = 0\n    while i < n {\n        if _qlm_is_blank(mem_load8(p, i)) {\n            break\n        }\n        i = i + 1\n    }\n    while i < n {\n        while i < n {\n            if !_qlm_is_blank(mem_load8(p, i)) {\n                break\n            }\n            i = i + 1\n        }\n        if i >= n {\n            break\n        }\n        let mut blen = 0\n        let mut q = 0\n        while i < n {\n            let c = mem_load8(p, i)\n            if c == 34 {\n                q = 1 - q\n                i = i + 1\n                continue\n            }\n            if q == 0 && _qlm_is_blank(c) {\n                break\n            }\n            mem_store8(buf, blen, c)\n            blen = blen + 1\n            i = i + 1\n        }\n        if blen > 0 {\n            out.push(mem_str(buf, blen))\n        }\n    }\n    return out\n}\n"
+
+/// 把预置源码 lex 出来的 token **前置**拼进目标流（v3.56）。
+///
+/// 做法是"存旧 → 清空 → 先填预置、再填旧"：`vec` 是共享句柄，
+/// 调用方拿着的就是同一个 `toks`，所以只能原地改内容，不能重新赋值。
+///
+/// 预置流的 `T_EOF` 要丢掉（否则 `parse` 在预置函数的 `}` 之后就停了），
+/// 旧流的 `T_EOF` 留在最后 —— `parse` 靠它收尾。
+fn _prepend_args_prelude(toks: vec[Tok]) {
+    let pre = vec[Tok].new(256)
+    lex(ARGS_PRELUDE, pre)
+    let old = vec[Tok].new(256)
+    let mut i = 0
+    while i < len(toks) {
+        old.push(toks.get(i))
+        i = i + 1
+    }
+    toks.clear()
+    i = 0
+    while i < len(pre) {
+        if pre.get(i).k != T_EOF {
+            toks.push(pre.get(i))
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < len(old) {
+        toks.push(old.get(i))
+        i = i + 1
+    }
+}
+
+/// 源码里是否出现 `args` 这个名字（粗判：查子串）。
+///
+/// **故意用子串而不是完整词法分析**：这是"要不要注入预置实现"的开关，
+/// 判多了只是多编一个用不上的函数（几 KB），判少了才是 bug。
+/// 而 `args` 这个词在正常程序里几乎只会是内建调用。
+fn _toks_use_args(toks: vec[Tok]) -> int {
+    // **扫 token，不扫原始文本**：注释和字符串在 `lex` 之后已经不是
+    // `T_NAME` 了，所以看 token 才准。
+    //
+    // v3.56 第一版扫的是原始文本，结果 qlmc 自己的源码里那 9 处
+    // 「注释里写着 `args()`」全被命中 —— 编 qlmc 自己时也注入了预置实现，
+    // stage-2 与 stage-3 因此不一致，**不动点破**。
+    let mut i = 0
+    while i + 1 < len(toks) {
+        let t = toks.get(i)
+        if t.k == T_NAME && t.s == "args" {
+            // 后面必须紧跟 `(`（排除 `args_x` 这类同前缀名字）
+            let nx = toks.get(i + 1)
+            if nx.k == T_PUNCT && nx.n == P_LPAREN {
+                return 1
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 /// C 串长度（GetCommandLineA 的返回值没有长度前缀）
 fn _strlen_c(p: int) -> int {
     let mut i = 0
@@ -15380,6 +15507,12 @@ fn main() {
 
     let toks = vec[Tok].new(256)
     lex(text, toks)
+    // v3.56：`args()` 走**源码级前置注入**（见 `ARGS_PRELUDE` 的说明）。
+    // **在 lex 之后按 token 判**：注释和字符串已经不是 T_NAME，
+    // 所以「注释里写着 args()」不会被误判（第一版扫文本就栽在这里）。
+    if _toks_use_args(toks) {
+        _prepend_args_prelude(toks)
+    }
     let nodes = vec[Node].new(256)
     let names = vec[str].new(32)
     let strs = vec[str].new(16)
