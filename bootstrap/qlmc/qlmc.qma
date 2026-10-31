@@ -7744,6 +7744,152 @@ fn _emit_ir(fc: FnCtx, i: int) {
 /// 现在按实际用量给：变量/聚合区看 `C_ST`，临时槽看 `vloc` 里最深的那个。
 /// 上限仍是 `MAX_SLOT*8 = 4096`（分配器不给更深的槽），所以**永远不需要栈探测**
 /// （§7.17 的红线是"帧 > 4 KB"）。
+// ---------------------------------------------------------------------------
+// IR dump（v3.45）—— 调试手写 IR 的必备工具
+//
+// 为什么要有：v3.44 在 `udp_sendto` 的 `0xC0000005` 上花了约 40 轮，全程
+// "猜假设 → 改代码 → 重编 2 分钟 → 跑一次"。重编 qlmc 要 2 分钟，40 轮
+// ≈ 80 分钟纯等待，最后还是没定位。**有 IR dump 就能一次看到生成的指令
+// 序列**，与已知正常的 `recvfrom` 逐条对比。
+//
+// 用法：`qlmc irdump <src.qma> [函数名]`
+//   * 不给函数名 → 只列函数清单（名字 + IR 条数 + 帧字节）
+//   * 给函数名   → 打该函数的完整 IR（含 vreg 位置表）
+//
+// 输出的是**优化之后**的 IR（`_emit_fn` 之前的那一刻），因为要查的正是
+// 分配器/融合之后的形态。
+// ---------------------------------------------------------------------------
+
+/// opcode 编号 → 名字，**用一条逗号分隔的常量串**（不是 vec）。
+///
+/// 为什么不建 `vec[str]` 表：最初是 80 次 push/set，每个语句占
+/// 1 个帧槽，直接把这个函数顶到 417 格（上限 416）—— 而它是被
+/// stage-2 编译的，于是 stage-2 自己崩掉（v3.45 实测：自举等价性
+/// 30 组全不同）。**一条常量串只占 1 格。**
+///
+/// 查表用 _op_name(i)：数第 i 个逗号之前有几个分隔符。
+fn _op_names_str() -> str {
+    return "NOP0,CONST,MOV,ADD,SUB,MUL,DIV,MOD,AND,OR,XOR,NEG,NOT,JMP,LAB,JZ,JNZ,CMP,PARAM,CALL,PRINT,EXIT,LEA,LEN,PARAM2,JCMP,ADDRV,ADDRF,ADDRX,LOAD,STORE,COPY,ZERO,CALLRT,RET,NZ,BNOT,SHL,SAR,SHR,CALLR,RTADDR,CALLIAT,SHL2,SAR2,SHR2,STKALLOC2,PARAMSTK,STKALLOC,STKARG,STKFREE,ADDRXN,RTADDR2,LOAD8,STORE8,FCMP,NOP,FBIN,ITOF,FTOI,FLOAD,FSTORE,CMPI,BINI,LOADD,LOADX,LOAD8D,LOAD8X,STORED,STOREX,STORE8D,STORE8X,LOAD8I,STORE8I,JCMPVLEN,JCMPSTR,F64IMM,JCMPI,BSSADDR"
+}
+
+/// 取第 n 个 opcode 的名字（n 越界返回 ?n）。
+fn _op_name(n: int) -> str {
+    if n < 0 {
+        return "?"
+    }
+    let mut start = 0
+    let mut cur = 0
+    let mut i = 0
+    let tbl = _op_names_str()
+    let total = len(tbl)
+    while i < total {
+        if tbl[i] == 44 {
+            if cur == n {
+                return substr(tbl, start, i - start)
+            }
+            cur = cur + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if cur == n {
+        return substr(tbl, start, total - start)
+    }
+    return "?"
+}
+
+/// 打一个函数的完整 IR + vreg 位置表。
+fn _dump_fn_ir(fc: FnCtx, fname: str) {
+    print("=== fn " + fname + "  ir=" + len(fc.ir).to_str()
+          + "  vregs=" + len(fc.vloc).to_str()
+          + "  frame=" + _frame_bytes(fc).to_str() + "B ===")
+    let mut i = 0
+    while i < len(fc.ir) {
+        let ins = fc.ir.get(i)
+        let nm = _op_name(ins.op)
+        // 位置：>0 寄存器（编号-1）、<0 帧槽（-(loc+1)）、0 未分配
+        // **必须做边界检查**：`dst` 可能是 `setcc` 机器码（`OP_JCMP`）、
+        // 子操作码（`OP_BINI`）或 0，直接 `vloc.get()` 会越界 fail-fast。
+        let mut dloc = "  -  "
+        if ins.dst > 0 && ins.dst < len(fc.vloc) {
+            let dl = fc.vloc.get(ins.dst)
+            if dl > 0 {
+                dloc = "r" + (dl - 1).to_str()
+            } else {
+                if dl < 0 {
+                    dloc = "s" + (0 - dl - 1).to_str()
+                }
+            }
+        }
+        print("  " + i.to_str() + "  " + nm
+              + "  dst=" + ins.dst.to_str() + "(" + dloc + ")"
+              + "  a=" + ins.a.to_str()
+              + "  b=" + ins.b.to_str()
+              + "  imm=" + ins.imm.to_str())
+        i = i + 1
+    }
+}
+
+/// `qlmc irdump` 的实现。
+///
+/// **单独成函数是为了压 `main` 的帧槽**：这段有 12 个局部变量，直接内联
+/// 会把 `main` 的帧从 1776B 顶到 2544B（v3.45 实测），而 stage-2 编自己时
+/// `main` 还会再涨 —— 超 4 KB 就是编译期 fail-fast 或运行期 AV。
+/// 与 `_reg_ws2`、`_bi_tcp_listen` 同一个处理方式。
+fn _cmd_irdump(nodes: vec[Node], names: vec[str], fns: vec[Fn],
+               stt: vec[int], a: vec[str]) {
+    let rt_pos = vec[int].new(RT_COUNT)
+    let mut si2 = 0
+    while si2 < RT_COUNT {
+        rt_pos.push(0)
+        si2 = si2 + 1
+    }
+    let fc = _new_fc(nodes, names, fns, rt_pos, stt)
+    let ucnt = vec[int].new(512)
+    let baked = vec[int].new(512)
+    let csb = vec[int].new(16)
+    let lpm = vec[int].new(512)
+    let cok = vec[int].new(512)
+    let cval = vec[int].new(512)
+    let use = vec[int].new(512)
+    let ndef = vec[int].new(512)
+    let out = vec[int].new(2)
+    out.push(0)
+    out.push(0)
+    let want_fn = ""
+    if len(a) >= 3 {
+        want_fn = a[2]
+    }
+    let mut fi2 = 0
+    let mut hit = 0
+    while fi2 < len(fns) {
+        let fnm = names.get(fns.get(fi2).name)
+        if len(want_fn) == 0 {
+            _fc_reset(fc)
+            _lower_fn(fc, fi2)
+            _opt(fc, cok, cval, use, ndef, out)
+            _alloc(fc, ucnt, baked, csb, lpm)
+            print("fn " + fnm + "  ir=" + len(fc.ir).to_str()
+                  + "  vregs=" + len(fc.vloc).to_str()
+                  + "  frame=" + _frame_bytes(fc).to_str() + "B")
+        } else {
+            if fnm == want_fn {
+                hit = 1
+                _fc_reset(fc)
+                _lower_fn(fc, fi2)
+                _opt(fc, cok, cval, use, ndef, out)
+                _alloc(fc, ucnt, baked, csb, lpm)
+                _dump_fn_ir(fc, fnm)
+            }
+        }
+        fi2 = fi2 + 1
+    }
+    if len(want_fn) > 0 && hit == 0 {
+        eprint("qlmc: 找不到函数 " + want_fn)
+        exit(2)
+    }
+}
+
 fn _frame_bytes(fc: FnCtx) -> int {
     let mut units = fc.cells.get(C_ST)
     let mut i = 1
@@ -12966,7 +13112,7 @@ fn _dir_of(path: str) -> str {
 }
 
 fn _usage() {
-    eprint("用法: qlmc build <src.qma> [-o out.exe] [-j N] | qlmc dump <src.qma> | qlmc version")
+    eprint("用法: qlmc build <src.qma> [-o out.exe] [-j N] | qlmc dump <src.qma> | qlmc irdump <src.qma> [函数名] | qlmc version")
 }
 
 /// 线程数：函数太少时并行只付线程创建成本。`want` = 0 表示自动。
@@ -13178,6 +13324,18 @@ fn main() {
         print("strs     : " + len(strs).to_str())
         print("structs  : " + stt.get(0).to_str())
         print("enums    : " + stt.get(EN_HDR).to_str())
+        return
+    }
+    // v3.45：`qlmc irdump <src.qma> [函数名]`
+    //
+    // 打印**优化之后**（`_alloc` 完成、`_emit_fn` 之前）的 IR。这是查
+    // "手写 IR 生成的指令序列对不对"的唯一高效手段 —— v3.44 的
+    // `udp_sendto` 崩溃就是缺了它才耗掉 40 轮。
+    //
+    // 单线程跑，不复用 `_compile_range`（那边是并行 + 直接发射，没有
+    // dump 的插入点，且改它的签名会影响 spawn）。
+    if cmd == "irdump" {
+        _cmd_irdump(nodes, names, fns, stt, a)
         return
     }
     if len(fns) < 1 {

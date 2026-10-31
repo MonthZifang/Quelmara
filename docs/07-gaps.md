@@ -1463,10 +1463,9 @@ Segmentation fault (exit 139)
 * 函数体内二分：alloc / 清零 / 构造 `sockaddr` 全段都正常，崩在
   `_emit_call_args` + `CALLIAT` 那一段。
 
-**重启条件**：先做 **IR dump 工具**。qlmc 的 `fc.ir` 是普通 `vec[Ir]`，
-在 `_emit_fn` 之前打出来即可（约 20 行）。有了它就能把 `sendto` 那段
-生成的指令序列与 `recvfrom` 逐条对比 —— 这是黑盒二分已经到极限之后
-唯一高效的路。
+**重启条件**：~~先做 IR dump 工具~~ ✅ **v3.45 已完成**（`qlmc irdump`）。
+下一步：把 `_bi_udp_sendto` 与已知正常的 `_bi_udp_recvfrom` 各 dump
+一遍，逐条对比指令序列。
 
 **方法教训**：这次花了约 40 轮在"猜假设 → 改代码 → 重编 2 分钟 → 跑一次"
 的循环上。重编 qlmc 要 2 分钟，40 轮 ≈ 80 分钟纯等待。
