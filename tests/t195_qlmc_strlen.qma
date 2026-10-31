@@ -1,0 +1,55 @@
+import std.core
+
+// v3.51：`len()` 的机器码在 R12 上崩 —— `_len_of` 缺 SIB 字节
+//
+// 现象：`print(len(s).to_str())` 崩 `0xC0000005`，而
+// `print("x" + len(s).to_str())` 正常。两者 IR 同构，唯一差别是
+// 寄存器分配把 `LEN` 的结果分到 **r12**（`_cs_reg(1)`）还是 r13。
+//
+// 根因：`_len_of` 用裸 `_modrm(code, 1, dst, base)`。x86-64 里
+// `rm=100` 不表示"RSP 寄存器"，而是"后面跟一个 SIB 字节"。
+// R12 的低 3 位正好是 4，于是 `0xF8`（disp8 = -8）被当成 SIB 字节
+// 吃掉，实际变成 `mov r12, [r12]` 而不是 `mov r12, [r12-8]` ——
+// 读到的是字符串的**第一个字节**当指针，立刻 AV。
+//
+// 本夹具的价值在于**寄存器分配换序就崩**：单独写 `len(s)` 可能恰好
+// 分到 r13 而看不出问题。所以要凑够中间变量，逼分配器把 LEN 的结果
+// 放到 r12。
+fn main() {
+    // 1. 最直接的形态（v3.51 崩的那个）
+    let s = "hello"
+    print(len(s).to_str())
+
+    // 2. 不同长度的串，确保不是巧合
+    let a = "x"
+    print(len(a).to_str())
+    let b = ""
+    print(len(b).to_str())
+    let c = "0123456789"
+    print(len(c).to_str())
+
+    // 3. 落变量（这条以前就正常，作为对照）
+    let n = len(s)
+    print(n.to_str())
+
+    // 4. 直接对字面量取长度
+    print(len("abc").to_str())
+
+    // 5. 参与算术（会额外制造寄存器压力）
+    let t = len(s) + len(c)
+    print(t.to_str())
+
+    // 6. 在拼接里用（以前也正常，作为对照）
+    print("n=" + len(s).to_str())
+
+    // 7. 多个 len 连续调用，逼分配器复用寄存器
+    let u = len(s) + len(a) + len(b) + len(c)
+    print(u.to_str())
+
+    // 8. len 结果当循环上界
+    let mut acc = 0
+    for i in 0..len(s) {
+        acc = acc + i
+    }
+    print(acc.to_str())
+}

@@ -3166,10 +3166,21 @@ fn _neg_rm(code: vec[int], base: int, disp: int) {
 }
 
 /// mov dst, [base-8]（读 str 的长度前缀）
+/// `dst = [base - 8]`：读 str 的长度前缀。
+///
+/// **`base` 的低 3 位是 4（RSP / R12）时必须补 SIB 字节**：x86-64 里
+/// `rm=100` 不表示"RSP 寄存器"，而是"后面跟一个 SIB 字节"。原来的
+/// 实现用裸 `_modrm`，R12 上会把 `0xF8`（disp8 = -8）当成 SIB 字节吃掉，
+/// 于是实际位移变成 0、`mov` 读的是 `[r12]` 而不是 `[r12-8]`。
+///
+/// v3.51 实测：`print(len(s).to_str())` 崩 `0xC0000005`，而
+/// `print("x" + len(s).to_str())` 正常 —— 两者 IR 同构，唯一差别是
+/// 前者把 `LEN` 的结果分到 **r12**（`_cs_reg(1)`）、后者分到 r13。
+/// 这就是"寄存器分配换个顺序就崩"的典型形态。
 fn _len_of(code: vec[int], dst: int, base: int) {
     _rex2(code, 1, dst, base)
     _b(code, 0x8B)
-    _modrm(code, 1, dst, base)
+    _modrm_mem(code, 1, dst, base)
     _b(code, 0xF8)
 }
 
