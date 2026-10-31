@@ -92,6 +92,11 @@ CASES = [
     # stage-0 一直允许省略（"cap 须 2 的幂，省略默认 16"），qlmc 以前强制
     # 要求 —— `std/session` 的 `map[str]str.new()` 因此编不过。
     ("s34_mapnew", "tests/t201_qlmc_mapnew.qma"),
+    # v3.58：SIMD（XMM）基础四件 load/store/mov/pxor。
+    # **必须是差分用例**：SIMD 指令编码错了只会静默算错或崩，
+    # 光"能编过"完全说明不了问题 —— 尤其要验 b7/b8/b15 这三个跨 64 位
+    # 边界的字节，只看 b0 的话"只搬了低 64 位"也会通过。
+    ("s35_simd", "tests/t202_qlmc_simd.qma"),
 ]
 
 npass = 0
