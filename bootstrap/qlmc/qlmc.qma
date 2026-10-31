@@ -2532,6 +2532,8 @@ fn _modrm(code: vec[int], mod: int, reg: int, rm: int) {
 fn _sse_rr(code: vec[int], pf: int, opc: int, x: int, y: int) {
     if pf == 0 {
         _b(code, 0x66)
+    } else if pf == 2 {
+        _b(code, 0xF3)
     } else {
         _b(code, 0xF2)
     }
@@ -2543,8 +2545,11 @@ fn _sse_rr(code: vec[int], pf: int, opc: int, x: int, y: int) {
 
 /// `[base+disp32]` 形式（base 必须是 RBP 这类"必须带 disp"的寄存器）
 fn _sse_mem(code: vec[int], pf: int, opc: int, x: int, base: int, disp: int) {
+    // pf: 0 = 66（整数 SIMD）、1 = F2（标量 double）、2 = F3（movdqu / AES）
     if pf == 0 {
         _b(code, 0x66)
+    } else if pf == 2 {
+        _b(code, 0xF3)
     } else {
         _b(code, 0xF2)
     }
@@ -2559,6 +2564,8 @@ fn _sse_mem(code: vec[int], pf: int, opc: int, x: int, base: int, disp: int) {
 fn _sse_mem0(code: vec[int], pf: int, opc: int, x: int, base: int) {
     if pf == 0 {
         _b(code, 0x66)
+    } else if pf == 2 {
+        _b(code, 0xF3)
     } else {
         _b(code, 0xF2)
     }
@@ -3046,6 +3053,19 @@ const OP_BSSADDR = 78  // dst = &bss[imm]（lea rip + FK_BSS 重定位）
 const OP_CALLV = 79
 // v3.47：`pause` 指令（spin_hint）。自旋循环里降功耗、避免流水线清空。
 const OP_SPIN = 80
+// ---- v3.58：SIMD（XMM）----
+//
+// qlmc 原来只有 f64 用的 4 个 SSE 辅助（`_sse_rr` / `_sse_mem` / `_sse_mov_reg`），
+// 没有任何"XMM 寄存器当作值来分配"的机制。SIMD 内建的形式是
+// `xmm_load(槽号, 地址)` / `xmm_store(地址, 槽号)`，槽号是**编译期常量**
+// 0..15，直接对应 XMM0..XMM15 —— 不需要寄存器分配，所以只要三个新节点。
+//
+// `OP_XMMLD`  dst = 槽号（imm），a = 地址 vreg      → movdqu xmm[imm], [a]
+// `OP_XMMST`  a = 地址 vreg，imm = 槽号            → movdqu [a], xmm[imm]
+// `OP_XMMRR`  dst = 目标槽号，imm = 源槽号，b = 操作码 → 槽间运算
+const OP_XMMLD = 81
+const OP_XMMST = 82
+const OP_XMMRR = 83
 
 struct Ir {
     op: int
@@ -7414,6 +7434,51 @@ fn _emit_f64(fc: FnCtx, i: int) {
     }
 }
 
+/// SIMD（XMM）三条 IR 的发射（v3.58）。
+///
+/// 单独成函数是为了压 `_emit_ir` 的帧槽 —— 那个函数已经贴着上限，
+/// 加任何局部变量都可能让自举 stage-2 编不过自己（v2.55 踩过）。
+///
+/// ## 槽号是编译期常量
+///
+/// `xmm_load(0, addr)` 里的 `0` 直接就是 **XMM0**，不需要寄存器分配。
+/// 这是 SIMD 内建和普通值最大的不同：普通 vreg 要经过线性扫描分配，
+/// 而 XMM 槽是程序员显式指定的。所以 IR 里槽号放 `imm`，地址放 vreg。
+///
+/// ## 指令编码
+///
+/// ```
+/// movdqu xmm[imm], [a]   F3 0F 6F /r     (load)
+/// movdqu [a], xmm[imm]   F3 0F 7F /r     (store)
+/// pxor   xmm[dst], xmm[src]  66 0F EF /r (xor)
+/// pand   xmm[dst], xmm[src]  66 0F DB /r
+/// por    xmm[dst], xmm[src]  66 0F EB /r
+/// ```
+fn _emit_xmm(fc: FnCtx, ins: Ir) {
+    let code = fc.code
+    if ins.op == OP_XMMLD {
+        // movdqu xmm[imm], [a]
+        _to_reg(fc, RAX, ins.a)
+        _sse_mem0(code, 2, 0x6F, ins.imm, RAX)
+        return
+    }
+    if ins.op == OP_XMMST {
+        // movdqu [a], xmm[imm]
+        _to_reg(fc, RAX, ins.a)
+        _sse_mem0(code, 2, 0x7F, ins.imm, RAX)
+        return
+    }
+    if ins.op == OP_XMMRR {
+        // 四个值全在 imm 里：imm = (pf<<24) | (opc<<16) | (dst<<8) | src
+        let src = ins.imm & 0xFF
+        let dst = (ins.imm >> 8) & 0xFF
+        let opc = (ins.imm >> 16) & 0xFF
+        let pf = (ins.imm >> 24) & 0xFF
+        _sse_rr(code, pf, opc, dst, src)
+        return
+    }
+}
+
 fn _emit_ir(fc: FnCtx, i: int) {
     let ins = fc.ir.get(i)
     let code = fc.code
@@ -7423,6 +7488,10 @@ fn _emit_ir(fc: FnCtx, i: int) {
     }
     // v2.55：f64 的几条指令整体交给 `_emit_f64`（见那里的注释：不能给本函数
     // 加局部变量，帧已经顶到上限）
+    if op == OP_XMMLD || op == OP_XMMST || op == OP_XMMRR {
+        _emit_xmm(fc, ins)
+        return
+    }
     if op == OP_F64IMM || op == OP_FNEG || op == OP_ITOF || op == OP_FTOI ||
        op == OP_FBIN || op == OP_FCMP {
         _emit_f64(fc, i)
@@ -8438,7 +8507,7 @@ fn _iat_name(n: int) -> str {
 }
 
 fn _op_names_str() -> str {
-    return "NOP0,CONST,MOV,ADD,SUB,MUL,DIV,MOD,NEG,NOT,NZ,CMP,LAB,JMP,JZ,JNZ,ARG,CALL,CALLRT,RET,PRINT,EXIT,LEA,LEN,PARAM,JCMP,ADDRV,ADDRF,ADDRX,LOAD,STORE,COPY,ZERO,RETAGG,RETSRET,ZERON,CALLIAT,LEAFN,CALLR,MEMCPYN,AND,OR,XOR,SHL,SAR,SHR,BNOT,PARAMSTK,STKALLOC,STKARG,STKFREE,ADDRXN,RTADDR,LOAD8,STORE8,FCMP,NOP,BINI,CMPI,LOADD,LOADX,STORED,STOREX,LOAD8D,LOAD8X,STORE8D,STORE8X,FBIN,ITOF,FTOI,DIVC,LOAD8I,STORE8I,JCMPVLEN,JCMPSTR,FNEG,F64IMM,JCMPI,BSSADDR,CALLV,SPIN"
+    return "NOP0,CONST,MOV,ADD,SUB,MUL,DIV,MOD,NEG,NOT,NZ,CMP,LAB,JMP,JZ,JNZ,ARG,CALL,CALLRT,RET,PRINT,EXIT,LEA,LEN,PARAM,JCMP,ADDRV,ADDRF,ADDRX,LOAD,STORE,COPY,ZERO,RETAGG,RETSRET,ZERON,CALLIAT,LEAFN,CALLR,MEMCPYN,AND,OR,XOR,SHL,SAR,SHR,BNOT,PARAMSTK,STKALLOC,STKARG,STKFREE,ADDRXN,RTADDR,LOAD8,STORE8,FCMP,NOP,BINI,CMPI,LOADD,LOADX,STORED,STOREX,LOAD8D,LOAD8X,STORE8D,STORE8X,FBIN,ITOF,FTOI,DIVC,LOAD8I,STORE8I,JCMPVLEN,JCMPSTR,FNEG,F64IMM,JCMPI,BSSADDR,CALLV,SPIN,XMMLD,XMMST,XMMRR"
 }
 
 /// 取第 n 个 opcode 的名字（n 越界返回 ?n）。
@@ -11079,6 +11148,29 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         _ir_emit(fc, OP_CONST, d, 0, 0, 0)
         return d
     }
+    // ---- v3.58：SIMD（XMM）基础四件 ----
+    //
+    // 形式是 `xmm_load(槽号, 地址)` / `xmm_store(地址, 槽号)` ——
+    // **槽号是编译期常量** 0..15，直接对应 XMM0..XMM15，不需要寄存器分配。
+    // 所以这里要求第一个/第二个实参必须是 `E_NUM`（字面量），否则报错。
+    //
+    // 为什么先只做四件：`std/aes` 需要 12 个（aesenc / pclmulqdq / pshufb …），
+    // 一次全做风险太大。这四件（load / store / mov / pxor）能验证
+    // "XMM 通路 + 编码" 是否打通，后续再按同一模式扩。
+    if bn == "xmm_load" {
+        return _bi_xmm_load(fc, nd)
+    }
+    if bn == "xmm_store" {
+        return _bi_xmm_store(fc, nd)
+    }
+    if bn == "xmm_mov" {
+        // **pf=0 发 `66 0F 28` = movapd**（整 128 位搬，与 movaps 等价）。
+        // 不能用 pf=2：那会发 `F3 0F 28`，不是 movaps 的编码。
+        return _bi_xmm_rr(fc, nd, 0x28, 0)
+    }
+    if bn == "xmm_pxor" {
+        return _bi_xmm_rr(fc, nd, 0xEF, 0)      // pxor
+    }
     // v3.56：`args()` —— 改写成对预置实现 `_qlm_args_impl()` 的普通调用。
     //
     // 预置实现由 `ARGS_PRELUDE` 在 lex 阶段拼进 token 流（见那里的说明），
@@ -11898,6 +11990,84 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
 
 /// 把 (指针, 长度) 包成一个 Quelmara 串：alloc(n+9) + [len] + 拷贝 + NUL。
 /// mem_str 内建与 int.to_str 共用。
+/// `xmm_load(槽号, 地址)`：`movdqu xmm[槽号], [地址]`（v3.58）。
+///
+/// 槽号必须是**字面量**（0..15）—— 它是编译期常量，直接进 `imm`。
+/// 运行期算出来的槽号没有意义：XMM 寄存器是物理的，不是数组。
+fn _bi_xmm_load(fc: FnCtx, nd: Node) -> int {
+    if nd.b < 0 || nd.c < 0 {
+        eprint("qlmc: xmm_load(槽号, 地址) 需要两个实参")
+        exit(2)
+    }
+    let slot = _xmm_slot(fc, nd.b, "xmm_load")
+    let addr = _lower_expr(fc, nd.c)
+    _ir_emit(fc, OP_XMMLD, 0, addr, 0, slot)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+    return d
+}
+
+/// `xmm_store(地址, 槽号)`：`movdqu [地址], xmm[槽号]`（v3.58）。
+///
+/// **注意槽号在第 2 个位置**（与 `xmm_load` 相反）—— stage-0 的注释里
+/// 特意标了这个不对称："xmm_load 的槽在第 0 位，xmm_store 的槽在第 1 位"。
+fn _bi_xmm_store(fc: FnCtx, nd: Node) -> int {
+    if nd.b < 0 || nd.c < 0 {
+        eprint("qlmc: xmm_store(地址, 槽号) 需要两个实参")
+        exit(2)
+    }
+    let addr = _lower_expr(fc, nd.b)
+    let slot = _xmm_slot(fc, nd.c, "xmm_store")
+    _ir_emit(fc, OP_XMMST, 0, addr, 0, slot)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+    return d
+}
+
+/// 槽间二元运算：`f(目标槽, 源槽)`（v3.58）。
+///
+/// `opc` 是 SSE 操作码（pxor = 0xEF、pand = 0xDB、por = 0xEB），
+/// `pf` 是前缀（0 = 66 整数 SIMD、2 = F3）。
+fn _bi_xmm_rr(fc: FnCtx, nd: Node, opc: int, pf: int) -> int {
+    if nd.b < 0 || nd.c < 0 {
+        eprint("qlmc: SIMD 槽间运算需要两个槽号实参")
+        exit(2)
+    }
+    let dst = _xmm_slot(fc, nd.b, "SIMD")
+    let src = _xmm_slot(fc, nd.c, "SIMD")
+    // **`_ir_emit` 里 `a > 0` / `b > 0` 就会 `fc.vend.set(a, i)`** ——
+    // 所以这两个位置必须是**合法 vreg 或 0**，不能塞槽号/操作码
+    // （v3.58 实测：`a = 239` 直接 `vec index out of bounds`）。
+    // `imm` 不参与 vend 写入，所以四个值全装进它：
+    //   imm = (pf << 24) | (opc << 16) | (dst_slot << 8) | src_slot
+    let packed = (pf << 24) | (opc << 16) | (dst << 8) | src
+    _ir_emit(fc, OP_XMMRR, 0, 0, 0, packed)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+    return d
+}
+
+/// 把实参节点解析成 XMM 槽号（0..15 的字面量）。
+fn _xmm_slot(fc: FnCtx, nid: int, who: str) -> int {
+    let nd = fc.nodes.get(nid)
+    if nd.op != E_NUM {
+        eprint("qlmc: " + who + " 的槽号必须是字面量（0..15）")
+        exit(2)
+    }
+    // **0..7**：stage-0 的报错信息写着 "xmm 槽参数必须是 0-7 的编译期常量"。
+    // 虽然 XMM 有 16 个寄存器，但 8..15 是 Win64 的**非易失**寄存器，
+    // 跨调用要保存 —— 而 SIMD 内建不参与寄存器分配，没法保证这一点。
+    // 为与基准同口径、也为了避免静默破坏调用方的 XMM8..15，限制在 0..7。
+    if nd.a < 0 || nd.a > 7 {
+        eprint("qlmc: " + who + " 的槽号越界（0..7），得到 " + nd.a.to_str())
+        exit(2)
+    }
+    return nd.a
+}
+
 fn _bi_mem_str(fc: FnCtx, p: int, n: int) -> int {
     // 长度必须是"看起来合理"的非负数：上游 wsprintfA / GetFileSize 失败时会返回
     // -1 / 0xFFFFFFFF，直接拿去 alloc(n+9) + memcpy 会变成一次巨大的拷贝（AV）。

@@ -1,0 +1,122 @@
+import std.core
+
+// v3.58：SIMD（XMM）基础四件 —— xmm_load / xmm_store / xmm_mov / xmm_pxor
+//
+// ## 为什么先只做四件
+//
+// `std/aes` 需要 12 个 SIMD 内建（还有 aesenc / pclmulqdq / pshufb …）。
+// 一次全做风险太大，所以先用这四件验证「XMM 通路 + 指令编码」是否打通 ——
+// 它们是其余 8 个的公共基础。
+//
+// ## 槽号是编译期常量
+//
+// `xmm_load(0, addr)` 里的 `0` 直接就是 **XMM0**，不需要寄存器分配。
+// 这是 SIMD 内建和普通值最大的不同：普通 vreg 要经过线性扫描分配，
+// 而 XMM 槽是程序员显式指定的。
+//
+// ## 指令编码
+//
+// ```
+// movdqu xmm[s], [a]      F3 0F 6F /r
+// movdqu [a], xmm[s]      F3 0F 7F /r
+// movapd xmm[d], xmm[s]   66 0F 28 /r
+// pxor   xmm[d], xmm[s]   66 0F EF /r
+// ```
+//
+// **`xmm_mov` 用 `66 0F 28`（movapd）而不是 `0F 28`（movaps）**：
+// 两者都是整 128 位搬、效果等价，而前者能用现成的 pf=0 路径发出来。
+fn main() {
+    let a = mem_alloc(16)
+    let b = mem_alloc(16)
+    let o = mem_alloc(16)
+
+    // a = [1..16]，b/o 清零
+    let mut i = 0
+    while i < 16 {
+        mem_store8(a, i, i + 1)
+        mem_store8(b, i, 0)
+        mem_store8(o, i, 0)
+        i = i + 1
+    }
+
+    // ---- 1. load + store：整块拷贝 ----
+    xmm_load(0, a)
+    xmm_store(b, 0)
+    let mut same = 1
+    i = 0
+    while i < 16 {
+        if mem_load8(a, i) != mem_load8(b, i) {
+            same = 0
+        }
+        i = i + 1
+    }
+    print("copy=" + same.to_str())          // 1
+
+    // ---- 2. pxor 自己 = 全 0 ----
+    xmm_load(0, a)
+    xmm_load(1, a)
+    xmm_pxor(0, 1)
+    xmm_store(o, 0)
+    let mut allzero = 1
+    i = 0
+    while i < 16 {
+        if mem_load8(o, i) != 0 {
+            allzero = 0
+        }
+        i = i + 1
+    }
+    print("xor_self=" + allzero.to_str())   // 1
+
+    // ---- 3. pxor 两个相同内容 = 全 0 ----
+    xmm_load(2, a)
+    xmm_load(3, b)
+    xmm_pxor(2, 3)
+    xmm_store(o, 2)
+    let mut z2 = 1
+    i = 0
+    while i < 16 {
+        if mem_load8(o, i) != 0 {
+            z2 = 0
+        }
+        i = i + 1
+    }
+    print("xor_ab=" + z2.to_str())          // 1
+
+    // ---- 4. mov：槽间搬 128 位 ----
+    xmm_load(0, a)
+    xmm_mov(4, 0)
+    xmm_store(o, 4)
+    let mut m = 1
+    i = 0
+    while i < 16 {
+        if mem_load8(o, i) != mem_load8(a, i) {
+            m = 0
+        }
+        i = i + 1
+    }
+    print("mov=" + m.to_str())              // 1
+
+    // ---- 5. 首尾字节必须都对（防"只搬了低 64 位"）----
+    print("b0=" + mem_load8(o, 0).to_str())     // 1
+    print("b7=" + mem_load8(o, 7).to_str())     // 8
+    print("b8=" + mem_load8(o, 8).to_str())     // 9
+    print("b15=" + mem_load8(o, 15).to_str())   // 16
+
+    // ---- 6. 最高槽号（7）也要能用 ----
+    // **槽号限制 0..7**：stage-0 的报错写着 "xmm 槽参数必须是 0-7 的编译期常量"。
+    // XMM8..15 是 Win64 的非易失寄存器，而 SIMD 内建不参与寄存器分配、
+    // 没法保证保存它们，所以不用。
+    xmm_load(7, a)
+    xmm_store(o, 7)
+    let mut h = 1
+    i = 0
+    while i < 16 {
+        if mem_load8(o, i) != mem_load8(a, i) {
+            h = 0
+        }
+        i = i + 1
+    }
+    print("hi_slot=" + h.to_str())          // 1
+
+    print("done")
+}

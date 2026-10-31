@@ -3885,6 +3885,46 @@ SIMD 支持，那是下一个真正的大件。
 `BASELINE` 59 → **60**，回归 PASS=370 FAIL=0，自举 30/30 不动点成立。
 
 
+### 3.108 SIMD（XMM）基础四件：覆盖率仍 60（v3.58）
+
+开 SIMD 轨道的第一版。**覆盖率没涨** —— 本版是基础设施，`std/aes` 还差 8 个内建。
+
+**为什么只做四件**：`std/aes` 需要 12 个 SIMD 内建
+（`xmm_load`/`xmm_store`/`xmm_mov`/`xmm_pxor`/`pand`/`por`/`pshufb`/
+`pclmulqdq`/`aesenc`/`aesenclast`/`cpu_aes`/`cpu_pclmul`）。这四件是其余
+8 个的公共基础 —— 验证「XMM 通路 + 指令编码」是否打通。
+
+**关键设计：槽号是编译期常量**。`xmm_load(0, addr)` 的 `0` 直接就是 XMM0，
+不需要寄存器分配（普通 vreg 要过线性扫描）。所以 IR 里槽号放 `imm`、
+地址放 vreg。**槽号限制 0..7** —— XMM8..15 是 Win64 非易失寄存器，而
+SIMD 内建不参与寄存器分配、没法保证保存；stage-0 的报错也写着 "0-7"。
+
+**三个新 IR 节点**（81..83）：`OP_XMMLD` / `OP_XMMST` / `OP_XMMRR`。
+
+`OP_XMMRR` 把四个值全打包进 `imm`：`(pf<<24)|(opc<<16)|(dst<<8)|src`。
+**因为 `_ir_emit` 里 `if a > 0 { fc.vend.set(a, i) }`** —— `a`/`b` 必须是
+合法 vreg 或 0，塞槽号会越界（v3.58 实测 `a=239` 直接
+`vec index out of bounds`）。
+
+**SSE 前缀扩展**：`_sse_rr`/`_sse_mem`/`_sse_mem0` 原来只有 `66`(pf=0) 和
+`F2`(pf=1)，加 `F3`(pf=2) 给 `movdqu`。
+
+**一个编码陷阱**：`xmm_mov` 第一版传 `pf=2` 想发 `movaps`(`0F 28`)，实际发出
+`F3 0F 28` —— 不是 movaps，运行时崩 `0xC000005D`。改用 `pf=0` 发
+`66 0F 28`(`movapd`)，同样整 128 位搬、效果等价。
+
+**测试**：`s35_simd` 差分用例，10 行输出逐字节一致（70 字节）。
+关键断言 `b7=8` / `b8=9` / `b15=16` —— **跨 64 位边界**；只看 `b0` 的话
+"只搬了低 64 位"也会通过（`movsd` 只写低 64 位，v2.55 在 CI 上踩过）。
+
+qlmc 差分 80 → **82**，回归 PASS=370 FAIL=0，自举 30/30 不动点成立。
+
+**下一步**：`std/aes` 还差 8 个内建（`pand`/`por`/`pshufb`/`pclmulqdq`/
+`aesenc`/`aesenclast`/`cpu_aes`/`cpu_pclmul`），其中后四个需要新的
+`0F 38` / `0F 3A` 三字节 opcode map 编码路径。补齐预计解开
+`std/aes` → `std/tls13`（60 → 62）。
+
+
 ## 4. 自举
 
 | 组件 | 阶段 | 状态 |
