@@ -1,0 +1,35 @@
+import std.core
+
+// v3.43：tcp_peer_raw 自检（对端地址的 20 字节原始视图）
+//
+// 布局：[0..1] 端口网络序 | [2] family | [3] 0 | [4..19] 地址
+//
+// 由 tests/net_e2e_test.py 拉起：Python 客户端连上后发一句，
+// 服务端把 peer_raw 的每个字节打印出来，驱动侧核对端口与 127.0.0.1。
+fn main() {
+    let fd = tcp_listen(39475)
+    print("listening")
+    let conn = tcp_accept(fd)
+    let msg = tcp_recv(conn, 256)
+    print("recv=" + msg)
+
+    let raw = tcp_peer_raw(conn)
+    print("raw len=" + len(raw).to_str())
+
+    // 端口（网络序）与 family 逐字节打印，方便驱动侧核对
+    print("b0=" + mem_load8(raw, 0).to_str())
+    print("b1=" + mem_load8(raw, 1).to_str())
+    print("fam=" + mem_load8(raw, 2).to_str())
+    print("b3=" + mem_load8(raw, 3).to_str())
+    print("a0=" + mem_load8(raw, 4).to_str())
+    print("a1=" + mem_load8(raw, 5).to_str())
+    print("a2=" + mem_load8(raw, 6).to_str())
+    print("a3=" + mem_load8(raw, 7).to_str())
+
+    // 回一个标记，让客户端知道服务端算完了
+    tcp_send(conn, "ok")
+
+    tcp_close(conn)
+    tcp_close(fd)
+    print("done")
+}

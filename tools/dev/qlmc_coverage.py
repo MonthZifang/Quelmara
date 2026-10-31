@@ -53,7 +53,8 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 # v3.40: 44  （加 str_ptr / target_arch）
 # v3.42: 45  （加 tcp_listen / tcp_accept / tcp_send / tcp_send_n / tcp_recv /
 #              tcp_close —— ws2_32 的 IAT 槽位 + sockaddr_in 构造）
-BASELINE = 45
+# v3.43: 46  （加 tcp_peer_raw —— getpeername + 20 字节视图）
+BASELINE = 46
 
 QLMC_SRC = "bootstrap/qlmc/qlmc.qma"
 QLMC_EXE = os.path.join("build", "_qlmc_cov.exe")

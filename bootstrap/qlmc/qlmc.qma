@@ -2108,7 +2108,9 @@ const I_ACCEPT = 16
 const I_SEND = 17
 const I_RECV = 18
 const I_CLOSESOCK = 19
-const I_USER = 20       // 用户 @ffi 符号从第 20 个 IAT 槽开始
+// v3.43：tcp_peer_raw 要 getpeername
+const I_GETPEERNAME = 20
+const I_USER = 21       // 用户 @ffi 符号从第 21 个 IAT 槽开始
 
 // ---------------------------------------------------------------------------
 // 字节发射
@@ -10306,6 +10308,10 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
     if bn == "tcp_recv" {
         return _bi_tcp_recv(fc, _lower_expr(fc, nd.b), _lower_expr(fc, nd.c))
     }
+    // v3.43：tcp_peer_raw(fd) -> str（对端地址的 20 字节原始视图）
+    if bn == "tcp_peer_raw" {
+        return _bi_tcp_peer_raw(fc, _lower_expr(fc, nd.b))
+    }
     // v3.39：str_ptr(s) -> int（str 的数据指针）
     // Quelmara 的 str 值**本身就是数据指针**（长度在 p-8），所以零成本：
     // 直接返回操作数。用途是把 str 喂给 tcp_send_n 这类零拷贝内建。
@@ -10859,6 +10865,190 @@ fn _bi_tcp_recv(fc: FnCtx, fd: int, cap: int) -> int {
     fc.vty.set(d, TY_STR)
     _ir_emit(fc, OP_MOV, d, dp, 0, 0)
     return d
+}
+
+/// tcp_peer_raw(fd) -> str：对端地址的 20 字节原始视图。
+///
+/// 布局（与 stage-0 的 `__tcp_peer_raw` 逐字节一致，`std/net/addr.qma`
+/// 按这个解）：
+///
+/// ```
+/// [0..1] 端口（网络序）  [2] family（2 = IPv4 / 23 = IPv6 / 0 = 未知）
+/// [3]    0               [4..19] 地址（v4 占前 4 字节，其余 0）
+/// ```
+///
+/// **getpeername 失败不开失败分支**（fd 已关闭时 name 缓冲保持全 0）——
+/// 库层按 family == 0 当"未知"处理。这与 `tcp_listen` 那类 fail-fast 不同：
+/// "问不到对端地址"不是致命错误，服务端照样能继续服务别的连接。
+fn _bi_tcp_peer_raw(fc: FnCtx, fd: int) -> int {
+    // 布局（与 stage-0 的 __tcp_peer_raw 逐字节一致）：
+    //   [0..1] 端口网络序 | [2] family | [3] 0 | [4..19] 地址
+    //
+    // 这个内建的手写 IR 踩过三个分配器陷阱，注释里逐条记着（v3.43）：
+    //
+    // 1. **memcpy 必须用 OP_COPY，不能用 `OP_ARG` + `OP_CALLRT RT_MEMCPY`**。
+    //    RT_MEMCPY 的实参搬运是 OP_COPY 自己做的（它把实参落 r8/r9 再 call）。
+    //    用 OP_ARG 摆参数会让 __memcpy 拿到错指针 → 进程**挂死**
+    //    （不崩、不返回、无输出）。
+    // 2. **所有常量必须在分支之前定义**。`eight`/`four` 若定义在某个分支
+    //    内部，走另一条路时那条 OP_CONST 不执行，用到它的地方就是野值。
+    // 3. **临时值不能跨 OP_CALLRT 存活**。分配器会把跨调用的临时值溢出到
+    //    帧槽，但前提是 cp[] 认得出来；手写 IR 的形状稍变就可能让它漏判，
+    //    于是 raw/name 留在 R8-R11 里被 RT_ALLOC 内部 clobber。
+    //    这里每个 alloc 之后立刻把结果用掉/存好，不让它跨越后续调用。
+    //
+    // 所有内存都用 RT_ALLOC 拿（返回值 = **数据指针**，8 字节长度头在 -8）。
+
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+
+    // ---- name 缓冲：alloc(32)，全 0（失败时 family 读出来就是 0）----
+    let n32 = _vnew(fc)
+    fc.vty.set(n32, TY_INT)
+    _ir_emit(fc, OP_CONST, n32, 0, 0, 32)
+    _ir_emit(fc, OP_ARG, 0, n32, 0, 0)
+    let name = _vnew(fc)
+    fc.vty.set(name, TY_INT)
+    _ir_emit(fc, OP_CALLRT, name, 0, 0, RT_ALLOC)
+    let n0 = _vnew(fc)
+    fc.vty.set(n0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, n0, name, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, n0, z, 8)
+    let n1 = _vnew(fc)
+    fc.vty.set(n1, TY_INT)
+    _ir_emit(fc, OP_ADDRF, n1, name, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, n1, z, 8)
+    let n2 = _vnew(fc)
+    fc.vty.set(n2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, n2, name, 0, 16)
+    _ir_emit(fc, OP_STORE, 0, n2, z, 8)
+    let n3 = _vnew(fc)
+    fc.vty.set(n3, TY_INT)
+    _ir_emit(fc, OP_ADDRF, n3, name, 0, 24)
+    _ir_emit(fc, OP_STORE, 0, n3, z, 8)
+
+    // ---- namelen：alloc(8)，初值 28 ----
+    let e8 = _vnew(fc)
+    fc.vty.set(e8, TY_INT)
+    _ir_emit(fc, OP_CONST, e8, 0, 0, 8)
+    _ir_emit(fc, OP_ARG, 0, e8, 0, 0)
+    let lp = _vnew(fc)
+    fc.vty.set(lp, TY_INT)
+    _ir_emit(fc, OP_CALLRT, lp, 0, 0, RT_ALLOC)
+    let n28 = _vnew(fc)
+    fc.vty.set(n28, TY_INT)
+    _ir_emit(fc, OP_CONST, n28, 0, 0, 28)
+    _ir_emit(fc, OP_STORE, 0, lp, n28, 8)
+
+    // ---- getpeername(fd, name, &namelen) ---- 返回值故意忽略 ----
+    _ir_emit(fc, OP_ARG, 0, fd, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, name, 0, 1)
+    _ir_emit(fc, OP_ARG, 0, lp, 0, 2)
+    let gr = _vnew(fc)
+    fc.vty.set(gr, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, gr, 0, 0, I_GETPEERNAME)
+
+    // ---- raw 缓冲：alloc(28) = 8 字节长度头 + 20 字节数据 ----
+    let n28b = _vnew(fc)
+    fc.vty.set(n28b, TY_INT)
+    _ir_emit(fc, OP_CONST, n28b, 0, 0, 28)
+    _ir_emit(fc, OP_ARG, 0, n28b, 0, 0)
+    let raw = _vnew(fc)
+    fc.vty.set(raw, TY_INT)
+    _ir_emit(fc, OP_CALLRT, raw, 0, 0, RT_ALLOC)
+    let r0 = _vnew(fc)
+    fc.vty.set(r0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, r0, raw, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, r0, z, 8)
+    let r1 = _vnew(fc)
+    fc.vty.set(r1, TY_INT)
+    _ir_emit(fc, OP_ADDRF, r1, raw, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, r1, z, 8)
+    let r2 = _vnew(fc)
+    fc.vty.set(r2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, r2, raw, 0, 16)
+    _ir_emit(fc, OP_STORE, 0, r2, z, 8)
+
+    // ---- 填字节：端口（网络序）+ family ----
+    // 常量先全建好（陷阱 2）
+    let two = _vnew(fc)
+    fc.vty.set(two, TY_INT)
+    _ir_emit(fc, OP_CONST, two, 0, 0, 2)
+    let three = _vnew(fc)
+    fc.vty.set(three, TY_INT)
+    _ir_emit(fc, OP_CONST, three, 0, 0, 3)
+    let one = _vnew(fc)
+    fc.vty.set(one, TY_INT)
+    _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+    let four = _vnew(fc)
+    fc.vty.set(four, TY_INT)
+    _ir_emit(fc, OP_CONST, four, 0, 0, 4)
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    let n23 = _vnew(fc)
+    fc.vty.set(n23, TY_INT)
+    _ir_emit(fc, OP_CONST, n23, 0, 0, 23)
+
+    // raw[0] = name[2]、raw[1] = name[3]（端口高低字节，网络序原样）
+    let a2 = _vnew(fc)
+    fc.vty.set(a2, TY_INT)
+    _ir_emit(fc, OP_ADD, a2, name, two, 0)
+    let b0 = _vnew(fc)
+    fc.vty.set(b0, TY_INT)
+    _ir_emit(fc, OP_LOAD8, b0, a2, 0, 0)
+    _ir_emit(fc, OP_STORE8, 0, raw, b0, 0)
+
+    let a3 = _vnew(fc)
+    fc.vty.set(a3, TY_INT)
+    _ir_emit(fc, OP_ADD, a3, name, three, 0)
+    let b1 = _vnew(fc)
+    fc.vty.set(b1, TY_INT)
+    _ir_emit(fc, OP_LOAD8, b1, a3, 0, 0)
+    let r1p = _vnew(fc)
+    fc.vty.set(r1p, TY_INT)
+    _ir_emit(fc, OP_ADD, r1p, raw, one, 0)
+    _ir_emit(fc, OP_STORE8, 0, r1p, b1, 0)
+
+    // raw[2] = name[0]（family）
+    let fam = _vnew(fc)
+    fc.vty.set(fam, TY_INT)
+    _ir_emit(fc, OP_LOAD8, fam, name, 0, 0)
+    let r2p = _vnew(fc)
+    fc.vty.set(r2p, TY_INT)
+    _ir_emit(fc, OP_ADD, r2p, raw, two, 0)
+    _ir_emit(fc, OP_STORE8, 0, r2p, fam, 0)
+
+    // ---- 地址：family == 23 走 v6（name+8 拷 16），否则 v4（name+4 拷 4）----
+    let lv6 = _newlab(fc.labs)
+    let ldone = _newlab(fc.labs)
+    _ir_emit(fc, OP_JCMP, 0x84, fam, n23, lv6)
+    // v4：OP_COPY（陷阱 1）
+    let rd4 = _vnew(fc)
+    fc.vty.set(rd4, TY_INT)
+    _ir_emit(fc, OP_ADD, rd4, raw, four, 0)
+    let nd4 = _vnew(fc)
+    fc.vty.set(nd4, TY_INT)
+    _ir_emit(fc, OP_ADD, nd4, name, four, 0)
+    _ir_emit(fc, OP_COPY, 0, rd4, nd4, 4)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, ldone)
+    // v6
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lv6)
+    let rd6 = _vnew(fc)
+    fc.vty.set(rd6, TY_INT)
+    _ir_emit(fc, OP_ADD, rd6, raw, four, 0)
+    let nd6 = _vnew(fc)
+    fc.vty.set(nd6, TY_INT)
+    _ir_emit(fc, OP_ADD, nd6, name, eight, 0)
+    _ir_emit(fc, OP_COPY, 0, rd6, nd6, 16)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, ldone)
+
+    // ---- 包成 str：raw 本身就是数据指针，20 字节 ----
+    let n20 = _vnew(fc)
+    fc.vty.set(n20, TY_INT)
+    _ir_emit(fc, OP_CONST, n20, 0, 0, 20)
+    return _bi_mem_str(fc, raw, n20)
 }
 
 /// Win64 的 int 返回值**只写 eax**（高 32 位 0 扩展），所以
@@ -11633,6 +11823,9 @@ fn _reg_ws2(dsym: vec[str], ddll: vec[int]) {
     ddll.push(3)
     dsym.push("closesocket")
     ddll.push(3)
+    // v3.43：对端地址
+    dsym.push("getpeername")
+    ddll.push(3)
 }
 
 fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
@@ -11809,15 +12002,17 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
     iat.set(I_VALLOC, rdata_rva + iatb.get(0) + 72)
     iat.set(I_STRTOD, rdata_rva + iatb.get(2))
     iat.set(I_WSPRINTF, rdata_rva + iatb.get(1))
-    // v3.42：ws2_32 的 8 个槽位（DLL 索引 3，组内顺序与上面 dsym.push 一致）。
-    // **漏了这 8 行 = 槽位留 0 = CALLIAT 跳到地址 0**，表现是进程直接
+    // v3.42：ws2_32 的槽位（DLL 索引 3，组内顺序与 `_reg_ws2` 里一致）。
+    // **漏了这些行 = 槽位留 0 = CALLIAT 跳到地址 0**，表现是进程直接
     // 0xC0000005 崩掉、连第一条 print 之后都活不过去（tcp_listen 踩过）。
     //
-    // 写成循环而不是 8 条 `iat.set(I_XXX, rdata_rva + iatb.get(3) + N)`：
+    // 写成循环而不是逐条 `iat.set(I_XXX, rdata_rva + iatb.get(3) + N)`：
     // `build_rdata` 的帧槽**正好卡在 416 格上限**，摊开写会多要一格，
     // 自举 stage-2 立刻编不过自己（v3.42 实测）。循环只多两个变量。
+    //
+    // **I_WSASTART..I_GETPEERNAME 必须连续**（12..20）—— 这条循环靠它推。
     let mut wi = 0
-    while wi < 8 {
+    while wi < I_USER - I_WSASTART {
         iat.set(I_WSASTART + wi, rdata_rva + iatb.get(3) + wi * 8)
         wi = wi + 1
     }
