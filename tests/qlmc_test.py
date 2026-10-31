@@ -97,6 +97,11 @@ CASES = [
     # 光"能编过"完全说明不了问题 —— 尤其要验 b7/b8/b15 这三个跨 64 位
     # 边界的字节，只看 b0 的话"只搬了低 64 位"也会通过。
     ("s35_simd", "tests/t202_qlmc_simd.qma"),
+    # v3.59：AES-NI / PCLMULQDQ / SSSE3 / SSE 立即数移位（14 个内建）。
+    # **必须是差分用例**：SIMD 编码错了只静默算错 —— 比如 pshufb 的 map
+    # 写成 0F 3A 而不是 0F 38 就完全是另一条指令，pclmulqdq 少发 imm8
+    # 后面的字节会被当指令。本夹具对每条指令都做已知答案的数值验证。
+    ("s36_aes", "tests/t203_qlmc_aes.qma"),
 ]
 
 npass = 0

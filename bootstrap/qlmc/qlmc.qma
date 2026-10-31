@@ -2543,6 +2543,44 @@ fn _sse_rr(code: vec[int], pf: int, opc: int, x: int, y: int) {
     _modrm(code, 3, x, y)
 }
 
+/// SSE 三字节 opcode map：`66 REX 0F 38 opc /r` 或 `66 REX 0F 3A opc /r ib`（v3.59）。
+///
+/// `map`：0x38 或 0x3A（Intel 的两个三字节 escape）。
+/// `hasimm` = 1 时末尾再发一个 imm8（`pclmulqdq` / `aeskeygenassist` 需要）。
+///
+/// 为什么单独一个函数而不是扩展 `_sse_rr`：三字节 map 的指令（AES-NI /
+/// PCLMULQDQ / SSSE3）全是 **WIG**（忽略 REX.W），而且部分带 imm8 ——
+/// 塞进 `_sse_rr` 会让那个函数多两个分支、多一个参数，而它已经在
+/// f64 热路径上。
+fn _sse_rr3(code: vec[int], mmap: int, opc: int, x: int, y: int,
+             hasimm: int, imm: int) {
+    _b(code, 0x66)
+    _rex2(code, 0, x, y)
+    _b(code, 0x0F)
+    _b(code, mmap)
+    _b(code, opc)
+    _modrm(code, 3, x, y)
+    if hasimm == 1 {
+        _b(code, imm & 0xFF)
+    }
+}
+
+/// SSE 立即数移位：`66 REX 0F opc /group ib`（v3.59）。
+///
+/// 这类指令**没有 reg 字段**（`/group` 是 modrm 的 reg 位当操作码扩展），
+/// 唯一的 xmm 操作数在 `rm` 位。所以不能用 `_sse_rr3` —— 那个是 reg,rm 形态。
+///
+/// `group`：psrlw=2、psllw=6（都配 `0F 71`）；
+///          psrlq=2、psllq=6、pslldq=7、psrldq=3（都配 `0F 73`）。
+fn _sse_shift_imm(code: vec[int], opc: int, group: int, x: int, imm: int) {
+    _b(code, 0x66)
+    _rex2(code, 0, 0, x)
+    _b(code, 0x0F)
+    _b(code, opc)
+    _modrm(code, 3, group, x)
+    _b(code, imm & 0xFF)
+}
+
 /// `[base+disp32]` 形式（base 必须是 RBP 这类"必须带 disp"的寄存器）
 fn _sse_mem(code: vec[int], pf: int, opc: int, x: int, base: int, disp: int) {
     // pf: 0 = 66（整数 SIMD）、1 = F2（标量 double）、2 = F3（movdqu / AES）
@@ -3066,6 +3104,12 @@ const OP_SPIN = 80
 const OP_XMMLD = 81
 const OP_XMMST = 82
 const OP_XMMRR = 83
+// 三字节 map + imm8（`pclmulqdq` / `aeskeygenassist` 用）。
+// **单独一个 opcode**：`OP_XMMRR` 的 imm 已经塞满 5 个字段，
+// 再加 imm8 就得跨 32 位 —— 分开更清楚，也避免 `pf << 32` 这种依赖。
+const OP_XMMRI = 84
+// SSE 立即数移位（单槽 + imm8）：imm = (opc<<24) | (imm8<<16) | (group<<8) | slot
+const OP_XMMSH = 85
 
 struct Ir {
     op: int
@@ -3228,7 +3272,9 @@ const RT_MEMXCHG = 26
 // 支持的 lock 前缀指令）。
 const RT_AADD = 27
 const RT_ACAS = 28
-const RT_COUNT = 29      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
+// v3.59：CPUID leaf 1 的 ECX（AES-NI bit25 / PCLMULQDQ bit1 都在这儿）
+const RT_CPUID1ECX = 29
+const RT_COUNT = 30      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
 
 fn _slot_disp(slot: int) -> int {
     return -8 * (slot + 1)
@@ -7469,12 +7515,41 @@ fn _emit_xmm(fc: FnCtx, ins: Ir) {
         return
     }
     if ins.op == OP_XMMRR {
-        // 四个值全在 imm 里：imm = (pf<<24) | (opc<<16) | (dst<<8) | src
+        // imm = (pf << 24) | (opc << 16) | (dst << 8) | src
+        //   pf = 0 → `66 0F opc`（两字节，整数 SIMD）
+        //   pf = 2 → `F3 0F opc`（两字节，movdqu）
+        //   pf = 0x38 / 0x3A → 三字节 map，**不带 imm8**
         let src = ins.imm & 0xFF
         let dst = (ins.imm >> 8) & 0xFF
         let opc = (ins.imm >> 16) & 0xFF
         let pf = (ins.imm >> 24) & 0xFF
-        _sse_rr(code, pf, opc, dst, src)
+        if pf == 0x38 || pf == 0x3A {
+            _sse_rr3(code, pf, opc, dst, src, 0, 0)
+        } else {
+            _sse_rr(code, pf, opc, dst, src)
+        }
+        return
+    }
+    if ins.op == OP_XMMSH {
+        // imm = (opc << 24) | (imm8 << 16) | (group << 8) | slot
+        let slot = ins.imm & 0xFF
+        let group = (ins.imm >> 8) & 0xFF
+        let imm8 = (ins.imm >> 16) & 0xFF
+        let opc = (ins.imm >> 24) & 0xFF
+        _sse_shift_imm(code, opc, group, slot, imm8)
+        return
+    }
+    if ins.op == OP_XMMRI {
+        // 三字节 map + imm8：imm = (pf << 32) | (imm8 << 24) | (opc << 16)
+        //                          | (dst << 8) | src
+        // **注意 `pf << 32` 需要 64 位移位** —— Quelmara 的 int 是 64 位，
+        // 所以能放下。若哪天改成 32 位，这里要重新设计。
+        let src = ins.imm & 0xFF
+        let dst = (ins.imm >> 8) & 0xFF
+        let opc = (ins.imm >> 16) & 0xFF
+        let imm8 = (ins.imm >> 24) & 0xFF
+        let pf = (ins.imm >> 32) & 0xFF
+        _sse_rr3(code, pf, opc, dst, src, 1, imm8)
         return
     }
 }
@@ -7488,7 +7563,8 @@ fn _emit_ir(fc: FnCtx, i: int) {
     }
     // v2.55：f64 的几条指令整体交给 `_emit_f64`（见那里的注释：不能给本函数
     // 加局部变量，帧已经顶到上限）
-    if op == OP_XMMLD || op == OP_XMMST || op == OP_XMMRR {
+    if op == OP_XMMLD || op == OP_XMMST || op == OP_XMMRR ||
+       op == OP_XMMRI || op == OP_XMMSH {
         _emit_xmm(fc, ins)
         return
     }
@@ -8507,7 +8583,7 @@ fn _iat_name(n: int) -> str {
 }
 
 fn _op_names_str() -> str {
-    return "NOP0,CONST,MOV,ADD,SUB,MUL,DIV,MOD,NEG,NOT,NZ,CMP,LAB,JMP,JZ,JNZ,ARG,CALL,CALLRT,RET,PRINT,EXIT,LEA,LEN,PARAM,JCMP,ADDRV,ADDRF,ADDRX,LOAD,STORE,COPY,ZERO,RETAGG,RETSRET,ZERON,CALLIAT,LEAFN,CALLR,MEMCPYN,AND,OR,XOR,SHL,SAR,SHR,BNOT,PARAMSTK,STKALLOC,STKARG,STKFREE,ADDRXN,RTADDR,LOAD8,STORE8,FCMP,NOP,BINI,CMPI,LOADD,LOADX,STORED,STOREX,LOAD8D,LOAD8X,STORE8D,STORE8X,FBIN,ITOF,FTOI,DIVC,LOAD8I,STORE8I,JCMPVLEN,JCMPSTR,FNEG,F64IMM,JCMPI,BSSADDR,CALLV,SPIN,XMMLD,XMMST,XMMRR"
+    return "NOP0,CONST,MOV,ADD,SUB,MUL,DIV,MOD,NEG,NOT,NZ,CMP,LAB,JMP,JZ,JNZ,ARG,CALL,CALLRT,RET,PRINT,EXIT,LEA,LEN,PARAM,JCMP,ADDRV,ADDRF,ADDRX,LOAD,STORE,COPY,ZERO,RETAGG,RETSRET,ZERON,CALLIAT,LEAFN,CALLR,MEMCPYN,AND,OR,XOR,SHL,SAR,SHR,BNOT,PARAMSTK,STKALLOC,STKARG,STKFREE,ADDRXN,RTADDR,LOAD8,STORE8,FCMP,NOP,BINI,CMPI,LOADD,LOADX,STORED,STOREX,LOAD8D,LOAD8X,STORE8D,STORE8X,FBIN,ITOF,FTOI,DIVC,LOAD8I,STORE8I,JCMPVLEN,JCMPSTR,FNEG,F64IMM,JCMPI,BSSADDR,CALLV,SPIN,XMMLD,XMMST,XMMRR,XMMRI,XMMSH"
 }
 
 /// 取第 n 个 opcode 的名字（n 越界返回 ?n）。
@@ -11171,6 +11247,16 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
     if bn == "xmm_pxor" {
         return _bi_xmm_rr(fc, nd, 0xEF, 0)      // pxor
     }
+    // ---- v3.59：AES-NI / PCLMULQDQ / SSSE3 / SSE 移位 ----
+    //
+    // **整体委托给独立函数**：`_lower_builtin` 已经用到 416 槽（上限），
+    // 这 14 个分支把它顶到 417，自举 stage-2 立刻编不过自己。
+    // 这个陷阱本项目踩过多次（v3.42 / v3.45 / v3.49 / v3.55），
+    // 处理方式一律是"抽出独立函数"。
+    let simd = _lower_simd_extra(fc, nd, bn)
+    if simd != -2 {
+        return simd
+    }
     // v3.56：`args()` —— 改写成对预置实现 `_qlm_args_impl()` 的普通调用。
     //
     // 预置实现由 `ARGS_PRELUDE` 在 lex 阶段拼进 token 流（见那里的说明），
@@ -12042,12 +12128,171 @@ fn _bi_xmm_rr(fc: FnCtx, nd: Node, opc: int, pf: int) -> int {
     // （v3.58 实测：`a = 239` 直接 `vec index out of bounds`）。
     // `imm` 不参与 vend 写入，所以四个值全装进它：
     //   imm = (pf << 24) | (opc << 16) | (dst_slot << 8) | src_slot
-    let packed = (pf << 24) | (opc << 16) | (dst << 8) | src
+    // **`pf` 可以是 0x38 / 0x3A**（三字节 map）—— 编码进 imm 的最高 8 位。
+    // 全部落在低 32 位内，不依赖 64 位移位。
+    let packed = (pf << 24) | ((opc & 0xFF) << 16) | (dst << 8) | src
     _ir_emit(fc, OP_XMMRR, 0, 0, 0, packed)
     let d = _vnew(fc)
     fc.vty.set(d, TY_INT)
     _ir_emit(fc, OP_CONST, d, 0, 0, 0)
     return d
+}
+
+/// v3.59 的 SIMD 内建分派（AES-NI / PCLMULQDQ / SSSE3 / SSE 移位）。
+///
+/// **返回 -2 表示"不是我负责的内建"** —— 用 -2 而不是 -1 是因为 -1 在
+/// 内建降级里表示"这个表达式不是内建"（见 `_lower_builtin` 的返回值约定）。
+///
+/// 单独成函数是为了压 `_lower_builtin` 的帧槽（那个函数贴着 416 上限）。
+fn _lower_simd_extra(fc: FnCtx, nd: Node, bn: str) -> int {
+    // ---- AES-NI / PCLMULQDQ / SSSE3（两字节或三字节 map + 两个槽）----
+    //
+    //   pand       66 0F DB /r        两字节
+    //   por        66 0F EB /r        两字节
+    //   pshufb     66 0F 38 00 /r     三字节（SSSE3）
+    //   aesenc     66 0F 38 DC /r     三字节（AES-NI）
+    //   aesenclast 66 0F 38 DD /r     三字节（AES-NI）
+    //   pclmulqdq  66 0F 3A 44 /r ib  三字节 + imm8
+    if bn == "pand" {
+        return _bi_xmm_rr(fc, nd, 0xDB, 0)
+    }
+    if bn == "por" {
+        return _bi_xmm_rr(fc, nd, 0xEB, 0)
+    }
+    if bn == "pshufb" {
+        return _bi_xmm_rr(fc, nd, 0x00, 0x38)
+    }
+    if bn == "aesenc" {
+        return _bi_xmm_rr(fc, nd, 0xDC, 0x38)
+    }
+    if bn == "aesenclast" {
+        return _bi_xmm_rr(fc, nd, 0xDD, 0x38)
+    }
+    if bn == "pclmulqdq" {
+        return _bi_xmm_ri(fc, nd, 0x44, 0x3A)
+    }
+    // ---- SSE 立即数移位（单槽 + imm8）----
+    //
+    //   psrlw(s, imm)  66 0F 71 /2 ib
+    //   psllw(s, imm)  66 0F 71 /6 ib
+    //   psrlq(s, imm)  66 0F 73 /2 ib
+    //   psllq(s, imm)  66 0F 73 /6 ib
+    //   pslldq(s, imm) 66 0F 73 /7 ib
+    //   psrldq(s, imm) 66 0F 73 /3 ib
+    if bn == "psrlw" {
+        return _bi_xmm_shift(fc, nd, 0x71, 2)
+    }
+    if bn == "psllw" {
+        return _bi_xmm_shift(fc, nd, 0x71, 6)
+    }
+    if bn == "psrlq" {
+        return _bi_xmm_shift(fc, nd, 0x73, 2)
+    }
+    if bn == "psllq" {
+        return _bi_xmm_shift(fc, nd, 0x73, 6)
+    }
+    if bn == "pslldq" {
+        return _bi_xmm_shift(fc, nd, 0x73, 7)
+    }
+    if bn == "psrldq" {
+        return _bi_xmm_shift(fc, nd, 0x73, 3)
+    }
+    // ---- CPUID 特征探测 ----
+    if bn == "cpu_aes" {
+        return _bi_cpu_feature(fc, 1)           // CPUID.1:ECX[25]
+    }
+    if bn == "cpu_pclmul" {
+        return _bi_cpu_feature(fc, 2)           // CPUID.1:ECX[1]
+    }
+    return -2
+}
+
+/// SSE 立即数移位：`f(槽, imm8)`（v3.59）。
+///
+/// 单槽形态 —— 移位只动一个 xmm。`opc` 是 `0F 71` 或 `0F 73` 的第二个字节，
+/// `group` 是 modrm 的 reg 位（当操作码扩展用）。
+fn _bi_xmm_shift(fc: FnCtx, nd: Node, opc: int, group: int) -> int {
+    if nd.b < 0 || nd.c < 0 {
+        eprint("qlmc: SIMD 移位需要 (槽, imm8) 两个实参")
+        exit(2)
+    }
+    let slot = _xmm_slot(fc, nd.b, "SIMD 移位")
+    let imm8 = _xmm_imm8(fc, nd.c)
+    // imm = (imm8 << 16) | (group << 8) | slot，opc 放 a 槽
+    // **a 必须是合法 vreg 或 0** —— 所以 opc 走 imm 的高位
+    let packed = (opc << 24) | (imm8 << 16) | (group << 8) | slot
+    _ir_emit(fc, OP_XMMSH, 0, 0, 0, packed)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+    return d
+}
+
+/// 三字节 map + imm8：`f(目标槽, 源槽, imm8)`（v3.59）。
+///
+/// 目前只有 `pclmulqdq` 用（`66 0F 3A 44 /r ib`）。
+fn _bi_xmm_ri(fc: FnCtx, nd: Node, opc: int, mmap: int) -> int {
+    if nd.b < 0 || nd.c < 0 || nd.n < 0 {
+        eprint("qlmc: 三字节 SIMD 指令需要三个实参")
+        exit(2)
+    }
+    let dst = _xmm_slot(fc, nd.b, "SIMD")
+    let src = _xmm_slot(fc, nd.c, "SIMD")
+    let imm8 = _xmm_imm8(fc, nd.n)
+    // imm = (pf << 32) | (imm8 << 24) | (opc << 16) | (dst << 8) | src
+    let packed = (mmap << 32) | (imm8 << 24) | ((opc & 0xFF) << 16) |
+                 (dst << 8) | src
+    _ir_emit(fc, OP_XMMRI, 0, 0, 0, packed)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+    return d
+}
+
+/// 取一个 0..255 的立即数（编译期常量）。
+fn _xmm_imm8(fc: FnCtx, nid: int) -> int {
+    let nd = fc.nodes.get(nid)
+    if nd.op != E_NUM {
+        eprint("qlmc: SIMD 的立即数必须是编译期常量")
+        exit(2)
+    }
+    if nd.a < 0 || nd.a > 255 {
+        eprint("qlmc: SIMD 的立即数越界（0..255），得到 " + nd.a.to_str())
+        exit(2)
+    }
+    return nd.a
+}
+
+/// `cpu_aes()` / `cpu_pclmul()`：CPUID 特征位（v3.59）。
+///
+/// `which`：1 = AES-NI（CPUID.1:ECX[25]）、2 = PCLMULQDQ（CPUID.1:ECX[1]）。
+/// 两者都在 **leaf 1 的 ECX** 里，所以用同一个运行时例程 `RT_CPUID1ECX`。
+///
+/// 返回 1 = 支持、0 = 不支持。**绝不能谎报 1** —— 库层靠它决定走
+/// AES-NI 快路径还是 T-table 软件实现，谎报会让 CPU 不支持的程序直接
+/// 非法指令崩溃。
+fn _bi_cpu_feature(fc: FnCtx, which: int) -> int {
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_CPUID1ECX)
+    // 取位：AES = bit 25、PCLMUL = bit 1
+    let mut sh = 25
+    if which == 2 {
+        sh = 1
+    }
+    let shc = _vnew(fc)
+    fc.vty.set(shc, TY_INT)
+    _ir_emit(fc, OP_CONST, shc, 0, 0, sh)
+    let t = _vnew(fc)
+    fc.vty.set(t, TY_INT)
+    _ir_emit(fc, OP_SHR, t, d, shc, 0)
+    let one = _vnew(fc)
+    fc.vty.set(one, TY_INT)
+    _ir_emit(fc, OP_CONST, one, 0, 0, 1)
+    let r = _vnew(fc)
+    fc.vty.set(r, TY_INT)
+    _ir_emit(fc, OP_AND, r, t, one, 0)
+    return r
 }
 
 /// 把实参节点解析成 XMM 槽号（0..15 的字面量）。
@@ -14592,6 +14837,33 @@ fn _gen_str_eq(ctx: Ctx) {
 /// 本机实测 16 MB 顺序写：`.bss` 21~29 ms，`VirtualAlloc` 4.0 ms。
 /// b4_array 的 push 循环 2 M 次里有 16 ms 花在这上面（23.3 → 7.3 ms）。
 /// 副作用：产物不再带 64 MB 的 .bss 节（5.6 KB 的 exe 里 64 MB 是虚的）。
+/// `__cpuid1ecx() -> rax`：CPUID leaf 1 的 ECX（v3.59）。
+///
+/// AES-NI 在 **ECX[25]**、PCLMULQDQ 在 **ECX[1]**，两者都在 leaf 1 里，
+/// 所以一个例程够两个内建用。
+///
+/// ## 为什么要保存 RBX
+///
+/// `cpuid` 指令**写 RBX**，而 RBX 是 Win64 的**非易失**寄存器 ——
+/// 被调方必须保存。不保存的话调用方的 RBX（qlmc 的变量寄存器）会被
+/// 悄悄改掉，表现为"调一次 cpu_aes() 之后某个变量变成随机值"，
+/// 极难定位。
+fn _gen_cpuid1ecx(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    ctx.rt_pos.set(RT_CPUID1ECX, len(code))
+    _b(code, 0x53)                         // push rbx
+    _b(code, 0xB8)                         // mov eax, 1
+    _w32(code, 1)
+    _b(code, 0x31)                         // xor ecx, ecx
+    _b(code, 0xC9)
+    _b(code, 0x0F)                         // cpuid
+    _b(code, 0xA2)
+    _b(code, 0x89)                         // mov eax, ecx（返回值放 eax）
+    _b(code, 0xC8)
+    _b(code, 0x5B)                         // pop rbx
+    _ret(code)
+}
+
 fn _gen_alloc(ctx: Ctx) {
     let code: vec[int] = ctx.code
     let labs: vec[int] = ctx.labs
@@ -15861,6 +16133,7 @@ fn main() {
     _gen_print_str(ctx)
     _gen_print_bool(ctx)
     _gen_memcpy(ctx)
+    _gen_cpuid1ecx(ctx)
     _gen_alloc(ctx)
     _gen_str_cat(ctx)
     _gen_str_eq(ctx)

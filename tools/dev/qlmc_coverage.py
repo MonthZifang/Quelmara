@@ -65,7 +65,10 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 # v3.55: 58  （for k in map + map.del —— 解开 std/kv 与 std/set）
 # v3.56: 59  （args() 源码级预置注入 —— 解开 std/cli）
 # v3.57: 60  （map[K]V.new() 容量可省略（默认 16）—— 解开 std/session）
-BASELINE = 60
+# v3.58: 60  （SIMD 基础四件 —— 基础设施，没解开模块）
+# v3.59: 63  （AES-NI / PCLMULQDQ / SSSE3 / SSE 移位 14 个内建 ——
+#              解开 std/aes、std/tls13，以及此前卡在同一处的那一个）
+BASELINE = 63
 
 QLMC_SRC = "bootstrap/qlmc/qlmc.qma"
 QLMC_EXE = os.path.join("build", "_qlmc_cov.exe")
