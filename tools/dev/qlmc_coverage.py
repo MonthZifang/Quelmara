@@ -60,7 +60,9 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 # v3.49: 51  （udp_sendto / udp_sendto6 —— 解开 std/net/udp 与 std/net/udp6）
 # v3.52: 51  （跨模块 const + str 切片 —— 障碍前移但没解开模块）
 # v3.53: 54  （thread_start —— 一次解开 std/net/reactor + std/ws + std/sse）
-BASELINE = 54
+# v3.54: 56  （tcp_connect + tcp_send_n_to + tcp_recv_to —— 解开 std/net 与
+#              std/net/udp6；getaddrinfo 链表遍历 + SO_SNDTIMEO/SO_RCVTIMEO）
+BASELINE = 56
 
 QLMC_SRC = "bootstrap/qlmc/qlmc.qma"
 QLMC_EXE = os.path.join("build", "_qlmc_cov.exe")
