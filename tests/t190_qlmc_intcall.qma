@@ -1,0 +1,43 @@
+import std.core
+
+// v3.47：函数名作值 + int 变量存地址后间接调用
+//
+// 两条语言语义（`02-language.md` §4「函数值就是代码地址」）：
+//   1. `let f = twice`       —— 函数名直接作值
+//   2. `f(5)`  /  `g(a,b,c)` —— 通过 int 变量间接调用
+//
+// qlmc 以前两条都不支持：E_VAR 遇到函数名报「未定义变量」，
+// E_CALL 遇到非 TY_FN 变量报「未定义函数」。
+
+fn twice(x: int) -> int {
+    return x * 2
+}
+
+fn add3(a: int, b: int, c: int) -> int {
+    return a + b + c
+}
+
+fn main() {
+    // 1) 函数名直接作值，存进 int 变量
+    let f = twice
+    assert(f != 0, "function name has nonzero address")
+
+    // 2) 通过 int 变量调用（单参）
+    let r1 = f(21)
+    assert(r1 == 42, "indirect single-arg call")
+
+    // 3) 通过 int 变量调用（三参，走不同实参寄存器）
+    let g = add3
+    let r2 = g(10, 20, 12)
+    assert(r2 == 42, "indirect three-arg call")
+
+    // 4) 地址存进 static_word 槽再取出来调用（std/sync 的注入模式）
+    let slot = static_word(63)
+    mem_store64(slot, 0, f)
+    let h = mem_load64(slot, 0)
+    assert(h == f, "slot roundtrip keeps address")
+    let r3 = h(5)
+    assert(r3 == 10, "call through slot-loaded address")
+
+    print("t190 ok")
+}
