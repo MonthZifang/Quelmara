@@ -286,6 +286,33 @@ def case_peer_e2e():
             f"{r.stdout[-400:]}{r.stderr[-300:]}")
 
 
+def case_udp_e2e():
+    """UDP 接收侧内建端到端（v3.44）。
+
+    覆盖 `udp_open` / `udp_bind` / `udp_recvfrom` / `udp_recvfrom_to`。
+    `udp_sendto` 本版未实现（见 docs/versions/v3.44/CHANGELOG.md），
+    所以只钉接收侧。
+
+    **超时那条最关键**：`udp_recvfrom_to(fd, cap, 300)` 在对端不发东西时
+    必须返回空串而不是永久阻塞 —— 这正是 `dns` 查询循环能停下来的前提。
+    """
+    if not IS_WIN:
+        skip("UDP 内建 E2E：非 Windows 平台（服务端运行时仅 PE）")
+        return
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/udp_e2e_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=300)
+    if r.returncode == 2:
+        skip("UDP 内建 E2E：39480 已被占用，跳过")
+    elif r.returncode == 0 and "udp e2e: PASS=" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines() if "udp e2e:" in ln]
+        ok(f"UDP 内建 E2E：{line[-1].strip() if line else 'ok'}")
+    else:
+        bad(f"UDP 内建 E2E 失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
 def case_encoding_diag():
     """源文件编码错误诊断 + CLI 诊断出口（v3.32，收 §7.11）。
 
@@ -1651,6 +1678,8 @@ def main():
     case_net_e2e()
     # v3.43：tcp_peer_raw 的字节级差分（端口网络序 / family / 地址布局）
     case_peer_e2e()
+    # v3.44：UDP 接收侧内建（open / bind / recvfrom / recvfrom_to）
+    case_udp_e2e()
 
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），

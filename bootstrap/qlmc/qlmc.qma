@@ -2110,7 +2110,11 @@ const I_RECV = 18
 const I_CLOSESOCK = 19
 // v3.43：tcp_peer_raw 要 getpeername
 const I_GETPEERNAME = 20
-const I_USER = 21       // 用户 @ffi 符号从第 21 个 IAT 槽开始
+// v3.44：UDP 三个内建要 sendto / recvfrom / setsockopt
+const I_SENDTO = 21
+const I_RECVFROM = 22
+const I_SETSOCKOPT = 23
+const I_USER = 24       // 用户 @ffi 符号从第 24 个 IAT 槽开始
 
 // ---------------------------------------------------------------------------
 // 字节发射
@@ -10312,6 +10316,44 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
     if bn == "tcp_peer_raw" {
         return _bi_tcp_peer_raw(fc, _lower_expr(fc, nd.b))
     }
+    // v3.44：UDP 三个内建（解 std/net/udp、udp6、dns 三个模块）
+    if bn == "udp_open" {
+        return _bi_udp_open(fc, 2)          // AF_INET
+    }
+    if bn == "udp_open6" {
+        return _bi_udp_open(fc, 23)         // AF_INET6
+    }
+    // udp_recvfrom(fd, cap) -> str（单 datagram；源地址丢弃，与 stage-0 同口径）
+    if bn == "udp_recvfrom" {
+        return _bi_udp_recvfrom(fc, _lower_expr(fc, nd.b),
+                                _lower_expr(fc, nd.c), 0)
+    }
+    if bn == "udp_recvfrom6" {
+        return _bi_udp_recvfrom(fc, _lower_expr(fc, nd.b),
+                                _lower_expr(fc, nd.c), 1)
+    }
+    // udp_recvfrom_to(fd, cap, ms) -> str（带接收超时）
+    if bn == "udp_recvfrom_to" {
+        let r0 = _pin(fc, _lower_expr(fc, nd.b))
+        let r1 = _pin(fc, _lower_expr(fc, nd.c))
+        let r2 = _pin(fc, _lower_expr(fc, nd.n))
+        return _bi_udp_recvfrom_to(fc, r0, r1, r2, 0)
+    }
+    if bn == "udp_recvfrom6_to" {
+        let q0 = _pin(fc, _lower_expr(fc, nd.b))
+        let q1 = _pin(fc, _lower_expr(fc, nd.c))
+        let q2 = _pin(fc, _lower_expr(fc, nd.n))
+        return _bi_udp_recvfrom_to(fc, q0, q1, q2, 1)
+    }
+    // v3.44：tcp_listen6(port) -> fd（IPv6 双栈监听）
+    if bn == "tcp_listen6" {
+        return _bi_tcp_listen6(fc, _lower_expr(fc, nd.b))
+    }
+    // v3.44：udp_bind(fd, port) -> 0（绑 0.0.0.0:port）
+    if bn == "udp_bind" {
+        return _bi_udp_bind(fc, _lower_expr(fc, nd.b),
+                            _lower_expr(fc, nd.c))
+    }
     // v3.39：str_ptr(s) -> int（str 的数据指针）
     // Quelmara 的 str 值**本身就是数据指针**（长度在 p-8），所以零成本：
     // 直接返回操作数。用途是把 str 喂给 tcp_send_n 这类零拷贝内建。
@@ -11049,6 +11091,519 @@ fn _bi_tcp_peer_raw(fc: FnCtx, fd: int) -> int {
     fc.vty.set(n20, TY_INT)
     _ir_emit(fc, OP_CONST, n20, 0, 0, 20)
     return _bi_mem_str(fc, raw, n20)
+}
+
+/// udp_open / udp_open6：建一个 UDP socket，失败 fail-fast。
+///
+/// `af` 是地址族：2 = AF_INET、23 = AF_INET6。与 TCP 的 `_bi_tcp_listen`
+/// 不同，这里**不 bind**（UDP 客户端由系统分配临时端口；要绑端口的
+/// 服务端调 `udp_bind`，那是另一个内建）。
+fn _bi_udp_open(fc: FnCtx, af: int) -> int {
+    // WSAStartup(0x202, &wsa)
+    let wsa = _vnew(fc)
+    fc.vty.set(wsa, TY_INT)
+    _ir_emit(fc, OP_CONST, wsa, 0, 0, 64)
+    _ir_emit(fc, OP_ARG, 0, wsa, 0, 0)
+    let wh = _vnew(fc)
+    fc.vty.set(wh, TY_INT)
+    _ir_emit(fc, OP_CALLRT, wh, 0, 0, RT_ALLOC)
+    let ver = _vnew(fc)
+    fc.vty.set(ver, TY_INT)
+    _ir_emit(fc, OP_CONST, ver, 0, 0, 514)      // 0x0202
+    _ir_emit(fc, OP_ARG, 0, ver, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, wh, 0, 1)
+    let wr = _vnew(fc)
+    fc.vty.set(wr, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, wr, 0, 0, I_WSASTART)
+    _net_fail_if_nonzero(fc, wr, 1)
+    // socket(af, SOCK_DGRAM=2, 0)
+    let afv = _vnew(fc)
+    fc.vty.set(afv, TY_INT)
+    _ir_emit(fc, OP_CONST, afv, 0, 0, af)
+    _ir_emit(fc, OP_ARG, 0, afv, 0, 0)
+    let typ = _vnew(fc)
+    fc.vty.set(typ, TY_INT)
+    _ir_emit(fc, OP_CONST, typ, 0, 0, 2)        // SOCK_DGRAM
+    _ir_emit(fc, OP_ARG, 0, typ, 0, 1)
+    let zero = _vnew(fc)
+    fc.vty.set(zero, TY_INT)
+    _ir_emit(fc, OP_CONST, zero, 0, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, zero, 0, 2)
+    let s = _vnew(fc)
+    fc.vty.set(s, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, s, 0, 0, I_SOCKET)
+    _net_fail_if_neg1(fc, s, 2)
+    return s
+}
+
+
+/// udp_recvfrom / udp_recvfrom6：收一个 datagram，返回 str（源地址丢弃）。
+///
+/// 与 stage-0 的 `__udp_recvfrom` 逐字节一致：
+///   * 缓冲 = alloc(cap + 9)：8 字节长度头 + cap 数据 + 1 字节 NUL；
+///   * 失败（recvfrom < 0）**fail-fast**（不是返回空串）；
+///   * 对端没发东西时 recvfrom 阻塞，超时靠 `udp_recvfrom_to`。
+///
+/// `v6` 只影响 `sockaddr` 缓冲大小（16 vs 32），源地址反正丢掉。
+fn _bi_udp_recvfrom(fc: FnCtx, fd: int, cap: int, v6: int) -> int {
+    // 缓冲 cap + 9
+    let nine = _vnew(fc)
+    fc.vty.set(nine, TY_INT)
+    _ir_emit(fc, OP_CONST, nine, 0, 0, 9)
+    let sz = _vnew(fc)
+    fc.vty.set(sz, TY_INT)
+    _ir_emit(fc, OP_ADD, sz, cap, nine, 0)
+    _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+    let buf = _vnew(fc)
+    fc.vty.set(buf, TY_INT)
+    _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
+    // 数据指针 = buf + 8
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    let dp = _vnew(fc)
+    fc.vty.set(dp, TY_INT)
+    _ir_emit(fc, OP_ADD, dp, buf, eight, 0)
+    // 源地址缓冲（丢掉，但 recvfrom 要求非 NULL 才不报错）
+    let ssz = _vnew(fc)
+    fc.vty.set(ssz, TY_INT)
+    if v6 == 1 {
+        _ir_emit(fc, OP_CONST, ssz, 0, 0, 40)
+    } else {
+        _ir_emit(fc, OP_CONST, ssz, 0, 0, 24)
+    }
+    _ir_emit(fc, OP_ARG, 0, ssz, 0, 0)
+    let sin = _vnew(fc)
+    fc.vty.set(sin, TY_INT)
+    _ir_emit(fc, OP_CALLRT, sin, 0, 0, RT_ALLOC)
+    // salen 缓冲：初值 16（v4）/ 28（v6）
+    let lsz = _vnew(fc)
+    fc.vty.set(lsz, TY_INT)
+    _ir_emit(fc, OP_CONST, lsz, 0, 0, 8)
+    _ir_emit(fc, OP_ARG, 0, lsz, 0, 0)
+    let slen = _vnew(fc)
+    fc.vty.set(slen, TY_INT)
+    _ir_emit(fc, OP_CALLRT, slen, 0, 0, RT_ALLOC)
+    let initlen = _vnew(fc)
+    fc.vty.set(initlen, TY_INT)
+    if v6 == 1 {
+        _ir_emit(fc, OP_CONST, initlen, 0, 0, 28)
+    } else {
+        _ir_emit(fc, OP_CONST, initlen, 0, 0, 16)
+    }
+    _ir_emit(fc, OP_STORE, 0, slen, initlen, 8)
+    // recvfrom(fd, dp, cap, 0, sin, slen)
+    let flags = _vnew(fc)
+    fc.vty.set(flags, TY_INT)
+    _ir_emit(fc, OP_CONST, flags, 0, 0, 0)
+    // 6 个实参：复用 `_emit_call_args`（见 _bi_udp_recvfrom 里的说明）
+    let av = vec[int].new(6)
+    av.push(fd)
+    av.push(dp)
+    av.push(cap)
+    av.push(flags)
+    av.push(sin)
+    av.push(slen)
+    let stk = _emit_call_args(fc, av, 0)
+    let got = _vnew(fc)
+    fc.vty.set(got, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, got, 0, 0, I_RECVFROM)
+    _emit_call_free(fc, stk)
+    _net_fail_if_neg1(fc, got, 4)
+    // 写长度头、末尾 NUL
+    let hp = _vnew(fc)
+    fc.vty.set(hp, TY_INT)
+    _ir_emit(fc, OP_ADDRF, hp, buf, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, hp, got, 8)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    let ep = _vnew(fc)
+    fc.vty.set(ep, TY_INT)
+    _ir_emit(fc, OP_ADD, ep, dp, got, 0)
+    _ir_emit(fc, OP_STORE8, 0, ep, z, 0)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_STR)
+    _ir_emit(fc, OP_MOV, d, dp, 0, 0)
+    return d
+}
+
+/// udp_recvfrom_to / udp_recvfrom6_to：带接收超时。
+///
+/// 先 `setsockopt(SO_RCVTIMEO, ms)` 再走与 `_bi_udp_recvfrom` 相同的收包路径。
+/// `ms = 0` 表示不限时（Win/Linux 语义一致：0 = 等到底，不是非阻塞）。
+///
+/// **超时/出错返回空串，不 fail-fast** —— 与 stage-0 的 `__udp_recvfrom_to`
+/// 同口径："对端没发"是可恢复结果，`dns` 的查询循环靠它停。
+fn _bi_udp_recvfrom_to(fc: FnCtx, fd: int, cap: int, ms: int,
+                       v6: int) -> int {
+    // tv = alloc(16)，前 4 字节放 DWORD 毫秒（Win 的 timeval 是 DWORD,DWORD）
+    let tvsz = _vnew(fc)
+    fc.vty.set(tvsz, TY_INT)
+    _ir_emit(fc, OP_CONST, tvsz, 0, 0, 16)
+    _ir_emit(fc, OP_ARG, 0, tvsz, 0, 0)
+    let tv = _vnew(fc)
+    fc.vty.set(tv, TY_INT)
+    _ir_emit(fc, OP_CALLRT, tv, 0, 0, RT_ALLOC)
+    _ir_emit(fc, OP_STORE, 0, tv, ms, 8)
+    // setsockopt(fd, SOL_SOCKET=0xFFFF, SO_RCVTIMEO=0x1006, tv, 4)
+    let lvl = _vnew(fc)
+    fc.vty.set(lvl, TY_INT)
+    _ir_emit(fc, OP_CONST, lvl, 0, 0, 65535)
+    let opt = _vnew(fc)
+    fc.vty.set(opt, TY_INT)
+    _ir_emit(fc, OP_CONST, opt, 0, 0, 4102)     // 0x1006
+    let four = _vnew(fc)
+    fc.vty.set(four, TY_INT)
+    _ir_emit(fc, OP_CONST, four, 0, 0, 4)
+    _ir_emit(fc, OP_ARG, 0, fd, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, lvl, 0, 1)
+    _ir_emit(fc, OP_ARG, 0, opt, 0, 2)
+    _ir_emit(fc, OP_ARG, 0, tv, 0, 3)
+    // 5 个实参：复用 `_emit_call_args`
+    let av = vec[int].new(5)
+    av.push(fd)
+    av.push(lvl)
+    av.push(opt)
+    av.push(tv)
+    av.push(four)
+    let stk = _emit_call_args(fc, av, 0)
+    let sr = _vnew(fc)
+    fc.vty.set(sr, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, sr, 0, 0, I_SETSOCKOPT)
+    _emit_call_free(fc, stk)
+    // setsockopt 失败也继续（超时设不上就退化成阻塞收，不致命）
+    // ---- 以下与 _bi_udp_recvfrom 相同，但**失败返回空串** ----
+    let nine = _vnew(fc)
+    fc.vty.set(nine, TY_INT)
+    _ir_emit(fc, OP_CONST, nine, 0, 0, 9)
+    let sz = _vnew(fc)
+    fc.vty.set(sz, TY_INT)
+    _ir_emit(fc, OP_ADD, sz, cap, nine, 0)
+    _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+    let buf = _vnew(fc)
+    fc.vty.set(buf, TY_INT)
+    _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    let dp = _vnew(fc)
+    fc.vty.set(dp, TY_INT)
+    _ir_emit(fc, OP_ADD, dp, buf, eight, 0)
+    let ssz = _vnew(fc)
+    fc.vty.set(ssz, TY_INT)
+    if v6 == 1 {
+        _ir_emit(fc, OP_CONST, ssz, 0, 0, 40)
+    } else {
+        _ir_emit(fc, OP_CONST, ssz, 0, 0, 24)
+    }
+    _ir_emit(fc, OP_ARG, 0, ssz, 0, 0)
+    let sin = _vnew(fc)
+    fc.vty.set(sin, TY_INT)
+    _ir_emit(fc, OP_CALLRT, sin, 0, 0, RT_ALLOC)
+    let lsz = _vnew(fc)
+    fc.vty.set(lsz, TY_INT)
+    _ir_emit(fc, OP_CONST, lsz, 0, 0, 8)
+    _ir_emit(fc, OP_ARG, 0, lsz, 0, 0)
+    let slen = _vnew(fc)
+    fc.vty.set(slen, TY_INT)
+    _ir_emit(fc, OP_CALLRT, slen, 0, 0, RT_ALLOC)
+    let initlen = _vnew(fc)
+    fc.vty.set(initlen, TY_INT)
+    if v6 == 1 {
+        _ir_emit(fc, OP_CONST, initlen, 0, 0, 28)
+    } else {
+        _ir_emit(fc, OP_CONST, initlen, 0, 0, 16)
+    }
+    _ir_emit(fc, OP_STORE, 0, slen, initlen, 8)
+    let flags = _vnew(fc)
+    fc.vty.set(flags, TY_INT)
+    _ir_emit(fc, OP_CONST, flags, 0, 0, 0)
+    // 6 个实参：复用 `_emit_call_args`（见 _bi_udp_recvfrom 里的说明）
+    let av = vec[int].new(6)
+    av.push(fd)
+    av.push(dp)
+    av.push(cap)
+    av.push(flags)
+    av.push(sin)
+    av.push(slen)
+    let stk = _emit_call_args(fc, av, 0)
+    let got = _vnew(fc)
+    fc.vty.set(got, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, got, 0, 0, I_RECVFROM)
+    _emit_call_free(fc, stk)
+    // 失败 → got = 0（空串），不 fail-fast
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    let lneg = _newlab(fc.labs)
+    let lok = _newlab(fc.labs)
+    // 先符号扩展再比较（Win64 int 返回值只写 eax）
+    let sh = _vnew(fc)
+    fc.vty.set(sh, TY_INT)
+    let n32 = _vnew(fc)
+    fc.vty.set(n32, TY_INT)
+    _ir_emit(fc, OP_CONST, n32, 0, 0, 32)
+    _ir_emit(fc, OP_SHL, sh, got, n32, 0)
+    let se = _vnew(fc)
+    fc.vty.set(se, TY_INT)
+    _ir_emit(fc, OP_SAR, se, sh, n32, 0)
+    // se >= 0 就正常
+    _ir_emit(fc, OP_JCMP, 0x8D, se, z, lok)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lneg)
+    _ir_emit(fc, OP_MOV, got, z, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
+    let hp = _vnew(fc)
+    fc.vty.set(hp, TY_INT)
+    _ir_emit(fc, OP_ADDRF, hp, buf, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, hp, got, 8)
+    let ep = _vnew(fc)
+    fc.vty.set(ep, TY_INT)
+    _ir_emit(fc, OP_ADD, ep, dp, got, 0)
+    _ir_emit(fc, OP_STORE8, 0, ep, z, 0)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_STR)
+    _ir_emit(fc, OP_MOV, d, dp, 0, 0)
+    return d
+}
+
+/// tcp_listen6(port) -> fd：IPv6 **双栈**监听（同一个 socket 同时接 v4/v6）。
+///
+/// 与 `tcp_listen` 的差别只有三处：
+///   * `socket(AF_INET6=23, SOCK_STREAM=1, 0)`；
+///   * **必须** `setsockopt(IPPROTO_IPV6=41, IPV6_V6ONLY=27, &0, 4)` ——
+///     Windows 默认 V6ONLY=1，不关掉就只接 IPv6，双栈部署会漏掉所有 v4 连接；
+///   * `sockaddr_in6` 是 28 字节：family(2) | port(2) | flowinfo(4) |
+///     addr(16) | scope(4)。地址全 0 = 通配 `::`。
+fn _bi_tcp_listen6(fc: FnCtx, port: int) -> int {
+    // WSAStartup
+    let wsa = _vnew(fc)
+    fc.vty.set(wsa, TY_INT)
+    _ir_emit(fc, OP_CONST, wsa, 0, 0, 64)
+    _ir_emit(fc, OP_ARG, 0, wsa, 0, 0)
+    let wh = _vnew(fc)
+    fc.vty.set(wh, TY_INT)
+    _ir_emit(fc, OP_CALLRT, wh, 0, 0, RT_ALLOC)
+    let ver = _vnew(fc)
+    fc.vty.set(ver, TY_INT)
+    _ir_emit(fc, OP_CONST, ver, 0, 0, 514)
+    _ir_emit(fc, OP_ARG, 0, ver, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, wh, 0, 1)
+    let wr = _vnew(fc)
+    fc.vty.set(wr, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, wr, 0, 0, I_WSASTART)
+    _net_fail_if_nonzero(fc, wr, 1)
+    // socket(AF_INET6=23, SOCK_STREAM=1, 0)
+    let af = _vnew(fc)
+    fc.vty.set(af, TY_INT)
+    _ir_emit(fc, OP_CONST, af, 0, 0, 23)
+    _ir_emit(fc, OP_ARG, 0, af, 0, 0)
+    let typ = _vnew(fc)
+    fc.vty.set(typ, TY_INT)
+    _ir_emit(fc, OP_CONST, typ, 0, 0, 1)
+    _ir_emit(fc, OP_ARG, 0, typ, 0, 1)
+    let zero = _vnew(fc)
+    fc.vty.set(zero, TY_INT)
+    _ir_emit(fc, OP_CONST, zero, 0, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, zero, 0, 2)
+    let s = _vnew(fc)
+    fc.vty.set(s, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, s, 0, 0, I_SOCKET)
+    _net_fail_if_neg1(fc, s, 2)
+    // IPV6_V6ONLY=0：不开就等于"只接 v6"
+    let vonly = _vnew(fc)
+    fc.vty.set(vonly, TY_INT)
+    _ir_emit(fc, OP_CONST, vonly, 0, 0, 8)
+    _ir_emit(fc, OP_ARG, 0, vonly, 0, 0)
+    let vb = _vnew(fc)
+    fc.vty.set(vb, TY_INT)
+    _ir_emit(fc, OP_CALLRT, vb, 0, 0, RT_ALLOC)
+    _ir_emit(fc, OP_STORE, 0, vb, zero, 8)
+    let lvl6 = _vnew(fc)
+    fc.vty.set(lvl6, TY_INT)
+    _ir_emit(fc, OP_CONST, lvl6, 0, 0, 41)      // IPPROTO_IPV6
+    let optv6 = _vnew(fc)
+    fc.vty.set(optv6, TY_INT)
+    _ir_emit(fc, OP_CONST, optv6, 0, 0, 27)     // IPV6_V6ONLY
+    let four = _vnew(fc)
+    fc.vty.set(four, TY_INT)
+    _ir_emit(fc, OP_CONST, four, 0, 0, 4)
+    // 5 个实参：复用 `_emit_call_args`
+    let av = vec[int].new(5)
+    av.push(s)
+    av.push(lvl6)
+    av.push(optv6)
+    av.push(vb)
+    av.push(four)
+    let stk = _emit_call_args(fc, av, 0)
+    let so = _vnew(fc)
+    fc.vty.set(so, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, so, 0, 0, I_SETSOCKOPT)
+    _emit_call_free(fc, stk)
+    _net_fail_if_neg1(fc, so, 3)
+    // sockaddr_in6（28B，全 0 = 通配 ::）
+    let ssz = _vnew(fc)
+    fc.vty.set(ssz, TY_INT)
+    _ir_emit(fc, OP_CONST, ssz, 0, 0, 40)
+    _ir_emit(fc, OP_ARG, 0, ssz, 0, 0)
+    let sin6 = _vnew(fc)
+    fc.vty.set(sin6, TY_INT)
+    _ir_emit(fc, OP_CALLRT, sin6, 0, 0, RT_ALLOC)
+    let c0 = _vnew(fc)
+    fc.vty.set(c0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, c0, sin6, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, c0, zero, 8)
+    let c1 = _vnew(fc)
+    fc.vty.set(c1, TY_INT)
+    _ir_emit(fc, OP_ADDRF, c1, sin6, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, c1, zero, 8)
+    let c2 = _vnew(fc)
+    fc.vty.set(c2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, c2, sin6, 0, 16)
+    _ir_emit(fc, OP_STORE, 0, c2, zero, 8)
+    let c3 = _vnew(fc)
+    fc.vty.set(c3, TY_INT)
+    _ir_emit(fc, OP_ADDRF, c3, sin6, 0, 24)
+    _ir_emit(fc, OP_STORE, 0, c3, zero, 8)
+    // w0 = family(23) | htons(port)<<16
+    let m255 = _vnew(fc)
+    fc.vty.set(m255, TY_INT)
+    _ir_emit(fc, OP_CONST, m255, 0, 0, 255)
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    let s16 = _vnew(fc)
+    fc.vty.set(s16, TY_INT)
+    _ir_emit(fc, OP_CONST, s16, 0, 0, 16)
+    let lo = _vnew(fc)
+    fc.vty.set(lo, TY_INT)
+    _ir_emit(fc, OP_AND, lo, port, m255, 0)
+    let lo8 = _vnew(fc)
+    fc.vty.set(lo8, TY_INT)
+    _ir_emit(fc, OP_SHL, lo8, lo, eight, 0)
+    let hi = _vnew(fc)
+    fc.vty.set(hi, TY_INT)
+    _ir_emit(fc, OP_SHR, hi, port, eight, 0)
+    let hi2 = _vnew(fc)
+    fc.vty.set(hi2, TY_INT)
+    _ir_emit(fc, OP_AND, hi2, hi, m255, 0)
+    let hbe = _vnew(fc)
+    fc.vty.set(hbe, TY_INT)
+    _ir_emit(fc, OP_OR, hbe, lo8, hi2, 0)
+    let sh16 = _vnew(fc)
+    fc.vty.set(sh16, TY_INT)
+    _ir_emit(fc, OP_SHL, sh16, hbe, s16, 0)
+    let f23 = _vnew(fc)
+    fc.vty.set(f23, TY_INT)
+    _ir_emit(fc, OP_CONST, f23, 0, 0, 23)
+    let w0 = _vnew(fc)
+    fc.vty.set(w0, TY_INT)
+    _ir_emit(fc, OP_OR, w0, sh16, f23, 0)
+    let p0 = _vnew(fc)
+    fc.vty.set(p0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p0, sin6, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, p0, w0, 8)
+    // bind(s, sin6, 28)
+    _ir_emit(fc, OP_ARG, 0, s, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, sin6, 0, 1)
+    let n28 = _vnew(fc)
+    fc.vty.set(n28, TY_INT)
+    _ir_emit(fc, OP_CONST, n28, 0, 0, 28)
+    _ir_emit(fc, OP_ARG, 0, n28, 0, 2)
+    let br = _vnew(fc)
+    fc.vty.set(br, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, br, 0, 0, I_BIND)
+    _net_fail_if_neg1(fc, br, 4)
+    // listen(s, 128)
+    _ir_emit(fc, OP_ARG, 0, s, 0, 0)
+    let bl = _vnew(fc)
+    fc.vty.set(bl, TY_INT)
+    _ir_emit(fc, OP_CONST, bl, 0, 0, 128)
+    _ir_emit(fc, OP_ARG, 0, bl, 0, 1)
+    let lr = _vnew(fc)
+    fc.vty.set(lr, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, lr, 0, 0, I_LISTEN)
+    _net_fail_if_neg1(fc, lr, 5)
+    return s
+}
+
+/// udp_bind(fd, port) -> 0：把 UDP socket 绑到 `0.0.0.0:port`。
+///
+/// 服务端侧必须有它（客户端由系统分配临时端口，不需要 bind）。
+/// 失败 fail-fast，与 stage-0 的 `__udp_bind` 一致。
+fn _bi_udp_bind(fc: FnCtx, fd: int, port: int) -> int {
+    // sockaddr_in（16B）：family | htons(port) | 0.0.0.0 | 0
+    let sz = _vnew(fc)
+    fc.vty.set(sz, TY_INT)
+    _ir_emit(fc, OP_CONST, sz, 0, 0, 24)
+    _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+    let sin = _vnew(fc)
+    fc.vty.set(sin, TY_INT)
+    _ir_emit(fc, OP_CALLRT, sin, 0, 0, RT_ALLOC)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    let b0 = _vnew(fc)
+    fc.vty.set(b0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, b0, sin, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, b0, z, 8)
+    let b1 = _vnew(fc)
+    fc.vty.set(b1, TY_INT)
+    _ir_emit(fc, OP_ADDRF, b1, sin, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, b1, z, 8)
+    // w0 = family(2) | htons(port)<<16
+    let m255 = _vnew(fc)
+    fc.vty.set(m255, TY_INT)
+    _ir_emit(fc, OP_CONST, m255, 0, 0, 255)
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    let s16 = _vnew(fc)
+    fc.vty.set(s16, TY_INT)
+    _ir_emit(fc, OP_CONST, s16, 0, 0, 16)
+    let lo = _vnew(fc)
+    fc.vty.set(lo, TY_INT)
+    _ir_emit(fc, OP_AND, lo, port, m255, 0)
+    let lo8 = _vnew(fc)
+    fc.vty.set(lo8, TY_INT)
+    _ir_emit(fc, OP_SHL, lo8, lo, eight, 0)
+    let hi = _vnew(fc)
+    fc.vty.set(hi, TY_INT)
+    _ir_emit(fc, OP_SHR, hi, port, eight, 0)
+    let hi2 = _vnew(fc)
+    fc.vty.set(hi2, TY_INT)
+    _ir_emit(fc, OP_AND, hi2, hi, m255, 0)
+    let hbe = _vnew(fc)
+    fc.vty.set(hbe, TY_INT)
+    _ir_emit(fc, OP_OR, hbe, lo8, hi2, 0)
+    let sh16 = _vnew(fc)
+    fc.vty.set(sh16, TY_INT)
+    _ir_emit(fc, OP_SHL, sh16, hbe, s16, 0)
+    let two = _vnew(fc)
+    fc.vty.set(two, TY_INT)
+    _ir_emit(fc, OP_CONST, two, 0, 0, 2)
+    let w0 = _vnew(fc)
+    fc.vty.set(w0, TY_INT)
+    _ir_emit(fc, OP_OR, w0, sh16, two, 0)
+    let p0 = _vnew(fc)
+    fc.vty.set(p0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p0, sin, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, p0, w0, 8)
+    // bind(fd, sin, 16)
+    _ir_emit(fc, OP_ARG, 0, fd, 0, 0)
+    _ir_emit(fc, OP_ARG, 0, sin, 0, 1)
+    let n16 = _vnew(fc)
+    fc.vty.set(n16, TY_INT)
+    _ir_emit(fc, OP_CONST, n16, 0, 0, 16)
+    _ir_emit(fc, OP_ARG, 0, n16, 0, 2)
+    let br = _vnew(fc)
+    fc.vty.set(br, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, br, 0, 0, I_BIND)
+    _net_fail_if_neg1(fc, br, 2)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_CONST, d, 0, 0, 0)
+    return d
 }
 
 /// Win64 的 int 返回值**只写 eax**（高 32 位 0 扩展），所以
@@ -11825,6 +12380,13 @@ fn _reg_ws2(dsym: vec[str], ddll: vec[int]) {
     ddll.push(3)
     // v3.43：对端地址
     dsym.push("getpeername")
+    ddll.push(3)
+    // v3.44：UDP
+    dsym.push("sendto")
+    ddll.push(3)
+    dsym.push("recvfrom")
+    ddll.push(3)
+    dsym.push("setsockopt")
     ddll.push(3)
 }
 

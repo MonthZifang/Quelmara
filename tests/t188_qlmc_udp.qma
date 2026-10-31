@@ -1,0 +1,31 @@
+import std.core
+
+// v3.44：UDP 接收侧内建端到端自检
+//
+// 覆盖 udp_open / udp_bind / udp_recvfrom / udp_recvfrom_to。
+//
+// **不 import std.net.udp**：那个模块的 `udp_send_str` 里有 `udp_sendto`
+// 调用点，而 `udp_sendto` 本版未实现（见 docs/versions/v3.44/CHANGELOG.md），
+// import 进来就编不过。这里直接调裸内建，把接收侧单独钉住。
+fn main() {
+    let fd = udp_open()
+    print("opened fd=" + fd.to_str())
+
+    let br = udp_bind(fd, 39480)
+    print("bound=" + br.to_str())
+
+    // 第 1 个：阻塞收
+    let a = udp_recvfrom(fd, 256)
+    print("recv1=" + a)
+
+    // 第 2 个：带超时收（2000ms 内应收到）
+    let b = udp_recvfrom_to(fd, 256, 2000)
+    print("recv2=" + b)
+
+    // 第 3 个：超时收（对端不再发，应返回空串而不是挂死）
+    let c = udp_recvfrom_to(fd, 256, 300)
+    print("recv3len=" + len(c).to_str())
+
+    tcp_close(fd)
+    print("done")
+}
