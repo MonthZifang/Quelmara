@@ -13,7 +13,7 @@
 
 | 项 | 结果 | 命令 |
 |---|---|---|
-| PE 回归（主回归） | **PASS=336 FAIL=0 SKIP=0**（v3.22 口径：新增 \	174_peer_ip\（双栈下的 peer_ip：端到端 3 组 + addr_text 纯函数 4 组）= 335 → 336；v3.21 口径：新增 \	est_reactor_dualstack\（IOCP reactor 同一端口 v4/v6）= 334 → 335；v3.20 口径：新增 \	173_udp6\（UDP over IPv6 回环 4 组）= 333 → 334；v3.15 口径：新增 `t170_wg_park`（WaitGroup 的 park 唤醒 4 组）= 332 → 333；v3.14 口径：新增 `t169_spin_wait`（自旋等待不被 LICM 外提 load）= 331 → 332；v3.13 口径：把 4 项"文档记着 PASS、门禁里没有"的脚本接进主回归——`gzip_http_test`（重写为自包含）、`debugger_test`、`doc_test`、`bootstrap_test --strict`（自举五级链）= 327 → 331；v3.12 口径：新增 `t168_httpc_bulk`（HTTP 客户端大响应 5 场景）= 326 → 327；v3.11 口径：新增 `[3k]` TCP 批量收发与两端超时 5 项 + `[11]` HTTP 端到端 1 项 = 302 → 308，当时记录的 SKIP=1 是 WSL 交叉验证，本机 v3.12 复跑为 SKIP=0；v3.10 及以前为 302。下面那串历史注记停在 v2.76，仅作追溯）（v2.76 口径：qlmc 差分 63 条、LSP 42 条；数字增长来自 v2.27–v2.75 期间各轨新增夹具，本轮只跑不改。v2.26 口径：qlmc 差分 35 → 37 条（新增 `s13_closure`），主回归总数不变；v2.25 口径：新增 `s12_ffi`；v2.24 口径：新增 `s11_import`；v2.23 口径：新增 `s10_defer`；v2.22 口径：新增 `s9_slice`；v2.21 口径：新增 `s8_map`；v2.20 口径：新增 `s7_aggfn`；v2.19 口径：新增 `s6_vec`；v2.18 口径：新增 `s5_enum`；v2.17 口径：新增 `s4_agg`；v2.16 口径：新增 `t143_parshard`（分片并行写 / 工作线程读共享 vec / 8 参 spawn）；v2.14 口径：新增 `[9b]` stage-1 编译器差分（`tests/qlmc_test.py`，7 条）；v2.13 口径：新增 `t141_vecindex`（vec 下标六形态）+ `test_exitcode()` 三条（`exit(运行期值)` 的退出码）；v2.12 口径：新增负向夹具 `net_serve_builtin`——reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断；v2.11 那条 `.qla` 沙箱删除 FAIL 已随夹具改「就地覆盖」收口。以下为 v2.10 口径的历史记录：本版新增项 `[3j2]`：`t130_router_dispatch`（路由表 / 参数 / 404·405 / 表满）+ `http_router_test.py`（20 项真实 socket E2E）。**唯一 FAIL 是 `.qla` 目标文件用例撞沙箱的批量删除策略**（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`：一次删 `build/_qlatest` 里 62 个文件，超过 50 个的阈值），与被测逻辑无关；`cache_test` 的 `build/` 争用失败本次未复现。v2.07 记录的那条 LSP FAIL 已收口（`tests/lsp_test.py` 的容错索引段改成 `std/sse` / `std/ws`（仍解析失败）负向 + `std/http` / `std/timer`（已修好）正向，内部断言 38 → 42）。SKIP 为 WSL 交叉验证，本机被沙箱拦。此前新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
+| PE 回归（主回归） | **PASS=367 FAIL=0 SKIP=0（v3.49 口径：新增 `t192_qlmc_udp_send`（UDP 发送侧 10 组）+ `t193_qlmc_udp6_send`（UDP over IPv6 发送侧 7 组）= 365 → 367；v3.48 口径：新增 `t191_qlmc_fileio`（`file_size` / `read_text`）= 364 → 365**（v3.22 口径：新增 \	174_peer_ip\（双栈下的 peer_ip：端到端 3 组 + addr_text 纯函数 4 组）= 335 → 336；v3.21 口径：新增 \	est_reactor_dualstack\（IOCP reactor 同一端口 v4/v6）= 334 → 335；v3.20 口径：新增 \	173_udp6\（UDP over IPv6 回环 4 组）= 333 → 334；v3.15 口径：新增 `t170_wg_park`（WaitGroup 的 park 唤醒 4 组）= 332 → 333；v3.14 口径：新增 `t169_spin_wait`（自旋等待不被 LICM 外提 load）= 331 → 332；v3.13 口径：把 4 项"文档记着 PASS、门禁里没有"的脚本接进主回归——`gzip_http_test`（重写为自包含）、`debugger_test`、`doc_test`、`bootstrap_test --strict`（自举五级链）= 327 → 331；v3.12 口径：新增 `t168_httpc_bulk`（HTTP 客户端大响应 5 场景）= 326 → 327；v3.11 口径：新增 `[3k]` TCP 批量收发与两端超时 5 项 + `[11]` HTTP 端到端 1 项 = 302 → 308，当时记录的 SKIP=1 是 WSL 交叉验证，本机 v3.12 复跑为 SKIP=0；v3.10 及以前为 302。下面那串历史注记停在 v2.76，仅作追溯）（v2.76 口径：qlmc 差分 63 条、LSP 42 条；数字增长来自 v2.27–v2.75 期间各轨新增夹具，本轮只跑不改。v2.26 口径：qlmc 差分 35 → 37 条（新增 `s13_closure`），主回归总数不变；v2.25 口径：新增 `s12_ffi`；v2.24 口径：新增 `s11_import`；v2.23 口径：新增 `s10_defer`；v2.22 口径：新增 `s9_slice`；v2.21 口径：新增 `s8_map`；v2.20 口径：新增 `s7_aggfn`；v2.19 口径：新增 `s6_vec`；v2.18 口径：新增 `s5_enum`；v2.17 口径：新增 `s4_agg`；v2.16 口径：新增 `t143_parshard`（分片并行写 / 工作线程读共享 vec / 8 参 spawn）；v2.14 口径：新增 `[9b]` stage-1 编译器差分（`tests/qlmc_test.py`，7 条）；v2.13 口径：新增 `t141_vecindex`（vec 下标六形态）+ `test_exitcode()` 三条（`exit(运行期值)` 的退出码）；v2.12 口径：新增负向夹具 `net_serve_builtin`——reactor 搬进 std 后直接调内建 `net_serve` 必须给出迁移诊断；v2.11 那条 `.qla` 沙箱删除 FAIL 已随夹具改「就地覆盖」收口。以下为 v2.10 口径的历史记录：本版新增项 `[3j2]`：`t130_router_dispatch`（路由表 / 参数 / 404·405 / 表满）+ `http_router_test.py`（20 项真实 socket E2E）。**唯一 FAIL 是 `.qla` 目标文件用例撞沙箱的批量删除策略**（`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`：一次删 `build/_qlatest` 里 62 个文件，超过 50 个的阈值），与被测逻辑无关；`cache_test` 的 `build/` 争用失败本次未复现。v2.07 记录的那条 LSP FAIL 已收口（`tests/lsp_test.py` 的容错索引段改成 `std/sse` / `std/ws`（仍解析失败）负向 + `std/http` / `std/timer`（已修好）正向，内部断言 38 → 42）。SKIP 为 WSL 交叉验证，本机被沙箱拦。此前新增项：语言轨 `t97_atomic`/`t121_syncmpmc`/`t122_syncport`，工具链 `cov_test`（23 条断言）/`fuzz_test`（12 条断言）/`cache_test`（24 条断言，v1.100）/`kv_test`（10 条断言，v1.102）；语言轨 `[9] AArch64 接口 vtable`（7 用例）+ 两个跨文件接口负向夹具 + **模块系统 `modsame` 正例与 3 个多文件负例**（v1.101）） | `python tests/run_win_tests.py` |
 | 词法器对拍 | **PASS=297 FAIL=0**（300 个源文件，v2.78 口径；SKIP 3 个含 `f"..."` 插值的文件——stage-1 词法器不认 `FSTR`，v1.61 插值未移植。**闭包不再进 SKIP 名单**：`fn(x: int) -> int { ... }` 用的全是既有记号，`t126_closure` 逐记号一致（v1.95）） | `python tests/lexdiff.py` |
 | 声明级 AST 对拍 | **PASS=201 FAIL=0**（201 个源文件，v2.78 口径：v2.78 让 stage-1 parser 的签名行"struct/enum 全在前、fn 全在后"，与 oracle 顺序一致；v1.98 口径：150 个源文件；唯一 FAIL 是 `tests/t115_derive.qma`——并行轨的 enum 派生让声明顺序变了、自举 parser 还没跟上，**与并发改动无关**。跳过 17 个：`t52_iface` / `t54_iface_dyn` / `t56_generic` / `t81_generic_infer` / `t99_generic_struct` / `t101_bounds` / `t102_generic_impl` / `t103_generic_enum` / `t104_generic_enum_impl` / `t116_iface_multi` / `iface_rc` / `iface_rc_a64` / `t118_iface_own` / `t119_drop` / `t123_derive_enum` / `t124_macro` / `t125_refl_dyn`——自举 parser 未做 interface/impl/泛型单态化、类型约束、泛型 impl 与泛型 enum，v1.96 的 enum 派生 / token 宏 / 运行时下标反射也未移植；v1.97 把 `iface_rc_a64` 与 `t118_iface_own` 按同一口径记账，`t120_ffi` / `t115_derive` / `dpub_*` 两侧逐行一致） | `python tests/parsediff.py` |
 | 函数体 dump 对拍 | **一致 1719 / 分叉 1608 / SKIP 同步 26 / SKIP 不同步 44**（诊断项，非门禁：分叉随新增源文件增长，含 stage-1 body parser 未支持的 `defer`/f64 形态） | `python tests/bodydiff.py` |
@@ -3535,6 +3535,63 @@ v3.46 把 `file_size` 失败归因于「`_emit_call_args` 对同一 vreg 处理�
 `CALLIAT imm=16(CreateFileA)`。
 
 回归 PASS=365，自举 30/30 不动点成立。
+
+### 3.99 `udp_sendto` / `udp_sendto6`：覆盖率 49 → 51（v3.49）
+
+收口 v3.44 遗留的 §7.36（`0xC0000005`，当时查了约 40 轮没定位）。
+这版找到的是**三个互相独立的缺陷**，前两个叠在一起产生那个 AV。
+
+**缺陷 1（AV 的真正来源）：`OP_ADDRF` 把普通整数当指针。**
+
+`OP_ADDRF` 的语义是 `dst = a 的**值** + imm`（把 `a` 当基址）。v3.44 的
+v4 分支写的是 `ADDRF s4, ip, 0` 再 `COPY d4, s4, 4`。`sinp` 是
+`RT_ALLOC` 出来的指针，所以 `ADDRF sinp, 4` 是对的；但 `ip` 是**值**
+（`0x0100007F`），`ADDRF ip, 0` 生成 `lea rX, [rIp]` = 地址
+`0x0100007F`，随后 `COPY` 从那里读就必然 AV。
+
+这解释了 v3.44 的困惑："崩在 `_emit_call_args` 之前、连第一条 `OP_PRINT`
+都打不出来" —— 崩溃点其实在构造 `sockaddr` 的**地址段**，比 `sendto`
+更早。当时一直盯着 `CALLIAT`/`STKFREE` 看，方向反了。
+
+修法：`ADDRF sinp, 4` 拿缓冲内地址，再把 `ip` 当值 `STORE` 进去。
+
+**缺陷 2（不崩、返回值正确，只是包发错端口）：端口偏移 + 字节序。**
+
+第一版两个端口字节都写到 `+2`（`[3]` 恒为 0），`39482 = 0x9A3A` 变成
+`0x9A00 = 39424`。第二版改对偏移，却把 `hbe` 拆成 `[2] = hbe>>8`、
+`[3] = hbe&255` —— 而 `hbe = htons(port)` **已经**是"按小端存下去正好是
+网络序"的 u16（`0x9A3A → 0x3A9A`），再拆就反转成 `0x3A 0x9A` = 14986。
+
+`sendto` 照样返回发送字节数（`n=3`），程序不崩、返回值正确，唯一症状是
+"包根本没到对端"。**没有差分对端就永远抓不到。** 修法是整字 `STORE`
+到偏移 2，不拆字节。
+
+**缺陷 3（v6 测试暴露）：词法器不认 `\xNN`。**
+
+原来只认 `\" \\ \n \t`，`\xNN` 落进 `else` 只取 `chr(e)` —— `\` 被吞掉
+只剩 `x`，`"\x00"` 变成 `"x00"`。16 字节 IPv6 地址字面量因此膨胀成
+48 字符（`rawlen=48`），`udp_sendto6` 收到垃圾地址。按 stage-0 的
+`qlm_index.py` 补上。
+
+**工具改进**：`irdump` 的 `CALLIAT` 现在显示符号名
+（`imm=27(sendto)`），新增 `_iat_names_str()` / `_iat_name(n)`（30 条）。
+加上之后**直接看见了铁证**：`ADDRF dst=112 a=78` 里的 `78` 是
+`CONST 16777343`（`0x0100007F`），不是 alloc 出来的指针。缺陷 1 是靠
+这一眼定位的，不是靠猜。
+
+**验证**：
+
+| 测试 | 结果 |
+|---|---|
+| `tests/udp_send_e2e_test.py`（t192，v4 发送侧） | PASS=10 FAIL=0 |
+| `tests/udp6_send_e2e_test.py`（t193，v6 发送侧） | PASS=7 FAIL=0 |
+| 自举五级链（stage-1/2/3 + 不动点） | 30/30 PASS |
+
+覆盖率 **49 → 51**：`std/net/udp.qma`（`udp_send_str` 的 `udp_sendto`
+调用点）与 `std/net/udp6.qma`（`udp_send6` 的 `udp_sendto6` 调用点）
+同时解锁。`BASELINE` 已上调到 51。
+
+回归 PASS=367（365 → 367），自举 30/30 不动点成立。
 
 ## 4. 自举
 

@@ -290,8 +290,8 @@ def case_udp_e2e():
     """UDP 接收侧内建端到端（v3.44）。
 
     覆盖 `udp_open` / `udp_bind` / `udp_recvfrom` / `udp_recvfrom_to`。
-    `udp_sendto` 本版未实现（见 docs/versions/v3.44/CHANGELOG.md），
-    所以只钉接收侧。
+    `udp_sendto` 在 v3.49 才修好（见 CHANGELOG v3.49 与 `case_udp_send_e2e`），
+    本用例只钉接收侧。
 
     **超时那条最关键**：`udp_recvfrom_to(fd, cap, 300)` 在对端不发东西时
     必须返回空串而不是永久阻塞 —— 这正是 `dns` 查询循环能停下来的前提。
@@ -310,6 +310,61 @@ def case_udp_e2e():
         ok(f"UDP 内建 E2E：{line[-1].strip() if line else 'ok'}")
     else:
         bad(f"UDP 内建 E2E 失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
+def case_udp_send_e2e():
+    """UDP 发送侧内建端到端（v3.49，收 §7.36）。
+
+    `udp_sendto` / `udp_sendto6` 在 v3.44 一上线就 `0xC0000005`，查了约
+    40 轮没定位。v3.49 用 irdump 找到两个**都不崩、只是静默错**的缺陷：
+
+      * v4 分支用 `OP_ADDRF ip` 再 `OP_COPY`，而 `ADDRF` 把操作数当指针，
+        `ip` 是普通 u32 → `lea rX, [rIp]` = 地址 0x0100007F → 读就 AV；
+      * 端口两个字节都写到偏移 +2，且 `hbe` 已是大端序 u16 又被拆字节，
+        端口 39482(0x9A3A) 变成 14986 —— sendto 照样返回字节数，包发错地方。
+
+    第二条**只有差分对端才抓得到**（返回值完全正常），所以必须用 Python
+    独立实现收包并逐字节比对。
+    """
+    if not IS_WIN:
+        skip("UDP 发送 E2E：非 Windows 平台（服务端运行时仅 PE）")
+        return
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/udp_send_e2e_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=300)
+    if r.returncode == 2:
+        skip("UDP 发送 E2E：39482 已被占用，跳过")
+    elif r.returncode == 0 and "udp send e2e: PASS=" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines() if "udp send e2e:" in ln]
+        ok(f"UDP 发送 E2E：{line[-1].strip() if line else 'ok'}")
+    else:
+        bad(f"UDP 发送 E2E 失败 rc={r.returncode} "
+            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+
+
+def case_udp6_send_e2e():
+    """UDP over IPv6 发送侧内建端到端（v3.49）。
+
+    v6 与 v4 共用 `_bi_udp_sendto`，只有 family(23)、sockaddr 28 字节、
+    地址 16 字节整块拷贝三处不同。这条顺带钉住 v3.49 补的 `\\xNN`
+    字面量转义 —— 没有它，16 字节 IPv6 地址字面量会膨胀成 48 字符。
+    """
+    if not IS_WIN:
+        skip("UDP6 发送 E2E：非 Windows 平台（服务端运行时仅 PE）")
+        return
+    r = subprocess.run([sys.executable,
+                        os.path.join(ROOT, "tests/udp6_send_e2e_test.py")],
+                       cwd=ROOT, capture_output=True, text=True,
+                       errors="replace", timeout=300)
+    if r.returncode == 2:
+        skip("UDP6 发送 E2E：本机没有 IPv6 回环，跳过")
+    elif r.returncode == 0 and "udp6 send e2e: PASS=" in r.stdout:
+        line = [ln for ln in r.stdout.splitlines() if "udp6 send e2e:" in ln]
+        ok(f"UDP6 发送 E2E：{line[-1].strip() if line else 'ok'}")
+    else:
+        bad(f"UDP6 发送 E2E 失败 rc={r.returncode} "
             f"{r.stdout[-400:]}{r.stderr[-300:]}")
 
 
@@ -1712,6 +1767,11 @@ def main():
     case_selfcheck_to("qlmc_intcall", "tests/t190_qlmc_intcall.qma", 60)
     # v3.48：file_size / read_text（真实文件端到端）
     case_selfcheck_to("qlmc_fileio", "tests/t191_qlmc_fileio.qma", 60)
+    # v3.49：UDP 发送侧（v3.44 的 §7.36 收口）—— 返回字节数正常但包发错
+    # 端口的缺陷只有差分对端抓得到，所以必须是 E2E 而不是自检。
+    case_udp_send_e2e()
+    # v3.49：UDP over IPv6 发送侧（顺带钉住 `\xNN` 字面量转义）
+    case_udp6_send_e2e()
 
     # v3.32：源文件编码错误诊断 + CLI 统一诊断出口（收 §7.11）。
     # 非 UTF-8 源文件以前抛裸 UnicodeDecodeError（无文件名/行号），

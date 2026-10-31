@@ -482,7 +482,13 @@ fn lex(src: str, toks: vec[Tok]) -> int {
             i = j
             continue
         }
-        // 字符串字面量（只支持 \" \\ \n \t 四个转义）
+        // 字符串字面量（支持 \" \\ \n \t \xNN 五类转义）
+        //
+        // `\xNN` 是**原始字节**转义，与 stage-0 的 `qlm_index.py` 同口径。
+        // v3.49 补：原来没有它，`\x00` 会落进 `else` 分支只取 `chr(e)`，
+        // 也就是把 `\` 吞掉、只留 `x` —— `"\x00"` 变成 `"x00"`（3 个字符），
+        // 16 字节的 IPv6 地址字面量因此膨胀成 48 字符，`udp_sendto6`
+        // 收到垃圾地址（差分测试抓到的正是这一条）。
         if c == 34 {
             let mut j = i + 1
             let mut out = ""
@@ -497,6 +503,17 @@ fn lex(src: str, toks: vec[Tok]) -> int {
                         out = out + chr(34)
                     } else if e == 92 {
                         out = out + chr(92)
+                    } else if e == 120 && j + 3 < n {
+                        // `\xNN`：两个十六进制数字。任一非法就退回字面量 `x`，
+                        // 与 stage-0 的 `except ValueError: pass` 一致。
+                        let h1 = _digval(src[j + 2])
+                        let h2 = _digval(src[j + 3])
+                        if h1 >= 0 && h2 >= 0 {
+                            out = out + chr(h1 * 16 + h2)
+                            j = j + 4
+                            continue
+                        }
+                        out = out + chr(e)
                     } else {
                         out = out + chr(e)
                     }
@@ -7878,6 +7895,47 @@ fn _emit_ir(fc: FnCtx, i: int) {
 /// 30 组全不同）。**一条常量串只占 1 格。**
 ///
 /// 查表用 _op_name(i)：数第 i 个逗号之前有几个分隔符。
+/// `I_*` 编号 → 导入符号名，逗号分隔（不是 `vec[str]` —— 表太大，
+/// 每个 `push` 占一个帧槽，会把这个函数顶爆，见 `_op_names_str` 的注释）。
+///
+/// **顺序必须与 `build_rdata` 里 `iat.set(...)` 的顺序一致**。这张表只给
+/// `irdump` 用，让 `CALLIAT imm=N` 能显示成 `CALLIAT imm=16(CreateFileA)`。
+///
+/// 为什么需要它（v3.49）：`irdump` 原来只显示编号，而 v3.46 的
+/// `file_size` 崩溃正是把 `I_CREATE(4)` 当成 `CreateFileA` 用了 ——
+/// 它其实是 `CreateThread`。**有名字显示就不会再犯这个错。**
+const IAT_NAME_N = 30
+
+fn _iat_names_str() -> str {
+    return "GetStdHandle,WriteFile,ExitProcess,wsprintfA,CreateThread,WaitForSingleObject,CloseHandle,GetFileAttributesA,QueryPerformanceCounter,QueryPerformanceFrequency,strtod,VirtualAlloc,SwitchToThread,GetSystemTimeAsFileTime,GetFileSize,Sleep,CreateFileA,ReadFile,WSAStartup,socket,bind,listen,accept,send,recv,closesocket,getpeername,sendto,recvfrom,setsockopt"
+}
+
+/// 取第 n 个 IAT 符号名（越界或用户 @ffi 返回空串）。
+fn _iat_name(n: int) -> str {
+    if n < 0 {
+        return ""
+    }
+    let tbl = _iat_names_str()
+    let total = len(tbl)
+    let mut start = 0
+    let mut cur = 0
+    let mut i = 0
+    while i < total {
+        if tbl[i] == 44 {
+            if cur == n {
+                return substr(tbl, start, i - start)
+            }
+            cur = cur + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if cur == n {
+        return substr(tbl, start, total - start)
+    }
+    return ""
+}
+
 fn _op_names_str() -> str {
     return "NOP0,CONST,MOV,ADD,SUB,MUL,DIV,MOD,NEG,NOT,NZ,CMP,LAB,JMP,JZ,JNZ,ARG,CALL,CALLRT,RET,PRINT,EXIT,LEA,LEN,PARAM,JCMP,ADDRV,ADDRF,ADDRX,LOAD,STORE,COPY,ZERO,RETAGG,RETSRET,ZERON,CALLIAT,LEAFN,CALLR,MEMCPYN,AND,OR,XOR,SHL,SAR,SHR,BNOT,PARAMSTK,STKALLOC,STKARG,STKFREE,ADDRXN,RTADDR,LOAD8,STORE8,FCMP,NOP,BINI,CMPI,LOADD,LOADX,STORED,STOREX,LOAD8D,LOAD8X,STORE8D,STORE8X,FBIN,ITOF,FTOI,DIVC,LOAD8I,STORE8I,JCMPVLEN,JCMPSTR,FNEG,F64IMM,JCMPI,BSSADDR,CALLV,SPIN"
 }
@@ -7931,11 +7989,24 @@ fn _dump_fn_ir(fc: FnCtx, fname: str) {
                 }
             }
         }
+        // CALLIAT 的 imm 是 IAT 编号 —— **附上符号名**。
+        // v3.46 的 file_size 崩溃就是把 I_CREATE(4) 当成 CreateFileA 用了
+        // （它其实是 CreateThread），当时 dump 只显示 `imm=4`，
+        // 看不出问题。v3.49 起显示成 `imm=4(CreateThread)`。
+        let mut imms = ins.imm.to_str()
+        if ins.op == OP_CALLIAT {
+            let sym = _iat_name(ins.imm)
+            if len(sym) > 0 {
+                imms = imms + "(" + sym + ")"
+            } else {
+                imms = imms + "(user@" + ins.imm.to_str() + ")"
+            }
+        }
         print("  " + i.to_str() + "  " + nm
               + "  dst=" + ins.dst.to_str() + "(" + dloc + ")"
               + "  a=" + ins.a.to_str()
               + "  b=" + ins.b.to_str()
-              + "  imm=" + ins.imm.to_str())
+              + "  imm=" + imms)
         i = i + 1
     }
 }
@@ -10758,6 +10829,21 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         _ir_emit(fc, OP_CALLRT, cd, 0, 0, RT_ACAS)
         return cd
     }
+    // v3.49：udp_sendto / udp_sendto6（重做，用 irdump 的 IAT 符号名复核）
+    if bn == "udp_sendto" {
+        let s0 = _lower_expr(fc, nd.b)
+        let s1 = _lower_expr(fc, nd.c)
+        let s2 = _lower_expr(fc, nd.n)
+        let s3 = _lower_expr(fc, nd.slot)
+        return _bi_udp_sendto(fc, s0, s1, s2, s3, 0)
+    }
+    if bn == "udp_sendto6" {
+        let t0 = _lower_expr(fc, nd.b)
+        let t1 = _lower_expr(fc, nd.c)
+        let t2 = _lower_expr(fc, nd.n)
+        let t3 = _lower_expr(fc, nd.slot)
+        return _bi_udp_sendto(fc, t0, t1, t2, t3, 1)
+    }
     // v3.44：UDP 三个内建（解 std/net/udp、udp6、dns 三个模块）
     if bn == "udp_open" {
         return _bi_udp_open(fc, 2)          // AF_INET
@@ -11578,6 +11664,170 @@ fn _bi_udp_open(fc: FnCtx, af: int) -> int {
     return s
 }
 
+
+/// udp_sendto / udp_sendto6：发一个 datagram，返回发出的字节数。
+///
+/// `ip` 已经是**内存序** u32（`127.0.0.1` → `0x0100007F`，与 stage-0 的
+/// `udp_parse_ip` 同口径）。按 LE 写进 sockaddr 后，字节 4..7 恰好是
+/// 网络序的地址字节。
+///
+/// `v6` = 0 构造 16 字节 `sockaddr_in`；`v6` = 1 构造 28 字节
+/// `sockaddr_in6`（`ip` 是 16 字节地址缓冲的指针）。
+///
+/// 失败（返回值 < 0）**fail-fast**，与 stage-0 的 `__udp_sendto` 一致。
+///
+/// ## v3.49 重做说明
+///
+/// v3.44 的版本一调就 `0xC0000005`，当时查了 40 轮没定位（§7.36）。
+/// v3.49 的 `irdump` 现在会显示 `CALLIAT imm=N(符号名)`，直接就能看出
+/// 调的是不是 `sendto`。这版按 `_bi_udp_recvfrom`（已知可用）的形状重写：
+/// 每个实参独立 vreg、常量在分支前建好、`_emit_call_args` 统一摆实参。
+fn _bi_udp_sendto(fc: FnCtx, fd: int, ip: int, port: int, data: int,
+                  v6: int) -> int {
+    // sockaddr 缓冲：alloc 40（8 字节长度头 + 32 数据）
+    let sz = _vnew(fc)
+    fc.vty.set(sz, TY_INT)
+    _ir_emit(fc, OP_CONST, sz, 0, 0, 40)
+    _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+    let sin = _vnew(fc)
+    fc.vty.set(sin, TY_INT)
+    _ir_emit(fc, OP_CALLRT, sin, 0, 0, RT_ALLOC)
+    let sinp = _pin(fc, sin)
+    // 32 字节清零：**每槽独立零值 vreg**（v3.48 的教训：复用同一 vreg 会让
+    // `_emit_call_args` 的 `_pin` 算出不同落点）
+    let z0 = _vnew(fc)
+    fc.vty.set(z0, TY_INT)
+    _ir_emit(fc, OP_CONST, z0, 0, 0, 0)
+    let z1 = _vnew(fc)
+    fc.vty.set(z1, TY_INT)
+    _ir_emit(fc, OP_CONST, z1, 0, 0, 0)
+    let z2 = _vnew(fc)
+    fc.vty.set(z2, TY_INT)
+    _ir_emit(fc, OP_CONST, z2, 0, 0, 0)
+    let z3 = _vnew(fc)
+    fc.vty.set(z3, TY_INT)
+    _ir_emit(fc, OP_CONST, z3, 0, 0, 0)
+    let p0 = _vnew(fc)
+    fc.vty.set(p0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p0, sinp, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, p0, z0, 8)
+    let p1 = _vnew(fc)
+    fc.vty.set(p1, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p1, sinp, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, p1, z1, 8)
+    let p2 = _vnew(fc)
+    fc.vty.set(p2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p2, sinp, 0, 16)
+    _ir_emit(fc, OP_STORE, 0, p2, z2, 8)
+    let p3 = _vnew(fc)
+    fc.vty.set(p3, TY_INT)
+    _ir_emit(fc, OP_ADDRF, p3, sinp, 0, 24)
+    _ir_emit(fc, OP_STORE, 0, p3, z3, 8)
+    // 常量先全建好（每个独立）
+    let m255 = _vnew(fc)
+    fc.vty.set(m255, TY_INT)
+    _ir_emit(fc, OP_CONST, m255, 0, 0, 255)
+    let eight = _vnew(fc)
+    fc.vty.set(eight, TY_INT)
+    _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+    let s16 = _vnew(fc)
+    fc.vty.set(s16, TY_INT)
+    _ir_emit(fc, OP_CONST, s16, 0, 0, 16)
+    let two = _vnew(fc)
+    fc.vty.set(two, TY_INT)
+    _ir_emit(fc, OP_CONST, two, 0, 0, 2)
+    let four = _vnew(fc)
+    fc.vty.set(four, TY_INT)
+    _ir_emit(fc, OP_CONST, four, 0, 0, 4)
+    let fam = _vnew(fc)
+    fc.vty.set(fam, TY_INT)
+    if v6 == 1 {
+        _ir_emit(fc, OP_CONST, fam, 0, 0, 23)
+    } else {
+        _ir_emit(fc, OP_CONST, fam, 0, 0, 2)
+    }
+    // family 写字节 0
+    _ir_emit(fc, OP_STORE8, 0, sinp, fam, 0)
+    // htons(port)
+    let lo = _vnew(fc)
+    fc.vty.set(lo, TY_INT)
+    _ir_emit(fc, OP_AND, lo, port, m255, 0)
+    let lo8 = _vnew(fc)
+    fc.vty.set(lo8, TY_INT)
+    _ir_emit(fc, OP_SHL, lo8, lo, eight, 0)
+    let hi = _vnew(fc)
+    fc.vty.set(hi, TY_INT)
+    _ir_emit(fc, OP_SHR, hi, port, eight, 0)
+    let hi2 = _vnew(fc)
+    fc.vty.set(hi2, TY_INT)
+    _ir_emit(fc, OP_AND, hi2, hi, m255, 0)
+    let hbe = _vnew(fc)
+    fc.vty.set(hbe, TY_INT)
+    _ir_emit(fc, OP_OR, hbe, lo8, hi2, 0)
+    // 端口：**整字写**，不要拆字节。
+    //
+    // `hbe = htons(port)` 已经是"按小端存下去正好是网络序"的 u16
+    // （`39482 = 0x9A3A` → `hbe = 0x3A9A`）。所以直接 `STORE` 到偏移 2
+    // 就对了；如果拆成 `[2] = hbe>>8`、`[3] = hbe&255`，字节顺序会**反转**
+    // 成 `0x3A 0x9A`，端口变成 14986 —— sendto 照样返回发送字节数，
+    // 包却发去了不存在的端口，只有差分测试抓得到（v3.49 实测）。
+    //
+    // 写 8 字节而不是 2 字节：`OP_STORE` 只有 8 字节宽度，而 sockaddr 的
+    // 4..9 本来就是"流信息/填充 + 地址前缀"，紧接着会被下面的地址写入覆盖。
+    let pport = _vnew(fc)
+    fc.vty.set(pport, TY_INT)
+    _ir_emit(fc, OP_ADDRF, pport, sinp, 0, 2)
+    _ir_emit(fc, OP_STORE, 0, pport, hbe, 8)
+    // 地址
+    if v6 == 1 {
+        let d6 = _vnew(fc)
+        fc.vty.set(d6, TY_INT)
+        _ir_emit(fc, OP_ADD, d6, sinp, eight, 0)
+        _ir_emit(fc, OP_COPY, 0, d6, ip, 16)
+    } else {
+        // **不能用 `OP_ADDRF ip` 再 `COPY`**：`ADDRF` 的语义是
+        // `dst = a 的**值** + imm`（把 a 当指针）。`sinp` 是 alloc 出来的
+        // 指针所以 `ADDRF sinp, 4` 是对的；但 `ip` 是普通 u32，`ADDRF ip, 0`
+        // 会得到 `lea rX, [rIp]` = 地址 0x0100007F，`COPY` 从那儿读 4 字节
+        // 立刻 `0xC0000005`。v3.44 查了 40 轮没定位的正是这一条。
+        //
+        // 正确做法：`ADDRF sinp, 4`（base 必须是**变量**）拿缓冲内地址，
+        // 再把 `ip` 当值 `STORE` 进去。写 8 字节无害：sockaddr_in 的
+        // 8..11 本来就是必须为 0 的填充区，而 u32 地址的高 32 位恒为 0。
+        let d4 = _vnew(fc)
+        fc.vty.set(d4, TY_INT)
+        _ir_emit(fc, OP_ADDRF, d4, sinp, 0, 4)
+        _ir_emit(fc, OP_STORE, 0, d4, ip, 8)
+    }
+    // sendto(fd, data, len, 0, sin, salen)
+    let dn = _vnew(fc)
+    fc.vty.set(dn, TY_INT)
+    _ir_emit(fc, OP_LEN, dn, data, 0, 0)
+    let flags = _vnew(fc)
+    fc.vty.set(flags, TY_INT)
+    _ir_emit(fc, OP_CONST, flags, 0, 0, 0)
+    let slen = _vnew(fc)
+    fc.vty.set(slen, TY_INT)
+    if v6 == 1 {
+        _ir_emit(fc, OP_CONST, slen, 0, 0, 28)
+    } else {
+        _ir_emit(fc, OP_CONST, slen, 0, 0, 16)
+    }
+    let av = vec[int].new(6)
+    av.push(fd)
+    av.push(data)
+    av.push(dn)
+    av.push(flags)
+    av.push(sinp)
+    av.push(slen)
+    let stk = _emit_call_args(fc, av, 0)
+    let r = _vnew(fc)
+    fc.vty.set(r, TY_INT)
+    _ir_emit(fc, OP_CALLIAT, r, 0, 0, I_SENDTO)
+    _emit_call_free(fc, stk)
+    _net_fail_if_neg1(fc, r, 3)
+    return r
+}
 
 /// udp_recvfrom / udp_recvfrom6：收一个 datagram，返回 str（源地址丢弃）。
 ///

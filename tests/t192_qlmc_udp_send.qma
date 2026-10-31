@@ -1,0 +1,39 @@
+import std.core
+import std.net.udp
+
+// v3.49：UDP **发送侧**内建端到端自检（v3.44 的 §7.36 补丁验证）
+//
+// 覆盖 `udp_sendto` / `udp_sendto6`，以及它们经过
+// `std/net/udp` 的 `udp_send_str` 便捷层。
+//
+// 差分口径：本 exe 往 127.0.0.1:39482 发三个 datagram，
+// Python 端用标准库 socket 收，逐字节比对内容。
+// 之后 Python 端再回一个，本 exe 用 `udp_recvfrom_to` 收，
+// 证明同一 fd 收发双向都通。
+fn main() {
+    let fd = udp_open()
+    print("opened=" + fd.to_str())
+
+    // 1. 裸内建：ip 是**内存序** u32（127.0.0.1 -> 0x0100007F）
+    let n1 = udp_sendto(fd, 127 | (1 << 24), 39482, "alpha")
+    print("n1=" + n1.to_str())
+
+    // 2. 再发一个，确认 fd 可以复用（不是一次性的）
+    let n2 = udp_sendto(fd, 127 | (1 << 24), 39482, "bravo")
+    print("n2=" + n2.to_str())
+
+    // 3. 走库层：文本地址 -> 解析 -> 发送
+    let n3 = udp_send_str(fd, "127.0.0.1", 39482, "charlie")
+    print("n3=" + n3.to_str())
+
+    // 4. 库层解析失败路径必须返回 -1（不是崩，也不是 0）
+    let nbad = udp_send_str(fd, "not.an.ip", 39482, "x")
+    print("nbad=" + nbad.to_str())
+
+    // 5. 反向：Python 端回一个 datagram，证明同一 fd 双向可用
+    let back = udp_recvfrom_to(fd, 256, 3000)
+    print("back=" + back)
+
+    tcp_close(fd)
+    print("done")
+}

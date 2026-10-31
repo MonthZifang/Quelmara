@@ -1,0 +1,33 @@
+import std.core
+
+// v3.49：UDP over IPv6 **发送侧**自检
+//
+// `udp_sendto6` 与 v4 走同一个 `_bi_udp_sendto`，只有 family(23)、
+// sockaddr 大小(28)、地址 16 字节整块拷贝三处不同。本用例把 v6 路径
+// 单独钉住：Python 端在 [::1]:39483 收包并回一个。
+//
+// **不 import std.net.udp6**：它依赖 `std.net`，而 `std.net` 里的
+// `tcp_connect` 内建 qlmc 还没实现（07-gaps §7.39）。这里直接调裸内建，
+// 与 t188 同口径 —— 把 `udp_sendto6` 单独钉住，不被无关缺口挡住。
+//
+// `::1` 的 16 字节网络序是 00×15 + 01，用 `\xNN` 单字节转义写死。
+fn main() {
+    let fd = udp_open6()
+    print("opened6=" + fd.to_str())
+
+    // ip 是 16 字节网络序地址缓冲的**指针**（str 值本身就是数据指针）
+    let raw = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
+    print("rawlen=" + len(raw).to_str())
+
+    let n1 = udp_sendto6(fd, str_ptr(raw), 39483, "v6alpha")
+    print("n1=" + n1.to_str())
+
+    let n2 = udp_sendto6(fd, str_ptr(raw), 39483, "v6bravo")
+    print("n2=" + n2.to_str())
+
+    let back = udp_recvfrom6_to(fd, 256, 3000)
+    print("back=" + back)
+
+    tcp_close(fd)
+    print("done")
+}
