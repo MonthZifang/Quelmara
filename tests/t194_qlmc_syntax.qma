@@ -1,0 +1,161 @@
+import std.core
+
+// v3.50：字符串 const / 位运算复合赋值 / for k in vec 三件语法补全
+//
+// 这三项都是 `std/` 里真实用到的写法，以前 qlmc 直接报语法错：
+//   * `const HTTP_HDR_CL = "content-length"`（std/http、std/kv、std/ws）
+//   * `flags |= HP_F_TE`（std/http）
+//   * `for k in m` / `for k in v`（std/kv、std/set）
+//
+// 本夹具把语义钉死。**重点不是"能编过"，而是"算得对"** —— 尤其：
+//   1. 字符串 const 必须是真的 str（能拼接/比较/取长度），不是整数 0；
+//   2. `for k in vec` 的循环变量每轮真的换成元素值（不是恒等于首元素）；
+//   3. `break` / `continue` 在 foreach 里必须跳到正确的标签 ——
+//      v3.50 第一版把 `S_FOREACH` 的编号写成 19，与 `S_BREAK` 撞车，
+//      导致 `break` 被当集合表达式求值（qlmc 编译自己时越界崩溃）。
+
+const SC_EMPTY = ""
+const SC_HDR = "content-length"
+const SC_VER = "HTTP/1."
+const SC_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+const SC_BATCH = 64
+
+fn main() {
+    // ---- 1. 字符串 const ----
+    print("c1=" + SC_HDR)
+    print("c2=" + SC_VER)
+    print("c3=" + SC_GUID)
+    print("c4len=" + len(SC_GUID).to_str())
+    print("c5empty=" + len(SC_EMPTY).to_str())
+    // 必须能参与拼接（证明它是真的 str，不是 0）
+    let joined = "x-" + SC_HDR
+    print("c6=" + joined)
+    // 必须能比较
+    if SC_HDR == "content-length" {
+        print("c7=eq")
+    } else {
+        print("c7=ne")
+    }
+    if SC_VER == SC_GUID {
+        print("c8=bad")
+    } else {
+        print("c8=ne")
+    }
+    // 整型 const 与字符串 const 混在同一张表里不能互相污染。
+    // **注意**：这里先存进变量再 `.to_str()`，不写 `SC_BATCH.to_str()` ——
+    // stage-0 有个既有缺陷：const 名直接当方法接收者时不走 const 内联
+    // （报"未定义变量"），`let x = SC_BATCH` 才认。见 07-gaps §7.41。
+    let batch = SC_BATCH
+    print("c9=" + batch.to_str())
+
+    // ---- 2. 位运算复合赋值 ----
+    let mut a = 1
+    a |= 2
+    a |= 4
+    print("b1=" + a.to_str())            // 7
+    let mut b = 15
+    b &= 6
+    print("b2=" + b.to_str())            // 6
+    let mut c = 5
+    c ^= 1
+    c ^= 4
+    print("b3=" + c.to_str())            // 0
+    let mut d = 3
+    d <<= 2
+    d <<= 1
+    print("b4=" + d.to_str())            // 24
+    let mut e = 100
+    e >>= 2
+    e >>= 1
+    print("b5=" + e.to_str())            // 12
+    // 复合赋值在字段/下标上走的是 S_ASG_FIELD / S_ASG_INDEX，
+    // 但 stage-0 不支持 `vec[i] = x`（只认定长数组/切片），所以这里
+    // 只验证变量形态 —— 下标形态由 t194 之外的自举用例覆盖。
+
+    // ---- 3. for k in vec ----
+    let v = vec[int].new(4)
+    v.push(10)
+    v.push(20)
+    v.push(30)
+    let mut sum = 0
+    for k in v {
+        sum = sum + k
+    }
+    print("f1=" + sum.to_str())          // 60
+    // 循环次数必须等于 len（不是 1，也不是死循环）
+    let mut cnt = 0
+    for k in v {
+        cnt = cnt + 1
+    }
+    print("f2=" + cnt.to_str())          // 3
+    // 空 vec 不进循环
+    let ev = vec[int].new(1)
+    let mut z = 0
+    for k in ev {
+        z = z + 1
+    }
+    print("f3=" + z.to_str())            // 0
+    // 元素值必须每轮真的变（不是恒等于首元素）
+    let mut first = 0 - 1
+    let mut last = 0 - 1
+    let mut seen = 0
+    for k in v {
+        if seen == 0 {
+            first = k
+        }
+        last = k
+        seen = seen + 1
+    }
+    print("f4=" + first.to_str() + "," + last.to_str())   // 10,30
+    // str 元素
+    let sv = vec[str].new(4)
+    sv.push("x")
+    sv.push("y")
+    sv.push("z")
+    let mut cat = ""
+    for w in sv {
+        cat = cat + w
+    }
+    print("f5=" + cat)                   // xyz
+    // break
+    let mut br = 0
+    for k in v {
+        if k == 20 {
+            break
+        }
+        br = br + k
+    }
+    print("f6=" + br.to_str())           // 10
+    // continue
+    let mut sk = 0
+    for k in v {
+        if k == 20 {
+            continue
+        }
+        sk = sk + k
+    }
+    print("f7=" + sk.to_str())           // 40
+    // 嵌套：range 循环里套 foreach，break 只跳内层
+    // 每轮内层累加 10（遇到 20 就 break），外层再加 1000 → 两轮 = 2020
+    let mut nest = 0
+    for i in 0..2 {
+        for k in v {
+            if k == 20 {
+                break
+            }
+            nest = nest + k
+        }
+        nest = nest + 1000
+    }
+    print("f8=" + nest.to_str())         // 2020
+
+    // ---- 4. range 循环 + break（v3.50 修掉的既有 bug）----
+    let mut rb = 0
+    for i in 0..10 {
+        if i == 3 {
+            break
+        }
+        rb = rb + i
+    }
+    print("r1=" + rb.to_str())           // 3
+}

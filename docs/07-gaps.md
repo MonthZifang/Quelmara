@@ -1548,6 +1548,93 @@ COPY  d4, s4, 4      // 从地址 0x0100007F 读 4 字节
 与 `_reg_k32b` / `_reg_ws2` 的 push 顺序对齐 —— 又是一处"两处必须同步"，
 但收益是所有 IAT 相关的排查都不用再去 dump PE 导入表。
 
+### 7.38 已修（v3.50）：`S_FOREACH` 编号与 `S_BREAK` 撞车
+
+**现象**：v3.50 加 `for k in <vec>` 时，任何带 `break` 的循环都让 qlmc
+**自己**在编译期崩成 `quelmara: vec index out of bounds (fail-fast)`。
+连 `for i in 0..3 { if i == 1 { break } }`（完全没用新语法）也崩 ——
+说明是既有代码被新常量影响，不是新降级逻辑本身的问题。
+
+**真根因**：新加的 `const S_FOREACH = 19` 与 `const S_BREAK = 19` 撞号。
+于是 `break` 节点（op=19）被当成 `S_FOREACH` 降级，qlmc 把 `break` 的
+`a` 字段（-1）当集合表达式去求值，在 `fc.nodes.get(-1)` 上越界。
+
+**定位过程**（值得记下来）：连猜三轮都错（`_try_var` 的 -1 哨兵、
+`_loop_push` 的 `> d*2` 边界），每轮 2 分钟编译。最后靠**注入探针**
+打印 `nd.op` 才一眼看出 `op=19` 同时是 `S_BREAK` 和 `S_FOREACH`：
+
+```
+PROBE ENTER-STMT op=19 id=5 nodeslen=11
+quelmara: vec index out of bounds (fail-fast)
+```
+
+**教训**：这是本项目**第三次**因为「常量编号/名字与实际语义不符」浪费轮次
+（前两次：`I_CREATE` 其实是 `CreateThread`、`_op_name` 表错位）。加新 opcode
+后必须 `Select-String '^const S_'` 把全表核一遍 —— 编号区间并不连续，
+"看着空"不等于真的空。
+
+**同时修掉的既有 bug**：`_loop_push` 的边界写的是 `len(fc.loops) > d * 2`，
+但 `set(d*2+1)` 要求长度至少 `d*2+2`。长度恰为 `d*2+1`（奇数）时会越界，
+而"奇数长度"正是嵌套循环里内层刚 pop 完的常态。已改成 `> d * 2 + 1`
+并在长度不足时补齐到偶数。
+
+### 7.39 待修：qlmc 不支持**跨模块 const**
+
+**现象**：`import m` 之后引用 `m` 里声明的 `pub const MX = 42`，qlmc 报
+`未定义变量 MX`。`std/ws`（`ST_H0`）、`std/sse`（`ST_H0`）两个模块卡在这里。
+
+**根因**：qlmc 的 const 引用替换（`_const_idx` → `E_NUM` / `E_STR`）发生在
+**解析期**，而 `parse` 是按 import 顺序**逐个文件**调用的：当前文件解析时，
+被 import 的模块的 const 还没进 `p.cname`。
+
+stage-0 用**两遍解析**解决（`load_program` 第一遍收集各文件 const，
+第二遍带着全集重解析，见 `qlm.py` 的 `consts=` 种子参数）。qlmc 没有这一层。
+
+**修法方向**：把 `parse` 拆成两遍 —— 第一遍只扫顶层 `const`（跳过函数体），
+把所有文件的 const 都收进 `cname`/`cval`/`cisk`/`cstr`；第二遍正常解析，
+此时 `_const_idx` 能命中任意模块的 const。注意第一遍必须**按声明序**，
+因为 `const B = A + 1` 依赖 `A` 已定义。
+
+### 7.40 待修：qlmc 不支持 `for k in <map>`
+
+**现象**：`for k in m`（m 是 map）报 `qlmc: for k in ... 目前只支持遍历 vec`。
+`std/kv`、`std/set` 两个模块卡在这里。
+
+**根因**：v3.50 只实现了 vec 遍历（用现成的 `_vec_field` + `_vec_elem_addr`，
+零新增运行时）。map 遍历需要三个运行时例程：
+
+| 例程 | 作用 | stage-0 对应 |
+|---|---|---|
+| `map_cap(h)` | 桶数 | `qlm_map_cap` |
+| `map_state(h, i)` | 槽位状态（1 = 占用） | `qlm_map_state` |
+| `map_key_at(h, i)` | 第 i 槽的键 | `qlm_map_key_at` |
+
+`std/kv` 的 `_clear` 还要求"边遍历边删"安全 —— stage-0 的实现是**先收键
+再删**（注释写明"边遍历边删会破坏探测链"），照抄即可。
+
+### 7.41 待修（stage-0 侧）：const 名直接当方法接收者时不内联
+
+**现象**：
+
+```quelmara
+const A = 64
+fn main() {
+    print(A.to_str())     // ✗ [qlm] 编译错误：未定义变量 A
+    let x = A
+    print(x.to_str())     // ✓
+}
+```
+
+`let x = A` 走的是 const 内联路径，`A.to_str()` 不走 —— stage-0 在
+`postfix` 里遇到 `.` 时不查 const 表。qlmc 没有这个问题（v3.50 实测
+两边行为不一致）。
+
+**影响**：`tests/t194_qlmc_syntax.qma` 被迫写成 `let batch = SC_BATCH`
+再 `.to_str()`，否则差分测试在 stage-0 侧就编不过。
+
+**注意方向**：这里 **qlmc 是对的、stage-0 是错的**。修 stage-0 而不是
+把 qlmc 改成一样错 —— 否则等于把一个语言缺陷固化进自举链。
+
 ## 8. 推进顺序（2026-10-22 调整）平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
 当前顺序：
 
