@@ -1,0 +1,62 @@
+import std.core
+
+// v3.52：跨模块 const + str 切片
+//
+// 两件事都是 `std/` 真实用到的：
+//   * `import std.net.core` 后引用 `ST_H0`（std/ws、std/sse）
+//   * `data[start..i]` 对 str 切片（std/sse）
+//
+// 本夹具把两者的语义钉死。**必须是差分用例**：
+//   - 跨模块 const 的价值在于"值正确"，光能编过说明不了什么；
+//   - str 切片返回的是**新串**（不是视图），长度头/NUL/ABI 必须对，
+//     否则下游 len() 与拼接会读到原串的长度 —— 那是静默错。
+fn main() {
+    // ---- 1. str 切片 ----
+    let s = "hello world"
+    let a = s[0..5]
+    print("a=" + a)                      // hello
+    let b = s[6..11]
+    print("b=" + b)                      // world
+    // 长度必须是**新串自己的**，不是原串的
+    print("la=" + len(a).to_str())       // 5
+    print("lb=" + len(b).to_str())       // 5
+    print("ls=" + len(s).to_str())       // 11
+    // 空切片
+    let e = s[3..3]
+    print("le=" + len(e).to_str())       // 0
+    print("e=[" + e + "]")               // e=[]
+    // 全长
+    let f = s[0..11]
+    print("f=" + f)                      // hello world
+    // 拼接后仍正确（证明长度头 + NUL 都写了）
+    print("cat=" + a + "-" + b)          // hello-world
+    // 原串不受影响
+    print("orig=" + s)                   // hello world
+    // 连续切片（对切片结果再切）
+    let g = a[1..4]
+    print("g=" + g)                      // ell
+    // 单字符
+    let h = s[4..5]
+    print("h=" + h)                      // o
+    // 切片参与长度运算
+    let n = len(a) + len(b)
+    print("n=" + n.to_str())             // 10
+
+    // ---- 2. 跨模块 const ----
+    // 见 tests/modconst/ 下的模块；这里用主文件内的 const 做对照，
+    // 真正的跨模块验证由 modconst_test.py 覆盖（那需要独立模块文件）。
+    let localc = LOC_INT
+    print("li=" + localc.to_str())       // 64
+    print("ls2=" + LOC_STR)              // content-length
+    // 字符串 const 必须能参与拼接与比较
+    let j = "x-" + LOC_STR
+    print("j=" + j)                      // x-content-length
+    if LOC_STR == "content-length" {
+        print("eq=1")
+    } else {
+        print("eq=0")
+    }
+}
+
+const LOC_INT = 64
+const LOC_STR = "content-length"

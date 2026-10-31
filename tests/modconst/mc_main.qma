@@ -1,0 +1,40 @@
+import mc_mod
+
+// v3.52：**跨模块 const** 的差分夹具。
+//
+// `import mc_mod` 之后直接引用 `mc_mod` 里的 `pub const`。
+// 这在 v3.52 之前报"未定义变量" —— 因为 `parse` 把 const 引用**当场**
+// 折成 `E_NUM`/`E_STR` 节点，而主文件 parse 时被 import 模块的 const
+// 还没进表（装载发生在 parse 之后）。
+//
+// 修法是三段式解析：先收所有模块的 const，最后统一 parse。
+fn main() {
+    // 整型 const
+    print("i=" + MC_INT.to_str())         // 42
+    // 字符串 const
+    print("s=" + MC_STR)                  // hello
+    // 空串 const
+    print("e=" + len(MC_EMPTY).to_str())  // 0
+    // 负数 const
+    print("n=" + MC_NEG.to_str())         // -7
+    // 十六进制 const
+    print("h=" + MC_HEX.to_str())         // 3374027669
+
+    // 跨模块函数内部也能用（同一张 const 表）
+    print("f=" + mc_add(1).to_str())      // 43
+    print("c=" + mc_cat("x"))             // xhello
+    print("l=" + mc_len().to_str())       // 5
+
+    // const 参与算术
+    let v = MC_INT * 2 + 1
+    print("v=" + v.to_str())              // 85
+
+    // 字符串 const 参与拼接与比较
+    let j = "pre-" + MC_STR
+    print("j=" + j)                       // pre-hello
+    if MC_STR == "hello" {
+        print("eq=1")
+    } else {
+        print("eq=0")
+    }
+}
