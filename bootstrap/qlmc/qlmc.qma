@@ -5303,9 +5303,68 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
         // 记过同一个坑，v2.17 的 `for k in 0..3` 死循环）。
         let hv = _lower_expr(fc, nd.b)
         let hty = fc.vty.get(hv)
-        if hty < TY_VEC || hty >= TY_MAP {
-            eprint("qlmc: for k in ... 目前只支持遍历 vec")
+        if hty < TY_VEC || hty >= TY_SLICE {
+            eprint("qlmc: for k in ... 只支持遍历 vec 与 map")
             exit(2)
+        }
+        // ---- map 遍历（v3.55）：遍历所有槽，跳过键为 0 的空槽 ----
+        //
+        // map 布局（与 `_map_slot_of` 一致）：`[0]=cap`、`[8]=count`、
+        // `[16]=base`；每槽 16 字节（key 8 + val 8），**键为 0 表示空槽**。
+        //
+        // 遍历顺序是**槽序**，不是插入序 —— 与 stage-0 的
+        // `qlm_map_cap` / `qlm_map_state` / `qlm_map_key_at` 三个例程同语义。
+        // 所以 `for k in m` 的顺序未定义，需要有序必须自己排序
+        // （`std/set` 的文档里也这么写着）。
+        if hty >= TY_MAP && hty < TY_SLICE {
+            let hv2 = _lower_expr(fc, nd.b)
+            let hp2 = _new_var(fc, -2, TY_INT)
+            _ir_emit(fc, OP_MOV, hp2, hv2, 0, 0)
+            // kty = 键类型（map 类型编码是 TY_MAP + (K<<8) + V）
+            let kty = (hty - TY_MAP) >> 8
+            let cap2 = _pin(fc, _vec_field(fc, hp2, 0))
+            let base2 = _pin(fc, _map_base(fc, hp2))
+            let idx2 = _new_var(fc, -3, TY_INT)
+            let z2 = _vnew(fc)
+            fc.vty.set(z2, TY_INT)
+            _ir_emit(fc, OP_CONST, z2, 0, 0, 0)
+            _ir_emit(fc, OP_MOV, idx2, z2, 0, 0)
+            let kv = _new_var(fc, nd.a, kty)
+            let mtop = _newlab(fc.labs)
+            let mcont = _newlab(fc.labs)
+            let mend = _newlab(fc.labs)
+            let mskip = _newlab(fc.labs)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, mtop)
+            _ir_emit(fc, OP_JCMP, 0x8D, idx2, cap2, mend)
+            _loop_push(fc, mcont, mend)
+            // 键地址 = base + idx*16（用 ADDRXN 的 imul 形态）
+            let ka = _vnew(fc)
+            fc.vty.set(ka, TY_INT)
+            _ir_emit(fc, OP_ADDRXN, ka, base2, idx2, 16)
+            let kp = _pin(fc, ka)
+            let keyv = _vnew(fc)
+            fc.vty.set(keyv, kty)
+            _ir_emit(fc, OP_LOAD, keyv, kp, 0, 8)
+            // 键为 0 → 空槽，跳过本轮
+            let z3 = _vnew(fc)
+            fc.vty.set(z3, TY_INT)
+            _ir_emit(fc, OP_CONST, z3, 0, 0, 0)
+            let isempty = _vnew(fc)
+            fc.vty.set(isempty, TY_INT)
+            _ir_emit(fc, OP_CMP, isempty, keyv, z3, 0x94)     // sete
+            _ir_emit(fc, OP_JNZ, 0, isempty, 0, mskip)
+            _ir_emit(fc, OP_MOV, kv, keyv, 0, 0)
+            _lower_block(fc, nd.n, ep)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, mskip)
+            _loop_pop(fc)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, mcont)
+            let one2 = _vnew(fc)
+            fc.vty.set(one2, TY_INT)
+            _ir_emit(fc, OP_CONST, one2, 0, 0, 1)
+            _ir_emit(fc, OP_ADD, idx2, idx2, one2, 0)
+            _ir_emit(fc, OP_JMP, 0, 0, 0, mtop)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, mend)
+            return
         }
         let elem = hty - TY_VEC
         // **内部变量不能传 `nid = -1`**。`_try_var` 用 -1 当"找不到"的
@@ -10533,6 +10592,136 @@ fn _map_get(fc: FnCtx, nd: Node, vty: int, h: int) -> int {
 }
 
 /// m.has(k) → 1/0
+/// `m.del(k)`：删一个键（v3.55）。
+///
+/// ## 为什么不能只把键清 0
+///
+/// qlmc 的 map 布局是 `[0]=cap [8]=count [16]=base`，每槽 16 字节
+/// （key 8 + val 8），**键 0 表示空槽**。而 `_map_slot_of` 的线性扫描
+/// 一遇到"键为 0"就判定"这是插入位"并**停止**。
+///
+/// 所以直接清 0 会把探测链切断：排在后面的键再也找不到。
+/// v3.55 实测：`m.set(1,..) m.set(2,..) m.set(3,..)` 之后 `m.del(2)`，
+/// 再 `m.has(3)` 返回 **false**、`m.get(3)` 返回 **0** —— 数据没丢，但
+/// 找不到。这正是 `std/kv` 注释里写的"边遍历边删会破坏探测链"。
+///
+/// ## 采用的做法：删完重建后半段
+///
+/// stage-0 用**墓碑**（状态槽写 2）解决，但那需要每槽多一个状态字 ——
+/// qlmc 的布局没有这个空间，加字段会牵动 `_map_slot_of` / `_map_put` /
+/// `_map_grow` 全部路径，风险远大于收益。
+///
+/// 这里改成**删后把该槽之后的连续非空槽逐个摘下来重新插入**：搬完之后
+/// 探测链重新连续，语义与墓碑等价。代价是删除变成 O(后段长度)，但
+/// `std/kv` / `std/set` 的 `del` 都不在热路径上（都是 `_clear` 里的收尾）。
+///
+/// 返回值与 stage-0 一致：**永远 0**（stage-0 的 `__map_del` 命中路径
+/// 末尾也是 `ret 0`，它的文档没写返回值语义）。这里照抄，否则差分对不上 ——
+/// 而"能不能差分"比"返回值更合理"重要：语言缺陷不该单方面偏离基准。
+fn _map_del(fc: FnCtx, nd: Node, h: int) -> int {
+    let k = _lower_expr(fc, nd.c)
+    let hp = _pin(fc, h)
+    let kp = _pin(fc, k)
+    let slot = _pin(fc, _map_slot_of(fc, hp, kp))
+    let z0 = _map_const(fc, 0)
+    let d = _map_const(fc, 0)
+    fc.vty.set(d, TY_BOOL)
+    let lmiss = _newlab(fc.labs)
+    let ldone = _newlab(fc.labs)
+    // slot == 0 → 表满（_map_slot_of 满时返回 0）
+    _ir_emit(fc, OP_JCMP, 0x84, slot, z0, lmiss)
+    // 读键；为 0 说明走到空位了，没命中
+    let old = _vnew(fc)
+    fc.vty.set(old, TY_INT)
+    _ir_emit(fc, OP_LOAD, old, slot, 0, 8)
+    let zero = _map_const(fc, 0)
+    _ir_emit(fc, OP_JCMP, 0x84, old, zero, lmiss)
+
+    // ---- 命中：先把该槽清 0，再重建后半段 ----
+    let zz = _map_const(fc, 0)
+    _ir_emit(fc, OP_STORE, 0, slot, zz, 8)
+
+    let cap = _pin(fc, _vec_field(fc, hp, 0))
+    let base = _pin(fc, _map_base(fc, hp))
+    let sixteen = _pin(fc, _map_const(fc, 16))
+    // cur 从被删槽的**下一个**开始
+    let cur = _new_var(fc, -2, TY_INT)
+    let nxt = _vnew(fc)
+    fc.vty.set(nxt, TY_INT)
+    _ir_emit(fc, OP_ADD, nxt, slot, sixteen, 0)
+    _ir_emit(fc, OP_MOV, cur, nxt, 0, 0)
+    // end = base + cap*16
+    let c16 = _vnew(fc)
+    fc.vty.set(c16, TY_INT)
+    _ir_emit(fc, OP_MUL, c16, cap, sixteen, 0)
+    let end = _pin(fc, _vnew(fc))
+    fc.vty.set(end, TY_INT)
+    _ir_emit(fc, OP_ADD, end, base, c16, 0)
+    let rtop = _newlab(fc.labs)
+    let rnext = _newlab(fc.labs)
+    let rskip = _newlab(fc.labs)
+    let rend = _newlab(fc.labs)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, rtop)
+    let cv = _vnew(fc)
+    fc.vty.set(cv, TY_INT)
+    _ir_emit(fc, OP_MOV, cv, cur, 0, 0)
+    _ir_emit(fc, OP_JCMP, 0x83, cv, end, rend)        // cur >= end → 结束
+    let ckp = _pin(fc, cv)
+    // 读键；为 0 说明后面全空，结束
+    let ck = _vnew(fc)
+    fc.vty.set(ck, TY_INT)
+    _ir_emit(fc, OP_LOAD, ck, ckp, 0, 8)
+    let z4 = _map_const(fc, 0)
+    _ir_emit(fc, OP_JCMP, 0x84, ck, z4, rend)
+    // 摘下 (key, val)
+    let kv2 = _pin(fc, ck)
+    let va = _vnew(fc)
+    fc.vty.set(va, TY_INT)
+    _ir_emit(fc, OP_ADDRF, va, ckp, 0, 8)
+    let vv = _pin(fc, _vnew(fc))
+    fc.vty.set(vv, TY_INT)
+    _ir_emit(fc, OP_LOAD, vv, va, 0, 8)
+    // 清掉原槽
+    let z5 = _map_const(fc, 0)
+    _ir_emit(fc, OP_STORE, 0, ckp, z5, 8)
+    // 重新插入到新位置
+    let ns = _pin(fc, _map_slot_of(fc, hp, kv2))
+    _map_put(fc, ns, kv2, vv, hp)
+    // 刚才的 _map_put 让 count +1，这里补回来（净不变）
+    let cn = _pin(fc, _vec_field(fc, hp, 8))
+    let one3 = _map_const(fc, 1)
+    let nc = _vnew(fc)
+    fc.vty.set(nc, TY_INT)
+    _ir_emit(fc, OP_SUB, nc, cn, one3, 0)
+    let ca = _vnew(fc)
+    fc.vty.set(ca, TY_INT)
+    _ir_emit(fc, OP_ADDRF, ca, hp, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, ca, nc, 8)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, rnext)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, rnext)
+    let nx2 = _vnew(fc)
+    fc.vty.set(nx2, TY_INT)
+    _ir_emit(fc, OP_ADD, nx2, cur, sixteen, 0)
+    _ir_emit(fc, OP_MOV, cur, nx2, 0, 0)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, rtop)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, rend)
+
+    // count -= 1（真正的那一次）
+    let cn2 = _pin(fc, _vec_field(fc, hp, 8))
+    let one = _map_const(fc, 1)
+    let nc2 = _vnew(fc)
+    fc.vty.set(nc2, TY_INT)
+    _ir_emit(fc, OP_SUB, nc2, cn2, one, 0)
+    let ca2 = _vnew(fc)
+    fc.vty.set(ca2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, ca2, hp, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, ca2, nc2, 8)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, ldone)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lmiss)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, ldone)
+    return d
+}
+
 fn _map_has(fc: FnCtx, nd: Node, h: int) -> int {
     let k = _lower_expr(fc, nd.c)
     let slot = _map_slot_of(fc, h, k)
@@ -13765,7 +13954,10 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
             _ir_emit(fc, OP_MOV, d, _vec_field(fc, hp, 8), 0, 0)
             return d
         }
-        eprint("qlmc: map 只支持 .set(k,v) / .get(k) / .has(k) / .len()")
+        if m == "del" {
+            return _map_del(fc, nd, hp)
+        }
+        eprint("qlmc: map 只支持 .set(k,v) / .get(k) / .has(k) / .len() / .del(k)")
         exit(2)
     }
     if hty < TY_VEC || hty >= TY_ARRAY {
