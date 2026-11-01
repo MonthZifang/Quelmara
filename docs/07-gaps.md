@@ -1911,6 +1911,83 @@ const TBL_SIZE    = VTYPES_BASE + VTYPES_MAX // 9265
 > 改动完整保存在 `/tmp/v365_final_attempt.qma`（16694 行）与
 > `git stash` 里，下次可直接接着调。
 
+#### 第三次排查（同日）：类型表本身**已验证正确**，问题在别处
+
+用反汇编对拍 + 计数统计缩小了范围。
+
+**方法：统计两个 stage-1 产物里的移位指令**
+
+```
+                        shl r9,3(×8)   shl r9,6(×64)
+v3.62 s1 编（good）          379             3
+v3.65 s1 编（bad）           270             1
+```
+
+`shl r9,6` 是 `vec[Node]` 的步长（Node 8 字段 × 8 = 64）。good 有 3 处，
+bad 只有 1 处 —— **2 处被错算成别的值**。
+
+**逐处比对**（good 的 3 个位置在 bad 里是什么）：
+
+| VA | good | bad |
+|---|---|---|
+| `0x8bec` | `shl r9,6` | `shl r9,6` ✅ |
+| `0x114c2` | `shl r9,6` | `shl r9,**4**`（×16）❌ |
+| `0x9b719` | `shl r9,6` | 别的内容（代码整体偏移了） |
+
+**关键：`×64 → ×16`**。16 正是 `_ty_size` 里 `>= TY_ENUM` 分支的返回值。
+
+**但类型表本身是干净的**（实测 dump）：
+
+```
+DBG vtypes_n=7
+  ti=0 elem=4096  (Tok,  si=0)
+  ti=1 elem=4097  (Node, si=1)
+  ti=2 elem=2     (str)
+  ti=3 elem=4098  (Fn,   si=2)
+  ti=4 elem=0     (int)
+  ti=5 elem=4101  (Fix,  si=5)
+  ti=6 elem=4100  (Ir,   si=4)
+```
+
+源码里的 `vec[大写]` 形态正好 7 种（Tok 16 处、Node 10、Fn 10、Ir 8、
+Fix 5、`vec[T]` 5 是模板、Struct/Foo 各 1 是注释里的），**没有遗漏**。
+
+**进一步反汇编**（`VA 0x114c2` 上下文）：
+
+```
+mov [rbp-0x230], 1          ; 某个变量 = 1
+mov r8d, 24                 ; 24 字节
+call RT_ALLOC (0x1161)      ; 分配 vec 头块
+mov [rbp-0x2c8], rax        ; 存句柄
+mov r9, [rbp-0x230]         ; 取那个变量（=1）
+shl r9, 6                   ; 1 << 6 = 64   ← bad 是 shl r9, 4
+```
+
+**注意 `shl` 的操作数是变量而不是常量** —— 所以差异不在"stride 常量编码"，
+而在**那个变量在编译期被折叠成了不同的移位量**。
+
+> 也就是说：`_ty_size` 在**编译 qlmc 自己时**返回了 16 而不是 64，
+> 但它的输入（类型表、`et0`）在探针场景下都对。这指向一个只在
+> **特定函数规模/上下文**下才成立的折叠路径 —— 可能是常量折叠
+> 与 `C_ADDRTY` 单元格的交互（`_addr_index` 里
+> `fc.cells.set(C_ADDRTY, et0)` 之后又调 `_ty_size(fc, et0)`）。
+
+**下次的直接验证方法**（比反汇编更快）：
+
+在 `_addr_index` 的 vec 分支加一行调试打印：
+
+```quelmara
+let et0 = _vtypes_elem(fc.stt, bty0)
+eprint("ADDRIDX et0=" + et0.to_str() + " size=" + _ty_size(fc, et0).to_str())
+```
+
+然后编 qlmc 自己，看哪些调用的 `size` 不是 64/56/8 —— **直接命中**，
+不用再猜。这一行调试在 `dump` 模式下也会打印（`_addr_index` 只在
+lowering 期跑，所以要用 `build` 而非 `dump`）。
+
+**为什么本轮没做这一步**：加调试 → 重建（10 分钟）→ 看输出，
+而本轮已经重建了 6 次。下次直接从这一步开始，能省掉全部反汇编工作。
+
 ### 7.44 待修：qlmc **完全没有泛型**（`std/gen` 的唯一阻塞）
 
 **现象**：
