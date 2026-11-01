@@ -38,6 +38,7 @@ import argparse
 import collections
 import glob
 import os
+import shutil
 import subprocess
 import sys
 
@@ -73,11 +74,36 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 #              "struct 重复声明 _Ck"（那是另一个问题，见 §7.40））
 # v3.62: 67  （模块作用域：同名私有 struct/函数按模块隔离 ——
 #              一次解开 std/httpc_net + std/http + std/logfile，见 §7.43）
+# v3.63: 67  （**分母修正**：std/park_linux 是 Linux 专用模块，在 win 目标上
+#              连 stage-0 都编不过（`syscall` 只在 Linux/arm64 后端存在），
+#              不该计入"qlmc 对 std 的覆盖率"。分母 70 -> 69，真实缺口
+#              从"3 个"变成"2 个"：std/csv（vec[vec[T]]）与 std/gen（泛型）。
+#              **数字没涨，但口径变准了** —— 这比刷数字重要。）
 BASELINE = 67
 
 QLMC_SRC = "bootstrap/qlmc/qlmc.qma"
 QLMC_EXE = os.path.join("build", "_qlmc_cov.exe")
 OUT_EXE = os.path.join("build", "_qlmc_cov_out.exe")
+
+
+def _exe_runner(exe):
+    """返回调用 PE 产物的命令前缀。
+
+    * Windows 上直接跑（`[exe, ...]`）；
+    * Linux 上**必须显式走 `wine`**：`binfmt_misc` 注册的 `MZ` handler
+      会把 argv[0] 重复塞进去，qlmc 于是把 `build` 当成源文件名，
+      报"打不开源文件 build"（v3.63 实测）。
+
+    这不是本工具的怪癖 —— 任何在 Linux 上跑 qlmc 产物的脚本都会撞到。
+    """
+    if os.name == "nt":
+        return [exe]
+    wine = shutil.which("wine")
+    if wine is None:
+        raise SystemExit(
+            "FAIL：Linux 上需要 wine 才能执行 qlmc 产出的 PE 文件"
+            "（apt install wine64）")
+    return [wine, exe]
 
 
 def build_qlmc():
@@ -106,6 +132,46 @@ def classify(msg):
     return msg[:60]
 
 
+# **平台专用模块**：它们在任何编译器下都编不出 Windows 目标，
+# 所以不该计入"qlmc 对 std 的覆盖率"分母 —— 否则分母里永远有 1 个
+# 不可能项，覆盖率上限被钉在 69/70。
+#
+# 判据是**客观可验证**的：这些模块用 `syscall`（只在 Linux/arm64 后端
+# 存在）或 `@ffi`（只在 PE 后端存在），在 Windows 目标上是声明期硬失败。
+# `_verify_platform_exclusions()` 会真的用 stage-0 试一遍，**编得过就报错**
+# —— 防止有人往这张表里塞"其实能编、只是 qlmc 编不过"的模块来刷数字。
+PLATFORM_SPECIFIC = {
+    "std/park_linux.qma": "syscall() 只在 Linux/arm64 后端实现（Windows 是声明期硬失败）",
+}
+
+
+def _verify_platform_exclusions(root):
+    """用 stage-0 **带 `--lib`** 复核：表里每个模块必须真的编不过 win 目标。
+
+    为什么用 CLI 子进程而不是直接调 `transpile_win`：那个函数没有 `--lib`
+    概念，对 lib 模块会抛 `KeyError: 'main'` —— 那是"调用方式不对"，
+    不是"编不过"。用它当判据会把任何模块都误判成"编不过"。
+
+    真正的判据只有一条：**同一个 CLI 命令，qlmc 失败但 stage-0 也失败**。
+    这样排除表才不可能变成"qlmc 编不过的都塞进来"的垃圾桶。
+    """
+    bad = []
+    for mod, why in PLATFORM_SPECIFIC.items():
+        path = os.path.join(root, mod)
+        if not os.path.isfile(path):
+            bad.append(f"{mod}：文件不存在（表过期了？）")
+            continue
+        r = subprocess.run(
+            [sys.executable, os.path.join(root, "tools", "stage0", "qlm_cli.py"),
+             "build", path, "--target", "win", "--lib", "-o",
+             os.path.join(root, "build", "_cov_excl.exe")],
+            capture_output=True, text=True, timeout=300)
+        if r.returncode == 0:
+            bad.append(f"{mod}：stage-0 **能**编出 win 目标 —— "
+                       f"它不是平台专用，不该被排除（{why}）")
+    return bad
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -113,14 +179,28 @@ def main():
     args = ap.parse_args()
 
     exe = build_qlmc()
-    mods = sorted(glob.glob("std/**/*.qma", recursive=True))
-    if not mods:
+    allmods = sorted(glob.glob("std/**/*.qma", recursive=True))
+    if not allmods:
         print("FAIL：找不到 std/**/*.qma")
         return 1
 
+    # 先复核"平台专用"表，编得过就是表写错了
+    bad_excl = _verify_platform_exclusions(ROOT)
+    if bad_excl:
+        print("FAIL：PLATFORM_SPECIFIC 表有问题：")
+        for b in bad_excl:
+            print(f"  {b}")
+        return 1
+
+    mods = [m for m in allmods if m.replace(os.sep, "/") not in PLATFORM_SPECIFIC]
+    skipped = len(allmods) - len(mods)
+    if skipped:
+        print(f"（排除 {skipped} 个平台专用模块："
+              f"{', '.join(sorted(PLATFORM_SPECIFIC))} —— 见 PLATFORM_SPECIFIC 说明）")
+
     ok, fails = 0, []
     for m in mods:
-        r = subprocess.run([exe, "build", m, "-lib", "-o", OUT_EXE],
+        r = subprocess.run(_exe_runner(exe) + ["build", m, "-lib", "-o", OUT_EXE],
                            capture_output=True, text=True, timeout=180)
         if r.returncode == 0:
             ok += 1
