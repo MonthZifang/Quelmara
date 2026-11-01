@@ -304,7 +304,26 @@ const SMOD_BASE = EN_HDR + 1 + 64 * EN_STRIDE          // 与 struct 序号平�
 const EMOD_BASE = SMOD_BASE + 128                       // 与 enum 序号平行
 const FMOD_BASE = EMOD_BASE + 128                       // 与函数序号平行
 const NFN_MAX = 4096                                    // 函数序号上限（qlmc 自己约 400）
-const TBL_SIZE = FMOD_BASE + NFN_MAX
+
+// v3.65：**元素类型表**（收 §7.18）。
+//
+// 问题：`TY_VEC = 0x8000 + elem` 里 `elem` 是**完整**的 TY 码，
+// 于是 `vec[vec[str]]` = 0x8000 + 0x8002 = 0x10002 —— 落进 TY_MAP 区间
+// （0x10000..0x1ffff），`_lower_method` 把它当 map 处理。
+//
+// 改法：`TY_VEC = 0x8000 + ti`，`ti` 是**本表下标**，`stt[VTYPES_BASE+ti]`
+// 才是元素类型码。嵌套于是退化成一次查表，不再有进位。
+//
+// **为什么这个改法比"搬 TY_VEC"安全得多**：只要 `ti < VTYPES_MAX`（2048）
+// 且 2048 < 0x8000，`TY_VEC+ti` 就**永远落在 [0x8000, 0x10000) 区间内** ——
+// 那 8 处 `>= TY_VEC && < TY_MAP` 的区间判断**一行都不用改**。
+// 搬 TY_VEC 到高位则会让它们全部静默失效（见 §7.18 的量化）。
+const VTYPES_BASE = FMOD_BASE + NFN_MAX
+const VTYPES_MAX = 2048
+// **+1 是给"已用条数"那一格**（`stt[VTYPES_BASE]` 存 n，元素从
+// `VTYPES_BASE+1` 起）。少这个 +1 会让最后一条写到 `TBL_SIZE` 之外 ——
+// 越界一格，静默踩坏相邻数据。
+const TBL_SIZE = VTYPES_BASE + 1 + VTYPES_MAX
 
 struct Fn {
     name: int       // 名字 id
@@ -721,6 +740,71 @@ fn _set_mod(m: int) {
     mem_store64(static_word(SW_MOD_ID), 0, m)
 }
 
+// ---------------------------------------------------------------------------
+// v3.65：元素类型表（收 §7.18）
+// ---------------------------------------------------------------------------
+//
+// 类型表存在 `stt[VTYPES_BASE .. VTYPES_BASE+VTYPES_MAX)`，与 struct/enum/
+// 函数序号区并列。用 `stt` 而不是新开一个 vec：`P` 与 `FnCtx` 都已经持有
+// `stt`（lowering 期还是只读共享、天然并行安全），**零新增字段、零新增形参**
+// —— v3.62 试过给核心 struct 加字段，代价极大（见 §7.43）。
+
+/// 把元素类型 `elem` 登记进类型表，返回下标 `ti`。
+///
+/// **去重**：同一个 `elem` 复用已有下标。这样 `vec[str]` 无论出现几次
+/// 都是同一个类型码 —— 否则 `vec[str] == vec[str]` 的类型比较会失效
+/// （qlmc 里类型比较全是整数比较）。
+fn _vtypes_add(stt: vec[int], elem: int) -> int {
+    // stt[VTYPES_BASE + 0] 存已用条数
+    let n = stt.get(VTYPES_BASE)
+    let mut i = 0
+    while i < n {
+        if stt.get(VTYPES_BASE + 1 + i) == elem {
+            return i
+        }
+        i = i + 1
+    }
+    if n >= VTYPES_MAX - 1 {
+        // 超限只能 fail-fast：静默截断会让不同类型拿到同一码 = 静默错编
+        eprint("qlmc: 元素类型表溢出（" + (VTYPES_MAX - 1).to_str() + " 条）")
+        exit(2)
+    }
+    stt.set(VTYPES_BASE + 1 + n, elem)
+    stt.set(VTYPES_BASE, n + 1)
+    return n
+}
+
+/// 由 `vec` 的类型码取**元素**类型码（查表）。
+///
+/// 调用方必须已经确认 `ty` 是 vec（`ty >= TY_VEC && ty < TY_MAP`）。
+fn _vtypes_elem(stt: vec[int], ty: int) -> int {
+    let ti = ty - TY_VEC
+    return stt.get(VTYPES_BASE + 1 + ti)
+}
+
+/// `vec[str]` 的元素下标 —— **parse 期预登记，lowering 期只读**。
+///
+/// 为什么单独抽出来：`args()` 内建返回 `vec[str]`，而它可能在源码里
+/// **一次都没写过 `vec[str]` 字面类型**，于是类型表里没有 `TY_STR` 这一条。
+/// lowering 期（`spawn` 并行）不能补登记（会写坏 `stt`），所以由
+/// `main` 在 parse 之后、lowering 之前统一补一次。
+///
+/// 这里只**查**不写：找不到就是内部错误（main 保证补过）。
+fn _vtypes_str(stt: vec[int]) -> int {
+    let n = stt.get(VTYPES_BASE)
+    let mut i = 0
+    while i < n {
+        if stt.get(VTYPES_BASE + 1 + i) == TY_STR {
+            return i
+        }
+        i = i + 1
+    }
+    // 没登记过 —— 返回 0 是不安全的（可能正好是别的类型），必须 fail-fast
+    eprint("qlmc: 内部错误：vec[str] 的元素类型未在 parse 期登记")
+    exit(2)
+    return 0
+}
+
 fn _st_base(si: int) -> int {
     return 1 + si * ST_STRIDE
 }
@@ -879,13 +963,20 @@ fn _type(p: P, pos: vec[int]) -> int {
         _eat_p(p, pos, P_LBRACK)
         let e = _type(p, pos)
         _eat_p(p, pos, P_RBRACK)
-        // 聚合元素（v2.31）：struct / enum / 定长数组都行。
-        // 嵌套 vec/map/切片/闭包仍然拒绝——它们的类型码会和区间撞
-        // （0x8000+0x8000 = TY_MAP，见 07-gaps §7.18）。
-        if e >= TY_VEC && e < TY_ARRAY {
-            _fail(p, pos, "本版 vec 元素不支持嵌套 vec/map/切片/闭包（类型码撞区间，见 07-gaps §7.18）")
-        }
-        return TY_VEC + e
+        // v3.65（收 §7.18）：**元素类型不再直接相加，改为查类型表**。
+        //
+        // 老写法 `TY_VEC + e` 在 e 本身是 vec 时会进位：
+        // `vec[vec[str]]` = 0x8000 + 0x8002 = 0x10002，落进 TY_MAP 区间
+        // （0x10000..0x1ffff），`_lower_method` 于是把它当 map 处理 ——
+        // 不崩、不报错，只是走错分支。
+        //
+        // 现在 `TY_VEC + ti`（ti 是类型表下标，< VTYPES_MAX = 2048），
+        // 永远落在 [0x8000, 0x10000) 内，**那 8 处区间判断一行都不用改**。
+        //
+        // 原来这里有个"嵌套 vec/map/切片/闭包一律拒绝"的闸门，现在拆掉：
+        // 类型码不再撞车，闸门没有存在理由。
+        let ti = _vtypes_add(p.stt, e)
+        return TY_VEC + ti
     }
     if t.k == T_NAME {
         _adv(pos)
@@ -1684,7 +1775,14 @@ fn _primary(p: P, pos: vec[int]) -> int {
         _eat_p(p, pos, P_LPAREN)
         let cnt = _expr(p, pos)
         _eat_p(p, pos, P_RPAREN)
-        return _postfix(p, pos, _node(p, E_VECNEW, et, cnt, -1))
+        // v3.65：**在 parse 期就把元素类型登记进类型表**，`E_VECNEW` 的
+        // `a` 改存**已算好的 vec 类型码**（不是元素码）。
+        //
+        // 为什么必须前置：lowering 期 `_compile_range` 是 `spawn` 并行的，
+        // 多个线程同时 `_vtypes_add` 会写坏 `stt` —— 数据竞争。
+        // 前置之后 lowering 期**只查表不写表**，天然并行安全。
+        let vty = TY_VEC + _vtypes_add(p.stt, et)
+        return _postfix(p, pos, _node(p, E_VECNEW, vty, cnt, -1))
     }
     if t.k == T_NAME {
         _adv(pos)
@@ -3807,17 +3905,22 @@ fn _ent_ptype(fc: FnCtx, ei: int, vi: int) -> int {
     return fc.stt.get(_ent_base(ei) + 2 + vi * 3 + 2)
 }
 
-/// 类型占几个字节（元素步长 / 槽数）。
+/// 类型占几个字节（槽/元素步长）。
 ///
-/// **区间判定必须两头都卡**（`>= lo && < hi`）。类型码是"标签 + 载荷"
-/// 塞进一个 int，区间不连续，只卡下界迟早出事 —— 这里就出过：
-/// 原来 `if ty >= TY_ENUM { return 16 }` 没有上界，而
-/// `TY_VEC(0x8000) > TY_ENUM(0x2000)`，于是 **vec/map 句柄被算成 16 字节**
-/// （正确是 8）。
+/// **判定顺序有讲究**：类型码是"标签 + 载荷"塞进一个 int，区间不连续，
+/// 所以必须**从大到小**判，且每个区间都要有明确上界。
 ///
-/// 这个 bug 潜伏很久没暴露：调用 `_ty_size` 的地方一直传**元素**类型
-/// （标量/struct/enum），从没传过 vec 类型。一旦有人传 vec 类型
-/// （比如将来支持 `vec[vec[T]]`），元素步长立刻翻倍 —— 静默错编。
+/// v3.65 修：`TY_VEC`（0x8000）落在 `TY_ENUM`（0x2000）之上，原来那条
+/// `if ty >= TY_ENUM { return 16 }` **没有上界**，于是把 `vec` 句柄
+/// 也判成 16 字节 —— 而 vec/map/str 句柄都是 **8 字节**。
+///
+/// 这个 bug 一直存在但没暴露：调用 `_ty_size` 的地方传的一直是**元素**
+/// 类型（标量/struct/enum），从没传过 vec 类型。v3.65 让 `vec[vec[T]]`
+/// 合法之后，`_vtypes_elem` 会返回一个 **vec 类型码**，`_ty_size` 立刻
+/// 把它算成 16 —— 元素步长翻倍，静默错编（实测 `.text` 里
+/// `shl r9, 3` 变成 `shl r9, 4`）。
+///
+/// **教训**：区间判定必须两头都卡（`>= lo && < hi`），只卡下界迟早出事。
 fn _ty_size(fc: FnCtx, ty: int) -> int {
     if ty >= TY_ARRAY {
         return ((ty - TY_ARRAY) >> 8) * 8
@@ -3825,8 +3928,8 @@ fn _ty_size(fc: FnCtx, ty: int) -> int {
     if ty >= TY_SLICE && ty < TY_ARRAY {
         return 16                       // (ptr, len)
     }
-    // vec / map 都是**句柄**（8 字节）。必须在 TY_ENUM 之前判 ——
-    // TY_VEC = 0x8000 > TY_ENUM = 0x2000，否则会被下面那条吃掉。
+    // vec / map 都是**句柄**（8 字节）—— 必须在 TY_ENUM 之前判，
+    // 否则会被下面的 `>= TY_ENUM` 吃掉（TY_VEC=0x8000 > TY_ENUM=0x2000）
     if ty >= TY_VEC && ty < TY_SLICE {
         return 8
     }
@@ -4477,7 +4580,7 @@ fn _addr_index(fc: FnCtx, base_nid: int, ix_nid: int) -> int {
         let h = _lower_expr(fc, base_nid)
         let i = _lower_expr(fc, ix_nid)
         _vec_check(fc, h, i)
-        let et0 = bty0 - TY_VEC
+        let et0 = _vtypes_elem(fc.stt, bty0)
         fc.cells.set(C_ADDRTY, et0)
         let data = _vec_field(fc, h, 0)
         return _vec_elem_addr(fc, data, i, _ty_size(fc, et0))
@@ -5147,7 +5250,7 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
     if nd.op == E_INDEX {
         let bty = _ty_of_expr(fc, nd.a)
         if bty >= TY_VEC && bty < TY_ARRAY {
-            return bty - TY_VEC
+            return _vtypes_elem(fc.stt, bty)
         }
         if bty >= TY_ARRAY {
             return _ty_elem(bty)
@@ -5161,7 +5264,8 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
         return TY_ENUM + nd.a
     }
     if nd.op == E_VECNEW {
-        return TY_VEC + nd.a
+        // v3.65：`nd.a` 已经是**算好的 vec 类型码**（parse 期登记过）
+        return nd.a
     }
     if nd.op == E_MAPNEW {
         return TY_MAP + (nd.a << 8) + nd.c
@@ -5181,7 +5285,7 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
             return bty
         }
         if bty >= TY_VEC && bty < TY_MAP {
-            return TY_SLICE + (bty - TY_VEC)
+            return TY_SLICE + _vtypes_elem(fc.stt, bty)
         }
         if bty >= TY_ARRAY {
             return TY_SLICE + _ty_elem(bty)
@@ -5202,7 +5306,7 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
         }
         if rty >= TY_VEC && rty < TY_ARRAY {
             if m == "get" {
-                return rty - TY_VEC
+                return _vtypes_elem(fc.stt, rty)
             }
         }
         return TY_INT
@@ -5226,7 +5330,7 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
         // 类型推断会掉到"未知"分支 —— `len(args())` 因此报
         // "len() 只支持 str 与 vec"。这里特判一下。
         if fc.names.get(nd.a) == "args" {
-            return TY_VEC + TY_STR
+            return TY_VEC + _vtypes_str(fc.stt)
         }
     }
     if nd.op == E_BIN {
@@ -5624,7 +5728,7 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
             _ir_emit(fc, OP_LAB, 0, 0, 0, mend)
             return
         }
-        let elem = hty - TY_VEC
+        let elem = _vtypes_elem(fc.stt, hty)
         // **内部变量不能传 `nid = -1`**。`_try_var` 用 -1 当"找不到"的
         // 哨兵（`_find_var` 找不到也返回 -1），而 `_new_var(fc, -1, ...)`
         // 会把 -1 塞进 `fc.vmap`，于是循环体里任何一次 `_try_var(fc, -1)`
@@ -10649,7 +10753,7 @@ fn _lower_slice(fc: FnCtx, nd: Node) -> int {
         _ir_emit(fc, OP_LOAD, blen, la, 0, 8)
     } else if bty >= TY_VEC && bty < TY_MAP {
         let h = _lower_expr(fc, nd.a)
-        elem = bty - TY_VEC
+        elem = _vtypes_elem(fc.stt, bty)
         base = _pin(fc, _vec_field(fc, h, 0))     // 数据块基址
         blen = _vec_field(fc, h, 8)
     } else if bty >= TY_ARRAY {
@@ -11204,14 +11308,24 @@ fn _vec_grow_body(fc: FnCtx, h: int, stride: int) {
 fn _lower_vecnew(fc: FnCtx, nd: Node) -> int {
     let n = _pin(fc, _lower_expr(fc, nd.b))
     let h = _vnew(fc)
-    fc.vty.set(h, TY_VEC + nd.a)
+    // v3.65：`nd.a` 已经是算好的 vec 类型码（parse 期登记过），只读不写
+    fc.vty.set(h, nd.a)
     let hdr = _vnew(fc)
     fc.vty.set(hdr, TY_INT)
     _ir_emit(fc, OP_CONST, hdr, 0, 0, 24)
     _ir_emit(fc, OP_ARG, 0, hdr, 0, 0)
     _ir_emit(fc, OP_CALLRT, h, 0, 0, RT_ALLOC)
     // 数据块 = cap * 元素步长（聚合元素时步长是结构体字节数，v2.31）
-    let stride = _ty_size(fc, nd.a)
+    //
+    // **v3.65 修正**：`nd.a` 现在存的是 **vec 类型码**（`TY_VEC + ti`），
+    // 而 `_ty_size` 要的是**元素类型码**。直接传 `nd.a` 会让
+    // `_ty_size` 走 `ty >= TY_VEC && ty < TY_SLICE { return 8 }` 分支，
+    // **永远返回 8** —— 所有 `vec[Struct]` 的元素步长都塌成 8，
+    // 静默错编（`vec[Node]` 应该 64，`vec[Fn]` 应该 56）。
+    //
+    // 必须先用 `_vtypes_elem` 把下标换回元素类型码。
+    let et = _vtypes_elem(fc.stt, nd.a)
+    let stride = _ty_size(fc, et)
     let stv = _vnew(fc)
     fc.vty.set(stv, TY_INT)
     _ir_emit(fc, OP_CONST, stv, 0, 0, stride)
@@ -11467,7 +11581,10 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
             exit(2)
         }
         let d = _vnew(fc)
-        fc.vty.set(d, TY_VEC + TY_STR)
+        // v3.65：`args()` 返回 `vec[str]`。`TY_STR` 的元素下标由
+        // `_vtypes_str()` 在 parse 期预登记（见那里的说明）——
+        // lowering 期只读，不写 `stt`。
+        fc.vty.set(d, TY_VEC + _vtypes_str(fc.stt))
         _ir_emit(fc, OP_CALL, d, 0, 0, fi)
         return d
     }
@@ -14610,7 +14727,7 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
         eprint("qlmc: 只有 vec 有 .push/.get/.len 方法")
         exit(2)
     }
-    let et = hty - TY_VEC
+    let et = _vtypes_elem(fc.stt, hty)
     let stride = _ty_size(fc, et)
     let eagg = _ty_is_agg(et)
     let m = fc.names.get(nd.b)
@@ -15907,20 +16024,8 @@ fn _dir_of(path: str) -> str {
     return ""
 }
 
-/// 参数里有没有 `--addrdump`。
-fn _want_addrdump(a: vec[str]) -> int {
-    let mut i = 0
-    while i < len(a) {
-        if a.get(i) == "--addrdump" {
-            return 1
-        }
-        i = i + 1
-    }
-    return 0
-}
-
 fn _usage() {
-    eprint("用法: qlmc build <src.qma> [-o out.exe] [-j N] [--addrdump] | qlmc dump <src.qma> | qlmc irdump <src.qma> [函数名] | qlmc version")
+    eprint("用法: qlmc build <src.qma> [-o out.exe] [-j N] | qlmc dump <src.qma> | qlmc irdump <src.qma> [函数名] | qlmc version")
 }
 
 /// **拓扑排序 import 图**（v3.61，收 §7.40）：返回"被依赖的先出现"的模块下标序。
@@ -16399,6 +16504,17 @@ fn main() {
     // 复位：lowering 期 `_cur_mod` 不该再被 parse 语义使用
     _set_mod(0)
 
+    // v3.65：**lowering 前的最后一次补登记**（此时单线程，写 stt 安全）。
+    //
+    // 两个必然用到的元素类型，源码里可能一次都没显式写过：
+    //   * `TY_STR` —— `args()` 返回 `vec[str]`，即使源码没写过 `vec[str]`；
+    //   * `TY_INT` —— 防御性补一条（不占额外编码，只是让查表必命中）。
+    //
+    // 补完这两条之后，lowering 期所有 `_vtypes_elem` / `_vtypes_str` 都是
+    // **纯查表**，`spawn` 并行安全。
+    _vtypes_add(stt, TY_STR)
+    _vtypes_add(stt, TY_INT)
+
     if cmd == "dump" {
         print("tokens   : " + len(toks).to_str())
         print("nodes    : " + len(nodes).to_str())
@@ -16579,23 +16695,6 @@ _gen_memcmp(ctx)
                " vs " + real_bss.to_str())
         exit(2)
     }
-    // v3.69：`addrdump` —— 打印每个函数的 .text 偏移（诊断用）。
-    //
-    // 为什么需要：排查 stage-2 缺陷时要"从差异 VA 反推是哪个函数"，
-    // 而 PE 里没有函数边界信息（qlmc 不发 pdata）。这个命令直接输出
-    // `fnpos`，把 VA → 函数名的映射补上。
-    //
-    // 用法：`qlmc build <src> --addrdump -o x.exe` —— 编译照常进行，
-    // 额外把 `ADDR <偏移> <函数名>` 打到 stdout。
-    if _want_addrdump(a) {
-        let mut ai = 0
-        while ai < nfunc {
-            print("ADDR " + fnpos.get(ai).to_str() + " " +
-                  names.get(fns.get(ai).name))
-            ai = ai + 1
-        }
-    }
-
     write_file(out, blob)
     let t_all = (now_ns() - t0) / 1000
     print("[qlmc] " + src + " -> " + out + "  (" + len(blob).to_str() + " 字节, 子集 S12)" +

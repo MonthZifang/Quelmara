@@ -79,7 +79,9 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 #              不该计入"qlmc 对 std 的覆盖率"。分母 70 -> 69，真实缺口
 #              从"3 个"变成"2 个"：std/csv（vec[vec[T]]）与 std/gen（泛型）。
 #              **数字没涨，但口径变准了** —— 这比刷数字重要。）
-BASELINE = 67
+# v3.71: 68  （vec[vec[T]] —— 类型码从"加法"改成"类型表下标"，解开 std/csv。
+#              见 §7.18。剩下的 std/gen 需要泛型单态化，是另一个架构件）
+BASELINE = 68
 
 QLMC_SRC = "bootstrap/qlmc/qlmc.qma"
 QLMC_EXE = os.path.join("build", "_qlmc_cov.exe")

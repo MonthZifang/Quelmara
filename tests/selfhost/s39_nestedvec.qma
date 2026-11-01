@@ -1,0 +1,50 @@
+// s39_nestedvec.qma —— `vec[vec[T]]` 的差分夹具（v3.71，收 §7.18）
+//
+// 覆盖嵌套 vec 的全部语义面：构造 / push / get / len / 内层读写 /
+// **共享句柄**（内层 push 后外层可见）/ 三层嵌套。
+//
+// 为什么必须是差分用例：v3.71 把 vec 类型码从「TY_VEC + 元素码」改成
+// 「TY_VEC + 类型表下标」。老写法在元素本身是 vec 时会**进位**：
+//   vec[vec[str]] = 0x8000 + 0x8002 = 0x10002  <- 落进 TY_MAP 区间
+// 于是 `_lower_method` 把它当 map 处理 —— 不崩、不报错，只是走错分支。
+// 这种缺陷只有逐字节差分能抓。
+//
+// 语义参照（stage-0）：`2 2 y z 3 7 8 42`
+fn main() {
+    // ---- 1) vec[vec[str]]：两层都是句柄 ----
+    let rows = vec[vec[str]].new(4)
+    let a = vec[str].new(4)
+    a.push("x")
+    a.push("y")
+    let b = vec[str].new(4)
+    b.push("z")
+    rows.push(a)
+    rows.push(b)
+    print(len(rows))
+    let r0 = rows.get(0)
+    print(len(r0))
+    print(r0.get(1))
+    print(rows.get(1).get(0))
+
+    // ---- 2) 共享句柄：内层 push 后外层看到同一行 ----
+    a.push("w")
+    print(len(rows.get(0)))
+
+    // ---- 3) vec[vec[int]]：元素步长必须按句柄 8 字节 ----
+    let nums = vec[vec[int]].new(2)
+    let n1 = vec[int].new(4)
+    n1.push(7)
+    n1.push(8)
+    nums.push(n1)
+    print(nums.get(0).get(0))
+    print(nums.get(0).get(1))
+
+    // ---- 4) 三层嵌套 ----
+    let cube = vec[vec[vec[int]]].new(2)
+    let plane = vec[vec[int]].new(2)
+    let line = vec[int].new(2)
+    line.push(42)
+    plane.push(line)
+    cube.push(plane)
+    print(cube.get(0).get(0).get(0))
+}

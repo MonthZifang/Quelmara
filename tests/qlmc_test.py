@@ -112,6 +112,11 @@ CASES = [
     # **必须是差分用例**：`_fail` 有两种签名、`_Ck` 有两种布局，绑错是
     # 静默错编（字段偏移错位、str 当 int 传），不崩不报错只是结果错。
     ("s38_modscope", "tests/selfhost/s38_modscope.qma"),
+    # v3.71：**vec[vec[T]]**（收 §7.18）。类型码从"加法"改成"类型表下标"，
+    # 嵌套不再进位撞 TY_MAP。**必须是差分用例**：老写法下 vec[vec[str]]
+    # = 0x10002 落进 TY_MAP 区间，`_lower_method` 把它当 map 处理 ——
+    # 不崩、不报错、只是走错分支，只有逐字节差分能抓。
+    ("s39_nestedvec", "tests/selfhost/s39_nestedvec.qma"),
 ]
 
 npass = 0
