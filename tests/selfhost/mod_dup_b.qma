@@ -1,0 +1,25 @@
+// mod_dup_b.qma —— s38_modscope 的依赖模块 B（v3.62）
+//
+// 与 `mod_dup_a.qma` **故意声明同名但签名/布局完全不同**的私有声明。
+// 详见 `mod_dup_a.qma` 的表格。本模块的 `_Box` 是 3 字段（A 是 2 字段），
+// `_tag` 收 `str`（A 收 `int`）—— 任何一个被绑错都会立刻算出不同答案。
+module mod_dup_b
+
+struct _Box {
+    a: int
+    b: int
+    c: int
+}
+
+fn _tag(s: str) -> int {
+    return len(s)
+}
+
+pub fn b_tag(s: str) -> int {
+    return _tag(s)
+}
+
+pub fn b_box(a: int, b: int, c: int) -> int {
+    let x = _Box { a: a, b: b, c: c }
+    return x.a * 100 + x.b * 10 + x.c
+}

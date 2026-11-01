@@ -1,0 +1,36 @@
+// s38_modscope.qma —— **模块作用域**的差分夹具（v3.62，收 §7.43）
+//
+// 覆盖：两个 import 模块各自声明**同名但签名/布局不同**的私有函数与
+// struct，调用点必须各自绑到本模块那个。
+//
+// 为什么必须有这个夹具：qlmc 原来完全不做 `pub` 可见性检查，于是
+//   * `std/httpc` 与 `std/httpc_net` 各有一个 `struct _Ck`（3 vs 7 字段）；
+//   * `std/http` 与 `std/net/reactor` 各有一个 `fn _fail`
+//     （`int -> int` vs `str -> void`）。
+// 这两组的**签名/布局都不一样**，所以"允许重复、取第一个"会静默错编：
+// 字段偏移错位、返回值类型错 —— 不崩、不报错，只是结果错。
+// 这正是 `docs/08-handoff.md` §4.3 记的那类最难抓的缺陷。
+//
+// **必须是差分用例**：stage-0 有 per-module mangling（v1.99），qlmc 是
+// 本版才补上。两边输出逐字节相同才算数。
+//
+// 设计：两个模块的返回值刻意用不同数量级（A 是 ×1000，B 是字符串长度），
+// 绑错时答案会差得很明显，而不是"碰巧相同"。
+import mod_dup_a
+import mod_dup_b
+
+fn main() {
+    // 同名 `_tag`：A 收 int 返回 x*1000，B 收 str 返回 len
+    print(a_tag(3))
+    print(b_tag("abcd"))
+
+    // 同名 `_Box`：A 是 2 字段（v, w）→ v*10+w；B 是 3 字段（a, b, c）→ a*100+b*10+c
+    print(a_box(7, 2))
+    print(b_box(1, 2, 3))
+
+    // 交替调用，确认不是"后一次覆盖前一次"的假象
+    print(a_tag(1))
+    print(b_tag("xy"))
+    print(a_box(0, 5))
+    print(b_box(9, 9, 9))
+}

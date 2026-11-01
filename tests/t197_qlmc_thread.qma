@@ -39,9 +39,15 @@ fn main() {
     assert(h3 != 0, "thread_start 返回非 0 句柄（第 4 个）")
     print("handles=ok")
 
-    // 2. 等它们跑完（yield 而不是忙等，避免吃满一个核）
+    // 2. 等它们跑完：**轮询到条件成立**，不是固定次数 yield。
+    //
+    // 原来是 `while i < 400 { thread_yield() }` —— 那是"让出 400 次"，
+    // **不是同步**。线程调度慢一点就跑不满，于是 bits 可能是 7 / cnt 是 2。
+    // v3.62 实测 v3.61 基线本身就会偶发 7/2（与本版改动无关），
+    // 说明这是夹具的缺陷：**用固定次数的 yield 当同步，等于赌调度**。
+    // 上限 200000 次只是防死循环（真跑不完就该失败，而不是挂住）。
     let mut i = 0
-    while i < 400 {
+    while i < 200000 && mem_load64(static_word(41), 0) != 15 {
         thread_yield()
         i = i + 1
     }
@@ -60,7 +66,7 @@ fn main() {
         k = k + 1
     }
     let mut j = 0
-    while j < 400 {
+    while j < 200000 && mem_load64(static_word(42), 0) != 3 {
         thread_yield()
         j = j + 1
     }

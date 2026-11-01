@@ -290,7 +290,21 @@ const MAX_STRUCT = 64
 const EN_HDR = 1200          // stt[EN_HDR] = enum 个数，enum 区从 EN_HDR+1 起
 const EN_STRIDE = 26         // name, nvar, 8×(变体名, 载荷名, 载荷类型)
 const MAX_VARIANT = 8
-const TBL_SIZE = EN_HDR + 1 + 64 * EN_STRIDE
+// v3.62：`stt` 尾部追加三个**模块号区**（与 struct / enum / 函数序号平行）。
+//
+// 为什么不把模块号塞进 struct 表项或 `Fn` 字段：
+//   * `ST_STRIDE = 66` 已被字段表占满（32 字段 × 2 槽），没有空槽；
+//   * 给 `Fn` 加第 8 个字段实测**读出来是垃圾**（见下）；
+//   * 加 `P` 字段会传染全部 `P` 字面量与按值传参。
+//
+// 统一放 `stt` 尾部最省事：`P` 与 `FnCtx` 都已经持有 `stt`，
+// 零新增字段、零新增形参。parse 期写入（单线程），lowering 期只读
+// （并行安全）。
+const SMOD_BASE = EN_HDR + 1 + 64 * EN_STRIDE          // 与 struct 序号平行
+const EMOD_BASE = SMOD_BASE + 128                       // 与 enum 序号平行
+const FMOD_BASE = EMOD_BASE + 128                       // 与函数序号平行
+const NFN_MAX = 4096                                    // 函数序号上限（qlmc 自己约 400）
+const TBL_SIZE = FMOD_BASE + NFN_MAX
 
 struct Fn {
     name: int       // 名字 id
@@ -672,18 +686,77 @@ struct P {
     is_lib: int         // v3.37：1 = 编库（不要求 main、不发入口）
 }
 
+// ---------------------------------------------------------------------------
+// v3.62：**模块作用域**（per-module 同名私有声明隔离）
+// ---------------------------------------------------------------------------
+//
+// 背景：qlmc 原来完全不做 `pub` 可见性检查，于是不同模块里同名的私有声明
+// 被当成同一个 —— `std/httpc` 与 `std/httpc_net` 各有一个 `struct _Ck`
+// （3 字段 vs 7 字段），`std/http` 与 `std/net/reactor` 各有一个 `fn _fail`
+// （`int -> int` vs `str -> void`）。
+//
+// **注意这两个例子的签名/布局都不同** —— 所以"允许重复、取第一个"会
+// 静默错编（字段偏移错位、返回值类型错），必须真的按模块隔离。
+//
+// 为什么用 `static_word` 而不是加形参 / 加 struct 字段：
+//   * 加形参：`parse` 已有 12 个，`_type`/`_expr` 的调用链会一路传染，
+//     改动面巨大；
+//   * 加 `P` 字段：`P` 已 16 个字段，而且它是**按值传**的热点结构；
+//   * `static_word` 是进程级单值，正好匹配"当前正在 parse 哪个模块"
+//     这个天然全局的状态（parse 是单线程、不递归进模块）。
+//
+// 槽位分配：qlmc 自己的静态字区此前**完全没用过**（64 个槽全空），
+// 这里占前三个，其余留给将来。
+const SW_MOD_ID = 0       // 当前 parse 的模块号（0 = 主文件，1.. = 模块）
+const SW_SMOD_N = 1       // smod 表长度（与 struct 序号平行）
+const SW_EMOD_N = 2       // emod 表长度（与 enum 序号平行）
+
+/// 读当前模块号。
+fn _cur_mod() -> int {
+    return mem_load64(static_word(SW_MOD_ID), 0)
+}
+
+/// 写当前模块号。
+fn _set_mod(m: int) {
+    mem_store64(static_word(SW_MOD_ID), 0, m)
+}
+
 fn _st_base(si: int) -> int {
     return 1 + si * ST_STRIDE
 }
 
+/// 查 struct 序号；**按模块作用域解析**（v3.62）。
+///
+/// 规则：
+///   1. 先找"同模块 + 同名" —— 私有声明只在自己的模块里可见；
+///   2. 再找"同名且全局唯一" —— 跨模块引用没有重名的 struct 时走这条
+///      （`std/tls_net` 用 `std/tls_client` 的 `TlsClientResult` 就是这种）。
+///
+/// 第 2 趟**必须判"唯一"**：同名 struct 出现在两个模块里时不能猜，
+/// 返回 -1 让调用方报"未知类型"。猜错就是静默错编 —— `std/httpc` 与
+/// `std/httpc_net` 的 `_Ck` 分别是 3 字段和 7 字段，猜错字段偏移全错。
 fn _struct_index(p: P, nid: int) -> int {
     let n = p.stt.get(0)
+    let m = _cur_mod()
     let mut i = 0
     while i < n {
-        if p.stt.get(_st_base(i)) == nid {
+        if p.stt.get(_st_base(i)) == nid && p.stt.get(SMOD_BASE + i) == m {
             return i
         }
         i = i + 1
+    }
+    let mut hit = -1
+    let mut cnt = 0
+    i = 0
+    while i < n {
+        if p.stt.get(_st_base(i)) == nid {
+            hit = i
+            cnt = cnt + 1
+        }
+        i = i + 1
+    }
+    if cnt == 1 {
+        return hit
     }
     return -1
 }
@@ -708,14 +781,29 @@ fn _en_base(ei: int) -> int {
     return EN_HDR + 1 + ei * EN_STRIDE
 }
 
+/// 查 enum 序号；模块作用域规则与 `_struct_index` 完全相同（v3.62）。
 fn _enum_index(p: P, nid: int) -> int {
     let n = p.stt.get(EN_HDR)
+    let m = _cur_mod()
     let mut i = 0
     while i < n {
-        if p.stt.get(_en_base(i)) == nid {
+        if p.stt.get(_en_base(i)) == nid && p.stt.get(EMOD_BASE + i) == m {
             return i
         }
         i = i + 1
+    }
+    let mut hit = -1
+    let mut cnt = 0
+    i = 0
+    while i < n {
+        if p.stt.get(_en_base(i)) == nid {
+            hit = i
+            cnt = cnt + 1
+        }
+        i = i + 1
+    }
+    if cnt == 1 {
+        return hit
     }
     return -1
 }
@@ -1515,6 +1603,7 @@ fn _primary(p: P, pos: vec[int]) -> int {
         let lname = _name_id(p, "__lambda_" + len(p.fns).to_str())
         let body = _block(p, pos)
         let fi = len(p.fns)
+        p.stt.set(FMOD_BASE + len(p.fns), _cur_mod())
         p.fns.push(Fn { name: lname, np: np, pbase: pbase,
                         ret_t: rt, body: body, nbody: 0, nlocals: -1 })
         return _postfix(p, pos, _node(p, E_CLOSURE, fi, -1, -1))
@@ -1904,9 +1993,13 @@ fn _fn(p: P, pos: vec[int], ffi_idx: int) {
         _adv(pos)
         rt = _type(p, pos)
     }
+    // v3.62：**只在同一模块内**判重复（跨模块同名私有函数合法）。
+    // `std/http` 的 `_fail(int)->int` 与 `std/net/reactor` 的 `_fail(str)`
+    // 签名不同 —— 这里放行，由 `_fn_index` 按模块解析到各自那个。
+    let mcur = _cur_mod()
     let mut fi = 0
     while fi < len(p.fns) {
-        if p.fns.get(fi).name == nid {
+        if p.fns.get(fi).name == nid && p.stt.get(FMOD_BASE + fi) == mcur {
             _fail(p, pos, "函数重复定义 " + nm.s)
         }
         fi = fi + 1
@@ -1917,6 +2010,8 @@ fn _fn(p: P, pos: vec[int], ffi_idx: int) {
         body = _block(p, pos)
         nbody = 0
     }
+    // v3.62：登记该函数所属模块（与函数序号平行），供 `_fn_index` 过滤
+    p.stt.set(FMOD_BASE + len(p.fns), _cur_mod())
     p.fns.push(Fn { name: nid, np: np, pbase: pbase, ret_t: rt,
                     body: body, nbody: 0, nlocals: ffi_idx })
 }
@@ -2177,7 +2272,21 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
             }
             _adv(pos)
             let nid = _name_id(p, nm.s)
-            if _struct_index(p, nid) >= 0 {
+            // v3.62：**同模块**才判重复。不能直接用 `_struct_index` ——
+            // 它的第 2 趟会"跨模块唯一命中"，那样 `std/httpc_net` 声明
+            // 自己的 `_Ck` 时会命中 `std/httpc` 那个（3 字段 vs 7 字段）。
+            let mcur = _cur_mod()
+            let mut sdup = 0
+            let mut di = 0
+            while di < p.stt.get(0) {
+                if p.stt.get(_st_base(di)) == nid && p.stt.get(SMOD_BASE + di) == mcur {
+                    sdup = 1
+                    di = p.stt.get(0)
+                } else {
+                    di = di + 1
+                }
+            }
+            if sdup == 1 {
                 _fail(p, pos, "struct 重复声明 " + nm.s)
             }
             let nst = p.stt.get(0)
@@ -2189,6 +2298,8 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
             }
             p.stt.set(0, nst + 1)
             p.stt.set(_st_base(nst), nid)
+            // v3.62：登记模块号（与 struct 序号平行）
+            p.stt.set(SMOD_BASE + nst, _cur_mod())
             _eat_p(p, pos, P_LBRACE)
             let mut nf = 0
             while !_is_p(p, pos, P_RBRACE) {
@@ -2230,7 +2341,19 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
             }
             _adv(pos)
             let nid = _name_id(p, nm.s)
-            if _enum_index(p, nid) >= 0 {
+            // v3.62：同 struct —— 只在**本模块内**判重复。
+            let mcur = _cur_mod()
+            let mut edup = 0
+            let mut ei0 = 0
+            while ei0 < p.stt.get(EN_HDR) {
+                if p.stt.get(_en_base(ei0)) == nid && p.stt.get(EMOD_BASE + ei0) == mcur {
+                    edup = 1
+                    ei0 = p.stt.get(EN_HDR)
+                } else {
+                    ei0 = ei0 + 1
+                }
+            }
+            if edup == 1 {
                 _fail(p, pos, "enum 重复声明 " + nm.s)
             }
             if p.stt.get(EN_HDR) >= 64 {
@@ -2240,6 +2363,8 @@ fn parse(toks: vec[Tok], nodes: vec[Node], names: vec[str], strs: vec[str],
             p.stt.set(EN_HDR, ei + 1)
             let base = _en_base(ei)
             p.stt.set(base, nid)
+            // v3.62：登记模块号（与 enum 序号平行）
+            p.stt.set(EMOD_BASE + ei, _cur_mod())
             _eat_p(p, pos, P_LBRACE)
             let mut nv = 0
             while !_is_p(p, pos, P_RBRACE) {
@@ -3180,6 +3305,10 @@ struct FnCtx {
     cp: vec[int]        // 复用缓冲：调用前缀和
     rend: vec[int]      // 复用缓冲：寄存器占用到的指令
     send: vec[int]      // 复用缓冲：临时槽占用到的指令
+    // v3.62：**当前正在降级的函数所属模块号**。`_fn_index` 按它做作用域
+    // 解析 —— 同名函数（`_fail` 有两种签名）必须绑到本模块那个。
+    // 放在 `cells` 里而不是新字段：`cells` 是普通 vec，且 `_lower_fn`
+    // 已经在写 `C_CFI`（当前函数下标），加一格最省事，也不必再穿参数。
 }
 
 const C_ST = 0
@@ -3204,6 +3333,11 @@ const C_FNUM_NF = 10
 const C_FNUM_FLAG0 = 11
 const C_FNUM_NC = 50
 const C_FNUM_CACHE0 = 51
+// v3.62：**当前函数所属模块号**（`_fn_index` 的作用域判据）。
+// 放在 200 这个高位：`C_FNUM_CACHE0 = 51` 起是 f64 字面量缓存，
+// 最多 32 条 × 2 格 = 64 格 → 占到 115，200 留足余量。
+// `_cell_set` 会自动扩容，所以不占 `_new_fc` 的初始 10 格。
+const C_FMOD = 200
 // v2.55：f64 的 XMM 变量寄存器用了几个（0..N_XMMVAR）
 const C_NXF = 120
 // v2.55：每个 XMM 变量寄存器的保存槽（-1 = 没用到）。由 `_alloc` 在**临时池之前**
@@ -3810,13 +3944,38 @@ fn _var_id(fc: FnCtx, nid: int) -> int {
     return -1
 }
 
+/// 查函数序号；**按模块作用域解析**（v3.62）。
+///
+/// 规则与 `_struct_index` 一致：
+///   1. 先找"同模块 + 同名"；
+///   2. 再找"同名且全局唯一"（跨模块调用没有重名的函数时走这条）。
+///
+/// 为什么必须做：`std/http` 的 `_fail(code: int) -> int` 与
+/// `std/net/reactor` 的 `_fail(what: str)` **签名完全不同**。取第一个
+/// 会静默把 `str` 当 `int` 传、把 `void` 当 `int` 用 —— 不崩、不报错，
+/// 只是结果错。这正是本项目最贵的那类缺陷（见 `08-handoff.md` §4.3）。
 fn _fn_index(fc: FnCtx, nid: int) -> int {
+    let fmod = fc.cells.get(C_FMOD)
+    let n = len(fc.fns)
     let mut i = 0
-    while i < len(fc.fns) {
-        if fc.fns.get(i).name == nid {
+    while i < n {
+        if fc.fns.get(i).name == nid && fc.stt.get(FMOD_BASE + i) == fmod {
             return i
         }
         i = i + 1
+    }
+    let mut hit = -1
+    let mut cnt = 0
+    i = 0
+    while i < n {
+        if fc.fns.get(i).name == nid {
+            hit = i
+            cnt = cnt + 1
+        }
+        i = i + 1
+    }
+    if cnt == 1 {
+        return hit
     }
     return -1
 }
@@ -5597,6 +5756,8 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
 fn _lower_fn(fc: FnCtx, fi: int) {
     let f = fc.fns.get(fi)
     fc.cells.set(C_CFI, fi)
+    // v3.62：记下本函数的模块号，供 `_fn_index` 做作用域解析
+    _cell_set(fc, C_FMOD, fc.stt.get(FMOD_BASE + fi))
     if f.body < 0 {
         return                  // @ffi 声明：没有函数体，只占一个 IAT 槽
     }
@@ -15380,13 +15541,26 @@ fn build_rdata(ctx: Ctx, rdata_rva: int, iat: vec[int]) {
 // 只有标签的解析不同（顺序段用 ctx.labs，函数段用该函数自己的标签表）。
 // ---------------------------------------------------------------------------
 
+/// 查函数序号（发射期用）。**只在"同名且唯一"时返回**（v3.62）。
+///
+/// 这里没有模块上下文（`Ctx` 是发射期结构，不带 AST 的模块信息），
+/// 所以退回"唯一"判据：同名函数出现两次就返回 -1。发射期本来只按
+/// 已经解析好的函数下标工作，走到这里说明前一步（`_fn_index`）已经
+/// 选定了具体那个函数；保持"不猜"比猜错安全。
 fn _fn_index_ctx(ctx: Ctx, nid: int) -> int {
+    let n = len(ctx.fns)
+    let mut hit = -1
+    let mut cnt = 0
     let mut i = 0
-    while i < len(ctx.fns) {
+    while i < n {
         if ctx.fns.get(i).name == nid {
-            return i
+            hit = i
+            cnt = cnt + 1
         }
         i = i + 1
+    }
+    if cnt == 1 {
+        return hit
     }
     return -1
 }
@@ -16182,13 +16356,20 @@ fn main() {
     while mi < len(ord) {
         let mtk2 = vec[Tok].new(256)
         lex(msrc.get(ord.get(mi)), mtk2)
+        // v3.62：模块号 = 该模块在 `loaded` 里的下标 + 1（0 留给主文件）。
+        // **必须用 `ord.get(mi)` 而不是 `mi`** —— 拓扑排序后 `mi` 是
+        // 输出位置，`ord.get(mi)` 才是模块下标；两者不同。
+        _set_mod(ord.get(mi) + 1)
         parse(mtk2, nodes, names, strs, fns, cname, cval, stt, imports, fdll,
               fsym, cisk, cstr)
         mi = mi + 1
     }
     // 主文件最后 parse：它能看见全部模块的 struct/enum/函数
+    _set_mod(0)
     parse(toks, nodes, names, strs, fns, cname, cval, stt, imports, fdll, fsym,
           cisk, cstr)
+    // 复位：lowering 期 `_cur_mod` 不该再被 parse 语义使用
+    _set_mod(0)
 
     if cmd == "dump" {
         print("tokens   : " + len(toks).to_str())

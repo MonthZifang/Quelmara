@@ -1,0 +1,31 @@
+// mod_dup_a.qma —— s38_modscope 的依赖模块 A（v3.62）
+//
+// 与 `mod_dup_b.qma` **故意声明同名但签名完全不同**的私有函数和 struct：
+//
+//   | 名字      | 本模块（A）              | 兄弟模块（B）           |
+//   |-----------|--------------------------|--------------------------|
+//   | `_tag`    | `(x: int) -> int`        | `(s: str) -> int`        |
+//   | `_Box`    | 2 字段（v, w）           | 3 字段（a, b, c）        |
+//
+// 这两个差异都是**静默错编**的形状：函数签名错 → `str` 当 `int` 传；
+// struct 布局错 → 字段偏移全错、读到别的字段。所以 v3.62 的模块作用域
+// 必须有夹具钉住，光"能编过"说明不了任何事。
+module mod_dup_a
+
+struct _Box {
+    v: int
+    w: int
+}
+
+fn _tag(x: int) -> int {
+    return x * 1000
+}
+
+pub fn a_tag(x: int) -> int {
+    return _tag(x)
+}
+
+pub fn a_box(v: int, w: int) -> int {
+    let b = _Box { v: v, w: w }
+    return b.v * 10 + b.w
+}
