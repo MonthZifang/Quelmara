@@ -2181,6 +2181,85 @@ fn _st_nf(fc: FnCtx, si: int) -> int {
 > 的 scale 编错"，但定位它需要 `addrdump` 这类新工具（约 1 次重建 + 反汇编），
 > 不是本轮剩余时间能收敛的。**下次从"给 qlmc 加 addrdump"开始。**
 
+#### 第七次排查（同日）：加 `addrdump`，精确锁定到 `_prescan_imports` + 常量折叠
+
+按上一轮的计划做了两件事，都成功了。
+
+**1. 给 qlmc 加了 `addrdump` 命令**（永久保留，诊断价值高）
+
+```
+qlmc build <src> --addrdump -o x.exe
+→ ADDR <相对 .text 偏移> <函数名>
+```
+
+PE 里没有函数边界（qlmc 不发 pdata），这个命令补上了"VA → 函数名"的映射。
+
+**2. 用它对上差异 VA，定位到函数**
+
+```
+目标 VA 0x114c5 → 相对 .text 偏移 0x104c5
+→ 落在 _prescan_imports（起始偏移 0x1001c，下一个函数 0x10dcd）
+```
+
+**3. 找到精确到 IR 的差异**
+
+用两个 stage-1 分别 `irdump _prescan_imports`：
+
+| IR# | `S1_FULL`（stage-0 编的） | `s1_real365`（可靠） | 含义 |
+|---|---|---|---|
+| 11 | `BINI a=7 b=43 imm=3` | `BINI a=7 b=43 imm=6` | **×8 vs ×64** |
+| 68 | `BINI a=46 b=43 imm=3` | `BINI a=46 b=5 imm=56` | **完全不同** |
+
+`b=43` 是 `OP_SHR`，`imm` 是预先算好的移位量。
+
+**4. 追到常量折叠**
+
+IR# 11 对应源码 `_prescan_imports` 里的 `nodes: vec[Node].new(1)` ——
+`Node` 有 8 个字段，元素步长 `8*8 = 64`，所以 `k = log2(64) = 6`。
+
+这段折叠在 `_opt` 的强度削减里：
+
+```quelmara
+// ---- 乘 2 的幂 → 左移 ----
+if op == OP_MUL && cv > 0 && cv <= 4611686018427387904 {
+    if (cv & (cv - 1)) == 0 {
+        let mut k = 0
+        let mut t = cv
+        while t > 1 { t = t >> 1; k = k + 1 }
+        ir.set(i, Ir { op: OP_BINI, ..., imm: k })
+```
+
+`S1_FULL` 把 `cv=64` 算成了 `k=3`（即当成 8）。**探针单独测这个循环时
+两个编译器都对**（`log2i(64)=6`），所以不是循环本身编错，而是
+**`cv` 在 `_prescan_imports` 的上下文里被算成了 8 而不是 64**。
+
+**5. 确认不是 IR 差异**
+
+`_opt` 本身的 IR 在两个 stage-1 下完全相同：
+
+| 函数 | `S1_FULL` | `s1_real365` |
+|---|---|---|
+| `_opt` | ir=1457 vregs=918 frame=984B | ir=1457 vregs=918 frame=984B |
+| `_emit_fn` | ir=503 vregs=295 frame=456B | 同 |
+| `_alloc` | ir=1254 vregs=775 frame=944B | 同 |
+
+**所以是 `S1_FULL` 的机器码在运行期算错了值** —— stage-0 编它时出的错。
+
+**下次的入口（非常具体）**：
+
+1. `_prescan_imports` 里 IR# 11 的 `a=7` 是 `CONST 1`（`vec.new` 的容量），
+   `b=43`（`OP_SHR`）。这条 `BINI` 是**强度削减把 `1 * 64` 折成 `1 << 6`**；
+2. 但 `S1_FULL` 折成了 `1 << 3`，说明它算出的 `cv` 是 8 不是 64；
+3. `cv` 来自 `cok/cval` 常量表 —— 追 `_opt` 里 `cval` 怎么被写成 8 的；
+4. 大概率是 `_ty_size` 的返回值在**这个特定调用点**被错算成 8
+   （`_ty_size` 返回 64，但被折成 8 —— 与 `_st_nf` 返回值相关）。
+
+**本轮产出**：`addrdump` 命令（永久有用）+ 把缺陷从"某条访存指令 scale 错"
+精确到"`_prescan_imports` 里 `vec[Node].new(1)` 的步长折叠成 8 而非 64"。
+
+> **`addrdump` 是本轮最实用的产出**：以后任何"从 VA 反查函数"的排查
+> 都能用它，不必再手写 PE 解析 + 猜函数边界。
+
 ### 7.44 待修：qlmc **完全没有泛型**（`std/gen` 的唯一阻塞）
 
 **现象**：
