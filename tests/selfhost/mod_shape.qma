@@ -1,0 +1,22 @@
+// mod_shape.qma —— s37_crossmod 的依赖模块（v3.61）
+//
+// 这个模块的**唯一目的**是提供一个 struct，让导入方能在自己的函数签名里
+// 用到它。v3.61 之前 qlmc 会报"未知类型 Shape"，因为 parse 顺序是
+// "主文件 → 模块"，主文件 parse 时这个 struct 还没进表（§7.40）。
+//
+// 同时提供一个**依赖本模块 struct 的工厂函数**：拓扑排序必须保证
+// 本模块先于导入方 parse，否则连这个函数都编不出来。
+module mod_shape
+
+pub struct Shape {
+    w: int
+    h: int
+}
+
+pub fn shape_new(w: int, h: int) -> Shape {
+    return Shape { w: w, h: h }
+}
+
+pub fn shape_area(s: Shape) -> int {
+    return s.w * s.h
+}

@@ -68,7 +68,10 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 # v3.58: 60  （SIMD 基础四件 —— 基础设施，没解开模块）
 # v3.59: 63  （AES-NI / PCLMULQDQ / SSSE3 / SSE 移位 14 个内建 ——
 #              解开 std/aes、std/tls13，以及此前卡在同一处的那一个）
-BASELINE = 63
+# v3.61: 64  （import 图拓扑排序 —— 被依赖的模块先 parse，解开 std/tls_net。
+#              std/httpc_net 也前进了，从"未知类型 TlsClientResult"变成
+#              "struct 重复声明 _Ck"（那是另一个问题，见 §7.40））
+BASELINE = 64
 
 QLMC_SRC = "bootstrap/qlmc/qlmc.qma"
 QLMC_EXE = os.path.join("build", "_qlmc_cov.exe")

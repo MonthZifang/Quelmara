@@ -1,0 +1,65 @@
+// s37_crossmod.qma —— 跨模块 struct 的差分夹具（v3.61，收 §7.40）
+//
+// 覆盖：**导入方在函数签名里直接用被导入模块声明的 struct**。
+//
+// 为什么这个夹具必须存在：v3.61 之前 qlmc 的 parse 顺序是
+// "主文件 → 模块（BFS 序）"，而 `_type` 遇到 struct 名会去 `_struct_index`
+// 查表，查不到就报"未知类型"。于是 `std/httpc_net` / `std/tls_net`
+// 引用 `std/tls_client` 的 `TlsClientResult` 时必然失败 —— 那不是
+// 类型系统缺能力，纯粹是**声明可见性被 parse 顺序绑住**。
+//
+// 修法是 import 图的拓扑排序（被依赖的先 parse）。这个夹具钉住：
+//   1. 主文件能用导入模块的 struct 作**形参类型**（_area / _grow）；
+//   2. 主文件能**写该 struct 的字段**（_grow 里 `t.w = t.w + by`）——
+//      这条最容易漏：字段偏移错位是静默的，不崩不报错、算出来是错的；
+//   3. 主文件的函数与模块的函数拿同一个 struct 时**字段布局必须一致**
+//      （`_area(b)` 与 `shape_area(b)` 必须同值）。
+//
+// **不做**：跨模块 struct 字面量 `Shape { w: .., h: .. }`。那是 stage-0 的
+// 既有边界（`02-language.md` §1："限定 struct 字面量不做，用 pub 工厂函数"），
+// 本夹具不引入新边界 —— 用 `shape_new` 造。
+//
+// **必须是差分用例**：字段错位是静默的，光"能编过"说明不了任何事。
+// stage-0 与 qlmc 逐字节比才有效。
+import mod_shape
+
+// 用导入模块的 struct 作形参类型，并读它的字段
+fn _area(s: Shape) -> int {
+    return s.w * s.h
+}
+
+// 写回字段：验证字段偏移在**跨模块**情况下也对
+fn _grow(s: Shape, by: int) -> Shape {
+    let mut t = s
+    t.w = t.w + by
+    t.h = t.h + by
+    return t
+}
+
+fn main() {
+    // 用模块工厂造（stage-0 不支持跨模块 struct 字面量）
+    let a = shape_new(3, 4)
+    print(_area(a))
+    // 字段顺序必须对：w=3, h=4。若 w/h 偏移搞反，这里会露馅
+    print(a.w)
+    print(a.h)
+
+    let b = _grow(a, 2)
+    print(_area(b))
+    print(b.w)
+    print(b.h)
+
+    // 模块自己的函数也拿同一个 struct —— 两侧字段布局必须一致，
+    // 否则 `shape_area(b)` 与 `_area(b)` 会给出不同答案
+    print(shape_area(b))
+
+    // 反向跨模块：模块造、本地读
+    let c = shape_new(5, 6)
+    print(_area(c))
+    print(c.w + c.h)
+
+    // 值语义：改副本不影响原件（跨模块 struct 也要按值拷贝）
+    let d = _grow(c, 1)
+    print(_area(c))
+    print(_area(d))
+}

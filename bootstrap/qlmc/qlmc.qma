@@ -15721,6 +15721,128 @@ fn _usage() {
     eprint("用法: qlmc build <src.qma> [-o out.exe] [-j N] | qlmc dump <src.qma> | qlmc irdump <src.qma> [函数名] | qlmc version")
 }
 
+/// **拓扑排序 import 图**（v3.61，收 §7.40）：返回"被依赖的先出现"的模块下标序。
+///
+/// 为什么需要：`parse` 是**声明表按顺序增长**的 —— `_type` 遇到 `Foo` 会去
+/// `_struct_index` 查，查不到就报"未知类型"。原来的顺序是"主文件 → 模块
+/// （按 `_prescan_imports` 的 BFS 顺序）"，于是 `std/httpc_net`（先）引用
+/// `std/tls_client`（后）的 `TlsClientResult` 时必然失败。这不是类型系统
+/// 缺能力，是**声明可见性被 parse 顺序绑住**。
+///
+/// 算法：Kahn。`msrc[i]` 是模块 i 的源码文本，`mname[i]` 是它的 import 名
+/// （`msrc` 与 `mname` **平行** —— 装载循环对两者同时 push）。入度 = 该模块
+/// import 的、**且在本批装载集合里**的模块个数。
+///
+/// 成环时：把剩下的按原序追加（不丢模块）。import 成环本身是错误，但由
+/// stage-0 报；qlmc 这里只保证"不因为排序而崩或漏 parse"。
+fn _topo_order(msrc: vec[str], mname: vec[str]) -> vec[int] {
+    let n = len(msrc)
+    let out = vec[int].new(n + 1)
+    if n < 2 {
+        let mut i0 = 0
+        while i0 < n {
+            out.push(i0)
+            i0 = i0 + 1
+        }
+        return out
+    }
+    // 依赖矩阵按扁平存：dep[i*MAXD + k] = 模块 i 的第 k 个依赖下标（-1 = 空）。
+    // 不用"边表 + 反向边表"那套：n 很小（一个程序的 import 闭包通常 < 32），
+    // 而两趟计数排序多出来的 40 行里**方向搞反一次就静默错序**（第一版就栽了）。
+    // 扁平矩阵 + 每轮 O(n²) 扫是最不容易写错的形式。
+    let MAXD = 32
+    let dep = vec[int].new(n * MAXD + 8)
+    let mut z = 0
+    while z < n * MAXD + 8 {
+        dep.push(0 - 1)
+        z = z + 1
+    }
+    let ndep = vec[int].new(n + 1)
+    let mut i = 0
+    while i < n {
+        ndep.push(0)
+        // 每个模块各自扫自己的 import（`_prescan_imports` 是幂等的）
+        let tk = vec[Tok].new(256)
+        lex(msrc.get(i), tk)
+        let myimp = vec[str].new(4)
+        _prescan_imports(tk, myimp)
+        let mut k = 0
+        while k < len(myimp) {
+            let mi2 = _mod_index_of(myimp.get(k), mname)
+            if mi2 >= 0 && mi2 != i {
+                if ndep.get(i) < MAXD {
+                    dep.set(i * MAXD + ndep.get(i), mi2)
+                    ndep.set(i, ndep.get(i) + 1)
+                }
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    // Kahn：每轮找一个"依赖全部已出"的模块。n 小，O(n²) 完全够。
+    let done = vec[int].new(n + 1)
+    let mut q = 0
+    while q < n {
+        done.push(0)
+        q = q + 1
+    }
+    let mut emitted = 0
+    let mut guard = 0
+    while emitted < n && guard < n * n + 8 {
+        guard = guard + 1
+        let mut pick = -1
+        let mut c = 0
+        while c < n && pick < 0 {
+            if done.get(c) == 0 {
+                let mut okdep = 1
+                let mut k2 = 0
+                while k2 < ndep.get(c) {
+                    if done.get(dep.get(c * MAXD + k2)) == 0 {
+                        okdep = 0
+                        k2 = ndep.get(c)
+                    } else {
+                        k2 = k2 + 1
+                    }
+                }
+                if okdep == 1 {
+                    pick = c
+                }
+            }
+            c = c + 1
+        }
+        if pick < 0 {
+            break
+        }
+        done.set(pick, 1)
+        out.push(pick)
+        emitted = emitted + 1
+    }
+    // 成环：剩下的按原序补上（不丢模块）
+    let mut r = 0
+    while r < n {
+        if done.get(r) == 0 {
+            out.push(r)
+            done.set(r, 1)
+        }
+        r = r + 1
+    }
+    return out
+}
+
+
+fn _mod_index_of(name: str, mname: vec[str]) -> int {
+    let n = len(mname)
+    let mut i = 0
+    while i < n {
+        if mname.get(i) == name {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+
 /// 线程数：函数太少时并行只付线程创建成本。`want` = 0 表示自动。
 ///
 /// 这里**不读 Quelmara.toml**（qlmc 没有配置解析器，`net_config` 是 stage-0 的
@@ -16038,16 +16160,35 @@ fn main() {
     _prescan_consts(toks, nodes, names, strs, cname, cval, cisk, cstr)
 
     // 第 3 步：统一 parse（此时 const 表已完整）
-    parse(toks, nodes, names, strs, fns, cname, cval, stt, imports, fdll, fsym,
-          cisk, cstr)
+    //
+    // v3.61：**被 import 的模块先 parse，主文件最后**（收 §7.40）。
+    //
+    // 原来是「主文件先、模块后」，于是主文件（或先 parse 的模块）里引用
+    // 后 parse 模块声明的 struct 时，`_type` 在 `_struct_index` 里找不到它，
+    // 直接报"未知类型"。这正是 `std/httpc_net` / `std/tls_net` 引用
+    // `std/tls_client` 的 `TlsClientResult` 卡住的原因 —— 不是类型系统缺
+    // 能力，纯粹是**声明可见性被 parse 顺序绑住了**。
+    //
+    // 为什么不是"预扫描 struct"：`_type` 解析字段类型时会递归调用
+    // `_type`（`vec[Foo]` 要先知道 `Foo`），所以 struct 之间也有依赖。
+    // 用拓扑序（被依赖的先 parse）一次性解决整条链，不需要第二趟。
+    //
+    // 排序失败（成环）时退回原来的顺序 —— import 成环本来就是错误，
+    // 但那由 stage-0 负责报，qlmc 这里不抢它的活，保持"不因此崩"。
+    // `loaded` 与 `msrc` 平行 push（同一个 `if seen == 0` 分支），
+    // 所以 `loaded` 就是模块名表。
+    let ord = _topo_order(msrc, loaded)
     let mut mi = 0
-    while mi < len(msrc) {
+    while mi < len(ord) {
         let mtk2 = vec[Tok].new(256)
-        lex(msrc.get(mi), mtk2)
+        lex(msrc.get(ord.get(mi)), mtk2)
         parse(mtk2, nodes, names, strs, fns, cname, cval, stt, imports, fdll,
               fsym, cisk, cstr)
         mi = mi + 1
     }
+    // 主文件最后 parse：它能看见全部模块的 struct/enum/函数
+    parse(toks, nodes, names, strs, fns, cname, cval, stt, imports, fdll, fsym,
+          cisk, cstr)
 
     if cmd == "dump" {
         print("tokens   : " + len(toks).to_str())

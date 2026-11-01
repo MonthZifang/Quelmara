@@ -38,21 +38,26 @@ python tools/dev/qlmc_coverage.py       # 覆盖率有没有退化
 
 | 模块 | 缺口 | 难度 | 备注 |
 |---|---|---|---|
-| `std/httpc_net` | 未知类型 `TlsClientResult` | 中 | 跨模块 struct，+2 模块的最短路径 |
-| `std/tls_net` | 同上 | 中 | 同上 |
-| `std/http` | 函数重复定义 `_fail` | 中 | 需要重构 |
-| `std/logfile` | 函数重复定义 `_get` | 中 | 需要重构 |
+| `std/httpc_net` | `struct 重复声明 _Ck` | 中 | **与下三行同一个根因**：qlmc 缺 per-module mangling |
+| `std/http` | 函数重复定义 `_fail` | 中 | 同上 |
+| `std/logfile` | 函数重复定义 `_get` | 中 | 同上 |
 | `std/csv` | `vec[vec[T]]` 类型码撞区间 | **高** | 架构性，见 `07-gaps.md` §7.18 |
 | `std/gen` | 泛型 `[T: Ord]` | **高** | 需要单态化 |
 | `std/park_linux` | `syscall` 内建 | 低 | **Linux 专用**，Windows 上意义有限 |
 
-**建议顺序**：`TlsClientResult` 跨模块 struct（一次解 2 个模块）→
-`std/http` / `std/logfile` 的重复定义 → 最后三个大件各留给专门版本。
+**建议顺序**：**per-module mangling**（一次解 3 个模块）→
+最后三个大件各留给专门版本。
 
-`TlsClientResult` 的参考实现是 v3.52 的跨模块 const 三段式解析
-（`_prescan_imports` / `_prescan_consts`）。前提已经具备：
-`std/tls_client` 本身能编（v3.59 解开 SIMD 依赖之后），所以这不再是死结，
-而是纯粹的"跨模块 struct 类型可见性"问题。
+`std/httpc_net` / `std/http` / `std/logfile` 三条**不是三个问题，是一个**：
+qlmc 不做 `pub` 可见性检查，于是不同模块里的同名私有声明（`_Ck` 结构体、
+`_fail` / `_get` 函数）被当成同一个名字。stage-0 按 `pub` 做 per-module
+mangling（v1.99），qlmc 没有。修法见 `07-gaps.md` §7.43。
+
+**注意性能约束**：`_struct_index` / `_fn_index` 都在热路径上（每次类型
+解析、每次调用都查），加一维不能退化成 O(n²) 全表扫。
+
+> 跨模块 **struct 类型**本身已经能用了（v3.61 的 import 图拓扑排序），
+> `std/tls_net` 就是靠它解开的。剩下的只是**同名**问题。
 
 ## 4. 必读：这个项目反复踩的六个坑
 

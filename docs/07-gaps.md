@@ -1643,6 +1643,74 @@ fn main() {
 **注意方向**：这里 **qlmc 是对的、stage-0 是错的**。修 stage-0 而不是
 把 qlmc 改成一样错 —— 否则等于把一个语言缺陷固化进自举链。
 
+### 7.42 已修（v3.61）：qlmc 不支持**跨模块 struct 类型**
+
+**现象**：`std/tls_net`、`std/httpc_net` 引用 `std/tls_client` 声明的
+`TlsClientResult` 时报：
+
+```
+qlmc: line 46: 未知类型 TlsClientResult
+```
+
+**根因：不是类型系统缺能力，是 parse 顺序把声明可见性绑住了。**
+
+`parse` 是"声明表按顺序增长"的：`_type` 遇到 `Foo` 会去 `_struct_index`
+查，查不到就 `_fail("未知类型")`。而原来的顺序是：
+
+```
+主文件 parse  →  模块 parse（`_prescan_imports` 的 BFS 序）
+```
+
+于是**主文件（或先 parse 的模块）看不见后 parse 模块的 struct**。
+`std/httpc_net` 先于 `std/tls_client` parse，它的 `_recv_once(fd, tls,
+tr: TlsClientResult, ...)` 必然失败。
+
+对比 v3.52 修的跨模块 **const**（§7.39）：那个是"值当场折叠成节点，
+节点定型后补表也没用"；这个是"类型当场查表，查不到直接报错"。
+**同一个病的两种形态**，都源于"解析是单趟、且顺序由装载顺序决定"。
+
+**修法：import 图拓扑排序**（`_topo_order` / `_mod_index_of`）。
+被依赖的模块先 parse，主文件最后 parse。Kahn 算法，n 很小
+（一个程序的 import 闭包通常 < 32），用**扁平依赖矩阵 + 每轮 O(n²) 扫**
+实现 —— 不用"边表 + 反向边表"那套：第一版就是栽在方向搞反上
+（把入度加在**被依赖方**，于是叶子最后出，顺序退化成原序，症状是
+`std/tls_net` 仍然排在 `std/tls_client` 之前）。**方向搞反不会崩，
+只会静默错序** —— 这是本轮最贵的 40 分钟。
+
+**为什么不是"预扫描 struct"**：`_type` 解析字段类型时会**递归**调用
+`_type`（`vec[Foo]` 要先知道 `Foo`），所以 struct 之间也有依赖。
+拓扑序一次性解决整条链，不需要第二趟。
+
+**成环时**：把剩下的按原序追加（不丢模块）。import 成环本身是错误，
+但那由 stage-0 报；qlmc 这里只保证"不因为排序而崩或漏 parse"。
+
+**验证**：`tests/selfhost/s37_crossmod.qma`（差分夹具，11 行输出逐字节
+一致）。覆盖三件事：跨模块 struct 作形参类型、跨模块写字段（**字段偏移
+错位是静默的**，这条最容易漏）、模块函数与本地函数拿同一 struct 时
+字段布局一致。
+
+**结果**：`std/tls_net` 解开；`std/httpc_net` 从"未知类型"前进到
+"struct 重复声明 `_Ck`"（那是下一个问题，见 §7.43）。
+
+### 7.43 待修：qlmc 不允许跨模块**同名私有 struct**
+
+**现象**：`std/httpc_net` 报 `qlmc: line 193: struct 重复声明 _Ck`。
+
+**根因**：`std/httpc` 与 `std/httpc_net` 各声明了一个 `struct _Ck`
+（前者是"对整段缓冲区做纯函数解析"的形态，后者是 v3.12 增量状态机）。
+stage-0 按 `pub` 可见性做 per-module mangling（v1.99），`_Ck` 是私有的，
+两个模块各自可见；qlmc **不做可见性检查**（`pub` 当无操作），
+于是把它们当成同一个名字。
+
+**修法方向**：qlmc 的 struct/enum 表按 `(name_id)` 索引，需要扩成
+`(name_id, module_id)` 或者给私有声明加模块前缀。注意
+`_struct_index` 在热路径上（每次类型解析都调），加一维不能变成
+O(n²) 全表扫。
+
+**影响**：`std/http` / `std/logfile` 的"函数重复定义"是**同一个根因**
+（qlmc 没有 per-module mangling）。一次修好能解 3 个模块。
+
+
 ## 8. 推进顺序（2026-10-22 调整）平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
 当前顺序：
 
