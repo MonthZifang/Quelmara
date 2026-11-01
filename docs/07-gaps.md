@@ -1988,6 +1988,85 @@ lowering 期跑，所以要用 `build` 而非 `dump`）。
 **为什么本轮没做这一步**：加调试 → 重建（10 分钟）→ 看输出，
 而本轮已经重建了 6 次。下次直接从这一步开始，能省掉全部反汇编工作。
 
+#### 第四次排查（同日）：**上一轮的假设被推翻了**，根因是 `_st_nf`
+
+按上一轮写的方法加了调试打印，结果**推翻了"`_ty_size` 返回 16"这个假设**：
+
+```
+ADDRIDX et0=2    size=8      (vec[str])
+ADDRIDX et0=0    size=8      (vec[int])
+ADDRIDX et0=4097 size=64     (vec[Node])   ← 正确
+ADDRIDX et0=4096 size=32     (vec[Tok])    ← 正确
+
+VELEM stride 分布：8×1493, 40×66, 64×40, 56×14, 32×11, 24×3
+METHOD stride 分布：8×1453+, 40×66, 64×38, 56×15, 32×11, 24×4
+```
+
+**所有 stride 都正确，没有一个是 16。** 所以 `shl r9,4` 根本不是 stride 计算。
+
+**继续反汇编，找到真正的来源**：
+
+```
+VA 0x1149b:  mov qword [rbp-0x230], 1     ← 变量 = 1
+...
+VA 0x114c2:  mov r9, [rbp-0x230]          ← 取 1
+             shl r9, 6                     ← 1 << 6 = 64    (bad: << 4 = 16)
+```
+
+那个 `1` 是 **struct 序号 `si=1`（Node）**，不是 stride。所以这是
+**`_st_nf(fc, 1) * 8`** 的计算：
+
+```quelmara
+fn _st_nf(fc: FnCtx, si: int) -> int {
+    return fc.stt.get(1 + si * ST_STRIDE + 1)   // si=1 -> stt[68]
+}
+```
+
+`Node` 有 **8 个字段**，所以 `stt[68]` 应该是 8，`8 * 8 = 64`（`shl 6`）。
+bad 版本算出 `2 * 8 = 16`（`shl 4`）—— **`stt[68]` 读到了 2**。
+
+**所以根因不是类型表，而是 struct 表在编译 qlmc 自身时被写坏了。**
+
+**为什么本轮的类型表方案会触发它**：类型表加在 `stt` 尾部
+（`VTYPES_BASE = 7217`），而 `TBL_SIZE` 从 3121+4096=7217 变成 7217+2048。
+**`_vtypes_add` 在 parse 期写 `stt[VTYPES_BASE ...]`** ——
+如果这个写入越界或索引算错，就会**踩到 struct 表**。
+
+第一轮我修的 `TBL_SIZE` 少 `+1` 正是这类问题（越界一格），
+但修完仍坏，说明**还有第二处越界**。
+
+**下次的直接验证**（一行，比反汇编快得多）：
+
+```quelmara
+// 在 _st_nf 里加
+fn _st_nf(fc: FnCtx, si: int) -> int {
+    let v = fc.stt.get(1 + si * ST_STRIDE + 1)
+    if si == 1 { eprint("STNF si=1 nf=" + v.to_str()) }   // 应为 8
+    return v
+}
+```
+
+编 qlmc 自己，看 `nf` 是不是 8。**如果是 2，就确认 struct 表被踩了**，
+然后用同样的方法逐个检查 `stt` 的各个区边界。
+
+**最可能的具体位置**（按嫌疑排序）：
+
+1. `VTYPES_BASE + 1 + n` 的写入 —— `n` 达到 `VTYPES_MAX-1` 时下标是
+   `VTYPES_BASE + VTYPES_MAX`，若 `TBL_SIZE` 算错就写穿；
+2. `SMOD_BASE` / `EMOD_BASE` / `FMOD_BASE` 三个区与 struct 区的边界
+   —— `struct 区 [1, 1200)`、`enum 区 [1201, 2865)`、`smod [2865,2993)`、
+   `emod [2993,3121)`、`fmod [3121,7217)`、`vtypes [7217,9265)`；
+   **`smod` 只有 128 槽，而 struct 上限是 18** —— 够用；
+   **`emod` 128 槽，enum 上限 64** —— 够用；
+   但 **`fmod` 区 4096 槽对应函数序号**，而 qlmc 有 ~400 个函数 —— 够用；
+3. `_vtypes_add` 的去重循环：`while i < n { if stt[VTYPES_BASE+1+i] == elem }`
+   —— 若 `n` 被写坏成一个大数，这个循环会读到 struct 区并可能误判。
+
+> **本轮最重要的收获：把根因从"类型表方案"转移到了"struct 表被踩"**。
+> 上一轮的 `_ty_size` 假设是错的，本轮用实测数据推翻了它。
+> 这意味着**类型表方案本身可能没问题**，只是实现时踩了 `stt` 的边界。
+> 下次从 `_st_nf` 的调试打印开始，能快速确认。
+
 ### 7.44 待修：qlmc **完全没有泛型**（`std/gen` 的唯一阻塞）
 
 **现象**：
