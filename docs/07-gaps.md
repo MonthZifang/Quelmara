@@ -2260,6 +2260,69 @@ if op == OP_MUL && cv > 0 && cv <= 4611686018427387904 {
 > **`addrdump` 是本轮最实用的产出**：以后任何"从 VA 反查函数"的排查
 > 都能用它，不必再手写 PE 解析 + 猜函数边界。
 
+#### 第八次排查（同日）：把缺陷压缩到**两条 IR 的 `cv` 值**
+
+有了 `addrdump` 之后，这次直接在**一次编译内**定位到具体 IR。
+
+**`_prescan_imports` 的完整 IR 对比**（555 条 IR，只有 **2 条**不同）：
+
+| IR# | `S1_FULL`（坏） | `s1_real365`（好） | 含义 |
+|---|---|---|---|
+| 11 | `BINI a=7 b=43(SHL) imm=3` | `BINI a=7 b=43(SHL) imm=6` | `1<<3`=8 vs `1<<6`=64 |
+| 68 | `BINI a=46 b=43(SHL) imm=3` | `BINI a=46 b=5(MUL) imm=56` | `46*8` vs `46*56` |
+
+**IR#68 是决定性的**：
+
+* good：`OP_MUL` by **56** —— `Fn` 是 7 字段，步长 `7*8 = 56`；
+* bad：`OP_SHL` by **3** —— 折成了 `×8`。
+
+而强度削减的条件是：
+
+```quelmara
+if op == OP_MUL && cv > 0 && (cv & (cv - 1)) == 0   // 只有 2 的幂才折
+```
+
+**56 不是 2 的幂，根本不该折。** 所以 `S1_FULL` 里 `cv` 的实际值是 **8**
+（8 是 2 的幂，折成 `<< 3` 正确）—— 也就是说 **`_ty_size` 在
+`S1_FULL` 里返回了 8，而不是 56/64**。
+
+**已排除的解释**（都实测过）：
+
+| 假设 | 结论 |
+|---|---|
+| `_st_nf` 的 IR 不同 | ❌ 两边完全相同（`imm=66` 的 ST_STRIDE） |
+| `ST_STRIDE` 常量错 | ❌ 两边都是 66 |
+| `stt` 里 struct 数不同 | ❌ 两边 `dump` 都报 8 个 struct |
+| `_ty_size` 本身有 bug | ❌ 探针（`vec[7字段]`/`vec[8字段]`/`vec[P]`）两个编译器全对 |
+| 运行期越界读 `stt` | ❌ stride 是**编译期折叠**的常量，不读运行期 `stt` |
+
+**矛盾点（下次的入口）**：
+
+* 单独探针里 `_ty_size` 正确 → 返回 56/64；
+* 但在 `_prescan_imports` 这个函数里就返回 8。
+
+说明触发条件是**这个函数的上下文**。最可疑的是 `_prescan_imports` 里
+`P` 字面量的 `stt: vec[int].new(1)` —— **只有 1 个元素的 stt**。
+
+**下次的第一件事**：在 `_ty_size` 里加一行调试
+
+```quelmara
+fn _ty_size(fc: FnCtx, ty: int) -> int {
+    ...
+    if ty >= TY_STRUCT && ty < TY_ENUM {
+        let nf = _st_nf(fc, ty - TY_STRUCT)
+        eprint("TYSIZE ty=" + ty.to_str() + " si=" + (ty-TY_STRUCT).to_str() +
+               " nf=" + nf.to_str() + " len(stt)=" + len(fc.stt).to_str())
+        return nf * 8
+    }
+```
+
+编 qlmc 自己，看 `vec[Fn]` 那次调用的 `nf` 和 `len(stt)` 是多少。
+**如果 `len(stt)==1`，就确认是 `_prescan_imports` 的空 stt 导致 `_st_nf`
+读到 1（`1*8=8`）—— 那根因就是"预扫描用的 P 没有 struct 表"。**
+
+> 这个调试只需一次重建（约 11 分钟），比前八轮的任何猜测都直接。
+
 ### 7.44 待修：qlmc **完全没有泛型**（`std/gen` 的唯一阻塞）
 
 **现象**：
