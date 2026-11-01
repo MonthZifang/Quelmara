@@ -3807,6 +3807,17 @@ fn _ent_ptype(fc: FnCtx, ei: int, vi: int) -> int {
     return fc.stt.get(_ent_base(ei) + 2 + vi * 3 + 2)
 }
 
+/// 类型占几个字节（元素步长 / 槽数）。
+///
+/// **区间判定必须两头都卡**（`>= lo && < hi`）。类型码是"标签 + 载荷"
+/// 塞进一个 int，区间不连续，只卡下界迟早出事 —— 这里就出过：
+/// 原来 `if ty >= TY_ENUM { return 16 }` 没有上界，而
+/// `TY_VEC(0x8000) > TY_ENUM(0x2000)`，于是 **vec/map 句柄被算成 16 字节**
+/// （正确是 8）。
+///
+/// 这个 bug 潜伏很久没暴露：调用 `_ty_size` 的地方一直传**元素**类型
+/// （标量/struct/enum），从没传过 vec 类型。一旦有人传 vec 类型
+/// （比如将来支持 `vec[vec[T]]`），元素步长立刻翻倍 —— 静默错编。
 fn _ty_size(fc: FnCtx, ty: int) -> int {
     if ty >= TY_ARRAY {
         return ((ty - TY_ARRAY) >> 8) * 8
@@ -3814,10 +3825,15 @@ fn _ty_size(fc: FnCtx, ty: int) -> int {
     if ty >= TY_SLICE && ty < TY_ARRAY {
         return 16                       // (ptr, len)
     }
-    if ty >= TY_ENUM {
+    // vec / map 都是**句柄**（8 字节）。必须在 TY_ENUM 之前判 ——
+    // TY_VEC = 0x8000 > TY_ENUM = 0x2000，否则会被下面那条吃掉。
+    if ty >= TY_VEC && ty < TY_SLICE {
+        return 8
+    }
+    if ty >= TY_ENUM && ty < TY_VEC {
         return 16
     }
-    if ty >= TY_STRUCT {
+    if ty >= TY_STRUCT && ty < TY_ENUM {
         return _st_nf(fc, ty - TY_STRUCT) * 8
     }
     return 8
