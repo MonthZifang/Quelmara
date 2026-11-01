@@ -146,11 +146,37 @@ import（`std/park` / `std/park_linux`），要么用 `static_word` + 函数指�
 
 提交时用 `git -c core.safecrlf=false commit`，否则 LF/CRLF 警告刷屏。
 
-推送：`git push` 走 SSH 需要仓库有对应 key。若 SSH 被拒，改用 HTTPS
-（`git push https://github.com/<owner>/<repo>.git master:master`，需要凭据助手），
-或用 `build/push_via_api.py <parent_sha> HEAD` 走 GitHub Git Data API
-（需要 `gh auth token` 可用）。API 建的 commit SHA 与本地不同（committer
-由服务端填）**是正常的**，只要 tree 一致就对 —— 用 `build/_verify_push.py` 验。
+**推送有三条路，按可用性选**：
+
+| 方式 | 命令 | 前置 |
+|---|---|---|
+| SSH | `git push` | 仓库里配了对应私钥 |
+| HTTPS + 凭据助手 | `git push https://github.com/<owner>/<repo>.git master:master` | `gh auth setup-git` 或 credential helper 已配 |
+| Git Data API | `build/push_via_api.py <parent_sha> HEAD` | `gh auth token` 可用 |
+
+API 建的 commit SHA 与本地不同（committer 由服务端填）**是正常的**，
+只要 tree 一致就对 —— 用 `build/_verify_push.py` 验证。
+
+**诊断推送为什么失败（别被退出码骗了）**：
+
+```bash
+git ls-remote https://github.com/<owner>/<repo>.git master    # 拉：无需认证
+curl -s -o /dev/null -w "%{http_code}\n" \
+  "https://github.com/<owner>/<repo>.git/info/refs?service=git-receive-pack"
+```
+
+第二条返回 **401 就是缺凭据**（拉能成功、推不行）。另外：
+
+- `git push` 挂住不返回、`timeout` 给出 **124** —— 是在等凭据输入，
+  **不是网络问题**。`GIT_TERMINAL_PROMPT=0` 也拦不住 credential helper。
+- `git push ... | tail -5; echo EXIT=$?` 里的 `$?` 是 **`tail` 的**退出码，
+  永远是 0。**必须把 git 单独重定向到文件再取 `$?`**，否则会误以为推送成功。
+- 推送后**一定用 API 或 `ls-remote` 核实远端 SHA**，不要相信本地退出码。
+
+> 2026-11-01：本机环境（Linux 容器）**没有任何 GitHub 凭据**
+> （`gh` 未安装、`~/.ssh` 无 GitHub key、无 `GITHUB_TOKEN`），
+> 所以 v3.60 / v3.61 两个提交**只落在本地**。接手时先 `git log` 对一下
+> 远端 SHA，缺的用上面任一条路补推。
 
 ### 5.4 已知的偶发失败
 
