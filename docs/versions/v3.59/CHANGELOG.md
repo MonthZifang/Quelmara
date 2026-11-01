@@ -5,7 +5,7 @@
 - 影响面：`bootstrap/qlmc/qlmc.qma`（14 个内建 + 2 个 IR 节点 +
   2 个编码函数 + 1 个运行时例程 + `_lower_simd_extra`）、
   `tests/t203_qlmc_aes.qma`、`tests/qlmc_test.py`、
-  `tools/dev/qlmc_coverage.py`（`BASELINE` 60 → 63）、`HANDOFF.md`（新增）
+  `tools/dev/qlmc_coverage.py`（`BASELINE` 60 → 63）、交接文档（v3.60 移入 `docs/08-handoff.md`）
 - 覆盖率：**60 → 63**（`std/aes` + `std/tls13` + 另一个卡在同一处的模块）
 - 回归：PASS=370 FAIL=0 SKIP=0；qlmc 差分 82 → **84**
 
@@ -116,15 +116,16 @@ OP_XMMSH = 85   立即数移位
 **一个自我纠错**：`psrlw` 的注释我第一版写反了（以为 `psrlw0=0`），
 实测是 `psrlw0=255` —— **实现是对的、注释错了**。已改正并在注释里标明。
 
-## 顺带：新增 `HANDOFF.md`
+## 顺带：新增交接文档
 
-交接文档，写清了：
+原为仓库根 `HANDOFF.md`（v3.60 已移入 `docs/08-handoff.md`，见 v3.60 CHANGELOG）。
+写清了：
 - 当前状态（已提交 60/70、工作区 63/70）
 - 立刻要做的收尾步骤
 - 剩余 7 个模块的缺口与难度
-- **五个反复出现的坑**（帧槽 / 编号撞车 / 静默错编 / `_ir_emit` 的 a/b / 诊断粒度）
+- **反复出现的坑**（帧槽 / 编号撞车 / 静默错编 / `_ir_emit` 的 a/b / 诊断粒度）
 - 工作流约定与推送方式
-- 当前基线数字
+- 当前基线数字（**v3.60 起改为引用 `06-status.md`**）
 
 ## 自举
 

@@ -15,6 +15,7 @@
 | 用 CLI、改配置、装依赖、跑测试 | [`05-toolchain.md`](05-toolchain.md) |
 | 知道现在到哪了、跑分多少、支持哪些平台 | [`06-status.md`](06-status.md) |
 | 知道什么还不能做、下一步做什么 | [`07-gaps.md`](07-gaps.md) |
+| 刚接手：现在在哪、下一步、有哪些坑 | [`08-handoff.md`](08-handoff.md) |
 | 看某个版本改了什么 | [`versions/`](versions/) |
 | 看 2.x 线（99 次更新）的整体复盘 | [`versions/v3.00/REPORT.md`](versions/v3.00/REPORT.md) |
 
@@ -30,6 +31,7 @@
 | `05-toolchain.md` | CLI、配置、src 布局、qpm、测试与门禁、CI | 语言语义、编译器算法 |
 | `06-status.md` | **所有实测数字的唯一出处**：回归/自举/性能/平台 | 能力缺口的论证 |
 | `07-gaps.md` | 缺口清单与优先级路线 | 实测数字（引用 06） |
+| `08-handoff.md` | 交接：现状、下一步顺序、反复踩的坑、工作流 | 实测数字（引用 06） |
 | `versions/vX.Y.Z/CHANGELOG.md` | 该版本的任务、改动、验证 | 当前状态口径 |
 
 ## 三条硬规则
