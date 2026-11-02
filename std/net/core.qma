@@ -283,15 +283,34 @@ pub fn conn_shift(p: int, from: int) -> int {
 
 // 发送一段缓冲区（零拷贝：指针 + 长度直接进 send）
 /// 发送一段缓冲区（指针 + 长度直接进 send，零拷贝）。返回实际写入字节数。
+///
+/// **必须循环到写满**（v3.76）。`tcp_send_n` 是 `send()` 的直接包装，而
+/// `send()` 在内核发送缓冲区快满时**可以只写一部分**（返回值 < n），
+/// 剩下的要么调用方自己重发、要么直接丢掉。原来这里只发一次就把返回值
+/// 交给调用方，没人检查 —— 于是帧会被**截断**发出去。
+///
+/// 症状：`std/ws` 的 `on_open` 推送偶发收不到（客户端 `recv_frame` 等
+/// 一个永远凑不齐的帧，5 秒后超时）。实测在 WS E2E 里约 2% 的连接会中。
+/// 这类缺陷极难定位 —— 不崩、不报错，只是"有时候没消息"。
+///
+/// 重发时指针要按已写字节数前移。`w <= 0` 表示对端已断或真出错，
+/// 此时不能再循环（会死等），直接返回已写字节数。
 pub fn conn_send(st: int, fd: int, ptr: int, n: int) -> int {
     if n <= 0 {
         return 0
     }
-    let w = tcp_send_n(fd, ptr, n)
-    if w > 0 {
-        mem_store64(st, ST_BYTES_OUT, mem_load64(st, ST_BYTES_OUT) + w)
+    let mut total = 0
+    while total < n {
+        let w = tcp_send_n(fd, ptr + total, n - total)
+        if w <= 0 {
+            break                   // 对端关闭或真出错：交给调用方判断
+        }
+        total = total + w
     }
-    return w
+    if total > 0 {
+        mem_store64(st, ST_BYTES_OUT, mem_load64(st, ST_BYTES_OUT) + total)
+    }
+    return total
 }
 
 /// 发送一个 str（`len(s)` 字节）。返回实际写入字节数。

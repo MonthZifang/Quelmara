@@ -556,9 +556,23 @@ fn _ws_frame_raw(fd: int, op: int, payload: int, n: int) -> int {
     if n > 0 {
         mem_copy(buf + hl, payload, n)
     }
-    let w = tcp_send_n(fd, buf, hl + n)
-    mem_free(buf, hl + n)
-    return w
+    // **必须循环到写满**（v3.76）。`tcp_send_n` 是 `send()` 的直接包装，
+    // 内核发送缓冲区快满时**可以只写一部分**。只发一次就 `mem_free` 会把
+    // 帧截断 —— 对端收到半截帧，`recv_frame` 永远等不齐，表现为超时。
+    //
+    // 症状：WS E2E 的 `on_open` 推送偶发收不到（约 2% 的连接）。不崩、
+    // 不报错，只是"有时候没消息"，是最难定位的那类。
+    let total = hl + n
+    let mut sent = 0
+    while sent < total {
+        let w = tcp_send_n(fd, buf + sent, total - sent)
+        if w <= 0 {
+            break                   // 对端关闭或真出错：交给调用方判断
+        }
+        sent = sent + w
+    }
+    mem_free(buf, total)
+    return sent
 }
 
 /// 发一条文本帧（opcode 0x1）。返回实际发出的字节数。

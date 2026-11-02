@@ -133,12 +133,34 @@ def make_frame(opcode, payload, mask=True, fin=True):
     return hdr + key + masked
 
 
+# 握手响应之后可能**已经**读进来的字节（v3.76）。
+#
+# `handshake()` 用 `read_until(b"\r\n\r\n")` 收响应，而 `recv(4096)` 一次
+# 可能把 `101 响应 + on_open 推送帧` 一起读进来 —— 那多出来的一段在
+# `rest` 里。以前 `rest` 被赋值后**直接丢弃**，于是 `recv_frame` 从 socket
+# 重新读，而帧头已经被吃掉，它等的是一个永远凑不齐的帧，5 秒后超时。
+#
+# 这正是 WS E2E 偶发失败的真正根因（不是服务端的问题）：101 与 on_open
+# 是否落在同一个 TCP 段，取决于内核怎么分段，所以约 2% 的连接会中。
+_LEFTOVER = b""
+
+
 def recv_frame(sock, timeout=5.0):
     """读一帧，返回 (opcode, payload)。服务端发的不掩码。"""
+    global _LEFTOVER
     sock.settimeout(timeout)
 
     def rd(n):
-        buf = b""
+        global _LEFTOVER
+        # 先把握手时多读的字节用掉
+        if _LEFTOVER:
+            take = _LEFTOVER[:n]
+            _LEFTOVER = _LEFTOVER[n:]
+            if len(take) == n:
+                return take
+            buf = take
+        else:
+            buf = b""
         while len(buf) < n:
             c = sock.recv(n - len(buf))
             if not c:
@@ -201,6 +223,10 @@ def main():
         # ---- [1] 握手 ----
         sock = socket.create_connection(("127.0.0.1", PORT), timeout=5)
         status, hdrs, rest, key = handshake(sock)
+        # **必须接住 rest**：101 响应和 on_open 推送可能在同一 TCP 段里
+        # 一起被读进来，那段多出来的字节就是帧的开头。
+        global _LEFTOVER
+        _LEFTOVER = rest
         ok("握手返回 101") if "101" in status else bad(f"握手状态行：{status}")
 
         expect = base64.b64encode(

@@ -747,8 +747,15 @@ def test_ws_e2e():
         line = [ln for ln in r.stdout.splitlines() if ln.startswith("WS_E2E:")]
         ok(f"WebSocket E2E：{line[-1] if line else 'ok'}")
     else:
-        bad(f"WebSocket E2E 失败 rc={r.returncode} "
-            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+        # **必须挑出真正的 [FAIL] 行**。以前直接截 stdout[-400:]，而 e2e 的
+        # 输出里最后 400 字节往往只装得下后面几条 `[PASS]` —— 于是日志里
+        # 显示的是"某条 PASS 的文本"，看的人会以为失败的是那一条。
+        # v3.75 实测：连续三次 CI 都显示"同掩码 key 都能正确解出明文"，
+        # 而那句是 [5] 的**通过**文案，真正失败的用例在更前面被截掉了。
+        fails = [ln.strip() for ln in r.stdout.splitlines()
+                 if "[FAIL]" in ln]
+        detail = " | ".join(fails[:4]) if fails else r.stdout[-400:]
+        bad(f"WebSocket E2E 失败 rc={r.returncode} {detail}{r.stderr[-300:]}")
 
 
 def test_sse_e2e():
@@ -771,8 +778,10 @@ def test_sse_e2e():
         line = [ln for ln in r.stdout.splitlines() if ln.startswith("SSE_E2E:")]
         ok(f"SSE E2E：{line[-1] if line else 'ok'}")
     else:
-        bad(f"SSE E2E 失败 rc={r.returncode} "
-            f"{r.stdout[-400:]}{r.stderr[-300:]}")
+        # 同 test_ws_e2e：挑真正的 [FAIL] 行，别只截末尾 400 字节
+        fails = [ln.strip() for ln in r.stdout.splitlines() if "[FAIL]" in ln]
+        detail = " | ".join(fails[:4]) if fails else r.stdout[-400:]
+        bad(f"SSE E2E 失败 rc={r.returncode} {detail}{r.stderr[-300:]}")
 
 
 def test_log_streams():
