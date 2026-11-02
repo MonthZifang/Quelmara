@@ -1,0 +1,137 @@
+// s47_flagloop.qma —— 标志位循环的语义（v3.86）
+//
+// ⚠ **当前 qlmc 有 3 行不一致（07-gaps §7.47）**，所以这个夹具
+// **故意不登记**进 `tests/qlmc_test.py` 的 CASES 列表 —— 登记会让 CI
+// 一直红，失去"有变化才报警"的信号价值。等 §7.47 修好后再加上。
+//
+// 复现方式：
+//     python tools/stage0/qlm_cli.py build tests/selfhost/s47_flagloop.qma \
+//         --target win -o /tmp/a.exe && wine /tmp/a.exe     # 参照
+//     rm -rf .qlmcache && wine build/qlmc.exe build \
+//         tests/selfhost/s47_flagloop.qma -o /tmp/b.exe && wine /tmp/b.exe
+//     diff <(wine /tmp/a.exe) <(wine /tmp/b.exe)            # 3 行不同
+//
+// ## 为什么需要它
+//
+// v3.84 试过把 `while go == 1 && ...` 里的 `go = 0` 直接改写成 `break`
+// （"标志位循环 → break"），IR 层看起来完全正确（守卫里的 `cmp go, 1`
+// 确实被消掉了），**但运行时校验和错了、程序提前退出**。
+//
+// 根因：`go` 是 pin 变量，我只验证了"它只被 CONST 定义"，**没验证
+// "循环外没有其他读者"**。`go` 在循环结束后可能还被读到（甚至被再次
+// 赋值），把它当纯循环标志是错的。
+//
+// 所以这个夹具存在的意义是**先把语义钉住**：以后谁再试这个优化，
+// 一跑差分就知道有没有破坏行为。
+//
+// ## 覆盖的形态
+//
+//   [1] `while go == 1 && ...`，`go = 0` 在 else 分支（jws 的形状）
+//   [2] `go` 在循环**结束后**仍被读取
+//   [3] `go` 在循环**外**被重新赋值，再进第二个循环
+//   [4] 两个标志位循环串联
+//   [5] `go` 作为返回值的一部分
+//   [6] 标志位在循环内被重新置 1（不能被当成 break）
+//
+// 语义参照（stage-0）：见下方 print 顺序
+fn scan_ws(s: str, p0: int) -> int {
+    let n = len(s)
+    let mut p = p0
+    let mut go = 1
+    while go == 1 && p < n {
+        let c = s[p]
+        if c == 32 || c == 9 {
+            p = p + 1
+        } else {
+            go = 0
+        }
+    }
+    return p
+}
+
+fn scan_and_report(s: str) -> int {
+    let n = len(s)
+    let mut p = 0
+    let mut go = 1
+    while go == 1 && p < n {
+        if s[p] == 88 {          // 'X'
+            go = 0
+        } else {
+            p = p + 1
+        }
+    }
+    // [2] `go` 在循环结束后**仍被读取**
+    let r = p * 10
+    if go == 0 {
+        return r + 1
+    }
+    return r + 2
+}
+
+fn two_loops(s: str) -> int {
+    let n = len(s)
+    let mut p = 0
+    let mut go = 1
+    while go == 1 && p < n {
+        if s[p] == 65 {          // 'A'
+            go = 0
+        } else {
+            p = p + 1
+        }
+    }
+    let a = p
+    // [3] `go` 在循环外**被重新赋值**，再进第二个循环
+    go = 1
+    while go == 1 && p < n {
+        if s[p] == 66 {          // 'B'
+            go = 0
+        } else {
+            p = p + 1
+        }
+    }
+    // [4] 两个循环串联后，go 仍是 0
+    return a * 100 + p * 10 + go
+}
+
+fn rearm(s: str) -> int {
+    let n = len(s)
+    let mut p = 0
+    let mut go = 1
+    let mut hits = 0
+    while go == 1 && p < n {
+        if s[p] == 67 {          // 'C'
+            hits = hits + 1
+            go = 1               // [6] 重新置 1：不能当成 break
+        } else {
+            go = 0
+        }
+        p = p + 1
+    }
+    return hits * 1000 + p
+}
+
+fn main() {
+    // [1] 基本形态
+    print(scan_ws("   abc", 0))
+    print(scan_ws("abc", 0))
+    print(scan_ws("     ", 0))
+
+    // [2] 循环后仍读 go
+    print(scan_and_report("abcXdef"))
+    print(scan_and_report("abcdef"))
+
+    // [3][4] 两个循环串联
+    print(two_loops("xyABz"))
+    print(two_loops("AB"))
+    print(two_loops("zzz"))
+
+    // [5] go 参与返回值
+    let s = "  q"
+    let pos = scan_ws(s, 0)
+    print(pos * 100 + len(s))
+
+    // [6] 循环内重新置 1
+    print(rearm("CCCx"))
+    print(rearm("xCCC"))
+    print(rearm("CCCCC"))
+}
