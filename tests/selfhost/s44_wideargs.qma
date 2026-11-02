@@ -1,0 +1,69 @@
+// s44_wideargs.qma —— 第 7 个及以后实参走栈：顺序必须"先存栈、后摆寄存器"
+// （v3.80，收 §7.8）
+//
+// ## 为什么需要它
+//
+// stage-0 的 `_emit_call_args` 原来**先**把前 6 个实参搬进 ARG_REGS，**再**
+// 把第 7 个起写进调用方溢出区。而栈实参的值可能正住在某个 ARG_REGS 里
+// （临时值 / 变量都可能）—— 先搬寄存器就把它们覆盖了，栈实参读到别人的值。
+//
+// 症状极隐蔽：7 个参数、第 7 个是 str、**被调用两次**才崩。单次调用时
+// 编译器恰好没把那个 str 放进 ARG_REGS，所以看起来"一次正常"。
+//
+// 修法与 qlmc 里 `_emit_call_args` 的注释是同一条教训（v2.33 实测
+// `ReadFile(h, buf, sz, got, 0)` 的第 5 个实参被写成了 sz）。
+//
+// ## 覆盖的形态
+//
+//   [1] 8 个 int（全栈：第 7、8 个）
+//   [2] 7 个参数、第 7 个是 str，**调用三次**（原缺陷的触发条件）
+//   [3] 5 个参数、中间夹 str（寄存器路径不受影响，钉住别退化）
+//   [4] 栈实参是**运算结果**（临时值，最容易被 ARG_REGS 覆盖）
+//   [5] 栈实参是**函数返回值**
+//   [6] 10 个参数（3 个栈实参）
+//
+// 语义参照（stage-0）：见下方 print 顺序
+fn f8(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int) -> int {
+    return a + b + c + d + e + f + g + h
+}
+
+fn fstr(a: int, b: int, c: int, d: int, e: int, f: int, s: str) -> str {
+    return s + a.to_str()
+}
+
+fn f5(a: int, b: str, c: int, d: str, e: int) -> str {
+    return b + d + (a + c + e).to_str()
+}
+
+fn f10(a: int, b: int, c: int, d: int, e: int, f: int,
+       g: int, h: int, i: int, j: int) -> int {
+    return a * 1 + b * 2 + c * 3 + d * 4 + e * 5
+         + f * 6 + g * 7 + h * 8 + i * 9 + j * 10
+}
+
+fn ret_str() -> str {
+    return "R"
+}
+
+fn main() {
+    // [1] 8 个 int
+    print(f8(1, 2, 3, 4, 5, 6, 7, 8))
+
+    // [2] 第 7 个是 str，调三次（原缺陷触发条件）
+    print(fstr(1, 2, 3, 4, 5, 6, "a"))
+    print(fstr(7, 8, 9, 10, 11, 12, "b"))
+    print(fstr(13, 14, 15, 16, 17, 18, "c"))
+
+    // [3] 5 个参数、中间夹 str
+    print(f5(1, "x", 2, "y", 3))
+
+    // [4] 栈实参是运算结果（临时值）
+    let n = 5
+    print(fstr(n - 4, n - 3, n - 2, n - 1, n, n + 1, "t"))
+
+    // [5] 栈实参是函数返回值
+    print(fstr(1, 1, 1, 1, 1, 1, ret_str()))
+
+    // [6] 10 个参数（3 个栈实参）
+    print(f10(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+}

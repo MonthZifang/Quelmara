@@ -148,6 +148,11 @@ CASES = [
     # **必须是差分用例**：同一表达式形态的两种求值路径（折叠 / 运行期）
     # 必须给出同一种输出，只有逐字节比对能抓。
     ("s43_boolprint", "tests/selfhost/s43_boolprint.qma"),
+    # v3.80：**第 7 个及以后实参走栈，顺序必须"先存栈、后摆寄存器"**（收 §7.8）。
+    # stage-0 原来先搬前 6 个到 ARG_REGS 再存栈实参，而栈实参可能正住在
+    # ARG_REGS 里 —— 被覆盖后读到别人的值。症状是"7 参 + 第 7 个是 str +
+    # 调两次"直接 page fault。**必须是差分用例**：单次调用看不出来。
+    ("s44_wideargs", "tests/selfhost/s44_wideargs.qma"),
 ]
 
 npass = 0

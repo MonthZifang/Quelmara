@@ -11958,8 +11958,19 @@ class Codegen:
         [rbp+16+8j]=第 7+j 参（'args' 指令的 ("stk", j) 源与之对应）。"""
         reg = args[:6]
         stk = args[6:]
-        moves = [(self.src_move(a), ("r", ARG_REGS[i])) for i, a in enumerate(reg)]
-        self.parallel_move(moves)
+        # **先写栈实参，再摆寄存器实参**（v3.80，收 §7.8）。
+        #
+        # 顺序不能反：栈实参的值可能正住在某个 ARG_REGS 里（临时值/变量都可能），
+        # 而 `parallel_move` 会把这些寄存器覆盖掉 —— 先搬寄存器再存栈，栈实参
+        # 读到的是**别人的值**。
+        #
+        # 症状极隐蔽：7 个参数、第 7 个是 str、**被调用两次**才崩/静默。
+        # 单次调用时编译器恰好没把 str 放进 ARG_REGS，所以看起来"一次正常"。
+        # 实测（v3.80）：`print(s7(1,2,3,4,5,6,"x"))` 正常，
+        # 第二行 `print(s7(7,8,9,10,11,12,"y"))` 直接 page fault（读 0xfffffffffffffffa）。
+        #
+        # 这与 qlmc 里 `_emit_call_args` 的注释是**同一条教训**（v2.33 实测
+        # `ReadFile(h, buf, sz, got, 0)` 的第 5 个实参被写成了 sz）。
         if stk:
             self.enc.alu_ri("sub", RSP, 8 * len(stk))
             for j, a in enumerate(stk):
@@ -11969,6 +11980,8 @@ class Codegen:
                 else:
                     self.mat(SCRATCH, a)
                 self.enc.mov_mr(RSP, 4, 0, 8 * j, SCRATCH)
+        moves = [(self.src_move(a), ("r", ARG_REGS[i])) for i, a in enumerate(reg)]
+        self.parallel_move(moves)
         return len(stk)
 
     def _stkarg_base(self):
