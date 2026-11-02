@@ -3628,6 +3628,7 @@ const OP_NOT = 9       // dst = (a == 0) ? 1 : 0（int 口径）
 const OP_NZ = 10       // dst = (a != 0) ? 1 : 0
 const OP_CMP = 11      // dst = a <cc> b ? 1 : 0；imm = cc（setcc 机器码）
 const DBG_MODIND = 0
+const DBG_FLAGLOOP = 0
 const OP_LAB = 12      // imm = 标签
 const OP_JMP = 13      // goto imm
 const OP_JZ = 14       // if a == 0 goto imm
@@ -7380,6 +7381,239 @@ fn _opt_mod_ind(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     }
 }
 
+/// 标志位循环 → 直接跳出（v3.88，收 §7.31 的 `b9_json` 差距）。
+///
+/// ## 为什么需要它
+///
+/// `b9_json` 的 `jws` / `jstr` 都是这个形状：
+///
+/// ```quelmara
+/// let mut go = 1
+/// while go == 1 && p < n {
+///     if <空白> { p = p + 1 } else { go = 0 }
+/// }
+/// ```
+///
+/// stage-0 把 `go = 0` 直接编成"跳到循环出口"，**qlmc 却保留**
+/// `CONST go,0` + `JMP 循环头` + 循环头的 `JCMPI go,1` —— 每处理一个字符
+/// 白跑一条 `cmp` + 一条 `jcc`。
+///
+/// ## 为什么 v3.84 那次失败了
+///
+/// 那次只做了**局部模式匹配**："找到 `CONST flag,0` 就把它后面的 JMP 改跳出口"。
+/// 没验证"循环外还有没有人读 `flag`"，于是把循环外的 `CONST flag,0` 也当成
+/// 退出点，校验和从 `4010000` 变成 `6000`（提前退出）。
+///
+/// ## 这一版的安全判据（六条，全部是**全函数**扫描，不是局部匹配）
+///
+/// 记循环头标签 = `ltop`（`h` = 它的 `OP_LAB` 下标），回边 = `e`
+/// （`JMP ltop`），出口 = `lexit`（守卫的目标，`x` = 它的下标）。
+///
+///   ① **进循环时 `flag` 一定是 1** —— `h` 之前对 `flag` 的最后一次写必须是
+///      `CONST flag, 1`（也就是那句 `let mut go = 1`）。
+///   ② **循环体内只有置 0 点写 `flag`** —— `h..e` 内写 `flag` 的指令只能是
+///      `CONST flag, 0`。写别的值会让"恒为 1"失效。
+///   ③ **循环体内只有守卫读 `flag`** —— 否则"置 0 直接跳出"会让别的读者
+///      看到不同的值。
+///   ④ **`lexit` 必须在回边之后**（`x > e`）—— 否则那不是"跳出循环"。
+///   ⑤ **每个置 0 点后面必须紧跟 `JMP ltop`**（中间只允许 LAB/NOP）——
+///      这条是"守卫能 NOP"的前提：置 0 之后**本来**就回循环头，插入的
+///      专属 `JMP lexit` 正好把它截住；若置 0 后面跟的是别的东西，
+///      插入点就不明确。
+///   ⑥ **`ltop` 只有一条入边**（就是回边 `e`）—— 否则还有别的路径跳进来，
+///      那条路径上 `flag` 未必是 1。
+///
+/// 满足六条时：
+///   * 每条 `CONST flag,0` **之后插入**一条 `JMP lexit`（专属，不动共享回边）；
+///   * 循环头的守卫 `JCMPI flag,1 -> lexit` 换成 NOP。
+///
+/// **守卫为什么能 NOP**：由 ①②⑤⑥，回到循环头的唯一路径上 `flag` 一直是 1
+/// （置 0 的路径已经直接跳出了），所以 `flag != 1` 恒假、跳转永不成立。
+///
+/// **`CONST flag,0` 本身不删**：它保证退出时 `flag == 0`，循环外若有读者
+/// 看到的值与变换前一致（② 已证明循环体内没人再写它）。
+///
+/// **循环外的写不管**：`h` 之前由 ① 约束；`> e` 的写只是重新定义，不影响
+/// 退出那一刻的值。
+fn _opt_flag_loop(fc: FnCtx, use: vec[int], ndef: vec[int]) {
+    let ir = fc.ir
+    let mut n = len(ir)
+    let mut i = 0
+    let mut done = vec[int].new(4)
+    while i < n {
+        let ins = ir.get(i)
+        if ins.op != OP_JMP && ins.op != OP_JCMP && ins.op != OP_JCMPI {
+            i = i + 1
+            continue
+        }
+        let lid = ins.imm
+        let h = _lab_index(ir, lid)
+        let e = i
+        i = i + 1
+        if h < 0 || h >= e {
+            continue                     // 不是回边
+        }
+        if _vec_has(done, lid) {
+            continue
+        }
+        // ---- 循环头之后第一条实指令必须是 `JCMPI flag, 1`（jne 形式）----
+        // `while go == 1 && ...` 降级成"go != 1 就跳出口"，条件码 0x85（jne）。
+        let mut g = h + 1
+        while g < e {
+            let w = ir.get(g)
+            if w.op == OP_LAB || w.op == OP_NOP {
+                g = g + 1
+            } else {
+                break
+            }
+        }
+        if g >= e {
+            continue
+        }
+        let guard = ir.get(g)
+        if guard.op != OP_JCMPI || guard.b != 1 || guard.dst != 0x85 {
+            continue
+        }
+        let flag = guard.a
+        if flag <= 0 || fc.vpin.get(flag) != 1 {
+            continue                     // 必须是变量（pin），不是临时值
+        }
+        let lexit = guard.imm
+        if lexit == lid {
+            continue
+        }
+        // 判据 ④
+        let x = _lab_index(ir, lexit)
+        if x <= e {
+            continue
+        }
+        // ---- 判据 ⑥：ltop 只有一条入边（回边自己）----
+        let mut k = 0
+        let mut bad = 0
+        let mut nedge = 0
+        while k < n {
+            if k != e {
+                let w = ir.get(k)
+                if (w.op == OP_JMP || w.op == OP_JCMP || w.op == OP_JCMPI) &&
+                   w.imm == lid {
+                    nedge = nedge + 1
+                }
+            }
+            k = k + 1
+        }
+        if nedge != 0 {
+            continue
+        }
+        // ---- 判据 ①：h 之前对 flag 的最后一次写必须是 `CONST flag, 1` ----
+        let mut lastw = 0 - 1
+        k = 0
+        while k < h {
+            let w = ir.get(k)
+            if w.dst == flag && _opt_writes(w.op) == 1 {
+                lastw = k
+            }
+            k = k + 1
+        }
+        if lastw < 0 {
+            continue
+        }
+        let lw = ir.get(lastw)
+        if lw.op != OP_CONST || lw.imm != 1 {
+            continue
+        }
+        // ---- 判据 ②③：循环体内只允许"置 0 点写 / 守卫读" ----
+        let mut zeros = vec[int].new(2)
+        k = h
+        while k <= e {
+            let w = ir.get(k)
+            // 写：只能是 CONST flag,0
+            if w.dst == flag && _opt_writes(w.op) == 1 {
+                if w.op == OP_CONST && w.imm == 0 {
+                    zeros.push(k)
+                } else {
+                    bad = 1
+                    k = e + 1
+                }
+            }
+            if bad == 0 && k != g {
+                // 读：除守卫外一律不许（b 槽是立即数/子操作码的那几个不算）
+                let mut rb = 0
+                if w.b == flag && w.op != OP_BINI && w.op != OP_CMPI &&
+                   w.op != OP_DIVC && w.op != OP_JCMPI {
+                    rb = 1
+                }
+                if w.a == flag || rb == 1 {
+                    bad = 1
+                    k = e + 1
+                }
+            }
+            k = k + 1
+        }
+        if bad == 1 {
+            continue
+        }
+        if len(zeros) == 0 {
+            continue
+        }
+        // ---- 判据 ⑤：每个置 0 点后（跳过 LAB/NOP）紧跟 `JMP lid` ----
+        let mut zi = 0
+        while zi < len(zeros) {
+            let z = zeros.get(zi)
+            let mut j = z + 1
+            while j <= e {
+                let w = ir.get(j)
+                if w.op == OP_LAB || w.op == OP_NOP {
+                    j = j + 1
+                } else {
+                    break
+                }
+            }
+            if j > e {
+                bad = 1
+                break
+            }
+            let jw = ir.get(j)
+            if jw.op != OP_JMP || jw.imm != lid {
+                bad = 1
+                break
+            }
+            zi = zi + 1
+        }
+        if bad == 1 {
+            continue
+        }
+        if DBG_FLAGLOOP == 1 {
+            eprint("[flagloop] 命中 lid=" + lid.to_str() + " h=" + h.to_str() +
+                   " e=" + e.to_str() + " g=" + g.to_str() +
+                   " lexit=" + lexit.to_str() + " zeros=" + len(zeros).to_str())
+        }
+        // ---- 变换 ----
+        // **关键**：不能改那条 `JMP ltop` —— 它往往被**其它分支共享**。
+        // 例：`if c == 32 { p = p + 1 } else { go = 0 }` 里，then 分支的
+        // `JMP` 先汇合到 LAB，再和 else 分支共用同一条回边。改那条回边会让
+        // "p = p + 1" 也直接跳出循环（v3.88 第一版实测：s47 的 scan_ws
+        // 打 1 而不是 3）。
+        //
+        // 正确做法：在**每个置 0 点之后插入**一条专属的 `JMP lexit`。
+        // 这样置 0 的路径直接跳出，其它路径照旧回循环头。
+        // 插入要**从后往前**，否则前面的插入会让后面的下标漂移。
+        // 守卫换 NOP（`flag != 1` 恒假）：由 ①②⑤⑥，回到循环头的路径上
+        // `flag` 一直是 1，置 0 的路径已经跳出了。
+        ir.set(g, Ir { op: OP_NOP, dst: 0, a: 0, b: 0, imm: 0 })
+        let mut q = len(zeros) - 1
+        while q >= 0 {
+            let z = zeros.get(q)
+            _ir_insert(fc, z + 1, OP_JMP, 0, 0, 0, lexit)
+            q = q - 1
+        }
+        done.push(lid)
+        // 重扫：插入改了指令下标，`zeros` 里记的位置已经失效，只能从头再来。
+        // `done` 保证同一个循环（按头标签 id 记）不会被处理第二次，所以不会死循环。
+        i = 0
+        n = len(ir)
+    }
+}
+
 /// 优化入口。三个缓冲由调用方（`_compile_range`）持有并复用 —— **别在这里
 /// `vec.new`**：s3_manyfns 那种 200 个小函数一次编译要开 800 个 vec，光分配
 /// 就让编译慢 7%（v2.44 实测）。
@@ -7525,6 +7759,10 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     // 它会插入新指令、改使用关系，所以放在最后，之后重算 use/ndef 再跑一次 DCE
     // （不然被替换掉的 `t = i*C` 会留在循环里当死代码）。
     _opt_mod_ind(fc, cok, cval, use, ndef)
+    // ---- v3.88 标志位循环：`go = 0` 直接跳出，别绕回循环头再比一次 ----
+    // 放在归纳削减之后：它只改 JMP 目标、不插入指令，所以不需要重算长度；
+    // 但它**读了 use/ndef 之外的全函数结构**，放在 DCE 之前让死代码一起收掉。
+    _opt_flag_loop(fc, use, ndef)
     _opt_ndef(ir, ndef)
     i = 0
     while i < len(use) {
