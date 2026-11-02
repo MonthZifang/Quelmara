@@ -8482,6 +8482,54 @@ fn _emit_divc(fc: FnCtx, code: vec[int], ins: Ir, i: int) {
     _store_rax(fc, fc.vloc.get(ins.dst))
 }
 
+/// 条件减的无分支发射（v3.90，`OP_CSUBNS`）。
+///
+/// **单独成函数不是为了整洁**，是为了不给 `_emit_ir` 加局部变量 —— 那个函数
+/// 的帧已经贴着 `SLOT_TEMP`(416) 上限。v3.90 第一版直接内联，CI 当场报
+/// "当前函数：_emit_ir / 需要 417 个槽（已用 416，本次要 1）"。
+/// 同 `_emit_f64` 的处理方式。
+///
+/// 序列：
+///     mov    rax, a      ; rax = 原值（RAX 是发射器专用暂存，不参与分配）
+///     sub    rax, imm    ; rax = 原值 - imm
+///     mov    d, a        ; d   = 原值（d 可能就是 a，那就省掉）
+///     cmovns d, rax      ; **减完非负**才采纳
+///
+/// `cmovns` 的语义是"src 最高位为 0 时 dst = src"，所以 src 必须是
+/// **减完**的值、dst 是**原值**。第一版写反了（拿原值当 src），
+/// b1_int 当场从 119999988 变成 -1199999940000000。
+fn _emit_csubns(fc: FnCtx, i: int) {
+    let ins = fc.ir.get(i)
+    let code = fc.code
+    let dloc = fc.vloc.get(ins.dst)
+    let mut d = RAX
+    if dloc > 0 {
+        d = dloc - 1
+    }
+    let aloc = fc.vloc.get(ins.a)
+    let mut src = RAX
+    if aloc > 0 {
+        src = aloc - 1
+    } else {
+        _to_reg(fc, RAX, ins.a)
+    }
+    if dloc <= 0 {
+        // dst 落帧槽：算到 RAX，cmov 从 src 取回原值，再写回槽
+        _mov_rr(code, RAX, src)
+        _alu_imm(code, 5, RAX, ins.imm)              // rax = 原值 - imm
+        _cmovns(code, RAX, src)                      // 负数就退回原值
+        _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+        return
+    }
+    // dst 是寄存器：先算减完的值，再摆原值，最后条件采纳
+    _mov_rr(code, RAX, src)                          // rax = 原值
+    _alu_imm(code, 5, RAX, ins.imm)                  // rax -= imm
+    if d != src {
+        _mov_rr(code, d, src)                        // d = 原值
+    }
+    _cmovns(code, d, RAX)                            // 减完非负才采纳
+}
+
 /// f64 相关的发射（v2.55 / v2.56）。
 ///
 /// **单独成函数**不是为了整洁，是为了不给 `_emit_ir` 加局部变量 —— 那个函数
@@ -8802,43 +8850,10 @@ fn _emit_ir(fc: FnCtx, i: int) {
         return
     }
     if op == OP_CSUBNS {
-        // dst = (a - imm >= 0) ? (a - imm) : a —— 条件减的无分支形式（v3.90）。
-        //
-        //     mov    rax, a      ; rax = 原值（RAX 是发射器专用暂存，不参与分配）
-        //     sub    rax, imm    ; rax = 原值 - imm
-        //     mov    d, a        ; d   = 原值（d 可能就是 a，那就省掉）
-        //     cmovns d, rax      ; **减完非负**才采纳
-        //
-        // `cmovns` 的语义是"src 最高位为 0 时 dst = src"，所以 src 必须是
-        // **减完**的值、dst 是**原值**。第一版写反了（拿原值当 src），
-        // b1_int 当场从 1199999880000000 变成 -1199999940000000。
-        let dloc = fc.vloc.get(ins.dst)
-        let mut d = RAX
-        if dloc > 0 {
-            d = dloc - 1
-        }
-        let aloc = fc.vloc.get(ins.a)
-        let mut src = RAX
-        if aloc > 0 {
-            src = aloc - 1
-        } else {
-            _to_reg(fc, RAX, ins.a)
-        }
-        if dloc <= 0 {
-            // dst 落帧槽：算到 RAX，cmov 从 src 取回原值，再写回槽
-            _mov_rr(code, RAX, src)
-            _alu_imm(code, 5, RAX, ins.imm)          // rax = 原值 - imm
-            _cmovns(code, RAX, src)                  // 负数就退回原值
-            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
-            return
-        }
-        // dst 是寄存器：先摆原值，再算减完的值，最后条件采纳
-        _mov_rr(code, RAX, src)                      // rax = 原值
-        _alu_imm(code, 5, RAX, ins.imm)              // rax -= imm
-        if d != src {
-            _mov_rr(code, d, src)                    // d = 原值
-        }
-        _cmovns(code, d, RAX)                        // 减完非负才采纳
+        // 抽成独立函数：`_emit_ir` 的帧已经贴着 `SLOT_TEMP` 上限，
+        // 在这里加局部变量会让 qlmc 编不过自己（v3.90 实测：
+        // `_emit_ir` 需要 417 个槽，上限 416）。同 `_emit_f64` 的理由。
+        _emit_csubns(fc, i)
         return
     }
     if op == OP_CMPI {
