@@ -176,6 +176,27 @@ def main():
                         f"与最新版本目录 {latest[2]} 对齐（版本号同源）",
                         "docs/00-convention.md §5.1"))
 
+    # 7) `docs/03-stdlib.md` 与 `std/` 源码一致（v3.76）
+    #
+    # **这个检查以前只存在于 CI**：`gen_stdlib_doc.py --check` 是 CI 的独立
+    # 步骤，本地 `check_docs.py` 完全不管。于是"改了 std 的 doc comment
+    # 但没重新生成 03-stdlib.md"这种错误，本地全绿、推到 CI 才红。
+    #
+    # v3.76 实测：改了 `std/ws.qma` / `std/net/core.qma` 的 doc comment，
+    # 本地四项门禁全过，CI 33 秒就红了。**门禁必须能在本地复现**，
+    # 否则它只是"CI 的意外"而不是"开发者的约束"。
+    gen = os.path.join(ROOT, "tools", "dev", "gen_stdlib_doc.py")
+    if os.path.isfile(gen):
+        import subprocess
+        r = subprocess.run([sys.executable, gen, "--check", "--require-doc"],
+                           capture_output=True, text=True, cwd=ROOT)
+        if r.returncode != 0:
+            tail = (r.stdout + r.stderr).strip().splitlines()
+            bad.append(("docs/03-stdlib.md", 0,
+                        tail[-1] if tail else "与 std/ 源码不一致",
+                        "运行 python tools/dev/gen_stdlib_doc.py 重新生成",
+                        "docs/03-stdlib.md"))
+
     # 4) 数字单一来源
     for rel in files:
         if rel in ALLOW_NUM or rel.startswith(NUM_EXEMPT_PREFIX):
