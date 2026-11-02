@@ -1,0 +1,68 @@
+// s45_aesmain.qma —— AES 直接写在 main 里（v3.81 复核 §7.4 / §7.5）
+//
+// ## 为什么需要它
+//
+// §7.4 记录的是"`_aes128_encrypt_block_fast` 直接写在 main 里会被误编译"：
+// FIPS-197 C.1 向量跑出来**最后一个字节丢了**（`…70b4c500` 而不是 `…70b4c55a`）。
+// 当时的判断是"优化后在特定寄存器压力下的误编译"，产品路径没受影响
+// （`_ctr_xor` 里的调用形状是对的），但这类"少写一个字节"的缺陷比崩溃危险。
+//
+// 原复现件 `build/_aes_sw.qma` 一直没入库（因为它是"必失败"件）。v3.81 复核
+// 发现**当前版本不复现**，于是把它固化成**正向**差分夹具：
+//   * 直接调用（原缺陷形态）；
+//   * 包一层包装调用（原记录说"包一层就正确"，两条路都要钉住）；
+//   * 高寄存器压力变体（8 个活跃变量与 AES 同时存活）。
+//
+// 三个结果必须都是 FIPS-197 C.1 的标准答案
+// `69c4e0d86a7b0430d8cdb78070b4c55a`。
+//
+// ## 关于 §7.5
+//
+// §7.5（"多一条 xmm 指令就改变结果"）是同一类问题，出在 `_gmul_ni` 里。
+// 这里顺带跑一遍 GCM 路径：`tests/t73_ghash.qma` 与 `tests/t48_aes.qma`
+// 已经在主回归里覆盖，本夹具只钉"直接写在 main 里"这个形状。
+import std.aes
+import std.hex
+
+// 包一层：原记录说这样能绕开缺陷，两条路都要对
+fn wrap(inp: int, out: int, rk: int) -> int {
+    return _aes128_encrypt_block_fast(inp, out, rk)
+}
+
+fn main() {
+    // FIPS-197 C.1：key = 000102...0f，pt = 00112233445566778899aabbccddeeff
+    let key = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
+    let rk = mem_alloc(176)
+    aes128_expand(key, rk)
+    let pt = mem_alloc(16)
+    let mut i = 0
+    while i < 16 {
+        mem_store8(pt, i, i * 17)      // 00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff
+        i = i + 1
+    }
+
+    // [1] 直接调用（原缺陷形态）
+    let o1 = mem_alloc(16)
+    _aes128_encrypt_block_fast(pt, o1, rk)
+    print("direct:  " + hex_encode(mem_str(o1, 16)))
+
+    // [2] 包一层包装调用
+    let o2 = mem_alloc(16)
+    wrap(pt, o2, rk)
+    print("wrapped: " + hex_encode(mem_str(o2, 16)))
+
+    // [3] 高寄存器压力：8 个活跃变量与 AES 同时存活
+    let a = 1
+    let b = 2
+    let c = 3
+    let d = 4
+    let e = 5
+    let f = 6
+    let g = 7
+    let h = 8
+    let o3 = mem_alloc(16)
+    _aes128_encrypt_block_fast(pt, o3, rk)
+    let r3 = hex_encode(mem_str(o3, 16))
+    print("pressure:" + r3)
+    print(a + b + c + d + e + f + g + h)
+}
