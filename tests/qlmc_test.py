@@ -160,6 +160,11 @@ CASES = [
     # 直接调用 / 包一层 / 高寄存器压力三种形态都必须给出标准答案。
     # **必须是差分用例**：这类"少写一个字节"的缺陷不崩不报错，只有逐字节比对能抓。
     ("s45_aesmain", "tests/selfhost/s45_aesmain.qma"),
+    # v3.82：**容器的元素/值类型不能丢**（收 §7.28）。
+    # stage-0 有三处把元素类型弄丢后按 int/str 硬解释：`vec[f64]` / `map[K]f64`
+    # 的元素、`len(map)` 在"同函数两张 map"/"同文件多个带 map 的函数"时。
+    # 症状是**编得出、跑得完、答案错**（比编不过更麻烦）。
+    ("s46_containerelem", "tests/selfhost/s46_containerelem.qma"),
 ]
 
 npass = 0

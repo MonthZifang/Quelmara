@@ -2534,6 +2534,9 @@ class Lower:
             fn.emit("call", d, "__vec_get", [obj, i])
             if elem == "str":
                 self._mark_str(fn, d)
+            if elem == "f64":
+                # v3.82（收 §7.28b）：元素是 f64 → 打浮点标记，下游按 double 处理
+                self._mark_float(fn, d, "f64")
             if isinstance(elem, tuple) and elem[0] == "vecinner":
                 # 嵌套 vec：get 返回内层句柄，重挂内层标签——
                 # row.push / row.get 从此认领类型（v1.12 vec[vec[T]] 解锁）
@@ -2607,7 +2610,14 @@ class Lower:
                 return dst
             d = fn.new_v()
             fn.emit("call", d, "__map_get", [obj, kv])
-            return self._mark_str(fn, d) if vt == "str" else d
+            if vt == "str":
+                return self._mark_str(fn, d)
+            if vt in ("f64", "float"):
+                # v3.82（收 §7.28b）：值是 f64 → 打浮点标记。
+                # 以前只有 str 分支，f64 值按 int 位模式搬，`m.get(1) * 2.0`
+                # 打出 9.2e18（先当整数再转 double）。
+                return self._mark_float(fn, d, "f64")
+            return d
         if m == "has":
             if len(args) != 1:
                 raise SyntaxError("m.has(k) 需要且只需要一个实参")
@@ -10883,6 +10893,18 @@ class Lower:
             # 消费方全是 "== 'str'" / isinstance(tuple) 判定，字符串标签走标量路径；
             # push/set 凭它查出窄宽度做截断，vecinner 嵌套时随内层标签穿透。
             return et[1]
+        if et == ("named", "f64") or et == ("named", "float"):
+            # v3.82（收 §7.28b）：**f64 元素要留标签**。
+            #
+            # 以前 f64 落到最后的 `return None`（"标量"），于是 `v.get(0)` 拿不到
+            # 浮点标记 —— 值按 int 位模式搬，`print(v.get(0))` 打出
+            # 4609434218613702656（1.5 的位模式），`x + 1.0` 再把那个整数转成
+            # double 得 4.6e18。qlmc 一直是对的，所以只有 stage-0 错。
+            #
+            # 标签用 "f64"（字符串，与窄标量同构）：消费方全是 `== "str"` /
+            # isinstance(tuple) 判定，走标量路径不受影响；push/set 里
+            # `narrow_of(("named", "f64"))` 返回 None，不会误截断。
+            return "f64"
         if et and et[0] == "vec":
             return ("vecinner", self._vec_tag_of(et[1]))
         if et and et[0] == "map":

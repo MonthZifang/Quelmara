@@ -1,0 +1,91 @@
+// s46_containerelem.qma —— 容器的元素/值类型不能丢（v3.82，收 §7.28）
+//
+// ## 为什么需要它
+//
+// stage-0 的类型推断有三处会把**元素类型弄丢**，然后按 int 或 str 硬解释。
+// qlmc 在这三处都是对的，所以只有 stage-0 错 —— 而且**编得出、跑得完**，
+// 只是答案错（比编不过更麻烦：夹具会把错的输出钉成"标准答案"）。
+//
+// 本夹具因此是**差分**用例：两边都必须给出同一组正确答案。
+//
+// ## 覆盖的形态
+//
+//   [1] `vec[f64]` 的元素：push / get / 参与浮点运算
+//   [2] `map[K]f64` 的值：set / get / 参与浮点运算
+//   [3] `len(map)` 在同一函数里有两张 map 时
+//   [4] `len(map)` 在"同文件还有别的带 map 的函数"时
+//   [5] `len(map)` 对**函数返回的 map**
+//   [6] `vec[str]`（同一条标签通道，钉住别退化）
+//
+//   （窄标量 `vec[u8]` 也是同一条通道，但 **qlmc 不支持窄类型** —— 那是
+//    另一个缺口，不在本条范围内。）
+//
+// 语义参照（stage-0）：见下方 print 顺序
+fn two_maps() -> int {
+    let m1 = map[int]int.new(16)
+    m1.set(1, 10)
+    m1.set(2, 20)
+    let a = len(m1)
+    let m2 = map[int]int.new(16)
+    m2.set(3, 30)
+    return a * 100 + len(m1) * 10 + len(m2)
+}
+
+fn count_after_grow() -> int {
+    let m = map[int]int.new(4)
+    let mut i = 0
+    while i < 9 {
+        m.set(i, i * 3)
+        i = i + 1
+    }
+    return len(m)
+}
+
+fn fill() -> map[int]int {
+    let m = map[int]int.new(32)
+    let mut i = 0
+    while i < 9 {
+        m.set(i, i * 10)
+        i = i + 1
+    }
+    return m
+}
+
+fn main() {
+    // [1] vec[f64]
+    let vf = vec[f64].new(4)
+    vf.push(1.5)
+    vf.push(2.25)
+    print(vf.get(0))
+    print(vf.get(1))
+    let xf = vf.get(0)
+    print(xf + 1.0)
+    print(vf.get(1) * 2.0)
+
+    // [2] map[K]f64
+    let mf = map[int]f64.new(8)
+    mf.set(1, 2.5)
+    mf.set(2, 0.125)
+    print(mf.get(1))
+    print(mf.get(1) * 2.0)
+    print(mf.get(2) + 0.875)
+
+    // [3] 同一函数两张 map
+    print(two_maps())
+
+    // [4] 同文件多个带 map 的函数 + 扩容后查 len
+    print(count_after_grow())
+
+    // [5] 函数返回的 map
+    print(len(fill()))
+    let m2 = fill()
+    print(len(m2))
+    print(m2.get(3))
+
+    // [6] str 元素（同一条标签通道）
+    let vs = vec[str].new(4)
+    vs.push("ab")
+    vs.push("cd")
+    print(vs.get(0))
+    print(vs.get(1))
+}
