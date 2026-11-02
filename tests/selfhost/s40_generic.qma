@@ -1,0 +1,60 @@
+// s40_generic.qma —— 泛型单态化差分夹具（v3.73，收 §7.44）
+//
+// 覆盖泛型的全部语义面：
+//   * 无约束 `[T]` 与带约束 `[T: Ord]` 两种声明；
+//   * **同一模板两个类型实参**（int / f64）—— 验证特化副本各自独立，
+//     不共享代码（共享就会把 f64 的 > 当整数比较）；
+//   * 从 `vec[T]` 形参一元推出 T；
+//   * 递归调用泛型函数（体内自引用）；
+//   * 特化函数再调用另一个特化函数（跨模板）。
+//
+// 为什么必须是差分用例：泛型走的是"记 token 区间 -> 调用点推类型 ->
+// 重新 parse 出特化副本 -> 改写调用点"这条路，任何一步错都是静默错编
+// （展开出 0 个函数、名字没换、调用点没改写）。只有逐字节差分能抓。
+//
+// 语义参照（stage-0）：见下方 print 顺序
+fn mx[T](a: T, b: T) -> T {
+    if a > b { return a }
+    return b
+}
+
+fn mn[T: Ord](a: T, b: T) -> T {
+    if a < b { return a }
+    return b
+}
+
+fn first[T](xs: vec[T]) -> T {
+    return xs.get(0)
+}
+
+// 体内调用自己（自引用）：必须解析到**同一个特化副本**
+fn dbl[T](n: T) -> T {
+    if n > 100 { return n }
+    return n + n
+}
+
+// 跨模板：特化后的 outer 调用特化后的 mx
+fn outer[T](a: T, b: T) -> T {
+    return mx(a, b) + 1
+}
+
+fn main() {
+    // 1) 两个类型实参
+    print(mx(3, 9))
+    print(mx(2.5, 1.5))
+    // 2) 约束形态
+    print(mn(4, 7))
+    print(mn(8.5, 2.5))
+    // 3) vec 推导
+    let vs = vec[str].new(4)
+    vs.push("alpha")
+    vs.push("beta")
+    print(first(vs))
+    let vi = vec[int].new(4)
+    vi.push(42)
+    print(first(vi))
+    // 4) 体内自调用形态
+    print(dbl(7))
+    // 5) 跨模板特化
+    print(outer(10, 20))
+}

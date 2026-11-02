@@ -18,6 +18,7 @@
   python tests/qlmc_test.py --time     # 额外报 qlmc 的进程内编译耗时
 """
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -25,6 +26,17 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
+
+# Linux 上跑 qlmc 产出的 PE **必须显式走 wine**：binfmt_misc 的 `MZ`
+# handler 会把 argv[0] 重复塞进去，qlmc 于是把 `build` 当成源文件名，
+# 报"打不开源文件 build"（v3.63 实测，与 tools/dev/qlmc_coverage.py 同因）。
+def _exe_runner(exe):
+    if os.name == "nt":
+        return [exe]
+    wine = shutil.which("wine")
+    if wine is None:
+        raise SystemExit("FAIL：Linux 上需要 wine 才能执行 qlmc 产出的 PE")
+    return [wine, exe]
 CLI = os.path.join(ROOT, "tools", "stage0", "qlm_cli.py")
 QLMC = os.path.join(ROOT, "build", "qlmc.exe")
 SRC_QLMC = os.path.join(ROOT, "bootstrap", "qlmc", "qlmc.qma")
@@ -117,6 +129,12 @@ CASES = [
     # = 0x10002 落进 TY_MAP 区间，`_lower_method` 把它当 map 处理 ——
     # 不崩、不报错、只是走错分支，只有逐字节差分能抓。
     ("s39_nestedvec", "tests/selfhost/s39_nestedvec.qma"),
+    # v3.73：**泛型单态化**（收 §7.44）。同一模板两个类型实参（int/f64）、
+    # 约束形态 `[T: Ord]`、从 `vec[T]` 形参推元素类型、特化副本间互相调用。
+    # **必须是差分用例**：展开走"记 token 区间 -> 推类型 -> 重新 parse ->
+    # 改写调用点"四步，任一步错都是静默错编（0 个函数 / 名字没换 /
+    # 调用点没改写 / 类型绑错）。只有逐字节差分能抓。
+    ("s40_generic", "tests/selfhost/s40_generic.qma"),
 ]
 
 npass = 0
@@ -173,7 +191,7 @@ def main():
     bad_src = os.path.join(BUILD, "err_syntax.qma")
     with open(bad_src, "w", encoding="utf-8") as f:
         f.write("fn main() {\n    let x = \n}\n")
-    r = subprocess.run([QLMC, "dump", bad_src], capture_output=True)
+    r = subprocess.run(_exe_runner(QLMC) + ["dump", bad_src], capture_output=True)
     if r.returncode == 2 and b"\xe6\x9c\x9f\xe6\x9c\x9b\xe8\xa1\xa8\xe8\xbe\xbe\xe5\xbc\x8f" in r.stderr:
         ok("语法错：打印诊断且 rc=2（无崩溃）")
     else:
@@ -189,7 +207,7 @@ def main():
             build_with([PY, CLI, "build", src, "--target", "win", "-o", out0], out0)
             dt0 = (time.perf_counter() - t0) * 1000
             t1 = time.perf_counter()
-            build_with([QLMC, "build", src, "-o", out1], out1)
+            build_with(_exe_runner(QLMC) + ["build", src, "-o", out1], out1)
             dt1 = (time.perf_counter() - t1) * 1000
         except RuntimeError as ex:
             bad(f"{name} 构建失败：{ex}")
@@ -222,7 +240,7 @@ def main():
     for j in ("1", "4"):
         p = os.path.join(BUILD, f"qlmc_par_j{j}.exe")
         try:
-            build_with([QLMC, "build", big, "-o", p, "-j", j], p)
+            build_with(_exe_runner(QLMC) + ["build", big, "-o", p, "-j", j], p)
             outs.append(p)
         except RuntimeError as ex:
             bad(f"-j{j} 构建失败：{ex}")

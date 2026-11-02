@@ -325,6 +325,9 @@ const VTYPES_MAX = 2048
 // 越界一格，静默踩坏相邻数据。
 const TBL_SIZE = VTYPES_BASE + 1 + VTYPES_MAX
 
+// v3.73：泛型模板数上限（std/gen 有 9 个；SW_GT_BASE + 12*3 = 42 < STATIC_SLOTS=64）
+const GT_MAX = 12
+
 struct Fn {
     name: int       // 名字 id
     np: int         // 形参数（v2.29 起不限 4；第 5 个起走栈）
@@ -727,6 +730,162 @@ struct P {
 // 槽位分配：qlmc 自己的静态字区此前**完全没用过**（64 个槽全空），
 // 这里占前三个，其余留给将来。
 const SW_MOD_ID = 0       // 当前 parse 的模块号（0 = 主文件，1.. = 模块）
+// v3.73：**泛型模板表**（收 §7.44）。
+//
+// 存什么：每个泛型模板的 (名字 id, token 起, token 止)。展开时用这个区间
+// **重新 parse**，把 `T` 绑成实参类型 —— 不复制节点（qlmc 的节点表是平坦
+// 数组，复制要按 E_* 逐类判断哪些字段是 node id，判错一处就静默错编）。
+//
+// 存哪：`static_word`。parse 期单线程，安全；`P` 已 16 字段不能加（v3.62 教训）。
+// 布局：SW_GT_N 存条数，每模板 4 个槽（nid, tok_lo, tok_hi, tname_nid）
+// 从 SW_GT_BASE 起。第 4 槽是**登记时**存下的泛型参数名 id —— 早先版本
+// 靠事后扫 token 区间反查（`_gt_tname_nid`），但 `[T: 约束]` 的区间里
+// `[` 之后第一个 `T_NAME` 未必是 `T`，反查会失败（实测 `[T: Ord]` 报
+// "未知类型 T"）。登记时手里正好有它，存下来最可靠。
+const SW_GT_N = 5
+const SW_GT_BASE = 8
+const GT_STRIDE = 4
+
+// 当前正在展开的泛型实例的 `T` 绑定：SW_GT_BIND 存类型码（-1 = 未绑定），
+// SW_GT_TNAME 存 `T` 的名字 id。`_type` 遇到查不到的名字时看它。
+const SW_GT_BIND = 4
+const SW_GT_TNAME = 3
+// 1 = 正在展开（`_fn` 里遇到泛型语法时**不要**再登记模板，否则会无限增长）
+const SW_GT_EXPANDING = 63   // 必须在模板表区间之外（8 + 12*4 = 56）
+
+fn _gt_bind() -> int {
+    return mem_load64(static_word(SW_GT_BIND), 0)
+}
+
+/// 复位绑定（-1 = 未绑定）。**必须在 main 开头调用** ——
+/// `static_word` 初始是 0，而 0 是合法的类型码（TY_INT），
+/// 不复位的话 `_gt_bind() >= 0` 会恒成立，把任何未知类型都当成 T。
+fn _gt_reset() {
+    mem_store64(static_word(SW_GT_BIND), 0, 0 - 1)
+    mem_store64(static_word(SW_GT_TNAME), 0, 0 - 1)
+}
+
+fn _gt_set_bind(ty: int, tname_nid: int) {
+    mem_store64(static_word(SW_GT_BIND), 0, ty)
+    mem_store64(static_word(SW_GT_TNAME), 0, tname_nid)
+}
+
+fn _gt_tname() -> int {
+    return mem_load64(static_word(SW_GT_TNAME), 0)
+}
+
+fn _gt_n() -> int {
+    return mem_load64(static_word(SW_GT_N), 0)
+}
+
+fn _gt_add(nid: int, lo: int, hi: int, tname: int) {
+    let n = _gt_n()
+    if n >= GT_MAX {
+        // 注意：const 名直接当方法接收者时 stage-0 不内联（07-gaps §7.41），
+        // 必须加括号 `(GT_MAX)` 才走常量内联路径。
+        eprint("qlmc: 泛型模板超过上限（" + (GT_MAX).to_str() + " 个）")
+        exit(2)
+    }
+    mem_store64(static_word(SW_GT_BASE + n * GT_STRIDE), 0, nid)
+    mem_store64(static_word(SW_GT_BASE + n * GT_STRIDE + 1), 0, lo)
+    mem_store64(static_word(SW_GT_BASE + n * GT_STRIDE + 2), 0, hi)
+    mem_store64(static_word(SW_GT_BASE + n * GT_STRIDE + 3), 0, tname)
+    mem_store64(static_word(SW_GT_N), 0, n + 1)
+}
+
+/// 类型码 -> 特化副本的名字后缀（与 stage-0 的 `f__int` / `f__f64` 对齐）。
+///
+/// 只覆盖**标量**：`std/gen` 的实例都是标量。聚合要拼 `struct 名`，
+/// 而名字 id 在 parse 期还没落到 stt 里，得另想办法；本版遇到聚合直接
+/// 用下标数字当后缀 —— 同一个编译单元内唯一即可，不要求和 stage-0 逐字一致
+/// （差分比对看的是程序输出，不是符号名）。
+fn _gt_tsuffix(ty: int) -> str {
+    if ty == TY_INT { return "int" }
+    if ty == TY_BOOL { return "bool" }
+    if ty == TY_STR { return "str" }
+    if ty == TY_VOID { return "void" }
+    if ty == TY_BYTE { return "byte" }
+    if ty == TY_F64 { return "f64" }
+    return "t" + ty.to_str()
+}
+
+/// 模板的类型参数名 id（登记时存下的，见 `GT_STRIDE` 第 4 槽）。
+fn _gt_tname_of(gi: int) -> int {
+    return mem_load64(static_word(SW_GT_BASE + gi * GT_STRIDE + 3), 0)
+}
+
+/// 从模板的 token 区间里取出泛型参数名（`fn 名[T]` 里 `[` 之后那个）的
+/// 名字 id。`_expand_generic` 用它判断 `_type` 里遇到的哪个名字该绑成 T。
+/// 只读按名字查 id（不创建新条目）。与 `_name_id` 的区别：那个会 push
+/// 新名字，这里找不到就返回 -1 —— 泛型参数名一定已由 `_name_id` 建过。
+fn _name_id_ro2(names: vec[str], s: str) -> int {
+    let mut i = 0
+    while i < len(names) {
+        if names.get(i) == s {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+fn _gt_tname_nid(gi: int, toks: vec[Tok], names: vec[str]) -> int {
+    let lo = mem_load64(static_word(SW_GT_BASE + gi * GT_STRIDE + 1), 0)
+    let hi = mem_load64(static_word(SW_GT_BASE + gi * GT_STRIDE + 2), 0)
+    let mut i = lo
+    let mut seen_lb = 0
+    while i < hi && i < len(toks) {
+        let t = toks.get(i)
+        if t.k == T_PUNCT && t.n == P_LBRACK {
+            seen_lb = 1
+            i = i + 1
+            continue
+        }
+        if seen_lb == 1 && t.k == T_NAME {
+            return _name_id_ro2(names, t.s)
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+/// 从一个实参的类型推出泛型 `T` 的绑定（收 §7.44）。
+///
+/// 规则（覆盖 `std/gen` 的全部三种形态）：
+///   * `a: T`     -> T = 该实参类型；
+///   * `xs: vec[T]` -> T = 元素类型（用 `_vtypes_elem` 查表）；
+///   * 其它（约束/不匹配）-> 返回 -1，调用方报"推不出泛型实参"。
+///
+/// **只处理第一个能推出 T 的实参**：`std/gen` 里 `gen_min(a: T, b: T)`
+/// 两个实参应当同类型，取第一个即可；`gen_contains(xs: vec[T], v: T)`
+/// 从 `xs` 推出更可靠（`v` 可能是字面量，类型已定但 `xs` 是容器）。
+fn _gt_infer(stt: vec[int], aty: int) -> int {
+    if aty >= TY_VEC && aty < TY_MAP {
+        // `_vtypes_elem` 查不到会返回 -1（类型表里没这条），必须原样往上传，
+        // 不能当成"元素类型是 -1"接着用 —— 那会造出 `TY_VEC + (-1)` 这种
+        // 非法码，后面区间判断全部错位。
+        return _vtypes_elem(stt, aty)
+    }
+    // 标量 / struct / enum 都直接可用；vec 以外的高位类型（map/切片/
+    // 闭包/数组）推不出元素，返回 -1 让调用方报"推不出泛型实参"。
+    if aty >= 0 && aty < TY_ARRAY {
+        return aty
+    }
+    return 0 - 1
+}
+
+/// 按名字找模板下标；找不到返回 -1。
+fn _gt_find(nid: int) -> int {
+    let n = _gt_n()
+    let mut i = 0
+    while i < n {
+        if mem_load64(static_word(SW_GT_BASE + i * GT_STRIDE), 0) == nid {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
 const SW_SMOD_N = 1       // smod 表长度（与 struct 序号平行）
 const SW_EMOD_N = 2       // emod 表长度（与 enum 序号平行）
 
@@ -779,6 +938,13 @@ fn _vtypes_add(stt: vec[int], elem: int) -> int {
 /// 调用方必须已经确认 `ty` 是 vec（`ty >= TY_VEC && ty < TY_MAP`）。
 fn _vtypes_elem(stt: vec[int], ty: int) -> int {
     let ti = ty - TY_VEC
+    // **下标必须两边都验**：`ty` 若不是真的 vec 类型码（或 ti 超过已登记
+    // 条数），`stt.get` 会直接越界崩在编译期 —— 报的是
+    // "quelmara: vec index out of bounds"，跟真正的错因毫无关系。
+    // v3.73 实测：`_gt_infer` 拿到一个还没登记的 vec 码就崩在这里。
+    if ti < 0 || ti >= stt.get(VTYPES_BASE) {
+        return 0 - 1
+    }
     return stt.get(VTYPES_BASE + 1 + ti)
 }
 
@@ -992,6 +1158,10 @@ fn _type(p: P, pos: vec[int]) -> int {
         let ei = _enum_index(p, nid)
         if ei >= 0 {
             return TY_ENUM + ei
+        }
+        // v3.73：泛型展开期，`T` 解析成当前绑定的类型码（收 §7.44）
+        if _gt_bind() >= 0 && nid == _gt_tname() {
+            return _gt_bind()
         }
         _fail(p, pos, "未知类型 " + t.s)
     }
@@ -2063,6 +2233,58 @@ fn _fn(p: P, pos: vec[int], ffi_idx: int) {
     }
     _adv(pos)
     let nid = _name_id(p, nm.s)
+    // v3.73：**泛型函数**（收 §7.44）——`fn 名[T]` 或 `fn 名[T: 约束]`。
+    //
+    // 处理方式：**记录 token 区间、跳过函数体不解析**，等调用点推出实参类型
+    // 后再用这个区间重新 parse（见 `_expand_generic`）。
+    //
+    // 为什么不复制节点：qlmc 的节点表是平坦数组，复制函数体要按 `E_*`
+    // 逐类判断 `a`/`b`/`c`/`n`/`slot`/`nx` 里哪些是 node id —— 判错一处
+    // 就是静默错编。"重新 parse"复用的是 parse 本身，语义天然正确。
+    if _is_p(p, pos, P_LBRACK) {
+        // **切片必须从 `fn` 开始**（`parse` 期望顶层是 fn/const/struct）。
+        // 此时 pos 指向 `[`，往前退 3 个记号：`fn` `名字` `[`。
+        // （`_adv` 已经吃掉了 `fn` 和名字，所以 pos-3 是 `fn`。）
+        // 此时 pos 指向 `[`。`_fn` 里只 `_adv` 了两次（`fn` 之后跳到名字、
+        // 名字之后跳到 `[`），所以 `fn` 在 `pos[0] - 2`。
+        let mut tok_lo = pos[0]
+        if tok_lo >= 2 {
+            tok_lo = tok_lo - 2
+        }
+        _adv(pos)                              // [
+        // 泛型形参表：目前只支持**单个**类型参数 `T`（std/gen 的全部需求）
+        let gp = _cur(p, pos)
+        if gp.k != T_NAME {
+            _fail(p, pos, "泛型形参期望类型名")
+        }
+        // **必须建名字 id**：`_gt_tname_nid` 靠它反查。
+        // 不建的话 names 表里没有 `T`，反查返回 -1，`_type` 里
+        // `nid == _gt_tname()` 永远不成立，`T` 解析不出来。
+        let _tnid = _name_id(p, gp.s)
+        _adv(pos)
+        if _is_p(p, pos, P_COLON) {
+            // 约束（Ord / Eq / Num / Bit / interface 名）——本版**跳过不校验**
+            // 只记录语法；约束违反留给专门版本（见 07-gaps §7.44）
+            _adv(pos)
+            while !_is_p(p, pos, P_RBRACK) && _cur(p, pos).k != T_EOF {
+                _adv(pos)
+            }
+        }
+        _eat_p(p, pos, P_RBRACK)
+        // 跳过整个签名与函数体（与 `_prescan_imports` 里跳 fn 的做法一致）
+        while _cur(p, pos).k != T_EOF && !_is_p(p, pos, P_LBRACE) {
+            _adv(pos)
+        }
+        _skip_brace(p, pos)
+        let tok_hi = pos[0]
+        // **展开期不重复登记**：`_expand_generic` 里的 `parse(sub)` 会再次
+        // 走到这里（切片里就含 `fn 名[T]`）。不拦的话模板表会无限增长
+        // （实测 std/gen 的 9 个模板会涨到超过 12 上限）。
+        if mem_load64(static_word(SW_GT_EXPANDING), 0) == 0 {
+            _gt_add(nid, tok_lo, tok_hi, _tnid)
+        }
+        return
+    }
     _eat_p(p, pos, P_LPAREN)
     // 形参表：每条形参追加一条 E_FPARAM 记录（a=名字 id，b=类型），
     // Fn.pbase 记住基址。**不再限 4 个**——第 5 个起走栈（v2.29）。
@@ -2314,6 +2536,209 @@ fn _prescan_consts(toks: vec[Tok], nodes: vec[Node], names: vec[str],
         }
         _adv(pos)
     }
+}
+
+/// **扫描全程序，找出对泛型模板的调用并推出 `T`**（v3.73，收 §7.44）。
+///
+/// 为什么要单独扫一遍：qlmc 的调用点分散在 lowering 里（按函数逐个降级），
+/// 而泛型展开必须在**所有 parse 完成之后、任何 lowering 之前**做完 ——
+/// 否则 lowering 走到调用点时函数还不存在。
+///
+/// 做法：遍历 `nodes` 找 `E_CALL`，若被调名字是模板，用第一个实参的
+/// **静态类型**推 `T`（`_ty_of_expr` 需要一个 FnCtx，这里构造一个
+/// 只用于类型推断的临时 ctx）。
+///
+/// 限制（本版有意为之，见 §7.44）：
+///   * 只支持**单个**类型参数；
+///   * 同一模板被多种类型调用时会展开多份（正确的单态化语义）；
+///   * 推不出类型就**报错**，不静默跳过。
+fn _expand_all(toks: vec[Tok], nodes: vec[Node], names: vec[str],
+               strs: vec[str], fns: vec[Fn], cname: vec[int],
+               cval: vec[int], stt: vec[int], imports: vec[str],
+               fdll: vec[str], fsym: vec[str], cisk: vec[int],
+               cstr: vec[int]) -> int {
+    if _gt_n() < 1 {
+        return 0
+    }
+    // 已展开的 (模板下标, 类型码) 组合，避免重复展开
+    let done = vec[int].new(8)
+    // 用一个临时 FnCtx 做类型推断（只需要 nodes/names/fns/stt）
+    let rt_pos = vec[int].new(RT_COUNT)
+    let mut r0 = 0
+    while r0 < RT_COUNT {
+        rt_pos.push(0)
+        r0 = r0 + 1
+    }
+    let fc = _new_fc(nodes, names, fns, rt_pos, stt)
+    let mut guard = 0
+    while guard < 8 {
+        guard = guard + 1
+        let mut expanded = 0
+        let mut i = 0
+        while i < len(nodes) {
+            let nd = nodes.get(i)
+            if nd.op == E_CALL {
+                let gi = _gt_find(nd.a)
+                if gi >= 0 && nd.b >= 0 {
+                    let aty = _ty_of_expr(fc, nd.b)
+                    let bt = _gt_infer(stt, aty)
+                    if bt < 0 {
+                        eprint("qlmc: 推不出泛型实参（" +
+                               names.get(nd.a) + "）")
+                        exit(2)
+                    }
+                    // 这个 (模板, 类型) 组合展开过没有？
+                    // `done` 是三元组 (gi, bt, 特化名 id)：展开过的组合要
+                    // **复用**已产出的特化名，把调用点改写成它。
+                    let mut have = -1
+                    let mut k = 0
+                    while k + 2 < len(done) {
+                        if done.get(k) == gi && done.get(k + 1) == bt {
+                            have = done.get(k + 2)
+                        }
+                        k = k + 3
+                    }
+                    if have < 0 {
+                        have = _expand_generic(toks, nodes, names, strs, fns,
+                                               cname, cval, stt, imports, fdll,
+                                               fsym, cisk, cstr, gi, bt,
+                                               _gt_tname_of(gi))
+                        done.push(gi)
+                        done.push(bt)
+                        done.push(have)
+                        expanded = expanded + 1
+                    }
+                    // **改写调用点**：`a` 从模板名换成特化名。
+                    // 不改的话 lowering 里 `_fn_index(模板名)` 找不到函数，
+                    // 报"未定义函数 mx"。
+                    if have >= 0 {
+                        nodes.set(i, Node { op: nd.op, a: have, b: nd.b,
+                                            c: nd.c, n: nd.n, slot: nd.slot,
+                                            ty: nd.ty, nx: nd.nx })
+                    }
+                }
+            }
+            i = i + 1
+        }
+        if expanded == 0 {
+            guard = 8          // 没有新展开，收工
+        }
+    }
+    // v3.73：**没有任何调用点时，按 `int` 展开全部模板**。
+    //
+    // 为什么需要：`std/gen` 编库（`-lib`）时没有调用点，若不展开，
+    // 一个函数都不会产出 —— 库是**空的**，用户 import 后调 `gen_min`
+    // 仍然报"未定义函数"。那只是让覆盖率数字涨了，实际不可用（假能力）。
+    //
+    // 按 `int` 展开至少保证库里有 `gen_min__int` 这样可用的实例；
+    // 用户用别的类型时，自己的编译单元里会按需展开对应实例
+    // （单态化语义：每个编译单元独立展开）。
+    if len(done) < 3 {
+        let mut gi2 = 0
+        while gi2 < _gt_n() {
+            let tname = _gt_tname_of(gi2)
+            if tname >= 0 {
+                _expand_generic(toks, nodes, names, strs, fns, cname, cval,
+                                stt, imports, fdll, fsym, cisk, cstr,
+                                gi2, TY_INT, tname)
+            }
+            gi2 = gi2 + 1
+        }
+    }
+    return 0
+}
+
+/// **泛型实例展开**（v3.73，收 §7.44）：把模板的 token 区间重新 parse 成
+/// 一个**具体函数**，`T` 绑成 `bind_ty`。
+///
+/// 为什么"重新 parse"而不是"复制节点"：qlmc 的节点表是平坦数组，
+/// 复制函数体要按 `E_*` 逐类判断 `a`/`b`/`c`/`n`/`slot`/`nx` 里哪些是
+/// node id —— 判错一处就是静默错编。重新 parse 复用的是 parse 本身，
+/// 语义天然正确（等价于源码里手写了一个特化版本）。
+///
+/// 做法：临时把 `toks` 换成模板区间的**切片**，`T` 绑定设好，然后调
+/// `parse` —— 它会把区间里的 `fn` 正常解析成一个具体函数加进 `fns`。
+fn _expand_generic(toks: vec[Tok], nodes: vec[Node], names: vec[str],
+                   strs: vec[str], fns: vec[Fn], cname: vec[int],
+                   cval: vec[int], stt: vec[int], imports: vec[str],
+                   fdll: vec[str], fsym: vec[str], cisk: vec[int],
+                   cstr: vec[int], gi: int, bind_ty: int, tname_nid: int) -> int {
+    let lo = mem_load64(static_word(SW_GT_BASE + gi * GT_STRIDE + 1), 0)
+    let hi = mem_load64(static_word(SW_GT_BASE + gi * GT_STRIDE + 2), 0)
+    // 切片 [lo, hi) 拷成一个新 token 流（末位补 T_EOF）。
+    //
+    // **关键：跳过 `[T]`（或 `[T: 约束]`）那一段**。不跳的话 `parse` 会
+    // 再次看到 `fn 名[T]`，又走泛型分支被跳过 —— 展开出来一个函数都没有
+    // （实测 `expanded fns=1` 只有 main，没有特化副本）。
+    //
+    // 跳过之后切片形如 `fn 名(形参...) -> 返回 { 体 }`，`T` 由 `_type`
+    // 里的绑定解析成具体类型码。
+    // 特化副本必须**换名**（`mx` -> `mx__int`）。不换的话第二个类型实参
+    // 展开时又产出一个同名函数，parse 里直接报"函数重复定义 mx"。
+    // 名字与 stage-0 同款（`f__int` / `f__f64`），便于对照产物。
+    let orig_nid = mem_load64(static_word(SW_GT_BASE + gi * GT_STRIDE), 0)
+    let newname = names.get(orig_nid) + "__" + _gt_tsuffix(bind_ty)
+    let sub = vec[Tok].new(64)
+    let mut i = lo
+    let mut seen_lp = 0        // 已经过了形参表的 `(` 没有
+    let mut seen_fn = 0        // 已经过了 `fn` 关键字没有（下一个名字要换）
+    while i < hi && i < len(toks) {
+        let tk = toks.get(i)
+        // `fn` 之后那个名字换成特化名
+        if seen_fn == 1 && tk.k == T_NAME {
+            sub.push(Tok { k: tk.k, n: tk.n, s: newname, line: tk.line })
+            seen_fn = 0
+            i = i + 1
+            continue
+        }
+        if tk.k == T_KW && tk.n == K_FN {
+            seen_fn = 1
+        }
+        // **只跳形参表之前那个 `[`**（泛型形参表）。
+        //
+        // 不能"见 `[` 就跳"：形参和返回类型里的 `vec[T]` / `map[K]V` 也是
+        // `[`，一起删掉就变成 `fn 名(xs)` —— 实测报 `期望标点 #26`。
+        if seen_lp == 0 && tk.k == T_PUNCT && tk.n == P_LPAREN {
+            seen_lp = 1
+        }
+        if seen_lp == 0 && tk.k == T_PUNCT && tk.n == P_LBRACK {
+            i = i + 1
+            while i < hi && i < len(toks) &&
+                  !(toks.get(i).k == T_PUNCT && toks.get(i).n == P_RBRACK) {
+                i = i + 1
+            }
+            if i < hi {
+                i = i + 1              // 跳过 `]`
+            }
+            continue
+        }
+        sub.push(tk)
+        i = i + 1
+    }
+    _tok(sub, T_EOF, 0, "", 0)
+    // 设好 `T` 绑定，parse 这个切片
+    // 哨兵兜底：名字 id 一定在 [0, 100000) 内。不在这个范围说明模板表
+    // 那一槽被踩了（实测读到过 0x77e0… 这种堆指针），退回扫 token 区间。
+    if tname_nid < 0 || tname_nid > 100000 {
+        tname_nid = _gt_tname_nid(gi, toks, names)
+    }
+    _gt_set_bind(bind_ty, tname_nid)
+    mem_store64(static_word(SW_GT_EXPANDING), 0, 1)
+    parse(sub, nodes, names, strs, fns, cname, cval, stt, imports, fdll,
+          fsym, cisk, cstr)
+    mem_store64(static_word(SW_GT_EXPANDING), 0, 0)
+    // 复位绑定（避免影响后续正常 parse）
+    _gt_reset()
+    // 返回特化副本的名字 id：调用点要改写成它（`_expand_all` 用）。
+    //
+    // **必须判空**：切片里若没有可解析的 `fn`（例如模板区间记错了），
+    // `parse` 一个函数都不产，`fns.get(len(fns) - 1)` 直接越界 ——
+    // 报的是 "vec index out of bounds"，跟泛型毫无关系，极难定位。
+    if len(fns) < 1 {
+        eprint("qlmc: 内部错误：泛型模板展开后没有产出函数")
+        exit(2)
+    }
+    return fns.get(len(fns) - 1).name
 }
 
 /// 顶层：`module x` 忽略；`import` 本版不支持；`fn` 逐个解析。
@@ -3770,6 +4195,15 @@ fn _pop_r(code: vec[int], r: int) {
 // ---------------------------------------------------------------------------
 
 fn _fc_reset(fc: FnCtx) {
+    // **先把 cells 扩到最大索引**。`_cell_set` 会按需扩容，但直接
+    // `fc.cells.get(C_FMOD)` 的地方（`_fn_index`）不经过 `_cell_set` ——
+    // 若此前没扩容过，`cells` 只有 10 个元素而 `C_FMOD = 200`，
+    // 读它直接 "vec index out of bounds"。
+    //
+    // v3.73 实测：`_expand_all` 建的临时 FnCtx 走 `_new_fc` -> `_fc_reset`，
+    // 从未调 `_cell_set(C_FMOD)`，于是 `_ty_of_expr` -> `_fn_index` 崩在
+    // 编译期，报的却是"vec 越界"，跟泛型毫无关系。
+    _cell_ensure(fc, C_FMOD + 1)
     fc.code.clear()
     fc.labs.clear()
     fc.fixes.clear()
@@ -4027,7 +4461,7 @@ fn _bind_pop(fc: FnCtx) {
 /// 找变量，找不到返回 -1（`_var_id` 是 fail-fast 版）
 fn _try_var(fc: FnCtx, nid: int) -> int {
     let mut b = fc.cells.get(C_BD) - 1
-    while b >= 0 {
+    while b >= 0 && b * 2 + 1 < len(fc.bind) {
         if fc.bind.get(b * 2) == nid {
             return fc.bind.get(b * 2 + 1)
         }
@@ -4045,7 +4479,7 @@ fn _try_var(fc: FnCtx, nid: int) -> int {
 
 fn _var_id(fc: FnCtx, nid: int) -> int {
     let mut b = fc.cells.get(C_BD) - 1
-    while b >= 0 {
+    while b >= 0 && b * 2 + 1 < len(fc.bind) {
         if fc.bind.get(b * 2) == nid {
             return fc.bind.get(b * 2 + 1)
         }
@@ -4058,7 +4492,11 @@ fn _var_id(fc: FnCtx, nid: int) -> int {
         }
         i = i - 1
     }
-    eprint("qlmc: 未定义变量 " + fc.names.get(nid))
+    if nid >= 0 && nid < len(fc.names) {
+        eprint("qlmc: 未定义变量 " + fc.names.get(nid))
+    } else {
+        eprint("qlmc: 未定义变量（名字 id " + nid.to_str() + " 越界）")
+    }
     exit(2)
     return -1
 }
@@ -5217,9 +5655,37 @@ fn _lower_into_agg(fc: FnCtx, nid: int, dst: int, dty: int) {
     _ir_emit(fc, OP_COPY, 0, a0, src, _ty_size(fc, dty))
 }
 
+/// 在 **lowering 之前**从 AST 反查局部变量的类型（泛型实参推断用）。
+///
+/// 为什么需要：`_ty_of_expr` 的 `E_VAR` 分支靠 `fc.vty`（lowering 期才填），
+/// 而泛型展开发生在 lowering **之前**，那时 `vty` 是空的 —— 于是
+/// `first(vs)` 里 `vs` 的类型推不出来，`vec[str]` 的元素类型也拿不到。
+///
+/// 做法：从函数体链头线性扫 `S_LET`，`a == nid` 就按初值节点的形态定类型：
+///   * `E_VECNEW` -> 它的 `a`（parse 期已算好的 vec 类型码）；
+///   * `E_MAPNEW` / `E_STRUCTLIT` / `E_ENUMCTOR` / `E_FNUM` / `E_STR` 同理；
+///   * 其余按 `_ty_of_expr` 递归。
+///
+/// **找不到就返回 -1**（不是 TY_INT）：调用方据此报"推不出泛型实参"，
+/// 而不是拿一个错的类型去展开出错误的特化副本。
+fn _let_ty(fc: FnCtx, nid: int) -> int {
+    let mut i = 0
+    while i < len(fc.nodes) {
+        let nd = fc.nodes.get(i)
+        if nd.op == S_LET && nd.a == nid && nd.b >= 0 {
+            return _ty_of_expr(fc, nd.b)
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
 /// 把表达式算进一个已存在的位置（变量）。顶层是二元/一元运算时直接发射到位。
 /// 只做类型推导（不发指令）：`let q = p` 要按 p 的类型决定 q 是标量还是聚合
 fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
+    if nid < 0 || nid >= len(fc.nodes) {
+        return TY_INT
+    }
     let nd = fc.nodes.get(nid)
     if nd.op == E_FNUM {
         return TY_F64
@@ -5228,13 +5694,27 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
         // v3.47：函数名作值 → 类型是 TY_INT（代码地址）。
         // 先试变量（局部遮蔽优先），没有变量再看是不是函数。
         let vv = _try_var(fc, nd.a)
-        if vv >= 0 {
+        // `vv` 可能 >= len(fc.vty)：类型推断发生在 **lowering 之前**
+        // （`_expand_all` 用临时 FnCtx），那时 `vty` 还没按函数长度填满。
+        // 不判长度就 `vty.get(vv)` → "vec index out of bounds"（v3.73 实测）。
+        if vv >= 0 && vv < len(fc.vty) {
             return fc.vty.get(vv)
         }
         if _fn_index(fc, nd.a) >= 0 {
             return TY_INT
         }
-        return fc.vty.get(_var_id(fc, nd.a))
+        // **不要在这里调 `_var_id`**：它是"未定义变量"的报错路径，末尾
+        // `exit(2)`。而 `_ty_of_expr` 会被泛型推断在 **lowering 之前**调用，
+        // 那时局部变量还没绑定，调它等于把一个正常情况报成编译错误
+        // （v3.73 实测：`first(vs)` 报"未定义变量 vs"）。
+        //
+        // 正确顺序：先看 `vty`（lowering 期有值），再从 AST 的 `let` 反查
+        // （lowering 之前用），都拿不到才算 TY_INT。
+        let lt = _let_ty(fc, nd.a)
+        if lt >= 0 {
+            return lt
+        }
+        return TY_INT
     }
     if nd.op == E_FIELD {
         let bty = _ty_of_expr(fc, nd.a)
@@ -5294,6 +5774,9 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
     }
     if nd.op == E_METHOD {
         let rty = _ty_of_expr(fc, nd.a)
+        if nd.b < 0 || nd.b >= len(fc.names) {
+            return TY_INT
+        }
         let m = fc.names.get(nd.b)
         if rty >= TY_MAP && rty < TY_ARRAY {
             if m == "get" {
@@ -5312,7 +5795,10 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
         return TY_INT
     }
     if nd.op == E_MATCH {
-        return _ty_of_expr(fc, fc.nodes.get(nd.b).c)
+        if nd.b >= 0 && nd.b < len(fc.nodes) {
+            return _ty_of_expr(fc, fc.nodes.get(nd.b).c)
+        }
+        return TY_INT
     }
     if nd.op == E_ARRLIT {
         return TY_ARRAY + (nd.b << 8) + TY_INT
@@ -5329,7 +5815,7 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
         // `_qlm_args_impl`（预置注入的）。所以 `_fn_index(args)` 是 -1，
         // 类型推断会掉到"未知"分支 —— `len(args())` 因此报
         // "len() 只支持 str 与 vec"。这里特判一下。
-        if fc.names.get(nd.a) == "args" {
+        if nd.a >= 0 && nd.a < len(fc.names) && fc.names.get(nd.a) == "args" {
             return TY_VEC + _vtypes_str(fc.stt)
         }
     }
@@ -16402,6 +16888,11 @@ fn main() {
     let cval = vec[int].new(8)
     let cisk = vec[int].new(8)
     let cstr = vec[int].new(8)
+    // v3.73：泛型绑定复位（-1 = 未绑定）。必须在任何 parse 之前 ——
+    // `static_word` 初值是 0，而 0 是合法类型码（TY_INT），不复位会把
+    // 任何未知类型都当成泛型 T。
+    _gt_reset()
+
     let stt = vec[int].new(TBL_SIZE)
     let mut ti = 0
     while ti < TBL_SIZE {
@@ -16503,6 +16994,11 @@ fn main() {
           cisk, cstr)
     // 复位：lowering 期 `_cur_mod` 不该再被 parse 语义使用
     _set_mod(0)
+
+    // v3.73：**泛型展开**（收 §7.44）——必须在所有 parse 之后、任何
+    // lowering 之前。lowering 走到调用点时函数必须已经存在。
+    _expand_all(toks, nodes, names, strs, fns, cname, cval, stt, imports,
+                fdll, fsym, cisk, cstr)
 
     // v3.65：**lowering 前的最后一次补登记**（此时单线程，写 stt 安全）。
     //

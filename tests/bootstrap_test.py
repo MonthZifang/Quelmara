@@ -19,6 +19,7 @@
 import argparse
 import glob
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -27,6 +28,21 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "tools", "stage0", "qlm_cli.py")
 OUT = os.path.join(ROOT, "build", "bootstrap")
 SELF_SRC = os.path.join(ROOT, "bootstrap", "qlmc", "qlmc.qma")
+
+
+def _exe_runner(exe):
+    """Linux 上跑 qlmc 产出的 PE **必须显式走 wine**。
+
+    binfmt_misc 的 `MZ` handler 会把 argv[0] 重复塞进去，qlmc 于是把
+    `build` 当成源文件名，报"打不开源文件 build"（v3.63 实测，
+    与 tools/dev/qlmc_coverage.py / tests/qlmc_test.py 同因）。
+    """
+    if os.name == "nt":
+        return [exe]
+    wine = shutil.which("wine")
+    if wine is None:
+        raise SystemExit("FAIL：Linux 上需要 wine 才能执行 qlmc 产出的 PE")
+    return [wine, exe]
 
 
 def run(cmd, timeout=900):
@@ -39,9 +55,9 @@ def build(driver, src, out, j=0):
     if driver is None:
         r = run([sys.executable, CLI, "build", src, "--target", "win", "-o", out])
     elif j:
-        r = run([driver, "build", src, "-o", out, "-j", str(j)])
+        r = run(_exe_runner(driver) + ["build", src, "-o", out, "-j", str(j)])
     else:
-        r = run([driver, "build", src, "-o", out])
+        r = run(_exe_runner(driver) + ["build", src, "-o", out])
     dt = time.time() - t0
     return r.returncode == 0 and os.path.exists(out), dt, (r.stdout + r.stderr).strip()
 
@@ -110,7 +126,7 @@ def main():
         bad = os.path.join(OUT, "bad_syntax.qma")
         with open(bad, "w", encoding="utf-8") as f:
             f.write("fn main() {\n    let x = \n}\n")
-        r = run([stage2, "build", bad, "-o", os.path.join(OUT, "bad.exe")])
+        r = run(_exe_runner(stage2) + ["build", bad, "-o", os.path.join(OUT, "bad.exe")])
         ok_err = r.returncode == 2 and "期望表达式" in (r.stdout + r.stderr)
         print(f"[2.5] stage-2 错误路径干净退 2：{'PASS' if ok_err else 'FAIL'}"
               f"（rc={r.returncode}）")

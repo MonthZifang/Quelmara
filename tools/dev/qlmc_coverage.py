@@ -81,7 +81,12 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "stage0"))
 #              **数字没涨，但口径变准了** —— 这比刷数字重要。）
 # v3.71: 68  （vec[vec[T]] —— 类型码从"加法"改成"类型表下标"，解开 std/csv。
 #              见 §7.18。剩下的 std/gen 需要泛型单态化，是另一个架构件）
-BASELINE = 68
+# v3.73: 69  （泛型单态化 —— 收 §7.44。模板记 token 区间、调用点推实参类型、
+#              重新 parse 出特化副本（改名 f__int / f__f64）、改写调用点。
+#              **69/69 = 分母全绿**，std/ 下每个模块 qlmc 都编得过。
+#              注意"编得过"只是必要条件：真实可用性由差分夹具
+#              tests/selfhost/s40_generic.qma 保证（逐字节对照 stage-0））
+BASELINE = 69
 
 QLMC_SRC = "bootstrap/qlmc/qlmc.qma"
 QLMC_EXE = os.path.join("build", "_qlmc_cov.exe")
