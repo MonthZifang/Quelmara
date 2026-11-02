@@ -1,23 +1,26 @@
-// s47_flagloop.qma —— 标志位循环的语义（v3.86）
+// s47_flagloop.qma —— 标志位循环的语义（v3.86 建，v3.87 收 §7.47 并登记）
 //
-// ⚠ **当前 qlmc 有 3 行不一致（07-gaps §7.47）**，所以这个夹具
-// **故意不登记**进 `tests/qlmc_test.py` 的 CASES 列表 —— 登记会让 CI
-// 一直红，失去"有变化才报警"的信号价值。等 §7.47 修好后再加上。
+// ✅ **v3.87 起已登记进 `tests/qlmc_test.py` 的 CASES**，与 stage-0 逐字节差分。
 //
-// 复现方式：
-//     python tools/stage0/qlm_cli.py build tests/selfhost/s47_flagloop.qma \
-//         --target win -o /tmp/a.exe && wine /tmp/a.exe     # 参照
-//     rm -rf .qlmcache && wine build/qlmc.exe build \
-//         tests/selfhost/s47_flagloop.qma -o /tmp/b.exe && wine /tmp/b.exe
-//     diff <(wine /tmp/a.exe) <(wine /tmp/b.exe)            # 3 行不同
+// ## 那次"3 行不一致"到底是什么
 //
-// ## 为什么需要它
+// v3.86 观察到 qlmc 只跑一轮循环（stage-0 打 3、qlmc 打 1）。v3.87 定位：
+// **不是源码缺陷，是本地 `build/qlmc.exe` 陈旧**。那个二进制是 14:05 用一次
+// 已完全回退的 `_opt_flag_loop`（"标志位循环 -> break"）实验编出来的，而该
+// pass **从未进入任何提交**（`git log -S_opt_flag_loop -- bootstrap/qlmc/qlmc.qma`
+// 为空）。从 HEAD 干净重建的 qlmc 对本文件 12 行输出与 stage-0 逐字节一致。
+//
+// 教训：差分测试必须**每次从源码重建被测编译器**（`tests/qlmc_test.py` 就是
+// 这么做的，所以 CI 一直是绿的）；手跑 `wine build/qlmc.exe` 验的是磁盘上
+// 那个来历不明的二进制，不是当前源码。
+//
+// ## 为什么仍然需要它
 //
 // v3.84 试过把 `while go == 1 && ...` 里的 `go = 0` 直接改写成 `break`
 // （"标志位循环 → break"），IR 层看起来完全正确（守卫里的 `cmp go, 1`
 // 确实被消掉了），**但运行时校验和错了、程序提前退出**。
 //
-// 根因：`go` 是 pin 变量，我只验证了"它只被 CONST 定义"，**没验证
+// 根因：`go` 是 pin 变量，当时只验证了"它只被 CONST 定义"，**没验证
 // "循环外没有其他读者"**。`go` 在循环结束后可能还被读到（甚至被再次
 // 赋值），把它当纯循环标志是错的。
 //

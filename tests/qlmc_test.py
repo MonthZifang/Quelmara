@@ -165,6 +165,16 @@ CASES = [
     # 的元素、`len(map)` 在"同函数两张 map"/"同文件多个带 map 的函数"时。
     # 症状是**编得出、跑得完、答案错**（比编不过更麻烦）。
     ("s46_containerelem", "tests/selfhost/s46_containerelem.qma"),
+    # v3.87：**标志位循环的语义**（收 §7.47）。
+    # `while go == 1 && p < n` + 体内 `if/else` 改 `go` + 体内 `s[p]` ——
+    # 三要素同时出现时曾观察到 qlmc 只跑一轮（stage-0 打 3、qlmc 打 1）。
+    # 定位结论：**不是源码缺陷，是本地 `build/qlmc.exe` 陈旧** —— 那个二进制
+    # 是 14:05 用一次已完全回退的 `_opt_flag_loop` 实验编出来的，而该 pass
+    # 从未进入任何提交（`git log -S_opt_flag_loop` 为空）。从 HEAD 干净重建
+    # 的 qlmc 对 12 行输出与 stage-0 逐字节一致。
+    # 夹具保留作**回归**：它同时钉住 6 种标志位循环形态，任何"把 go = 0
+    # 当 break"的优化都会在这里翻红。
+    ("s47_flagloop", "tests/selfhost/s47_flagloop.qma"),
 ]
 
 npass = 0

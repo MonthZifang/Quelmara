@@ -4462,6 +4462,40 @@ b1 寄存器池不够会溢出，实测慢 6.6 倍）。
 **下一步（未做）**：要收掉那 1.53× 得改分配器的溢出/复制决策，那是核心路径，
 必须先建"寄存器分配正确性判据"（类似 `s26_alias`），否则改错代价远高于收益。
 
+### 3.125 §7.47 收尾：不是源码缺陷，是 `build/qlmc.exe` 陈旧（v3.87）
+
+v3.86 登记的"标志位循环只跑一轮"**在源码里不存在**。v3.87 定位到根因：
+
+```
+$ stat -c '%y' build/qlmc.exe        # 2026-11-02 14:05:40  ← 早于 HEAD(15:04)
+$ git log -S_opt_flag_loop --oneline -- bootstrap/qlmc/qlmc.qma
+(空)                                  # 该 pass 从未进入任何提交
+```
+
+那个二进制是 14:05 用一次**已完全回退**的 `_opt_flag_loop`（"标志位循环 →
+break"）实验编出来的。从 HEAD 干净重建后：
+
+| 输入 | stage-0 | 旧 `build/qlmc.exe` | 从 HEAD 重建的 qlmc |
+|---|---|---|---|
+| `/tmp/g21/t.qma`（最小复现） | `3` | `1` ❌ | `3` ✅ |
+| `tests/selfhost/s47_flagloop.qma`（12 行） | 12 行 | 3 行不同 ❌ | **逐字节一致** ✅ |
+
+**为什么 CI 一直是绿的**：`tests/qlmc_test.py` 每次都先
+`python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma -o build/qlmc.exe`
+**从源码重建被测编译器**，再跑差分。CI 从来没见过那个坏二进制。
+
+**"跳过任何一个 pass 都能修好"这个误导信号也解释得通了** —— 那个二进制带着
+一个半成品 pass，扰动任何一环都会改变它的行为。
+
+**教训（已写进 `docs/07-gaps.md` §7.47）**：`build/` 是产物目录，不是可信
+输入；任何"我复现了"的结论都必须先 `rm -rf .qlmcache` 重建，或直接用
+`tests/qlmc_test.py`。
+
+**资产保留**：`s47_flagloop.qma` v3.87 起**已登记**进 CASES（此前因"怕 CI 常红"
+而故意不登记）。它现在钉住 6 种标志位循环形态 —— 正是 v3.84 那次失败优化的形状。
+
+**回归**：`tests/qlmc_test.py` **PASS=102 FAIL=0**（含新增 s47）。
+
 
 ## 4. 自举
 

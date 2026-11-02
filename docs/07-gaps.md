@@ -2959,75 +2959,41 @@ stage-0 侧测试文件（`t49_width` / `t85_narrowstore` / `t123_derive_enum` /
 `examples/`；而 §7.31 影响的是所有真实程序的性能。
 
 
-### 7.47 待修：qlmc 在 `while <flag> && ...` + `if/else` 里**循环只跑一轮**
+### 7.47 ✅ 已收（v3.87）：不是源码缺陷 —— 本地 `build/qlmc.exe` 陈旧
 
-**v3.86 写"标志位循环"夹具时撞出来的既有缺陷**（与 v3.84 那次失败的优化无关 ——
-那次改动已完全回退，本缺陷在**已发布版本**里同样存在）。
-
-**最小复现**：
-
-```quelmara
-fn main() {
-    let s = "   abc"
-    let mut p = 0
-    let mut go = 1
-    while go == 1 && p < 3 {
-        let c = s[p]
-        if c == 32 {
-            p = p + 1
-        } else {
-            go = 0
-        }
-    }
-    print(p)          // stage-0: 3    qlmc: 1
-}
-```
-
-**触发条件（已二分）**：三个要素**同时**出现才触发 ——
-1. 循环守卫是 `flag == 1 && <另一个条件>`（`&&` 短路）；
-2. 循环体内有 `if/else`，其中一支改 `flag`；
-3. 循环体内有**字符串下标** `s[p]`。
-
-去掉任一条就正常：
-* 去掉 `go`（只用 `while p < 3`）→ ✅ 正确；
-* 去掉 `if/else`（体内无条件）→ ✅ 正确；
-* 去掉 `s[p]`（用普通变量）→ ✅ 正确。
-
-**IR 层的现象**：`go == 1` 那条 `JCMPI` 变成 **NOP**（`go` 明明在循环体内被
-`CONST go, 0` 改过，不是常量），而且循环尾的 `JMP` 从跳**循环头**变成跳**出口**：
+**结论先行**：v3.86 记录的那个"循环只跑一轮"**在源码里不存在**。它来自磁盘上
+一个**陈旧二进制** `build/qlmc.exe`（mtime 14:05），那是用一次**已完全回退**的
+`_opt_flag_loop` 实验编出来的；该 pass **从未进入任何提交**：
 
 ```
-  5  CONST  go, 1
-  8  NOP                <- 原本应是 JCMPI go, 1
-  9  NOP
- 10  JCMP  p < 3  -> 出口
- ...
- 26  CONST  go, 0
- 28  JMP   -> 出口      <- 原本应是 -> 循环头(1)
+$ git log -S_opt_flag_loop --oneline -- bootstrap/qlmc/qlmc.qma
+(空)
 ```
 
-**已排除**：不是 `_opt_dce` / `_opt_copy` / `_opt_fuse` / `_opt_strength` /
-`_opt_const_imm` / `_opt_cse` / `_opt_licm` / `_opt_mod_inductive` 中**任何单个**
-pass —— 逐个 `QLM_SKIP_PASSES` 跳过，**每一个都能让结果变正确**。这说明是
-**多 pass 交互**，不是某一条 pass 的逻辑错误。
+从 HEAD 干净重建后，qlmc 对 `tests/selfhost/s47_flagloop.qma` 的 12 行输出
+与 stage-0 **逐字节一致**（`diff` 无输出）。
 
-**为什么难查**：跳过任何一个 pass 都能"修好"，这个信号本身有误导性 ——
-它让人以为"是那个 pass 的错"，实际是"任何扰动都改变了 pass 之间的状态耦合"。
+**为什么 CI 一直是绿的**：`tests/qlmc_test.py` 每次都先
+`python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma -o build/qlmc.exe`
+**从源码重建被测编译器**，再拿它跑差分。所以 CI 从来没见过那个坏二进制 ——
+只有"手动 `wine build/qlmc.exe`"这条路会踩到它。
 
-**夹具已入库**：`tests/selfhost/s47_flagloop.qma`（12 行输出，覆盖 6 种形态：
+**教训（值得写进流程）**：
+* 手跑 `wine build/qlmc.exe` 验的是**磁盘上那个来历不明的二进制**，不是当前
+  源码。任何"我复现了"的结论，都必须先 `rm -rf .qlmcache && 重建` 或直接用
+  `tests/qlmc_test.py`。
+* `build/` 是**产物目录**，不是可信输入。它不入库，也没人管它的新鲜度。
+* 当时"跳过任何一个 pass 都能修好"这个误导信号，现在也解释得通了 ——
+  那个二进制带着一个半成品 pass，扰动任何一环都会改变它的行为。
+
+**保留的资产**：`tests/selfhost/s47_flagloop.qma`（12 行输出，覆盖 6 种形态：
 基本形态 / 循环后仍读 flag / 循环外重新赋值 / 两个循环串联 / flag 参与返回值 /
-循环内重新置 1）。当前 qlmc 有 **3 行不一致**。
+循环内重新置 1）。v3.87 起**已登记**进 `tests/qlmc_test.py` 的 CASES ——
+它现在钉住的是"任何把 `go = 0` 当 `break` 的优化都会翻红"，这正是 v3.84
+那次失败的形状。
 
-**它为什么还没被现有回归抓到**：`s1_basics` / `s3_manyfns` 等夹具里的循环
-体内都没有 `if/else` + 字符串下标这个组合。**这是回归覆盖的真空**。
-
-**下一步建议**：
-1. 先用 `--no-opt` 确认 lowering 本身是对的（v3.86 实测：关掉优化后 `JMP`
-   确实是 `imm=1`，**所以错在优化层**）；
-2. 在 `_opt` 里加"pass 之间打 IR 快照"的调试开关，逐 pass 对比第 8-9 行与
-   第 28 行的变化 —— 现在只能整体跳过，看不清是哪一步动的；
-3. **不要靠"再加一个 pass 修补"** —— 根因是状态耦合，得先找到哪个 pass 读了
-   过期的 `use` / `ndef`。
+**回归覆盖的真空已补**：`s1_basics` / `s3_manyfns` 等夹具里的循环体内都没有
+`if/else` + 字符串下标这个组合，s47 补上了。
 
 
 ## 8. 推进顺序（2026-10-22 调整）平台相关（§4）**暂停**；TLS 信任链（根证书库 / P-384 / SHA-384）也停在 v1.27 的进度。
