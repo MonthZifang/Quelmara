@@ -96,8 +96,18 @@ def main():
                 hdr[k.strip().lower()] = v.strip()
 
         # ---- [1] 状态与响应头 ----
-        ok("订阅返回 200") if "200" in head_text.split("\r\n")[0] \
-            else bad(f"状态行：{head_text.splitlines()[0]}")
+        #
+        # **空响应要单独处理**（v3.82）：服务端没起来 / 连接被立刻关闭时
+        # `buf` 是空的，`head_text.splitlines()[0]` 会抛 IndexError，
+        # 整条测试以 rc=1 崩掉 —— 报出来的是 Python traceback 而不是
+        # "服务端没响应"。CI 上就因为这个偶发红过一次。
+        if not head_text.strip():
+            # 空响应：记一条失败后**继续走正常收尾**（proc.kill + 汇总行），
+            # 不能直接 `return 1` —— 那会跳过进程清理，留下僵死的服务端。
+            bad("状态行：服务端没有返回任何数据（连接被立刻关闭？）")
+        else:
+            ok("订阅返回 200") if "200" in head_text.split("\r\n")[0] \
+                else bad(f"状态行：{head_text.splitlines()[0]}")
 
         ct = hdr.get("content-type", "")
         ok(f"Content-Type 是 text/event-stream（{ct}）") \
