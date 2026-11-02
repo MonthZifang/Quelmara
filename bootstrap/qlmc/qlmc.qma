@@ -7763,6 +7763,15 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     // 放在归纳削减之后：它只改 JMP 目标、不插入指令，所以不需要重算长度；
     // 但它**读了 use/ndef 之外的全函数结构**，放在 DCE 之前让死代码一起收掉。
     _opt_flag_loop(fc, use, ndef)
+    // **`use` 和 `ndef` 都要先清零再重算**（v3.89）。以前只清了 `use`，
+    // `_opt_ndef` 是**累加**语义，于是第二次调用后每个 vreg 的定义次数都翻倍 ——
+    // `_opt_copy` 的 `ndef.get(d) == 1` 条件就永远不成立，归纳削减插的
+    // `MOV dst, v` 一条也消不掉（b1_int 热循环里白留一条 `mov r8, r6`）。
+    i = 0
+    while i < len(ndef) {
+        ndef.set(i, 0)
+        i = i + 1
+    }
     _opt_ndef(ir, ndef)
     i = 0
     while i < len(use) {
