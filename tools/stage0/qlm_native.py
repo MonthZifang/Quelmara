@@ -1752,7 +1752,12 @@ class Lower:
                     fn.emit("fcmpset", wa, "e", d, a, ("imm", 0))
                     return self._mark_bool(fn, d)
                 if isinstance(a, tuple) and a[0] == "imm":
-                    return ("imm", 0 if a[1] else 1)
+                    # v3.79（收 §7.22）：折叠结果也要带 bool 标记，
+                    # 否则 `print(!true)` 走 __print_i64 打 0，
+                    # 而 `print(!t)`（变量）打 true —— 又是不一致。
+                    d = fn.new_v()
+                    fn.emit("mov", d, ("imm", 0 if a[1] else 1))
+                    return self._mark_bool(fn, d)
                 d = fn.new_v()
                 fn.emit("cmpset", "e", d, a, ("imm", 0))
                 return self._mark_bool(fn, d)
@@ -2333,7 +2338,19 @@ class Lower:
                 return ("imm", x ^ y)
             cmp_map = {"==": x == y, "!=": x != y, "<": x < y, "<=": x <= y, ">": x > y, ">=": x >= y}
             if op in cmp_map:
-                return ("imm", 1 if cmp_map[op] else 0)
+                # v3.79（收 §7.22）：折叠出来的比较结果**仍然要带 bool 标记**。
+                #
+                # 以前直接返回 ("imm", 0/1)，于是 `print(1 < 2)` 走
+                # `__print_i64` 打 1，而 `print(i + 1 < n)`（运行期，不折叠）
+                # 走 `__print_bool` 打 true —— **同一个表达式形态，两种输出**。
+                # 那是 stage-0 自己不一致，不是语言差异。
+                #
+                # 修法：折成一个**带标记的临时 vreg**（一条 `mov` 而已，
+                # 常量折叠省下的指令数基本不变），这样下游的 print /
+                # 条件判断都按 bool 处理。
+                d = fn.new_v()
+                fn.emit("mov", d, ("imm", 1 if cmp_map[op] else 0))
+                return self._mark_bool(fn, d)
         d = fn.new_v()
         if op in ("<", "<=", ">", ">=") and (self._is_str(fn, a) or self._is_str(fn, b)):
             # 字符串按字节字典序比较（早期这里走的是指针比较，属于语义 bug）

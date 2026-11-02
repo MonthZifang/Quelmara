@@ -4852,7 +4852,7 @@ fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
         let cc = _fcmp_cc(op)
         if cc != 0 {
             _ir_emit(fc, OP_FCMP, dst, lv, rv, cc)
-            return TY_INT
+            return TY_BOOL      // 比较产生 bool（v3.79，收 §7.22）
         }
         eprint("qlmc: f64 只支持 + - * / 与比较")
         exit(2)
@@ -4944,6 +4944,13 @@ fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
         // 两侧的基址。loc < 0 是帧槽；loc >= 0 说明值在寄存器里 ——
         // 聚合永远不进寄存器（`_new_var` 对 isagg 直接给帧槽），
         // 所以这里只可能是帧槽，但保险起见仍按地址取。
+        // **两个基址都要 `_pin`**（v3.79 修正 v3.78 的缺陷）。
+        //
+        // 不 pin 的话它们只是临时值：分配器允许把 `ra` 和后面的临时值
+        // 复用同一个寄存器，于是 `ARG ra` 拿到的可能是别人的值。
+        // 实测形态（s43_boolprint）：`la`/`ra` 分别落 r8/r9，随后
+        // `MOV 105(r9), 102(la)` 把 `ra` 所在的 r9 覆盖掉，`ARG ra` 于是
+        // 传了 `la` —— mem_cmp 比的是"自己和自己"，恒等。
         let la = _vnew(fc)
         fc.vty.set(la, TY_INT)
         if fc.vloc.get(l) < 0 {
@@ -4951,6 +4958,7 @@ fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
         } else {
             _ir_emit(fc, OP_MOV, la, l, 0, 0)
         }
+        let la2 = _pin(fc, la)
         let ra = _vnew(fc)
         fc.vty.set(ra, TY_INT)
         if fc.vloc.get(r) < 0 {
@@ -4958,11 +4966,12 @@ fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
         } else {
             _ir_emit(fc, OP_MOV, ra, r, 0, 0)
         }
+        let ra2 = _pin(fc, ra)
         let sz = _vnew(fc)
         fc.vty.set(sz, TY_INT)
         _ir_emit(fc, OP_CONST, sz, 0, 0, n)
-        _ir_emit(fc, OP_ARG, 0, la, 0, 0)
-        _ir_emit(fc, OP_ARG, 0, ra, 0, 1)
+        _ir_emit(fc, OP_ARG, 0, la2, 0, 0)
+        _ir_emit(fc, OP_ARG, 0, ra2, 0, 1)
         _ir_emit(fc, OP_ARG, 0, sz, 0, 2)
         let d = _vnew(fc)
         fc.vty.set(d, TY_INT)
@@ -4981,15 +4990,19 @@ fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
         } else {
             _ir_emit(fc, OP_MOV, dst, eqv, 0, 0)
         }
-        return TY_INT
+        return TY_BOOL      // 比较产生 bool（与标量路径一致）
     }
-    // 比较结果按 **int** 收（保持 v2.33 之前的口径）。为什么不是 bool：
-    // stage-0 会把编译期可折叠的比较（`print(1 < 2)`）折成 int 打 1，而运行期的
-    // 比较（`print(i + 1 < n)`）打 true —— 它自己就不一致。qlmc 没有常量折叠，
-    // 只能对一头，选 int 这头（夹具 s1_basics 的 `print((1<2) && (3>2))` 依赖它）。
-    // 已知差异：运行期比较被直接 print 时 stage-0 打 true、qlmc 打 1（见 07-gaps §7.22）。
+    // 比较结果按 **bool** 收（v3.79，收 §7.22）。
+    //
+    // 以前收 int，理由是"stage-0 会把可折叠的比较折成 int 打 1，qlmc 没有常量
+    // 折叠，只能对一头"。但那等于**把一个不一致固化进契约**：同一个表达式形态
+    // （`print(1 < 2)` vs `print(i + 1 < n)`）在 stage-0 里打出两种结果。
+    //
+    // 正确做法是修 stage-0 让它一致（v3.79 同版修了它的常量折叠），两边都收
+    // bool —— `print` 打 true/false，与语言定义（`02-language.md`：比较产生
+    // bool）一致。
     _ir_emit(fc, OP_CMP, dst, l, r, cc + 0x10)
-    return TY_INT
+    return TY_BOOL
 }
 
 
@@ -5266,8 +5279,12 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
             return d
         }
         let d = _vnew(fc)
-        // `!` 在 stage-0 里是 int（打印 1/0）
-        fc.vty.set(d, TY_INT)
+        // `!` 产生 bool；`-` / `~` 是 int（v3.79，收 §7.22）。
+        if nd.a == P_MINUS || nd.a == P_TILDE {
+            fc.vty.set(d, TY_INT)
+        } else {
+            fc.vty.set(d, TY_BOOL)
+        }
         if nd.a == P_MINUS {
             _ir_emit(fc, OP_NEG, d, a, 0, 0)
         } else if nd.a == P_TILDE {
@@ -5934,7 +5951,13 @@ fn _lower_into(fc: FnCtx, nid: int, dst: int) {
             _ir_emit(fc, OP_FNEG, dst, a, 0, 0)
             return
         }
-        fc.vty.set(dst, TY_INT)
+        // `!` 产生 **bool**（v3.79，收 §7.22）；`-` / `~` 保持 int。
+        // 以前三种都设 TY_INT，于是 `print(!(1 == 2))` 打 1 而 stage-0 打 true。
+        if nd.a == P_MINUS || nd.a == P_TILDE {
+            fc.vty.set(dst, TY_INT)
+        } else {
+            fc.vty.set(dst, TY_BOOL)
+        }
         if nd.a == P_MINUS {
             _ir_emit(fc, OP_NEG, dst, a, 0, 0)
         } else if nd.a == P_TILDE {
