@@ -25,8 +25,16 @@ SYSCALL_RE = re.compile(r"\('syscall', (None|\d+), (\d+),")
 # v3.19：`target_os()` / `target_arch()` 折叠成 ('imm', N) 后出现在 jcc 的比较位。
 # 只匹配这个**特征形态**（两个 imm 做 ne/eq 比较），不碰普通常量 ——
 # 见 normalize() 的说明。
+# v3.73：**常量折叠之后** `target_arch() == 1` 不再是 `jcc` 两 imm 比较，
+# 而是直接被折成 `jnz ('imm', N)` / `jz ('imm', N)`。老规则只匹配 jcc 形态，
+# 于是 t184（`assert(target_arch() == 1, ...)`）在 a64 上被判分叉 ——
+# 而那是**正确行为**（a64 的 target_arch 是 2，断言本来就只对 x86 成立）。
+#
+# 补上折叠后的形态：`('jnz', ('imm', N), L)` / `('jz', ('imm', N), L)`。
 TARGET_IMM_RE = re.compile(
     r"\('jcc', '(ne|eq)', \('imm', \d+\), \('imm', \d+\),")
+# 折叠后的单 imm 分支：立即数归一化成 T
+TARGET_JNZ_RE = re.compile(r"\('(jnz|jz)', \('imm', \d+\),")
 
 
 def normalize(text):
@@ -53,6 +61,8 @@ def normalize(text):
     #     出现在比较位（jcc 的 a/b）或赋值位。用 TARGET_IMM_RE 精确匹配
     #     "jcc 里比较两个 imm 之一" 这个特征形态，避免误伤普通常量。
     s = TARGET_IMM_RE.sub(lambda m: f"('jcc', '{m.group(1)}', ('imm', T), ('imm', T),", s)
+    # 同上，但针对**常量折叠之后**的形态（v3.73）
+    s = TARGET_JNZ_RE.sub(lambda m: f"('{m.group(1)}', ('imm', T),", s)
     return s + "\n"
 
 
