@@ -1,0 +1,59 @@
+// s48_csub.qma —— 归纳削减的**条件减回绕**（v3.90，`OP_CSUBNS`）
+//
+// 背景：`(i*C) % D` 被归纳削减成"递增计数器 + 条件回绕"。回绕有两种写法：
+//   * 分支版：`cmp v, D; jl skip; sub v, D`  ← v3.89 之前
+//   * 无分支：`t = v - D; cmovns v, t`        ← v3.90 起
+//
+// v2.88 试过纯算术的无分支版（`t=v-D; m=t>>63; m&=D; v=t+m`），失败：
+// 它要两个 IR 级临时值，b1_int 的寄存器池挤不下，溢出到帧槽后慢 6.6×。
+// v3.90 用 `cmovns`，暂存压到发射器专用的 RAX，**IR 层不多要临时值**。
+//
+// 这个夹具钉的是**回绕的边界**：v 恰好等于 D、D-1、D+1、2D-1 时
+// 都必须只减一次（不能减两次，也不能不减）。
+//
+// 语义参照（stage-0）：见下方 print 顺序
+fn wrap_probe(c: int, d: int) -> int {
+    // `i*C % D` 在 i 走完一圈时的累计 —— 走归纳削减的快路
+    let mut acc = 0
+    let mut i = 0
+    while i < 40 {
+        acc = acc + (i * c) % d
+        i = i + 1
+    }
+    return acc
+}
+
+fn single(n: int, d: int) -> int {
+    // n 恰好跨过回绕点
+    let mut v = 0
+    let mut i = 0
+    while i < n {
+        v = (i * 7) % d
+        i = i + 1
+    }
+    return v
+}
+
+fn main() {
+    // [1] 常见除数
+    print(wrap_probe(7, 13))
+    print(wrap_probe(3, 7))
+    print(wrap_probe(5, 11))
+    print(wrap_probe(1, 2))
+    print(wrap_probe(9, 10))
+
+    // [2] 除数 = 步长 + 1（回绕最频繁：每轮都回绕一次）
+    print(wrap_probe(1, 2))
+    print(wrap_probe(12, 13))
+    print(wrap_probe(6, 7))
+
+    // [3] 大步长（一次加可能跨过 D）
+    print(wrap_probe(100, 13))
+    print(wrap_probe(1000, 7))
+
+    // [4] 走单条取模，确认最后一个值
+    print(single(1, 13))
+    print(single(13, 13))
+    print(single(14, 13))
+    print(single(40, 13))
+}

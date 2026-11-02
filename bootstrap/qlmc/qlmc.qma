@@ -3452,6 +3452,15 @@ fn _alu_rr(code: vec[int], op: int, dst: int, src: int) {
     _modrm(code, 3, src, dst)
 }
 
+/// `cmovns dst, src`（0F 49 /r）：**src 最高位为 0 时 dst = src**，否则 dst 不变。
+/// v3.90：条件减的无分支形式靠它，比 `t>>63` 那套省一个 IR 级临时值。
+fn _cmovns(code: vec[int], dst: int, src: int) {
+    _rex2(code, 1, dst, src)
+    _b(code, 0x0F)
+    _b(code, 0x49)
+    _modrm(code, 3, dst, src)
+}
+
 fn _imul_rr(code: vec[int], dst: int, src: int) {
     _rex2(code, 1, dst, src)
     _b(code, 0x0F)
@@ -3779,6 +3788,13 @@ const OP_XMMRR = 83
 const OP_XMMRI = 84
 // SSE 立即数移位（单槽 + imm8）：imm = (opc<<24) | (imm8<<16) | (group<<8) | slot
 const OP_XMMSH = 85
+// 条件减，**无分支**（v3.90）：`dst = (a - imm >= 0) ? (a - imm) : a`。
+// 归纳削减的回绕用它代替 `JCMPI + BINI`，**IR 层不多要任何临时值**。
+//
+// 为什么不复用 v2.88 的算术序列（`t=v-D; m=t>>63; m&=D; v=t+m`）：那要两个
+// IR 级临时值，b1_int 的 `main` 挤不下，溢出到帧槽后热循环多两次访存，
+// 实测慢 6.6×。这里借 `cmovns` 把暂存压到发射器专用的 RAX（不参与分配）。
+const OP_CSUBNS = 86
 
 struct Ir {
     op: int
@@ -6725,6 +6741,8 @@ fn _opt_pure(op: int) -> int {
     // v2.81：`OP_BINI`（dst = a <sub> imm）也是纯运算。以前没列进来，导致
     // 归纳削减把 `t = i*C` 变成死代码之后删不掉，热循环里白留一条 `imul`。
     if op == OP_BINI { return 1 }
+    // v3.90：条件减的无分支形式也是纯运算（只算 dst，不碰内存/不跳转）
+    if op == OP_CSUBNS { return 1 }
     return 0
 }
 
@@ -6740,7 +6758,7 @@ fn _opt_mark(ins: Ir, use: vec[int]) {
     }
     // OP_BINI / OP_CMPI 的 `b` 槽放的是子操作码 / setcc 机器码，不是 vreg
     if ins.op != OP_BINI && ins.op != OP_CMPI && ins.op != OP_DIVC &&
-       ins.op != OP_JCMPI {
+       ins.op != OP_JCMPI && ins.op != OP_CSUBNS {
         if ins.b > 0 && ins.b < len(use) {
             use.set(ins.b, use.get(ins.b) + 1)
         }
@@ -7195,10 +7213,19 @@ fn _mod_ind_apply(fc: FnCtx, h: int, hit: int, di: int, i0: int, c: int, dd: int
         // 原因：它要多两个临时值，b1 的 `main` 里寄存器池（7 个）不够，溢出到
         // 帧槽，热循环里多出访存。**b1 是延迟敏感型，b8 是吞吐型** —— 同一个
         // 变换在两边方向相反，所以保留分支版（分支在 13 周期模式上预测得很好）。
+        // v3.90：回绕用 **`OP_CSUBNS`（无分支条件减）**，取代原来的
+        // `JCMPI + BINI + LAB` 三条。
+        //
+        // 为什么现在能这么做，而 v2.88 的无分支版失败：那版是纯算术
+        // `t=v-D; m=t>>63; m&=D; v=t+m`，要**两个 IR 级临时值**；b1_int 的
+        // `main` 寄存器池挤不下，溢出到帧槽后热循环多两次访存，慢 6.6×。
+        // `cmovns` 只需要发射器专用的 RAX（不参与分配），**IR 层一个临时值
+        // 都不多要** —— 这是两者的关键差别。
         _ir_insert(fc, dbase + 1, OP_BINI, v, v, OP_ADD, step)
-        _ir_insert(fc, dbase + 2, OP_JCMPI, 0x8C, v, dd, lskip)
-        _ir_insert(fc, dbase + 3, OP_BINI, v, v, OP_SUB, dd)
-        _ir_insert(fc, dbase + 4, OP_LAB, 0, 0, 0, lskip)
+        _ir_insert(fc, dbase + 2, OP_CSUBNS, v, v, 0, dd)
+        // lskip 不再被任何分支引用，但标签本身保留（标签 id 是全局递增的，
+        // 删掉会让后面的 id 错位）
+        _ir_insert(fc, dbase + 3, OP_LAB, 0, 0, 0, lskip)
         // 2) 循环头之前的常量初始化（h 在最前，最后插）
         _ir_insert(fc, h, OP_CONST, v, 0, 0, r0)
 }
@@ -8772,6 +8799,46 @@ fn _emit_ir(fc: FnCtx, i: int) {
         if dloc <= 0 {
             _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
         }
+        return
+    }
+    if op == OP_CSUBNS {
+        // dst = (a - imm >= 0) ? (a - imm) : a —— 条件减的无分支形式（v3.90）。
+        //
+        //     mov    rax, a      ; rax = 原值（RAX 是发射器专用暂存，不参与分配）
+        //     sub    rax, imm    ; rax = 原值 - imm
+        //     mov    d, a        ; d   = 原值（d 可能就是 a，那就省掉）
+        //     cmovns d, rax      ; **减完非负**才采纳
+        //
+        // `cmovns` 的语义是"src 最高位为 0 时 dst = src"，所以 src 必须是
+        // **减完**的值、dst 是**原值**。第一版写反了（拿原值当 src），
+        // b1_int 当场从 1199999880000000 变成 -1199999940000000。
+        let dloc = fc.vloc.get(ins.dst)
+        let mut d = RAX
+        if dloc > 0 {
+            d = dloc - 1
+        }
+        let aloc = fc.vloc.get(ins.a)
+        let mut src = RAX
+        if aloc > 0 {
+            src = aloc - 1
+        } else {
+            _to_reg(fc, RAX, ins.a)
+        }
+        if dloc <= 0 {
+            // dst 落帧槽：算到 RAX，cmov 从 src 取回原值，再写回槽
+            _mov_rr(code, RAX, src)
+            _alu_imm(code, 5, RAX, ins.imm)          // rax = 原值 - imm
+            _cmovns(code, RAX, src)                  // 负数就退回原值
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+            return
+        }
+        // dst 是寄存器：先摆原值，再算减完的值，最后条件采纳
+        _mov_rr(code, RAX, src)                      // rax = 原值
+        _alu_imm(code, 5, RAX, ins.imm)              // rax -= imm
+        if d != src {
+            _mov_rr(code, d, src)                    // d = 原值
+        }
+        _cmovns(code, d, RAX)                        // 减完非负才采纳
         return
     }
     if op == OP_CMPI {
