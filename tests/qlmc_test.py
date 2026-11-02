@@ -135,6 +135,12 @@ CASES = [
     # 改写调用点"四步，任一步错都是静默错编（0 个函数 / 名字没换 /
     # 调用点没改写 / 类型绑错）。只有逐字节差分能抓。
     ("s40_generic", "tests/selfhost/s40_generic.qma"),
+    # v3.75：**第 5 个及以后位置的 f64 形参**（收 §7.33）。Win64 前 4 个整型
+    # 实参走寄存器、第 5 个起上栈；f64 住 XMM。以前分配器只在"区间内无调用"
+    # 时才给 f64 分 XMM，于是 CALL 的返回值（区间必然含那次调用）被分到通用
+    # 寄存器，一路按 int 语义搬运 —— 七参函数的第 6 个 f64 形参读出来是 0。
+    # **必须是差分用例**：不崩、不报错，只是数值不对，只有逐字节比对能抓。
+    ("s41_f64stk", "tests/selfhost/s41_f64stk.qma"),
 ]
 
 npass = 0
@@ -222,8 +228,15 @@ def main():
             continue
         ok(f"{name}: qlmc 产物是 PE32+ AMD64（{pi['size']} 字节，{pi['nsec']} 节）")
 
-        a = subprocess.run([out0], capture_output=True)
-        b = subprocess.run([out1], capture_output=True)
+        # 产物要在本机跑：Linux 上走 wine（binfmt 的 MZ handler 会重复
+        # argv[0]），并且要补执行位 —— stage-0 写出来的文件默认没有 x 位。
+        for _p in (out0, out1):
+            try:
+                os.chmod(_p, 0o755)
+            except OSError:
+                pass
+        a = subprocess.run(_exe_runner(out0), capture_output=True)
+        b = subprocess.run(_exe_runner(out1), capture_output=True)
         if a.stdout == b.stdout and a.returncode == b.returncode:
             ok(f"{name}: 与 stage-0 输出逐字节相同（{len(a.stdout)} 字节, rc={a.returncode}）")
         else:
@@ -251,7 +264,11 @@ def main():
             ok(f"-j1 与 -j4 产物逐字节相同（{len(d0)} 字节）")
         else:
             bad(f"-j1 与 -j4 产物不同（{len(d0)} vs {len(d1)} 字节）")
-        r = subprocess.run([outs[1]], capture_output=True)
+        try:
+            os.chmod(outs[1], 0o755)
+        except OSError:
+            pass
+        r = subprocess.run(_exe_runner(outs[1]), capture_output=True)
         if r.returncode == 0 and r.stdout == b"123013\n":
             ok("-j4 产物运行结果正确（200 个函数的累加）")
         else:

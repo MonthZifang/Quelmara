@@ -3382,6 +3382,26 @@ fn _mov_store_rsp(code: vec[int], disp: int, src: int) {
     _w32(code, disp)
 }
 
+/// `movsd [rsp+disp32], xmm`（F2 0F 11 /r）—— 写**栈实参**里的 f64。
+///
+/// 为什么不能复用 `_mov_store_rsp`：那条编的是 `mov [rsp+disp], r64`，
+/// 只能搬通用寄存器。f64 的值住在 XMM 里（vloc >= XLOC），走那条等于
+/// 把 XMM 编号当通用寄存器号编，存进去的是垃圾。
+///
+/// 为什么不能复用 `_sse_mem`：它用 `_modrm` 而非 `_modrm_sib`，
+/// base=RSP 时缺 SIB 字节，disp32 会被 CPU 当 SIB 解析，整条指令错位。
+///
+/// v3.75 实测（§7.33）：`fn mknd(..., n: int, f: f64)` 的第 6 个形参
+/// 是 f64、走栈传参，修之前读到 0，修之后读到 3.5。
+fn _sse_store_rsp(code: vec[int], disp: int, x: int) {
+    _b(code, 0xF2)
+    _rex2(code, 0, x, RSP)
+    _b(code, 0x0F)
+    _b(code, 0x11)
+    _modrm_sib(code, 2, x)
+    _w32(code, disp)
+}
+
 // [rsp+disp32] 的 modrm 带 SIB
 fn _modrm_sib(code: vec[int], mod: int, reg: int) {
     _modrm(code, mod, reg, 4)
@@ -7715,7 +7735,26 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int], csb: vec[int], lpm: vec[in
                     }
                 }
             }
-            if crosses == 0 {
+            // v3.75（§7.33）：**f64 且区间跨调用** → 分非易失 XMM6..15。
+            //
+            // 以前只在 `crosses == 0`（区间内无调用）时才给 f64 分 XMM，
+            // 于是 `CALL` 的返回值（区间必然包含那次调用本身，crosses > 0）
+            // 被分到**通用寄存器** —— `movq rax, xmm0` 之后一路当整数搬，
+            // 接收侧再 `movq xmm, rax` 转回来，位模式本该没错，但中途任何
+            // 一条按 int 语义处理它的指令（比较/算术/分配器 spill）都会毁掉
+            // 它。实测：七参函数的第 6 个 f64 形参读出来是 0。
+            //
+            // 分 XMM_VAR0..（XMM6-15，Win64 非易失）是安全的：它们在
+            // `_emit_fn` 的序言/尾声统一保存恢复，跨调用存活。
+            if crosses > 0 && fc.vty.get(v) == TY_F64 {
+                let mut nx2 = _nxf_get(fc)
+                if nx2 < N_XMMVAR {
+                    fc.vloc.set(v, XLOC + XMM_VAR0 + nx2)
+                    _cell_set(fc, C_NXF, nx2 + 1)
+                    placed = 1
+                }
+            }
+            if placed == 0 && crosses == 0 {
                 if fc.vty.get(v) == TY_F64 {
                     let mut rx = 0
                     while rx < 4 {
@@ -8838,10 +8877,28 @@ fn _emit_ir(fc: FnCtx, i: int) {
         // [rsp + imm] = a。RSP 当基址时 ModRM 的 rm=100 是"SIB 跟在后面"的
         // 标记，必须补一个 SIB 字节（0x24 = 无 index + base=rsp），
         // 否则 disp32 会被当成 SIB 解析，整条指令编码就错位了。
+        //
+        // v3.75（§7.33）：**f64 实参必须走 movsd**。以前这里只认通用寄存器
+        // 和帧槽，XMM 里住着的 f64 会被 `_mov_store_rsp` 当整数搬 ——
+        // 第 5 个及以后的 f64 形参因此读到垃圾位模式（实测读到 0）。
         let aloc = fc.vloc.get(ins.a)
-        if aloc > 0 {
+        if aloc >= XLOC {
+            // 值在 XMM 寄存器里
+            _sse_store_rsp(code, ins.imm, aloc - XLOC)
+        } else if aloc > 0 {
             _mov_store_rsp(code, ins.imm, aloc - 1)
         } else {
+            // 值在帧槽里。
+            //
+            // **f64 与 int 在这里不需要区分**：两者都是 8 字节，栈实参位置
+            // 要的就是"把这 8 字节搬过去"。`mov rax, [rbp+slot]` +
+            // `mov [rsp+imm], rax` 搬的是位模式，对 f64 完全正确 ——
+            // 不需要经过 XMM（经过反而要借 XMM0，那是临时寄存器池的头一个，
+            // 可能正持有别的值）。
+            //
+            // 真正的修复点在**上面两个分支**：值住在 XMM 寄存器里时
+            // 必须用 `movsd`，因为 `_mov_store_rsp` 编的是
+            // `mov [rsp+disp], r64`，把 XMM 编号当通用寄存器号编会存进垃圾。
             _mov_load(code, RAX, RBP, _slot_disp(-aloc - 1))
             _mov_store_rsp(code, ins.imm, RAX)
         }

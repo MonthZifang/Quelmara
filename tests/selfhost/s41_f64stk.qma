@@ -1,0 +1,63 @@
+// s41_f64stk.qma —— 第 5 个及以后位置的 f64 形参（v3.75，收 §7.33）
+//
+// ## 为什么需要它
+//
+// Win64 前 4 个整型实参走 RCX/RDX/R8/R9，第 5 个起在栈上；f64 走
+// XMM0-3 之后**也在栈上**。qlmc 的 `OP_STKARG` 以前只认通用寄存器和
+// 帧槽，XMM 里住着的 f64 会被当整数搬 —— 存进去的是 XMM 编号而不是
+// 位模式，函数里读出来是 0 或 denormal 垃圾。
+//
+// 症状极隐蔽：不崩、不报错，只是**数值不对**。§7.33 是写解释器时撞上
+// 的（一个七参数函数的第 7 个形参是 f64），当时的绕法是"不让 f64 出现
+// 在第 5 个及以后的位置"，但那只是绕，不是修。
+//
+// ## 覆盖的形态
+//
+//   [1] 6 参：第 6 个是 f64（栈上第一个 f64）
+//   [2] 7 参：第 6、7 个都是 f64（连续两个栈上 f64）
+//   [3] 混合：第 5 个 int、第 6 个 f64、第 7 个 int、第 8 个 f64
+//   [4] f64 从 struct 字段读出后再传（原缺陷的原始形态）
+//   [5] f64 运算结果直接作为栈实参（值在 XMM 临时寄存器里）
+//
+// 语义参照（stage-0）：见下方 print 顺序
+struct Tok { k: int, n: int, f: f64, s: str, line: int }
+struct Nd  { k: int, a: int, b: int, c: int, n: int, f: f64 }
+
+// [1] 6 参，第 6 个是 f64
+fn six(a: int, b: int, c: int, d: int, e: int, f: f64) -> f64 {
+    return f
+}
+
+// [2] 7 参，第 6、7 个都是 f64
+fn seven2(a: int, b: int, c: int, d: int, e: int, f: f64, g: f64) -> f64 {
+    return f * 10.0 + g
+}
+
+// [3] 混合：int / f64 / int / f64
+fn mixed(a: int, b: int, c: int, d: int, e: int, f: f64,
+         g: int, h: f64) -> f64 {
+    return f + to_float(g) + h
+}
+
+// [4] 原缺陷形态：把 f64 写进 struct 字段
+fn mknd(nd: vec[Nd], k: int, a: int, b: int, c: int, n: int, f: f64) -> int {
+    nd.push(Nd { k: k, a: a, b: b, c: c, n: n, f: f })
+    return len(nd) - 1
+}
+
+fn main() {
+    // [1]
+    print(six(1, 2, 3, 4, 5, 3.5))
+    // [2]
+    print(seven2(1, 2, 3, 4, 5, 1.5, 2.5))
+    // [3]
+    print(mixed(1, 2, 3, 4, 5, 1.25, 7, 0.5))
+    // [4] 从 struct 字段读出后传
+    let nd = vec[Nd].new(8)
+    let t = Tok { k: 1, n: 2, f: 3.5, s: "x", line: 7 }
+    let i = mknd(nd, 21, 0, 0, 0, 0, t.f)
+    print(nd[i].k)
+    print(nd[i].f)
+    // [5] 运算结果直接当栈实参（值在 XMM 临时寄存器里）
+    print(six(0, 0, 0, 0, 0, t.f * 2.0 + 1.0))
+}
