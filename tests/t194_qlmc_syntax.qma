@@ -42,11 +42,13 @@ fn main() {
         print("c8=ne")
     }
     // 整型 const 与字符串 const 混在同一张表里不能互相污染。
-    // **注意**：这里先存进变量再 `.to_str()`，不写 `SC_BATCH.to_str()` ——
-    // stage-0 有个既有缺陷：const 名直接当方法接收者时不走 const 内联
-    // （报"未定义变量"），`let x = SC_BATCH` 才认。见 07-gaps §7.41。
-    let batch = SC_BATCH
-    print("c9=" + batch.to_str())
+    //
+    // v3.77：**const 名直接当方法接收者**（`SC_BATCH.to_str()`）现在能编了 ——
+    // 收 §7.41。以前这里被迫写成 `let batch = SC_BATCH` 再 `.to_str()`，
+    // 因为 stage-0 只要看到 `.` 就不内联 const，`SC_BATCH.to_str()` 报
+    // "未定义变量 SC_BATCH"。**这条用例本身就是那个缺陷的回归钉**：
+    // 以后谁再把 const 内联的判据写窄，这里会立刻编不过。
+    print("c9=" + SC_BATCH.to_str())
 
     // ---- 2. 位运算复合赋值 ----
     let mut a = 1

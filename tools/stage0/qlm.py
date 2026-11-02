@@ -3505,10 +3505,26 @@ class Parser:
             return e
         if t.kind == "NAME":
             self.next()
-            # 顶层 const 内联：只在"不是函数调用/成员访问"时替换
-            if t.val in self.consts and not (
-                    self.at("SYM", "(") or self.at("SYM", ".")):
-                return self.consts[t.val]
+            # 顶层 const 内联：只在"不是函数调用/成员访问"时替换。
+            #
+            # v3.77（收 §7.41）：`.` 后面要区分**两种**形态 ——
+            #   `A.b`       路径段（如 `net.Action.Keep`），A 可能是命名空间，
+            #               不能内联；
+            #   `A.b(...)`  方法调用，A 是接收者，**必须内联**。
+            # 原来只要看到 `.` 就不内联，于是 `A.to_str()` 报"未定义变量 A"，
+            # 而 `let x = A; x.to_str()` 正常 —— 同一个常量两种写法行为不同。
+            #
+            # 判据：`.` 之后是 NAME 且**再之后不是** `(` → 路径，不内联。
+            # （与下面那个 `while` 循环里的 `break` 判据完全对称。）
+            if t.val in self.consts:
+                is_call = self.at("SYM", "(")
+                is_path = False
+                if self.at("SYM", ".") and self.peek(1).kind == "NAME":
+                    nxt2 = self.peek(2)
+                    if not (nxt2.kind == "SYM" and nxt2.val == "("):
+                        is_path = True
+                if not (is_call or is_path):
+                    return self.consts[t.val]
             # 点路径（仅吸收非方法调用的 .NAME 段；NAME( 留给 postfix 处理方法调用）
             path = [t.val]
             if self.at("SYM", "[") and t.val in self.generic_enums:
