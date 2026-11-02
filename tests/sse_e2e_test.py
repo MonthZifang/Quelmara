@@ -123,6 +123,20 @@ def main():
                 chunk = sock.recv(4096)
             except socket.timeout:
                 break
+            except OSError as ex:
+                # **`ConnectionResetError` 不是 `socket.timeout`**（v3.86）：
+                # 服务端在收完订阅后主动关连接 / 被重置时抛的是 OSError 的子类，
+                # 只捕 timeout 会让整条测试以 rc=1 崩掉，报出来的是 Python
+                # traceback 而不是"连接被重置"。CI 上就因为这个偶发红过。
+                #
+                # **只 break，不记 bad()**：连接提前关掉时后面那些"没收到
+                # tick"之类的断言自然会失败并给出更具体的诊断；在这里多记
+                # 一条反而会把失败数翻倍，掩盖真正的问题（v3.86 实测：
+                # 加了 bad() 之后本地从 8/0 变成 6/2）。
+                #
+                # 捕获范围只到 OSError（`socket.timeout` 在 3.10+ 是它的子类，
+                # 但上面那个 except 已经先接住了，不会走到这里）。
+                break
             if not chunk:
                 break
             body += chunk
