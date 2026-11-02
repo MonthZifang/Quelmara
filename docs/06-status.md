@@ -4167,6 +4167,34 @@ handler 会重复塞 `argv[0]`，qlmc 于是把 `build` 当源文件名报
 **本版未做（不声称支持）**：约束违反检查（`[T: Ord]` 只跳过语法不校验）、
 泛型 struct/enum/method、多类型参数、显式实例化 `f[int](...)`。
 
+### 3.115 irdiff 归一化补上常量折叠后的形态（v3.74）
+
+v3.73 推送后 CI 在 linux 的「发射层确定性」上红了一条：
+`tests/t184_qlmc_strptr.qma` 被判 x86/a64 分叉。**真因不是 qlmc，是门禁
+自己的归一化规则不完整。**
+
+v3.19 加 `target_os()` / `target_arch()` 时补过归一化（这两个内建按定义
+就取决于目标），但只匹配 `jcc` 的「两个 imm 比较」形态。而 `t184` 里是
+`assert(target_arch() == 1, ...)`，**常量折叠**把它直接折成单 imm 分支：
+
+```
+x86: ('jnz', ('imm', 1), 'main.assert_ok.12')
+a64: ('jnz', ('imm', 0), 'main.assert_ok.12')
+```
+
+于是绕过了归一化 —— 但那是**正确行为**（a64 的 `target_arch()` 是 2，
+`2 == 1` 本来就该折成假）。修法：补一条 `TARGET_JNZ_RE`。
+
+**为什么之前没暴露**：上一次 CI（v3.59）在门禁步骤就红了，根本没跑到
+irdiff 这一步。
+
+**验证**：t184 由 `bad` 变 `ok`；全量 **PASS=121 FAIL=0 SKIP=110**
+（此前 120/121）。
+
+> 同一次 CI 的 windows 上 `WS_E2E: PASS=16 FAIL=1` 与本版无关：本地
+> 17/17 全过，且 v3.73 完全没有改动 `std/` 与 `tests/ws_e2e_test.py`
+> （`git diff 4e901f9 HEAD` 在这两个路径上是空的）。判定为网络时序偶发。
+
 
 ## 4. 自举
 
