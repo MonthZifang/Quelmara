@@ -4928,6 +4928,61 @@ fn _emit_bin(fc: FnCtx, op: int, dst: int, l: int, r: int) -> int {
         eprint("qlmc: 不支持的运算符 " + op.to_str())
         exit(2)
     }
+    // ---- 聚合的 == / != 走**结构比较**（v3.78，收 §7.6）----
+    //
+    // 以前聚合落到下面那条 `OP_CMP`，而它比的是两个帧槽的**地址** ——
+    // `P { x: 1 } == P { x: 1 }` 永远 false，`a == a` 在两边各自落在不同
+    // 栈槽时也 false。不崩、不报错，只是答案错。
+    //
+    // 做法：取两侧的**区域基址**（`OP_ADDRV` 取帧槽地址），按聚合大小
+    // 调运行库 `mem_cmp`，再判"差值为 0"。
+    //
+    // 只处理 `==` / `!=`：聚合的 `<` / `>` 没有自然定义（stage-0 也是地址
+    // 比较），保持原状并让它在语言层不可依赖。
+    if (op == P_EQ || op == P_NE) && _ty_is_agg(tl) && tl == tr {
+        let n = _ty_size(fc, tl)
+        // 两侧的基址。loc < 0 是帧槽；loc >= 0 说明值在寄存器里 ——
+        // 聚合永远不进寄存器（`_new_var` 对 isagg 直接给帧槽），
+        // 所以这里只可能是帧槽，但保险起见仍按地址取。
+        let la = _vnew(fc)
+        fc.vty.set(la, TY_INT)
+        if fc.vloc.get(l) < 0 {
+            _ir_emit(fc, OP_ADDRV, la, 0, 0, -fc.vloc.get(l) - 1)
+        } else {
+            _ir_emit(fc, OP_MOV, la, l, 0, 0)
+        }
+        let ra = _vnew(fc)
+        fc.vty.set(ra, TY_INT)
+        if fc.vloc.get(r) < 0 {
+            _ir_emit(fc, OP_ADDRV, ra, 0, 0, -fc.vloc.get(r) - 1)
+        } else {
+            _ir_emit(fc, OP_MOV, ra, r, 0, 0)
+        }
+        let sz = _vnew(fc)
+        fc.vty.set(sz, TY_INT)
+        _ir_emit(fc, OP_CONST, sz, 0, 0, n)
+        _ir_emit(fc, OP_ARG, 0, la, 0, 0)
+        _ir_emit(fc, OP_ARG, 0, ra, 0, 1)
+        _ir_emit(fc, OP_ARG, 0, sz, 0, 2)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_MEMCMP)
+        // mem_cmp 返回"首个不同字节的差值"：0 表示相等
+        let z = _vnew(fc)
+        fc.vty.set(z, TY_INT)
+        _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+        let eqv = _vnew(fc)
+        fc.vty.set(eqv, TY_INT)
+        // `_cmp_cc(P_EQ)` 是 **jcc** 形态（0x84 = je）；setcc 是 jcc + 0x10，
+        // 所以相等判据要写 0x94（sete）。写成 0x04 是错的（那是 add 的 alu）。
+        _ir_emit(fc, OP_CMP, eqv, d, z, _cmp_cc(P_EQ) + 0x10)
+        if op == P_NE {
+            _ir_emit(fc, OP_NOT, dst, eqv, 0, 0)
+        } else {
+            _ir_emit(fc, OP_MOV, dst, eqv, 0, 0)
+        }
+        return TY_INT
+    }
     // 比较结果按 **int** 收（保持 v2.33 之前的口径）。为什么不是 bool：
     // stage-0 会把编译期可折叠的比较（`print(1 < 2)`）折成 int 打 1，而运行期的
     // 比较（`print(i + 1 < n)`）打 true —— 它自己就不一致。qlmc 没有常量折叠，
@@ -5961,22 +6016,34 @@ fn _lower_cond(fc: FnCtx, nid: int, lab: int, if_false: int) {
         if cc0 != 0 {
             let r = _lower_expr(fc, nd.c)
             let l = _lower_expr(fc, nd.b)
-            if fc.vty.get(l) != TY_STR && fc.vty.get(r) != TY_STR {
-                let mut cc = cc0
+            let tlc = fc.vty.get(l)
+            let trc = fc.vty.get(r)
+            // v3.78（§7.6）：**聚合不能走 JCMP** —— 那比的是帧槽地址。
+            // 走 `_emit_bin` 的结构比较（它内部用 mem_cmp），再按结果跳。
+            //
+            // 三个条件合成一个判据，别用 De Morgan 绕：
+            //   * 任一侧是 str  -> 走 `_emit_bin`（str 有专门的 RT_EQ）；
+            //   * 两侧同类型聚合 -> 走 `_emit_bin`（结构比较）；
+            //   * 其余（纯标量）  -> 保持原来的 JCMP 快路径。
+            let is_str = tlc == TY_STR || trc == TY_STR
+            let is_agg = (nd.a == P_EQ || nd.a == P_NE) &&
+                         _ty_is_agg(tlc) && tlc == trc
+            if is_str || is_agg {
+                let d = _vnew(fc)
+                let t = _emit_bin(fc, nd.a, d, l, r)
+                fc.vty.set(d, t)
                 if if_false == 1 {
-                    cc = _cc_inv(cc)
+                    _ir_emit(fc, OP_JZ, 0, d, 0, lab)
+                } else {
+                    _ir_emit(fc, OP_JNZ, 0, d, 0, lab)
                 }
-                _ir_emit(fc, OP_JCMP, cc, l, r, lab)
                 return
             }
-            let d = _vnew(fc)
-            let t = _emit_bin(fc, nd.a, d, l, r)
-            fc.vty.set(d, t)
+            let mut cc = cc0
             if if_false == 1 {
-                _ir_emit(fc, OP_JZ, 0, d, 0, lab)
-            } else {
-                _ir_emit(fc, OP_JNZ, 0, d, 0, lab)
+                cc = _cc_inv(cc)
             }
+            _ir_emit(fc, OP_JCMP, cc, l, r, lab)
             return
         }
     }

@@ -1,0 +1,84 @@
+// s42_aggeq.qma —— 聚合的 == / != 走结构比较（v3.78，收 §7.6）
+//
+// ## 为什么这个夹具**不是**差分用例
+//
+// 其它 sNN_*.qma 都是"stage-0 与 qlmc 各编一次、输出逐字节比较"。这一个
+// **不能**这样做 —— 因为 stage-0 的聚合判等本身就是错的（它比的是帧槽
+// 地址，见 07-gaps §7.6）：
+//
+//     struct P { x: int }
+//     let p1 = P { x: 1 }
+//     let p2 = P { x: 1 }
+//     print(p1 == p2)      # stage-0 输出 false（地址不同），应为 true
+//
+// 拿一个已知错误的实现当基准，只会把缺陷"固化"成契约。所以这里改成
+// **正向断言**：用 `assert` 钉住正确语义，跑通即通过。判据来自语言定义
+// （`02-language.md`：聚合的 `==` 按字段/变体逐项比较），不是来自 stage-0。
+//
+// ## 覆盖的形态
+//
+//   [1] struct 自等 / 不同变量字段相同 / 字段不同
+//   [2] struct 多字段（验证逐字节比对的宽度）
+//   [3] enum 无载荷 / 带载荷
+//   [4] `!=` 的两个方向
+//   [5] 作为 if 条件（走 `_lower_cond` 那条路径）
+//   [6] while 条件
+//  （嵌套聚合字段本身还不支持，见 `_lower_structlit` 的"嵌套聚合字段本版
+//    不支持"闸门 —— 那条是另一个缺口，与本夹具无关。）
+struct P { x: int }
+struct Q { a: int, b: int, c: int }
+
+enum Color { Red, Green }
+enum Shape { Dot, Circle(r: int) }
+
+fn main() {
+    // ---- [1] struct ----
+    let p = P { x: 1 }
+    assert(p == p, "struct 自等")
+    let p1 = P { x: 1 }
+    let p2 = P { x: 1 }
+    let p3 = P { x: 2 }
+    assert(p1 == p2, "struct 不同变量、字段相同 -> 相等")
+    assert(!(p1 == p3), "struct 字段不同 -> 不等")
+
+    // ---- [2] 多字段 ----
+    let q1 = Q { a: 1, b: 2, c: 3 }
+    let q2 = Q { a: 1, b: 2, c: 3 }
+    let q3 = Q { a: 1, b: 2, c: 4 }
+    assert(q1 == q2, "多字段全同")
+    assert(!(q1 == q3), "多字段末位不同")
+
+    // ---- [3] enum ----
+    let c1 = Color.Red
+    let c2 = Color.Red
+    let c3 = Color.Green
+    assert(c1 == c2, "enum 无载荷同变体")
+    assert(!(c1 == c3), "enum 无载荷不同变体")
+    let s1 = Shape.Circle(r: 5)
+    let s2 = Shape.Circle(r: 5)
+    let s3 = Shape.Circle(r: 6)
+    let s4 = Shape.Dot
+    assert(s1 == s2, "enum 带载荷同变体同载荷")
+    assert(!(s1 == s3), "enum 带载荷同变体不同载荷")
+    assert(!(s1 == s4), "enum 带载荷 vs 无载荷")
+
+    // ---- [4] != ----
+    assert(!(p1 != p2), "!= 相等时取假")
+    assert(p1 != p3, "!= 不等时取真")
+
+    // ---- [5] if 条件 ----
+    let mut hit = 0
+    if p1 == p2 {
+        hit = 1
+    }
+    assert(hit == 1, "if 条件走结构比较")
+
+    // ---- [6] while 条件（条件一开始为假，跑 0 轮） ----
+    let mut n = 0
+    while p1 == p3 {
+        n = n + 1
+    }
+    assert(n == 0, "while 条件走结构比较")
+
+    print("s42_aggeq ok")
+}

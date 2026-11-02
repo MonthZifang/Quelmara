@@ -233,6 +233,36 @@ def case_selfcheck_to(name, src, seconds):
         else bad(f"{name} 失败 rc={rc} stderr={stderr[-200:]!r}")
 
 
+def case_qlmc_aggeq():
+    """聚合 `==` / `!=` 的结构比较（v3.78，收 §7.6）。
+
+    **这条只验 qlmc 侧**：stage-0 的聚合判等比的是帧槽地址（`p1 == p2`
+    在两个不同栈槽上恒 false），拿它当基准等于把缺陷固化成契约。夹具
+    `tests/selfhost/s42_aggeq.qma` 用 `assert` 正向钉住语言定义
+    （`02-language.md`：聚合按字段/变体逐项比较）。
+    """
+    qlmc = os.path.join(ROOT, "build", "qlmc.exe")
+    if not os.path.isfile(qlmc):
+        skip("聚合判等：qlmc.exe 未构建")
+        return
+    out = os.path.join(ROOT, "build", "win_qlmc_aggeq.exe")
+    src = os.path.join(ROOT, "tests", "selfhost", "s42_aggeq.qma")
+    r = subprocess.run([qlmc, "build", src, "-o", out],
+                       cwd=ROOT, capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        bad(f"聚合判等：qlmc 编译失败 {(r.stdout or '')[-300:]}")
+        return
+    r2 = run(out, timeout=60)
+    if r2 is None:
+        skip("聚合判等：非 Windows 平台，跳过执行")
+        return
+    rc, stdout, stderr = r2
+    if rc == 0 and "s42_aggeq ok" in stdout:
+        ok("聚合 == / != 结构比较：assert 全过")
+    else:
+        bad(f"聚合判等失败 rc={rc} out={stdout[-200:]!r} err={stderr[-200:]!r}")
+
+
 def case_net_e2e():
     """qlmc 网络内建端到端（v3.42）。
 
@@ -1837,6 +1867,15 @@ def main():
     case_selfcheck_to("qlmc_strptr", "tests/t184_qlmc_strptr.qma", 60)
     # v3.41：qlmc 能否通过 @ffi 调 Winsock —— 决定网络内建走源码还是改 IAT
     case_selfcheck_to("qlmc_winsock", "tests/t185_qlmc_winsock.qma", 60)
+    # v3.78：**聚合的 == / != 走结构比较**（收 §7.6）。
+    #
+    # 这条**不是**差分用例（`case_selfcheck_to` 只跑 stage-0，差分由
+    # qlmc_test.py 管）—— 因为 stage-0 的聚合判等本身就是错的（比帧槽
+    # 地址），拿它当基准只会把缺陷固化成契约。夹具用 `assert` 正向钉住
+    # 正确语义，两个编译器都得跑通：
+    #   * stage-0 侧这里跑（会**失败**，所以只能验 qlmc 侧）；
+    #   * qlmc 侧由下面的 case_qlmc_aggeq 验。
+    case_qlmc_aggeq()
     # v3.42：网络内建端到端。
     # **不能用 case_selfcheck_to**：t186 会阻塞在 tcp_accept 上等客户端，
     # 没人连它就一直挂着。这里交给 net_e2e_test.py —— 它自己拉起 exe、
