@@ -110,14 +110,16 @@ fn v_str(x: str) -> Val {
     return Val { k: K_STR, i: 0, f: 0.0, s: x, n: 0, c: 0 }
 }
 
-/// 比较运算的结果：编译器把它当 int（打印 1/0），不是 bool。
-/// 只有 `&&` / `||` 才是真正的 bool（打印 true/false）—— 口径照抄编译器，
-/// 差分测试才逐字节对得上（`tests/t151_interp_arith.qma` 钉住这条）。
+/// 比较运算的结果：**bool**（v3.79，收 §7.22）。
+///
+/// 以前这里返回 int（打印 1/0），理由是"编译器把比较当 int"。但那是因为
+/// stage-0 的常量折叠和运行期走了两条不同的路 —— 折叠的打 1、运行期的打
+/// true，**它自己就不一致**。v3.79 把两边都修成 bool 之后，解释器也要跟上，
+/// 否则 `tests/t151_interp_arith.qma` 的差分立刻红（实测第 13–16 行）。
+///
+/// 保留 `v_cmp` 这个名字（调用点很多），语义改成与 `v_bool` 一致。
 fn v_cmp(x: bool) -> Val {
-    if x {
-        return v_int(1)
-    }
-    return v_int(0)
+    return v_bool(x)
 }
 
 fn v_bool(x: bool) -> Val {

@@ -20,6 +20,7 @@
 跑法：python tests/interp_test.py
 """
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -65,7 +66,29 @@ def want(cond, msg, detail=""):
     ok(msg) if cond else bad(f"{msg}{('（' + detail + '）') if detail else ''}")
 
 
+def _exe_runner(exe):
+    """Linux 上跑 PE **必须显式走 wine**（binfmt 的 MZ handler 会重复 argv[0]）。
+
+    与 tools/dev/qlmc_coverage.py / tests/qlmc_test.py 同一份实现 ——
+    v3.79 实测这个脚本缺它，本地 12 条用例里 9 条误判为"编译失败"。
+    """
+    if os.name == "nt":
+        return [exe]
+    wine = shutil.which("wine")
+    if wine is None:
+        raise SystemExit("FAIL：Linux 上需要 wine 才能执行 qlmc 产出的 PE")
+    return [wine, exe]
+
+
 def run(cmd, **kw):
+    # cmd[0] 若是 PE 产物（.exe），换成 wine 包装
+    if cmd and isinstance(cmd[0], str) and cmd[0].endswith(".exe") \
+            and os.path.isfile(cmd[0]):
+        try:
+            os.chmod(cmd[0], 0o755)
+        except OSError:
+            pass
+        cmd = _exe_runner(cmd[0]) + list(cmd[1:])
     return subprocess.run(cmd, capture_output=True, **kw)
 
 
