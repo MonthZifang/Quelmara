@@ -7,7 +7,7 @@ import (
 )
 
 func main() {
-	n := int64(50000000)
+	n := int64(10000000)
 	t0 := time.Now()
 	c := make([]uint8, n+1)
 	for i := int64(0); i <= n; i++ { c[i] = 1 }

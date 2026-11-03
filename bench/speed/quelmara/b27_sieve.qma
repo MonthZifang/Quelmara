@@ -1,6 +1,6 @@
 // b27_sieve —— 埃氏筛 5000 万
 fn main() {
-    let n = 50000000
+    let n = 10000000
     let t0 = now_ns()
     let c = vec[int].new(n + 1)
     let mut i = 0

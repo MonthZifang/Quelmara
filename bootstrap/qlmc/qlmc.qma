@@ -11838,7 +11838,12 @@ const ARENA_CAP = 4 * 1024 * 1024
 // 基址 +17.3 MB 处）。v2.38 起 f64 让 qlmc 自己变大，32 MB 不够，给 64 MB。
 // v2.76：这块内存改用 VirtualAlloc 拿（私有页首次触碰比 .bss 映像节快 5 倍），
 // BSS_SIZE 因此缩到 32 字节 —— .bss 只剩游标/锁/基址/上限四个槽。
-const HEAP_SIZE = 0x4000000      // 64 MB，VirtualAlloc(MEM_COMMIT|MEM_RESERVE)
+// v3.95：64 MB → **256 MB**。基准里 `b27_sieve` 要 5000 万字节（≈ 50 MB）
+// 的布尔数组，加上 vec 头和运行库自身占用，64 MB 直接顶爆
+// （症状：ELF 下退出码 3 —— 那是 `__alloc` 的 OOM 路径）。
+// 提交/预留都不改变物理占用（按需分页），所以放大只增加地址空间，
+// 不会让 hello 这种小程序的常驻内存变大。
+const HEAP_SIZE = 0x10000000      // 256 MB，VirtualAlloc / mmap 按需分页
 // v3.36：静态字区（static_word(i)）也放在 .bss，紧跟原来 32 字节之后。
 // 为什么放 bss 而不是堆：静态字是**进程级**状态，std/ 的模块在初始化时
 // 拿它的地址、之后长期持有；放堆里要惰性分配 + 一个已分配标志槽，
@@ -13170,9 +13175,9 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
             _ir_emit(fc, OP_CONST, sz, 0, 0, 32)
             _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
             _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
-            _ir_emit(fc, OP_ARG, 0, buf, 0, 0)
             // sys_clock_gettime(228)：rdi=CLOCK_MONOTONIC(1)，rsi=&ts
-            // 包成 RT_CGT 例程走既有通路（IR 层没有 syscall 操作码）
+            // 包成 RT_CGT 例程走既有通路（IR 层没有 syscall 操作码）。
+            // **注意只有一次 OP_ARG**：`RT_CGT` 的入参是 rcx=&timespec。
             _ir_emit(fc, OP_ARG, 0, buf, 0, 0)
             let r0 = _vnew(fc)
             fc.vty.set(r0, TY_INT)
@@ -17000,6 +17005,16 @@ fn _gen_alloc(ctx: Ctx) {
     // （高半区），所以后面那句 `test rax,rax; jz .oom` 要改成判符号。
     // 实际用不到那么多寄存器，但保持与 PE 版相同的 push/pop 结构最省心。
     if ctx.target == 1 {
+        // **mmap 会用到 rdi/rsi/rdx/r10/r8/r9，而 _gen_alloc 只保存了
+        // rcx/rdx/r9/r10/r11** —— rdi/rsi/r8 会被内核入口破坏，调用者
+        // （比如 now_ns 展开的那段 IR）若把它们当活跃值就会读到垃圾。
+        // 现象：单赋值能跑、双赋值崩（多一个活跃变量就踩到）。
+        // 所以这里额外把 rdi/rsi/r8 也 push 进去（与上面的 5 个 push 一起
+        // 构成 8 个，16 字节对齐仍然是 0x40 + 8*8 = 0x80，保持 16 对齐）。
+        _b(code, 0x57)                     // push rdi
+        _b(code, 0x56)                     // push rsi
+        _b(code, 0x41)                     // push r8
+        _b(code, 0x50)
         _b(code, 0x31)                     // xor edi, edi（addr = NULL）
         _b(code, 0xFF)
         _b(code, 0xBE)                     // mov esi, HEAP_SIZE
@@ -17019,6 +17034,10 @@ fn _gen_alloc(ctx: Ctx) {
         _b(code, 0xB8)                     // mov eax, 9（sys_mmap）
         _w32(code, 9)
         _syscall(code)
+        _b(code, 0x41)                     // pop r8
+        _b(code, 0x58)
+        _b(code, 0x5E)                     // pop rsi
+        _b(code, 0x5F)                     // pop rdi
     } else {
         let c0 = _call_rip(code)           // VirtualAlloc
         _addfix(ctx.fixes, c0, I_VALLOC, 3)

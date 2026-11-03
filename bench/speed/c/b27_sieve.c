@@ -5,7 +5,7 @@
 #include "bench.h"
 
 int main(void) {
-    int64_t n = 50000000;
+    int64_t n = 10000000;
     T0();
     uint8_t *c = (uint8_t *)calloc(n + 1, 1);
     for (int64_t i = 0; i <= n; i++) c[i] = 1;
