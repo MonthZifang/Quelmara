@@ -189,7 +189,23 @@ jobs:
           echo "> $LINE" >> "$GITHUB_STEP_SUMMARY"
           echo "> C 编译器：$(cc --version 2>/dev/null | head -1 || gcc --version | head -1)"
 
-      - name: 语言基准（stage-0 + C/Go/Python）
+      - name: 自举 qlmc（Linux 也要，quelmara 列靠它）
+        # v4.02：qlmc 从 v3.94 起有 ELF 后端，所以 posix 上 quelmara 列终于
+        # 能有数了。qlmc 自身是 PE 产物 —— 下面装 wine 来跑它，
+        # 它**编出来**的可执行文件是原生 ELF，直接 exec，计时口径与 C/Go 一致。
+        if: runner.os == 'Linux'
+        run: |
+          set -e
+          # wine 只为跑编译器本身；产物是原生 ELF，不经过 wine。
+          sudo dpkg --add-architecture i386 || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends wine64 || \
+            sudo apt-get install -y -qq --no-install-recommends wine
+          wine --version || true
+          python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe
+          ls -la build/qlmc.exe
+
+      - name: 语言基准（quelmara + C/C++/Go/...）
         run: |
           # **必须开 pipefail**：`| tee` 的退出码是 tee 的，会把 python 的
           # 非零退出码吞掉 —— v2.58 第一次跑就踩了（macOS 上 ELF 跑不了，

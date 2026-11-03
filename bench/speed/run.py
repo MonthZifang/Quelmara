@@ -191,24 +191,38 @@ def build_all(langs, only):
     if "quelmara" in langs:
         q = qlmc_exe()
         if not q:
-            if IS_WIN:
-                notes["quelmara"] = ("跳过：build/qlmc.exe 不存在（先自举："
-                                     "python tools/stage0/qlm_cli.py build "
-                                     "bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe）")
-            else:
-                notes["quelmara"] = "跳过：qlmc 只有 Windows PE 后端（非 Windows 平台无产物）"
+            notes["quelmara"] = ("跳过：build/qlmc.exe 不存在（先自举："
+                                 "python tools/stage0/qlm_cli.py build "
+                                 "bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe）")
         else:
+            # v4.02：**Linux 上走 qlmc 的 ELF 后端**（v3.94 加的那个）。
+            # 以前这里硬编码 PE，于是 posix 上 quelmara 列永远是空的 ——
+            # 只能靠 quelmara0（stage-0）凑数。现在 qlmc 自己能出 ELF，
+            # 两边同台比才有意义。
+            #
+            # qlmc 本身是 PE 产物，在 Linux 上要用 wine 跑；
+            # 它**编出来**的可执行文件是原生 ELF，直接 exec 即可。
+            ELF = (not IS_WIN)
+            # qlmc 是 PE 产物，Linux 上要用 wine 跑它（**只包编译器本身**，
+            # 它编出来的 ELF 是原生的，直接 exec）。binfmt 的 MZ handler 会
+            # 把 argv[0] 重复塞进去，所以不能用 `./qlmc.exe` 的裸执行。
+            wine = shutil.which("wine")
+            runner = ([wine, q] if (ELF and wine) else [q])
             for b, _ in BENCHES:
                 if only and b not in only:
                     continue
                 src = os.path.join(HERE, "quelmara", b + ".qma")
-                exe = os.path.join(OUT, "qlm_" + b + EXE)
-                r = subprocess.run([q, "build", src, "-o", exe],
-                                   capture_output=True, text=True)
+                exe = os.path.join(OUT, "qlm_" + b + ("" if ELF else EXE))
+                cmd = runner + ["build", src, "-o", exe]
+                if ELF:
+                    cmd += ["--target", "elf"]
+                r = subprocess.run(cmd, capture_output=True, text=True)
                 if r.returncode != 0:
                     notes.setdefault("quelmara", f"{b} 编译失败: " +
                                      (r.stdout + r.stderr).strip()[:200])
                     continue
+                if ELF:
+                    os.chmod(exe, 0o755)
                 built[("quelmara", b)] = [exe]
 
     if "quelmara0" in langs:
