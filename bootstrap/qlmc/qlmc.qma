@@ -12829,6 +12829,114 @@ fn _lower_spawn(fc: FnCtx, nd: Node) -> int {
 ///   mem_load64(p,w) 读第 w 个 **8 字节字**（不是字节！）
 ///   mem_free(p,n)   本版分配器是 bump，**不回收**（语义差异，见 §7.20）
 ///   cstr(s)         qlmc 的 str 布局本来就是 [len][bytes][NUL]，值即指针 → 恒等
+/// `now_ns()` 的 **ELF 实现**（v4.00，从 `_lower_builtin` 抽出来）。
+///
+/// **单独成函数不是为了整洁**：`_lower_builtin` 已经贴着 `SLOT_TEMP`(416)
+/// 上限，把这段内联进去会让它需要 417 个槽、stage-2 编不过自己
+/// （CI 实测 `[FAIL] 自举五级链失败：stage-2 构建`）。
+/// 同 `_emit_f64` / `_emit_csubns` / `_emit_trunc` 的处理方式 ——
+/// **帧敏感区不能直接加代码**。
+///
+/// 一次 `clock_gettime(CLOCK_MONOTONIC)` 就够：内核直接填
+/// `struct timespec{int64 sec; int64 nsec}`，比 Windows 的
+/// "取计数 + 取频率再做除法"两段式简洁得多。
+/// `now_ns()` 的 **PE 实现**（v4.00，从 `_lower_builtin` 抽出来）。
+/// 同 `_bi_now_ns_elf` —— `_lower_builtin` 是帧敏感区，两套实现都不能内联。
+///
+/// QPC 两段式：`ns = (c/f)*1e9 + ((c%f)*1e9)/f`。
+/// 先除后乘再补余数 —— 直接 `c*1e9` 在开机几小时后就会溢出 int64。
+fn _bi_now_ns_pe(fc: FnCtx) -> int {
+        // QPC 纳秒：ns = (c/f)*1e9 + ((c%f)*1e9)/f
+        // 先除后乘再补余数——直接 c*1e9 在开机几小时后就会溢出 int64。
+        let sz = _vnew(fc)
+        fc.vty.set(sz, TY_INT)
+        _ir_emit(fc, OP_CONST, sz, 0, 0, 16)
+        _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+        let buf = _vnew(fc)
+        fc.vty.set(buf, TY_INT)
+        _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
+        _ir_emit(fc, OP_ARG, 0, buf, 0, 0)
+        let r1 = _vnew(fc)
+        fc.vty.set(r1, TY_INT)
+        _ir_emit(fc, OP_CALLIAT, r1, 0, 0, I_QPC)
+        let fp = _vnew(fc)
+        fc.vty.set(fp, TY_INT)
+        _ir_emit(fc, OP_ADDRF, fp, buf, 0, 8)
+        _ir_emit(fc, OP_ARG, 0, fp, 0, 0)
+        let r2 = _vnew(fc)
+        fc.vty.set(r2, TY_INT)
+        _ir_emit(fc, OP_CALLIAT, r2, 0, 0, I_QPF)
+        let ap = _vnew(fc)
+        fc.vty.set(ap, TY_INT)
+        _ir_emit(fc, OP_ADDRF, ap, buf, 0, 0)
+        let c = _vnew(fc)
+        fc.vty.set(c, TY_INT)
+        _ir_emit(fc, OP_LOAD, c, ap, 0, 8)
+        let f = _vnew(fc)
+        fc.vty.set(f, TY_INT)
+        _ir_emit(fc, OP_LOAD, f, fp, 0, 8)
+        let big = _vnew(fc)
+        fc.vty.set(big, TY_INT)
+        _ir_emit(fc, OP_CONST, big, 0, 0, 1000000000)
+        let secs = _vnew(fc)
+        fc.vty.set(secs, TY_INT)
+        _ir_emit(fc, OP_DIV, secs, c, f, 0)
+        let whole = _vnew(fc)
+        fc.vty.set(whole, TY_INT)
+        _ir_emit(fc, OP_MUL, whole, secs, big, 0)
+        let rem = _vnew(fc)
+        fc.vty.set(rem, TY_INT)
+        _ir_emit(fc, OP_MOD, rem, c, f, 0)
+        let remns = _vnew(fc)
+        fc.vty.set(remns, TY_INT)
+        _ir_emit(fc, OP_MUL, remns, rem, big, 0)
+        let frac = _vnew(fc)
+        fc.vty.set(frac, TY_INT)
+        _ir_emit(fc, OP_DIV, frac, remns, f, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_ADD, d, whole, frac, 0)
+        return d
+}
+
+fn _bi_now_ns_elf(fc: FnCtx) -> int {
+
+            let buf = _vnew(fc)
+            fc.vty.set(buf, TY_INT)
+            // 32 字节够放 struct timespec{int64 sec; int64 nsec}
+            let sz = _vnew(fc)
+            fc.vty.set(sz, TY_INT)
+            _ir_emit(fc, OP_CONST, sz, 0, 0, 32)
+            _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+            _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
+            // sys_clock_gettime(228)：rdi=CLOCK_MONOTONIC(1)，rsi=&ts
+            // 包成 RT_CGT 例程走既有通路（IR 层没有 syscall 操作码）。
+            // **注意只有一次 OP_ARG**：`RT_CGT` 的入参是 rcx=&timespec。
+            _ir_emit(fc, OP_ARG, 0, buf, 0, 0)
+            let r0 = _vnew(fc)
+            fc.vty.set(r0, TY_INT)
+            _ir_emit(fc, OP_CALLRT, r0, 0, 0, RT_CGT)
+            let secp = _vnew(fc)
+            fc.vty.set(secp, TY_INT)
+            _ir_emit(fc, OP_LOAD, secp, buf, 0, 8)
+            let nsp = _vnew(fc)
+            fc.vty.set(nsp, TY_INT)
+            _ir_emit(fc, OP_ADDRF, nsp, buf, 0, 8)
+            let ns = _vnew(fc)
+            fc.vty.set(ns, TY_INT)
+            _ir_emit(fc, OP_LOAD, ns, nsp, 0, 8)
+            let big = _vnew(fc)
+            fc.vty.set(big, TY_INT)
+            _ir_emit(fc, OP_CONST, big, 0, 0, 1000000000)
+            let whole = _vnew(fc)
+            fc.vty.set(whole, TY_INT)
+            _ir_emit(fc, OP_MUL, whole, secp, big, 0)
+            let d = _vnew(fc)
+            fc.vty.set(d, TY_INT)
+            _ir_emit(fc, OP_ADD, d, whole, ns, 0)
+            return d
+}
+
 fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
     let bn = fc.names.get(nd.a)
     // ---- 诊断 ----
@@ -13167,92 +13275,9 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         // QPC 两段式（取计数 + 取频率再做除法）简单得多。
         // 返回纳秒，与 PE 版口径一致（都是单调时钟，不含进程创建开销）。
         if fc.target == 1 {
-            let buf = _vnew(fc)
-            fc.vty.set(buf, TY_INT)
-            // 32 字节够放 struct timespec{int64 sec; int64 nsec}
-            let sz = _vnew(fc)
-            fc.vty.set(sz, TY_INT)
-            _ir_emit(fc, OP_CONST, sz, 0, 0, 32)
-            _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
-            _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
-            // sys_clock_gettime(228)：rdi=CLOCK_MONOTONIC(1)，rsi=&ts
-            // 包成 RT_CGT 例程走既有通路（IR 层没有 syscall 操作码）。
-            // **注意只有一次 OP_ARG**：`RT_CGT` 的入参是 rcx=&timespec。
-            _ir_emit(fc, OP_ARG, 0, buf, 0, 0)
-            let r0 = _vnew(fc)
-            fc.vty.set(r0, TY_INT)
-            _ir_emit(fc, OP_CALLRT, r0, 0, 0, RT_CGT)
-            let secp = _vnew(fc)
-            fc.vty.set(secp, TY_INT)
-            _ir_emit(fc, OP_LOAD, secp, buf, 0, 8)
-            let nsp = _vnew(fc)
-            fc.vty.set(nsp, TY_INT)
-            _ir_emit(fc, OP_ADDRF, nsp, buf, 0, 8)
-            let ns = _vnew(fc)
-            fc.vty.set(ns, TY_INT)
-            _ir_emit(fc, OP_LOAD, ns, nsp, 0, 8)
-            let big = _vnew(fc)
-            fc.vty.set(big, TY_INT)
-            _ir_emit(fc, OP_CONST, big, 0, 0, 1000000000)
-            let whole = _vnew(fc)
-            fc.vty.set(whole, TY_INT)
-            _ir_emit(fc, OP_MUL, whole, secp, big, 0)
-            let d = _vnew(fc)
-            fc.vty.set(d, TY_INT)
-            _ir_emit(fc, OP_ADD, d, whole, ns, 0)
-            return d
+            return _bi_now_ns_elf(fc)
         }
-        // QPC 纳秒：ns = (c/f)*1e9 + ((c%f)*1e9)/f
-        // 先除后乘再补余数——直接 c*1e9 在开机几小时后就会溢出 int64。
-        let sz = _vnew(fc)
-        fc.vty.set(sz, TY_INT)
-        _ir_emit(fc, OP_CONST, sz, 0, 0, 16)
-        _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
-        let buf = _vnew(fc)
-        fc.vty.set(buf, TY_INT)
-        _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
-        _ir_emit(fc, OP_ARG, 0, buf, 0, 0)
-        let r1 = _vnew(fc)
-        fc.vty.set(r1, TY_INT)
-        _ir_emit(fc, OP_CALLIAT, r1, 0, 0, I_QPC)
-        let fp = _vnew(fc)
-        fc.vty.set(fp, TY_INT)
-        _ir_emit(fc, OP_ADDRF, fp, buf, 0, 8)
-        _ir_emit(fc, OP_ARG, 0, fp, 0, 0)
-        let r2 = _vnew(fc)
-        fc.vty.set(r2, TY_INT)
-        _ir_emit(fc, OP_CALLIAT, r2, 0, 0, I_QPF)
-        let ap = _vnew(fc)
-        fc.vty.set(ap, TY_INT)
-        _ir_emit(fc, OP_ADDRF, ap, buf, 0, 0)
-        let c = _vnew(fc)
-        fc.vty.set(c, TY_INT)
-        _ir_emit(fc, OP_LOAD, c, ap, 0, 8)
-        let f = _vnew(fc)
-        fc.vty.set(f, TY_INT)
-        _ir_emit(fc, OP_LOAD, f, fp, 0, 8)
-        let big = _vnew(fc)
-        fc.vty.set(big, TY_INT)
-        _ir_emit(fc, OP_CONST, big, 0, 0, 1000000000)
-        let secs = _vnew(fc)
-        fc.vty.set(secs, TY_INT)
-        _ir_emit(fc, OP_DIV, secs, c, f, 0)
-        let whole = _vnew(fc)
-        fc.vty.set(whole, TY_INT)
-        _ir_emit(fc, OP_MUL, whole, secs, big, 0)
-        let rem = _vnew(fc)
-        fc.vty.set(rem, TY_INT)
-        _ir_emit(fc, OP_MOD, rem, c, f, 0)
-        let remns = _vnew(fc)
-        fc.vty.set(remns, TY_INT)
-        _ir_emit(fc, OP_MUL, remns, rem, big, 0)
-        let frac = _vnew(fc)
-        fc.vty.set(frac, TY_INT)
-        _ir_emit(fc, OP_DIV, frac, remns, f, 0)
-        let d = _vnew(fc)
-        fc.vty.set(d, TY_INT)
-        _ir_emit(fc, OP_ADD, d, whole, frac, 0)
-        return d
+        return _bi_now_ns_pe(fc)
     }
     if bn == "mem_str" {
         // mem_str(p, n) -> 拷 n 字节并补 NUL 的 str
