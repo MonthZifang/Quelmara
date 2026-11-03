@@ -273,6 +273,24 @@ const TY_BYTE = 4
 // 双寄存器文件 + 调用约定是另一个量级的改动。这里先要"对"，性能留给之后：
 // 每次运算把两个操作数从槽里 movsd 进 xmm0/xmm1，算完再存回槽。
 const TY_F64 = 5
+// 窄整数（v3.91，收 §7.46）：值仍按 64 位寄存器承载，**只在存储点截断**。
+// 编码 = TY_NARROW + (bits 档) + 符号位：
+//   TY_NARROW+0 = u8   +1 = u16   +2 = u32
+//   TY_NARROW+4 = i8   +5 = i16   +6 = i32
+// 语义与 stage-0 一致（`NARROW_BITS`）：
+//   * uN 存储点**零扩展**（`movzx` / `mov r32,r32`）；
+//   * iN 存储点**符号扩展**（`movsx` / `movsxd`）；
+//   * 表达式内部**按 64 位算，不截断**（按 C 提升）。
+// 存储点：let 标注 / 形参入口 / 返回值出口 / 赋值 / struct 字段 /
+//         enum 载荷 / vec 元素 / 定长数组 / 切片写入。
+// 仍是标量（< TY_STRUCT），所以 `_ty_is_agg` 自然返回 false，不进聚合路径。
+const TY_NARROW = 6
+const TY_U8 = 6
+const TY_U16 = 7
+const TY_U32 = 8
+const TY_I8 = 10
+const TY_I16 = 11
+const TY_I32 = 12
 // 聚合类型编码（v2.17）：0x1000+si = struct；0x100000+(count<<8)+elem = 数组
 const TY_STRUCT = 0x1000
 const TY_ENUM = 0x2000
@@ -806,6 +824,12 @@ fn _gt_tsuffix(ty: int) -> str {
     if ty == TY_VOID { return "void" }
     if ty == TY_BYTE { return "byte" }
     if ty == TY_F64 { return "f64" }
+    if ty == TY_U8 { return "u8" }
+    if ty == TY_U16 { return "u16" }
+    if ty == TY_U32 { return "u32" }
+    if ty == TY_I8 { return "i8" }
+    if ty == TY_I16 { return "i16" }
+    if ty == TY_I32 { return "i32" }
     return "t" + ty.to_str()
 }
 
@@ -1150,6 +1174,13 @@ fn _type(p: P, pos: vec[int]) -> int {
         if t.s == "bool" { return TY_BOOL }
         if t.s == "str" { return TY_STR }
         if t.s == "f64" { return TY_F64 }
+        // v3.91 窄整数（收 §7.46）
+        if t.s == "u8" { return TY_U8 }
+        if t.s == "u16" { return TY_U16 }
+        if t.s == "u32" { return TY_U32 }
+        if t.s == "i8" { return TY_I8 }
+        if t.s == "i16" { return TY_I16 }
+        if t.s == "i32" { return TY_I32 }
         let nid = _name_id(p, t.s)
         let si = _struct_index(p, nid)
         if si >= 0 {
@@ -3795,6 +3826,13 @@ const OP_XMMSH = 85
 // IR 级临时值，b1_int 的 `main` 挤不下，溢出到帧槽后热循环多两次访存，
 // 实测慢 6.6×。这里借 `cmovns` 把暂存压到发射器专用的 RAX（不参与分配）。
 const OP_CSUBNS = 86
+// 窄整数截断（v3.91，收 §7.46）：`dst = trunc(a)`。
+// `imm` = (bits << 1) | signed —— bits 是 8/16/32，signed 是 0/1。
+// 编码与 stage-0 的 `trunc_reg` 完全一致：
+//   u8/u16 → movzx；u32 → mov r32,r32（写 32 位自动清高）
+//   i8/i16 → movsx；i32 → movsxd
+// **只在存储点发**，表达式内部不发（按 C 提升）。
+const OP_TRUNC = 87
 
 struct Ir {
     op: int
@@ -3851,6 +3889,12 @@ struct FnCtx {
     fns: vec[Fn]
     vloc: vec[int]      // vreg → 位置：>0 = 寄存器+1，<0 = -(槽号+1)，0 = 未分配
     vty: vec[int]       // vreg → TY_*
+    // vreg → **声明**类型（v3.91，收 §7.46）。与 `vty` 分开是必须的：
+    // `vty` 会被 `_emit_bin` / `_lower_into_raw` 按**表达式结果**覆盖
+    // （`u8 + int` → int），而窄类型的截断必须看"这个槽声明成什么"。
+    // 以前只有 `vty` 一张表，于是 `f = f + 1` 里的 `f` 被当成 int，
+    // 截断整个失效（实测打 256 而不是 0）。
+    vdecl: vec[int]
     vstart: vec[int]    // vreg → 起始 IR 下标
     vend: vec[int]      // vreg → 最后使用 IR 下标
     vpin: vec[int]      // 1 = 变量（位置固定），0 = 临时值
@@ -4262,6 +4306,7 @@ fn _fc_reset(fc: FnCtx) {
     fc.vstart.push(0)
     fc.vend.push(0)
     fc.vpin.push(0)
+    fc.vdecl.push(TY_INT)
     fc.cells.set(C_ST, 0)
     _cell_set(fc, C_FNUM_NF, 0)
     _cell_set(fc, C_FNUM_NC, 0)
@@ -4289,6 +4334,7 @@ fn _new_fc(nodes: vec[Node], names: vec[str], fns: vec[Fn], rt: vec[int],
                      fixes: vec[Fix].new(16), ir: vec[Ir].new(64),
                      nodes: nodes, names: names, fns: fns,
                      vloc: vec[int].new(32), vty: vec[int].new(32),
+                     vdecl: vec[int].new(32),
                      vstart: vec[int].new(32), vend: vec[int].new(32),
                      vpin: vec[int].new(32), vmap: vec[int].new(16),
                      vval: vec[int].new(16), cells: cells,
@@ -4307,6 +4353,7 @@ fn _vnew(fc: FnCtx) -> int {
     fc.vstart.push(len(fc.ir))
     fc.vend.push(0)
     fc.vpin.push(0)
+    fc.vdecl.push(TY_INT)
     return len(fc.vloc) - 1
 }
 
@@ -4342,6 +4389,30 @@ fn _ty_is_agg(ty: int) -> bool {
         return false
     }
     return true
+}
+
+/// 窄整数吗？（v3.91）0 = 不是；否则返回位宽（8/16/32）。
+fn _ty_narrow_bits(ty: int) -> int {
+    if ty < TY_NARROW || ty > TY_I32 {
+        return 0
+    }
+    let mut bits = 8
+    let k = ty - TY_NARROW
+    if k == 1 || k == 5 {
+        bits = 16
+    }
+    if k == 2 || k == 6 {
+        bits = 32
+    }
+    return bits
+}
+
+/// 窄整数是有符号的吗？（v3.91）uN → 0，iN → 1，非窄类型 → 0。
+fn _ty_narrow_signed(ty: int) -> int {
+    if ty >= TY_I8 && ty <= TY_I32 {
+        return 1
+    }
+    return 0
 }
 
 fn _st_nf(fc: FnCtx, si: int) -> int {
@@ -4437,6 +4508,7 @@ fn _new_var(fc: FnCtx, nid: int, ty: int) -> int {
     let v = _vnew(fc)
     fc.vpin.set(v, 1)
     fc.vty.set(v, ty)
+    fc.vdecl.set(v, ty)
     let isagg = _ty_is_agg(ty)
     if isagg {
         let units = _ty_size(fc, ty) / 8
@@ -5943,7 +6015,33 @@ fn _ty_of_expr(fc: FnCtx, nid: int) -> int {
     return TY_INT
 }
 
+/// 把表达式降到 `dst`，**并按 dst 的声明宽度截断**（v3.91，收 §7.46）。
+///
+/// 窄整数（`u8`/`i16`/`u32`…）的语义是"**所有存储点截断**"，而
+/// `let` / 赋值 / 形参入口 / 返回值出口都汇集到这一个函数，所以截断放在
+/// 这里最省事、也最不容易漏。
+///
+/// 表达式内部**不截断**（按 C 提升）—— `_lower_expr` 走的是另一条路，
+/// 只有"写进一个声明了窄类型的槽"时才经过这里。
+///
+/// 聚合不走这里（`_lower_into_raw` 一进门就分流出去了），所以不用管。
 fn _lower_into(fc: FnCtx, nid: int, dst: int) {
+    // **先取类型再降级**：`_lower_into_raw` 里的 `E_BIN` 分支会
+    // `fc.vty.set(dst, t)` 把表达式算出来的类型写回去（`u8 + int` → int），
+    // 之后再看 `vty` 就晚了 —— 截断会整个失效（v3.91 第一版实测：
+    // `let a: u8 = 300` 打 300 而不是 44）。
+    let dty = fc.vdecl.get(dst)
+    _lower_into_raw(fc, nid, dst)
+    let bits = _ty_narrow_bits(dty)
+    if bits > 0 {
+        let signed = _ty_narrow_signed(dty)
+        _ir_emit(fc, OP_TRUNC, dst, dst, 0, (bits << 1) | signed)
+        // 截断之后值仍是"这个窄类型"的值；但类型保持 int 口径更省事
+        // （后续运算按 64 位算，与 stage-0 的 C 提升一致）。
+    }
+}
+
+fn _lower_into_raw(fc: FnCtx, nid: int, dst: int) {
     let dty = fc.vty.get(dst)
     if _ty_is_agg(dty) {
         _lower_into_agg(fc, nid, dst, dty)
@@ -5954,7 +6052,15 @@ fn _lower_into(fc: FnCtx, nid: int, dst: int) {
         let r = _lower_expr(fc, nd.c)
         let l = _lower_expr(fc, nd.b)
         let t = _emit_bin(fc, nd.a, dst, l, r)
-        fc.vty.set(dst, t)
+        // **窄类型的变量不能被表达式结果覆盖**（v3.91）。
+        // 以前无条件 `set(dst, t)`，于是 `let mut f: u8 = 255` 之后
+        // `f = f + 1` 会把 `f` 的 vty 改成 int（实测打 256 而不是 0）。
+        // 但**非窄类型必须保留原行为**：`let x = <聚合表达式>` 这类
+        // 依赖"vty 跟着表达式走"的地方不少，一刀切会让 `len()` 之类
+        // 认不出 str（v3.91 第一版就这么把 s24_varreg / s43 弄红了）。
+        if _ty_narrow_bits(fc.vdecl.get(dst)) == 0 {
+            fc.vty.set(dst, t)
+        }
         return
     }
     if nd.op == E_UN {
@@ -6437,6 +6543,17 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
             _ir_emit(fc, OP_RETAGG, 0, v, 0, _ty_size(fc, vty))
             return
         }
+        // v3.91：窄整数返回值在**出口**截断（收 §7.46）。
+        // 声明类型看函数自己的 `ret_t`，不看表达式推出来的类型 ——
+        // `fn give_i8(x: int) -> i8 { return x }` 里 `x` 是 int。
+        let rt = fc.fns.get(fc.cells.get(C_CFI)).ret_t
+        let rb = _ty_narrow_bits(rt)
+        if v > 0 && rb > 0 {
+            let rv = _vnew(fc)
+            fc.vty.set(rv, TY_INT)
+            _ir_emit(fc, OP_TRUNC, rv, v, 0, (rb << 1) | _ty_narrow_signed(rt))
+            v = rv
+        }
         _ir_emit(fc, OP_RET, 0, v, 0, 0)
         return
     }
@@ -6526,6 +6643,12 @@ fn _lower_fn(fc: FnCtx, fi: int) {
             } else {
                 let v = _new_var(fc, _param_name(fc, f, k), pty)
                 _ir_emit(fc, OP_PARAMSTK, v, 0, 0, si)
+                // v3.91：窄整数形参在**入口**截断（调用方可以传任意 64 位值）
+                let pb = _ty_narrow_bits(pty)
+                if pb > 0 {
+                    _ir_emit(fc, OP_TRUNC, v, v, 0,
+                             (pb << 1) | _ty_narrow_signed(pty))
+                }
             }
             k = k + 1
             continue
@@ -6539,6 +6662,12 @@ fn _lower_fn(fc: FnCtx, fi: int) {
         } else {
             let v = _new_var(fc, _param_name(fc, f, k), pty)
             _ir_emit(fc, OP_PARAM, v, 0, 0, ai)
+            // v3.91：窄整数形参在**入口**截断
+            let pb = _ty_narrow_bits(pty)
+            if pb > 0 {
+                _ir_emit(fc, OP_TRUNC, v, v, 0,
+                         (pb << 1) | _ty_narrow_signed(pty))
+            }
         }
         k = k + 1
     }
@@ -6743,6 +6872,8 @@ fn _opt_pure(op: int) -> int {
     if op == OP_BINI { return 1 }
     // v3.90：条件减的无分支形式也是纯运算（只算 dst，不碰内存/不跳转）
     if op == OP_CSUBNS { return 1 }
+    // v3.91：窄整数截断也是纯运算
+    if op == OP_TRUNC { return 1 }
     return 0
 }
 
@@ -8482,6 +8613,121 @@ fn _emit_divc(fc: FnCtx, code: vec[int], ins: Ir, i: int) {
     _store_rax(fc, fc.vloc.get(ins.dst))
 }
 
+/// `OP_ADD` / `OP_SUB` / `OP_MUL` 的发射（v3.91 从 `_emit_ir` 搬出来）。
+///
+/// **搬出来不是为了整洁**：`_emit_ir` 的帧贴着 `SLOT_TEMP`(416) 上限，
+/// 加窄类型支持后需要 417 个槽、编不过自己。这段是最大的单块，搬走腾出余量。
+fn _emit_binop(fc: FnCtx, i: int) {
+    let ins = fc.ir.get(i)
+    let code = fc.code
+    let op = ins.op
+    let mut rr = 0x01
+    let mut rm = 0x03
+    if op == OP_SUB {
+        rr = 0x29
+        rm = 0x2B
+    }
+    if op == OP_MUL {
+        rr = 0
+        rm = 0
+    }
+    let dloc = fc.vloc.get(ins.dst)
+    if op == OP_MUL {
+        if dloc > 0 {
+            let d = dloc - 1
+            if fc.vloc.get(ins.b) == dloc {
+                _mul_alias(fc, d, ins.a, ins.b)
+            } else {
+                _to_reg(fc, d, ins.a)
+                let bloc = fc.vloc.get(ins.b)
+                if bloc > 0 {
+                    _imul_rr(code, d, bloc - 1)
+                } else {
+                    _imul_rm(code, d, RBP, _slot_disp(-bloc - 1))
+                }
+            }
+        } else {
+            _to_reg(fc, RAX, ins.a)
+            let bloc = fc.vloc.get(ins.b)
+            if bloc > 0 {
+                _imul_rr(code, RAX, bloc - 1)
+            } else {
+                _imul_rm(code, RAX, RBP, _slot_disp(-bloc - 1))
+            }
+            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+        }
+        return
+    }
+    if dloc > 0 {
+        let d = dloc - 1
+        if fc.vloc.get(ins.b) == dloc {
+            _bin_alias(fc, d, ins.a, ins.b, rr, rm)
+        } else {
+            _to_reg(fc, d, ins.a)
+            _bin_into(fc, d, ins.b, rr, rm)
+        }
+    } else {
+        _to_reg(fc, RAX, ins.a)
+        _bin_into(fc, RAX, ins.b, rr, rm)
+        _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
+    }
+}
+
+/// 窄整数截断的发射（v3.91，`OP_TRUNC`，收 §7.46）。
+///
+/// **单独成函数**是为了不给 `_emit_ir` 加局部变量 —— 那个函数的帧贴着
+/// `SLOT_TEMP`(416) 上限，v3.90 已经因此踩过一次"需要 417 个槽"的 CI 红灯。
+///
+/// 编码与 stage-0 的 `trunc_reg` 逐条对应：
+///   u8  → `movzx r64, r/m8`    (0F B6)
+///   u16 → `movzx r64, r/m16`   (0F B7)
+///   u32 → `mov   r32, r32`     (89) —— 写 32 位自动清高
+///   i8  → `movsx r64, r/m8`    (0F BE)
+///   i16 → `movsx r64, r/m16`   (0F BF)
+///   i32 → `movsxd r64, r/m32`  (63)
+fn _emit_trunc(fc: FnCtx, i: int) {
+    let ins = fc.ir.get(i)
+    let code = fc.code
+    let bits = ins.imm >> 1
+    let signed = ins.imm & 1
+    let dloc = fc.vloc.get(ins.dst)
+    let mut d = RAX
+    if dloc > 0 {
+        d = dloc - 1
+    }
+    _to_reg(fc, d, ins.a)
+    if bits == 32 {
+        if signed == 1 {
+            _rex2(code, 1, d, d)                     // movsxd r64, r/m32
+            _b(code, 0x63)
+            _modrm(code, 3, d, d)
+        } else {
+            _rex2(code, 0, d, d)                     // mov r32, r32（自动清高）
+            _b(code, 0x89)
+            _modrm(code, 3, d, d)
+        }
+    } else {
+        let mut op = 0xB6                        // movzx 8
+        if signed == 1 {
+            op = 0xBE                            // movsx 8
+        }
+        if bits == 16 {
+            if signed == 1 {
+                op = 0xBF                        // movsx 16
+            } else {
+                op = 0xB7                        // movzx 16
+            }
+        }
+        _rex2(code, 1, d, d)
+        _b(code, 0x0F)
+        _b(code, op)
+        _modrm(code, 3, d, d)
+    }
+    if dloc <= 0 {
+        _mov_store(code, RBP, _slot_disp(-dloc - 1), d)
+    }
+}
+
 /// 条件减的无分支发射（v3.90，`OP_CSUBNS`）。
 ///
 /// **单独成函数不是为了整洁**，是为了不给 `_emit_ir` 加局部变量 —— 那个函数
@@ -8856,6 +9102,11 @@ fn _emit_ir(fc: FnCtx, i: int) {
         _emit_csubns(fc, i)
         return
     }
+    if op == OP_TRUNC {
+        // 同上，**必须**独立成函数：v3.90 已经踩过一次帧顶爆。
+        _emit_trunc(fc, i)
+        return
+    }
     if op == OP_CMPI {
         // dst = (a <cc> imm) ? 1 : 0。cc 在 ins.b（setcc 码），常量在 ins.imm
         if ins.b < 0x90 || ins.b > 0x9F {
@@ -8876,56 +9127,10 @@ fn _emit_ir(fc: FnCtx, i: int) {
         return
     }
     if op == OP_ADD || op == OP_SUB || op == OP_MUL {
-        let mut rr = 0x01
-        let mut rm = 0x03
-        if op == OP_SUB {
-            rr = 0x29
-            rm = 0x2B
-        }
-        if op == OP_MUL {
-            rr = 0
-            rm = 0
-        }
-        let dloc = fc.vloc.get(ins.dst)
-        if op == OP_MUL {
-            if dloc > 0 {
-                let d = dloc - 1
-                if fc.vloc.get(ins.b) == dloc {
-                    _mul_alias(fc, d, ins.a, ins.b)
-                } else {
-                    _to_reg(fc, d, ins.a)
-                    let bloc = fc.vloc.get(ins.b)
-                    if bloc > 0 {
-                        _imul_rr(code, d, bloc - 1)
-                    } else {
-                        _imul_rm(code, d, RBP, _slot_disp(-bloc - 1))
-                    }
-                }
-            } else {
-                _to_reg(fc, RAX, ins.a)
-                let bloc = fc.vloc.get(ins.b)
-                if bloc > 0 {
-                    _imul_rr(code, RAX, bloc - 1)
-                } else {
-                    _imul_rm(code, RAX, RBP, _slot_disp(-bloc - 1))
-                }
-                _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
-            }
-            return
-        }
-        if dloc > 0 {
-            let d = dloc - 1
-            if fc.vloc.get(ins.b) == dloc {
-                _bin_alias(fc, d, ins.a, ins.b, rr, rm)
-            } else {
-                _to_reg(fc, d, ins.a)
-                _bin_into(fc, d, ins.b, rr, rm)
-            }
-        } else {
-            _to_reg(fc, RAX, ins.a)
-            _bin_into(fc, RAX, ins.b, rr, rm)
-            _mov_store(code, RBP, _slot_disp(-dloc - 1), RAX)
-        }
+        // v3.91：抽成独立函数。`_emit_ir` 的帧贴着 `SLOT_TEMP`(416) 上限，
+        // 加窄类型支持后它需要 417 个槽，编不过自己。这一段是最大的一块，
+        // 搬出去腾出余量。同 `_emit_f64` / `_emit_csubns` 的理由。
+        _emit_binop(fc, i)
         return
     }
     if op == OP_DIV || op == OP_MOD {
