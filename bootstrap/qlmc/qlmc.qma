@@ -16421,10 +16421,19 @@ fn _gen_print_bool_elf(ctx: Ctx) {
 fn _gen_cgt_elf(ctx: Ctx) {
     let code: vec[int] = ctx.code
     ctx.rt_pos.set(RT_CGT, len(code))
+    // **必须保存 RSI/RDI**：它们是变量寄存器池的第 6/7 个（v2.51 加进来的），
+    // 调用者完全可能把变量放在那里。syscall 的 ABI 要求参数摊到
+    // rdi/rsi，所以不经保存就用就是"静默改掉别人的变量"。
+    // 症状极有迷惑性：**只有 `now_ns` 和"循环里多条赋值"同时出现才崩**
+    // —— 因为多一个活跃变量才会用到第 6/7 个寄存器（§7.50）。
+    _b(code, 0x57)                         // push rdi
+    _b(code, 0x56)                         // push rsi
     _mov_imm(code, RDI, 1)                 // CLOCK_MONOTONIC
     _mov_rr(code, RSI, RCX)                // &timespec
     _mov_imm(code, RAX, 228)               // sys_clock_gettime
     _syscall(code)
+    _b(code, 0x5E)                         // pop rsi
+    _b(code, 0x5F)                         // pop rdi
     _ret(code)
 }
 
@@ -16433,11 +16442,18 @@ fn _gen_cgt_elf(ctx: Ctx) {
 fn _gen_syscall_elf(ctx: Ctx) {
     let code: vec[int] = ctx.code
     ctx.rt_pos.set(RT_SYSCALL, len(code))
+    // 同 `_gen_cgt_elf`：RSI/RDI 是变量寄存器池的第 6/7 个，必须保存。
+    // 另外 RAX/RDX 是发射器暂存不算，但 R8/R9 是**临时值池**，把参数
+    // 搬进它们之前也要保住 —— 这里用 push 一次解决。
+    _b(code, 0x57)                         // push rdi
+    _b(code, 0x56)                         // push rsi
     _mov_rr(code, RAX, RCX)                // rax = 号
     _mov_rr(code, RDI, RDX)                // rdi = a
     _mov_rr(code, RSI, R8)                 // rsi = b
     _mov_rr(code, RDX, R9)                 // rdx = c
     _syscall(code)
+    _b(code, 0x5E)                         // pop rsi
+    _b(code, 0x5F)                         // pop rdi
     _ret(code)
 }
 

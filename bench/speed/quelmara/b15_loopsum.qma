@@ -1,11 +1,16 @@
-// b15_loopsum —— 最朴素循环累加 2 亿次
+// b15_loopsum —— 最朴素循环累加 2 亿次（循环开销基线）
+//
+// 依赖链写法与 C/Go 版完全一致，防止"只做 s += i"时各语言的优化器
+// 把循环折叠成闭式解 —— 那会让这个基准失去意义。
 fn main() {
     let n = 200000000
     let t0 = now_ns()
     let mut s = 0
+    let mut x = 1
     let mut i = 0
     while i < n {
-        s = s + i
+        x = (x * 31 + i) | 1
+        s = s + (x & 1023)
         i = i + 1
     }
     let t1 = now_ns()
