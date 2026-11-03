@@ -53,7 +53,7 @@ env:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -138,7 +138,7 @@ jobs:
           - os: macos-latest
             arch: arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -155,6 +155,11 @@ jobs:
       # 某一种语言装不上不该让整条基准确链失败 —— `run.py` 找不到
       # 编译器时会明确跳过并把原因写进结果，不会假装测过。
       - name: 额外对比语言（rust / zig / nim / gfortran）
+        # **只在 Linux 上装**：这段脚本下的是 linux-x86_64 的预编译包，
+        # macOS（arm64）上会用错格式 —— v4.01 第一次跑就在
+        # `zigpkg/zig` 上抛 `OSError: [Errno 8] Exec format error`。
+        # macOS 的对比语言留到以后单独适配（brew 装 rust/gfortran 是可行的）。
+        if: runner.os == 'Linux'
         continue-on-error: true
         run: |
           set -x
