@@ -1,0 +1,40 @@
+// b28_matrix —— 矩阵乘法 300×300（朴素三重循环）
+fn main() {
+    let n = 300
+    let a = vec[int].new(n * n)
+    let b = vec[int].new(n * n)
+    let mut seed = 7
+    let mut i = 0
+    while i < n * n {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        a.push(seed % 100)
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        b.push(seed % 100)
+        i = i + 1
+    }
+    let c = vec[int].new(n * n)
+    i = 0
+    while i < n * n { c.push(0)  i = i + 1 }
+    let t0 = now_ns()
+    let mut r = 0
+    while r < n {
+        let mut k = 0
+        while k < n {
+            let av = a.get(r * n + k)
+            let mut j = 0
+            while j < n {
+                c.set(r * n + j, c.get(r * n + j) + av * b.get(k * n + j))
+                j = j + 1
+            }
+            k = k + 1
+        }
+        r = r + 1
+    }
+    let t1 = now_ns()
+    let mut chk = 0
+    i = 0
+    while i < n * n { chk = (chk + c.get(i)) % 1000000007  i = i + 1 }
+    print(chk)
+    print("T")
+    print(t1 - t0)
+}

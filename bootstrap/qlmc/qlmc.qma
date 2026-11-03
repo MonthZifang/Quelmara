@@ -760,6 +760,11 @@ const SW_MOD_ID = 0       // 当前 parse 的模块号（0 = 主文件，1.. = �
 // 靠事后扫 token 区间反查（`_gt_tname_nid`），但 `[T: 约束]` 的区间里
 // `[` 之后第一个 `T_NAME` 未必是 `T`，反查会失败（实测 `[T: Ord]` 报
 // "未知类型 T"）。登记时手里正好有它，存下来最可靠。
+// v3.94：**当前目标容器**（0 = PE32+, 1 = ELF64）。编译期常量，但
+// `_new_fc` 在很深的调用链里（`_compile_range` → 工作线程），再穿一层参数
+// 会波及十几个函数签名，所以用 static_word（编译期单值，与 SW_MOD_ID 同理）。
+// 槽 6/7 之前没人用。
+const SW_TARGET = 6
 const SW_GT_N = 5
 const SW_GT_BASE = 8
 const GT_STRIDE = 4
@@ -3938,6 +3943,9 @@ struct FnCtx {
     bind: vec[int]      // 臂内绑定栈：(名字 id, vreg) 成对
     loops: vec[int]     // 循环栈：(continue 标签, break 标签) 成对
     cp: vec[int]        // 复用缓冲：调用前缀和
+    // v3.94：目标容器（0=PE, 1=ELF）。只影响"调哪个平台 API"的内建
+    // （now_ns 用 QPC 还是 clock_gettime），纯计算代码两条后端完全共用。
+    target: int
     rend: vec[int]      // 复用缓冲：寄存器占用到的指令
     send: vec[int]      // 复用缓冲：临时槽占用到的指令
     // v3.62：**当前正在降级的函数所属模块号**。`_fn_index` 按它做作用域
@@ -4043,7 +4051,12 @@ const RT_AADD = 27
 const RT_ACAS = 28
 // v3.59：CPUID leaf 1 的 ECX（AES-NI bit25 / PCLMULQDQ bit1 都在这儿）
 const RT_CPUID1ECX = 29
-const RT_COUNT = 30      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
+// v3.94：ELF 后端的两个 syscall 例程。
+//   RT_CGT     : clock_gettime(CLOCK_MONOTONIC, rcx=&timespec) —— now_ns 用
+//   RT_SYSCALL : 通用 `syscall(n, ...)` 内建（ELF 侧直通内核）
+const RT_CGT = 30
+const RT_SYSCALL = 31
+const RT_COUNT = 32      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
 
 fn _slot_disp(slot: int) -> int {
     return -8 * (slot + 1)
@@ -4373,9 +4386,19 @@ fn _new_fc(nodes: vec[Node], names: vec[str], fns: vec[Fn], rt: vec[int],
                      df: vec[int].new(16),
                      bind: vec[int].new(16), loops: vec[int].new(16),
                      cp: vec[int].new(64), rend: vec[int].new(4),
-                     send: vec[int].new(64) }
+                     send: vec[int].new(64), target: _cur_target() }
     _fc_reset(fc)
     return fc
+}
+
+/// 读当前目标容器（0 = PE32+, 1 = ELF64）。
+fn _cur_target() -> int {
+    return mem_load64(static_word(SW_TARGET), 0)
+}
+
+/// 写当前目标容器。
+fn _set_target(t: int) {
+    mem_store64(static_word(SW_TARGET), 0, t)
 }
 
 fn _vnew(fc: FnCtx) -> int {
@@ -13134,6 +13157,46 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         return d
     }
     if bn == "now_ns" {
+        // v3.94：ELF 后端用 `clock_gettime(CLOCK_MONOTONIC)` ——
+        // 一次 syscall 直接拿到 (tv_sec, tv_nsec)，比 Windows 的
+        // QPC 两段式（取计数 + 取频率再做除法）简单得多。
+        // 返回纳秒，与 PE 版口径一致（都是单调时钟，不含进程创建开销）。
+        if fc.target == 1 {
+            let buf = _vnew(fc)
+            fc.vty.set(buf, TY_INT)
+            // 32 字节够放 struct timespec{int64 sec; int64 nsec}
+            let sz = _vnew(fc)
+            fc.vty.set(sz, TY_INT)
+            _ir_emit(fc, OP_CONST, sz, 0, 0, 32)
+            _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+            _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
+            _ir_emit(fc, OP_ARG, 0, buf, 0, 0)
+            // sys_clock_gettime(228)：rdi=CLOCK_MONOTONIC(1)，rsi=&ts
+            // 包成 RT_CGT 例程走既有通路（IR 层没有 syscall 操作码）
+            _ir_emit(fc, OP_ARG, 0, buf, 0, 0)
+            let r0 = _vnew(fc)
+            fc.vty.set(r0, TY_INT)
+            _ir_emit(fc, OP_CALLRT, r0, 0, 0, RT_CGT)
+            let secp = _vnew(fc)
+            fc.vty.set(secp, TY_INT)
+            _ir_emit(fc, OP_LOAD, secp, buf, 0, 8)
+            let nsp = _vnew(fc)
+            fc.vty.set(nsp, TY_INT)
+            _ir_emit(fc, OP_ADDRF, nsp, buf, 0, 8)
+            let ns = _vnew(fc)
+            fc.vty.set(ns, TY_INT)
+            _ir_emit(fc, OP_LOAD, ns, nsp, 0, 8)
+            let big = _vnew(fc)
+            fc.vty.set(big, TY_INT)
+            _ir_emit(fc, OP_CONST, big, 0, 0, 1000000000)
+            let whole = _vnew(fc)
+            fc.vty.set(whole, TY_INT)
+            _ir_emit(fc, OP_MUL, whole, secp, big, 0)
+            let d = _vnew(fc)
+            fc.vty.set(d, TY_INT)
+            _ir_emit(fc, OP_ADD, d, whole, ns, 0)
+            return d
+        }
         // QPC 纳秒：ns = (c/f)*1e9 + ((c%f)*1e9)/f
         // 先除后乘再补余数——直接 c*1e9 在开机几小时后就会溢出 int64。
         let sz = _vnew(fc)
@@ -16344,6 +16407,35 @@ fn _gen_print_bool_elf(ctx: Ctx) {
     _ret(code)
 }
 
+/// `__cgt(rcx = &timespec)`：`clock_gettime(CLOCK_MONOTONIC, rcx)`（ELF）。
+///
+/// 为什么单独一个例程：`now_ns` 在 **IR 降低期**展开（`_lower_builtin`），
+/// 那里发不了 `syscall`（IR 没有这个操作码，而加一个会波及优化器/分配器）。
+/// 包成运行库例程走既有的 `RT_*` 通路最省事 —— 与 PE 侧把 QPC 包成
+/// IAT 调用是同一个思路，只是这边换成内核入口。
+fn _gen_cgt_elf(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    ctx.rt_pos.set(RT_CGT, len(code))
+    _mov_imm(code, RDI, 1)                 // CLOCK_MONOTONIC
+    _mov_rr(code, RSI, RCX)                // &timespec
+    _mov_imm(code, RAX, 228)               // sys_clock_gettime
+    _syscall(code)
+    _ret(code)
+}
+
+/// `__syscall(n, a, b, c)`：通用内核入口（ELF 侧的 `syscall()` 内建）。
+/// 参数约定：rcx=n, rdx=a, r8=b, r9=c → rdi/rsi/rdx/r10。
+fn _gen_syscall_elf(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    ctx.rt_pos.set(RT_SYSCALL, len(code))
+    _mov_rr(code, RAX, RCX)                // rax = 号
+    _mov_rr(code, RDI, RDX)                // rdi = a
+    _mov_rr(code, RSI, R8)                 // rsi = b
+    _mov_rr(code, RDX, R9)                 // rdx = c
+    _syscall(code)
+    _ret(code)
+}
+
 /// `__i64_fmt(rcx = buf, rdx = v) -> rax = 字节数`（**ELF 版**，v3.94）。
 ///
 /// PE 版靠 `wsprintfA("%I64d")` —— Linux 上没有这个 API，所以这里**完全自己算**：
@@ -16363,7 +16455,12 @@ fn _gen_i64_fmt_elf(ctx: Ctx) {
     _mov_rbp_rsp(code)
     _sub_rsp(code, 0x40)
     _mov_rr(code, RDI, RCX)                    // rdi = buf
-    _mov_rsp_store(code, 0x28, RCX)            // 存 buf 原值（rcx 后面会被除法的 10 覆盖）
+    // **用 R11 保存 buf，不用栈槽**：临时区是 [rbp-32, rbp)，而帧只有
+    // 0x40 字节，`[rsp+8]`（= rbp-56）虽然不与临时区重叠，但 `[rsp+0x28]`
+    // （= rbp-24）**就在临时区中间** —— 数字写进去会把它踩掉，
+    // 症状正是"超过 8 位就出错"。R11 在 RT_* 约定里是自由寄存器（调用方
+    // 不依赖），`div` 也不碰它，用它最干净。
+    _mov_rr(code, R11, RCX)                    // r11 = buf 原值
     _lea_rbp(code, RSI, -32)                   // rsi = rbp-32（临时区尾）
     _mov_rr(code, R8, RDX)                     // r8 = v
     _b(code, 0x4D)                             // test r8, r8
@@ -16437,19 +16534,23 @@ fn _gen_i64_fmt_elf(ctx: Ctx) {
     // 最后一位截掉（第一次实测：`print(-12345)` 打成 `-1234`）。
     //
     // `rcx` 进来时是 buf 原值，`rdi - rcx` 就是符号位占的字节数（0 或 1）。
-    _b(code, 0x49)                             // mov r10, rdi
-    _b(code, 0x89)
-    _b(code, 0xFA)
-    _mov_rsp_load(code, RCX, 0x28)             // rcx = buf 原值
-    _b(code, 0x49)                             // sub r10, rcx
+    // RAX = 数字位数（r9 - rsi）。符号位占的字节数 = rdi - buf，用 R8 承
+    // （R8 在除法循环里已经用完，这里是空的）。
+    _mov_rr(code, R8, RDI)                     // r8 = rdi
+    _mov_rr(code, RCX, R11)                    // rcx = buf 原值（从 r11 取回）
+    _b(code, 0x49)                             // sub r8, rcx
     _b(code, 0x29)
-    _b(code, 0xCA)
-    _b(code, 0x4C)                             // add rax, r10
+    _b(code, 0xC8)
+    // 复制长度 = 纯数字位数（rdi 已跳过符号位，符号是直接写进 buf[0] 的）
+    _mov_rr(code, R10, RAX)                    // r10 = 数字位数
+    // 返回值 = 数字位数 + 符号位字节数
+    _b(code, 0x4C)                             // add rax, r8
     _b(code, 0x01)
-    _b(code, 0xD0)
-    _mov_rsp_store(code, 0x20, RAX)            // 存总长度（含符号位）
+    _b(code, 0xC0)
+    _mov_rsp_store(code, 0x00, RAX)            // 总长度存栈（rsp+0 = rbp-0x40，临时区之外）
     let lcopy = _newlab(labs)
     let ldone = _newlab(labs)
+    _mov_rr(code, RAX, R10)                    // 复制长度 = 数字位数
     _setlab(labs, code, lcopy)
     _b(code, 0x48)                             // test rax, rax
     _b(code, 0x85)
@@ -16472,7 +16573,7 @@ fn _gen_i64_fmt_elf(ctx: Ctx) {
     let p5 = _jmp(code)
     _addfix(ctx.fixes, p5, lcopy, FK_LAB)
     _setlab(labs, code, ldone)
-    _mov_rsp_load(code, RAX, 0x20)
+    _mov_rsp_load(code, RAX, 0x00)
     _add_rsp(code, 0x40)
     _pop_rbp(code)
     _ret(code)
@@ -16487,15 +16588,18 @@ fn _gen_i64_fmt_elf(ctx: Ctx) {
 fn _gen_print_i64_elf(ctx: Ctx) {
     let code: vec[int] = ctx.code
     ctx.rt_pos.set(RT_PINT, len(code))
-    _sub_rsp(code, 0x38)
-    // 缓冲在 [rsp+0x20]，24 字节够放 int64 + 符号
+    _sub_rsp(code, 0x40)
+    // **缓冲区必须与"长度暂存槽"分开**：`_mov_rsp_store(0x28, ...)` 写的是
+    // [rsp+0x28, rsp+0x30)，而缓冲区从 [rsp+0x20] 起要放最多 20 位 ——
+    // 两者重叠会把第 8 字节之后的内容踩掉（症状正是"超过 8 位就出错"）。
+    // 现在缓冲 32 字节在 [rsp+0x20, rsp+0x40)，长度暂存在 [rsp+0x18]（低处）。
     _lea_rsp(code, RCX, 0x20)
     _mov_rr(code, RDX, RAX)                // RDX = 值（RT_I64FMT 的入参）
     let p = _call_rel(code)
     _addfix(ctx.fixes, p, RT_I64FMT, FK_RT)
-    _mov_rr(code, RDX, RAX)                // RDX = 长度（返回值）
-    _mov_rsp_store(code, 0x28, RDX)
+    _mov_rsp_store(code, 0x18, RAX)        // 长度暂存（缓冲区之外）
     _lea_rsp(code, RSI, 0x20)
+    _mov_rsp_load(code, RDX, 0x18)         // 长度
     _mov_imm(code, RDI, 1)
     _mov_imm(code, RAX, SYS_WRITE)
     _syscall(code)
@@ -16507,7 +16611,7 @@ fn _gen_print_i64_elf(ctx: Ctx) {
     _mov_imm(code, RDX, 1)
     _mov_imm(code, RAX, SYS_WRITE)
     _syscall(code)
-    _add_rsp(code, 0x38)
+    _add_rsp(code, 0x40)
     _ret(code)
 }
 
@@ -16833,10 +16937,18 @@ fn _gen_alloc(ctx: Ctx) {
     let p9 = _jcc(code, 0x86)              // jbe .ok
     _addfix(ctx.fixes, p9, lok, 1)
     _setlab(labs, code, loom)
-    _b(code, 0xB9)                         // mov ecx, 3
-    _w32(code, 3)
-    let c9 = _call_rip(code)               // ExitProcess(3)
-    _addfix(ctx.fixes, c9, I_EXIT, 3)
+    if ctx.target == 1 {
+        // ELF：直接 exit_group(3)，不经过 IAT
+        _mov_imm(code, RAX, 3)
+        _elf_exit(code)
+    } else {
+        _b(code, 0xB9)                     // mov ecx, 3
+        _w32(code, 3)
+    }
+    if ctx.target != 1 {
+        let c9 = _call_rip(code)           // ExitProcess(3)
+        _addfix(ctx.fixes, c9, I_EXIT, 3)
+    }
     _setlab(labs, code, lok)
     _b(code, 0x4C)                         // mov [rip+HEAP], r8
     _b(code, 0x89)
@@ -16882,8 +16994,35 @@ fn _gen_alloc(ctx: Ctx) {
     _b(code, 0x41)                         // mov r9d, 4（PAGE_READWRITE）
     _b(code, 0xB9)
     _w32(code, 4)
-    let c0 = _call_rip(code)               // VirtualAlloc
-    _addfix(ctx.fixes, c0, I_VALLOC, 3)
+    // v3.94：ELF 用 `mmap(NULL, HEAP_SIZE, PROT_READ|PROT_WRITE,
+    // MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)`（syscall 9）代替 VirtualAlloc。
+    // 约定保持"返回值在 rax、0 表示失败" —— 内核在出错时返回 -errno
+    // （高半区），所以后面那句 `test rax,rax; jz .oom` 要改成判符号。
+    // 实际用不到那么多寄存器，但保持与 PE 版相同的 push/pop 结构最省心。
+    if ctx.target == 1 {
+        _b(code, 0x31)                     // xor edi, edi（addr = NULL）
+        _b(code, 0xFF)
+        _b(code, 0xBE)                     // mov esi, HEAP_SIZE
+        _w32(code, HEAP_SIZE)
+        _b(code, 0xBA)                     // mov edx, 3（PROT_READ|PROT_WRITE）
+        _w32(code, 3)
+        _b(code, 0x41)                     // mov r10d, 0x22（MAP_PRIVATE|MAP_ANON）
+        _b(code, 0xBA)
+        _w32(code, 0x22)
+        _b(code, 0x49)                     // mov r8, -1
+        _b(code, 0xC7)
+        _b(code, 0xC0)
+        _w32(code, -1)
+        _b(code, 0x45)                     // xor r9d, r9d（offset = 0）
+        _b(code, 0x31)
+        _b(code, 0xC9)
+        _b(code, 0xB8)                     // mov eax, 9（sys_mmap）
+        _w32(code, 9)
+        _syscall(code)
+    } else {
+        let c0 = _call_rip(code)           // VirtualAlloc
+        _addfix(ctx.fixes, c0, I_VALLOC, 3)
+    }
     _b(code, 0x48)                         // add rsp, 32
     _b(code, 0x83)
     _b(code, 0xC4)
@@ -16896,11 +17035,21 @@ fn _gen_alloc(ctx: Ctx) {
     _b(code, 0x59)
     _b(code, 0x5A)                         // pop rdx
     _b(code, 0x59)                         // pop rcx
-    _b(code, 0x48)                         // test rax, rax
-    _b(code, 0x85)
-    _b(code, 0xC0)
-    let p8 = _jcc(code, 0x84)              // jz .oom（拿不到堆就退 3）
-    _addfix(ctx.fixes, p8, loom, 1)
+    if ctx.target == 1 {
+        // mmap 出错时返回高半区的 -errno，所以要判**符号**（js .oom），
+        // 不是判零 —— 判零的话失败会被当成"拿到地址 0"继续用，直接段错误。
+        _b(code, 0x48)                     // test rax, rax
+        _b(code, 0x85)
+        _b(code, 0xC0)
+        let p8 = _jcc(code, 0x88)          // js -> .oom
+        _addfix(ctx.fixes, p8, loom, 1)
+    } else {
+        _b(code, 0x48)                     // test rax, rax
+        _b(code, 0x85)
+        _b(code, 0xC0)
+        let p8 = _jcc(code, 0x84)          // jz .oom（拿不到堆就退 3）
+        _addfix(ctx.fixes, p8, loom, 1)
+    }
     _b(code, 0x48)                         // mov [rip+bss+16], rax（堆基址）
     _b(code, 0x89)
     _b(code, 0x05)
@@ -18085,6 +18234,9 @@ fn main() {
         }
         i = i + 1
     }
+    // 把 target 发布到全局，让 `_new_fc`（深在编译线程里）能读到。
+    // 与 `_set_mod` 同一手法：编译期单值，parse/lower 都是单线程写。
+    _set_target(tgt)
     if !file_exists(src) {
         eprint("qlmc: 找不到 " + src)
         exit(2)
@@ -18320,6 +18472,8 @@ fn main() {
         _gen_print_str_elf(ctx)
         _gen_print_bool_elf(ctx)
         _gen_i64_fmt_elf(ctx)
+        _gen_cgt_elf(ctx)
+        _gen_syscall_elf(ctx)
     } else {
         _gen_entry(ctx)
         _gen_print_i64(ctx)

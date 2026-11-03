@@ -1,0 +1,33 @@
+// b17_bubble —— 冒泡排序 8 万元素（最坏分支 + 交换开销）
+fn main() {
+    let n = 80000
+    let a = vec[int].new(n)
+    let mut seed = 12345
+    let mut i = 0
+    while i < n {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        a.push(seed % 100000)
+        i = i + 1
+    }
+    let t0 = now_ns()
+    let mut x = 0
+    while x < n {
+        let mut y = 0
+        while y < n - 1 - x {
+            if a.get(y) > a.get(y + 1) {
+                let t = a.get(y)
+                a.set(y, a.get(y + 1))
+                a.set(y + 1, t)
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+    let t1 = now_ns()
+    let mut chk = 0
+    i = 0
+    while i < n { chk = (chk + a.get(i) * (i + 1)) % 1000000007  i = i + 1 }
+    print(chk)
+    print("T")
+    print(t1 - t0)
+}

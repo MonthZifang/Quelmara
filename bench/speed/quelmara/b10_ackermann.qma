@@ -1,0 +1,14 @@
+// b10_ackermann —— Ackermann(2,8)：深层非原始递归
+fn ack(m: int, n: int) -> int {
+    if m == 0 { return n + 1 }
+    if n == 0 { return ack(m - 1, 1) }
+    return ack(m - 1, ack(m, n - 1))
+}
+fn main() {
+    let t0 = now_ns()
+    let r = ack(2, 8)
+    let t1 = now_ns()
+    print(r)
+    print("T")
+    print(t1 - t0)
+}

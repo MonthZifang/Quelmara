@@ -1,0 +1,31 @@
+// b27_sieve —— 埃氏筛 5000 万
+fn main() {
+    let n = 50000000
+    let t0 = now_ns()
+    let c = vec[int].new(n + 1)
+    let mut i = 0
+    while i <= n { c.push(1)  i = i + 1 }
+    c.set(0, 0)
+    c.set(1, 0)
+    let mut p = 2
+    while p * p <= n {
+        if c.get(p) == 1 {
+            let mut q = p * p
+            while q <= n {
+                c.set(q, 0)
+                q = q + p
+            }
+        }
+        p = p + 1
+    }
+    let mut cnt = 0
+    i = 0
+    while i <= n {
+        cnt = cnt + c.get(i)
+        i = i + 1
+    }
+    let t1 = now_ns()
+    print(cnt)
+    print("T")
+    print(t1 - t0)
+}

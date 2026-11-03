@@ -1,0 +1,40 @@
+// b11_nqueens —— N 皇后(8)：回溯 + 数组标记
+fn solve(col: vec[int], n: int, r: int) -> int {
+    if r == n { return 1 }
+    let mut cnt = 0
+    let mut c = 0
+    while c < n {
+        let mut ok = 1
+        let mut k = 0
+        while k < r {
+            let cc = col.get(k)
+            if cc == c { ok = 0 }
+            let d = cc - c
+            if d == k - r || d == r - k { ok = 0 }
+            k = k + 1
+        }
+        if ok == 1 {
+            col.set(r, c)
+            cnt = cnt + solve(col, n, r + 1)
+        }
+        c = c + 1
+    }
+    return cnt
+}
+fn main() {
+    let n = 8
+    let col = vec[int].new(n)
+    let mut i = 0
+    while i < n { col.push(0)  i = i + 1 }
+    let t0 = now_ns()
+    let mut total = 0
+    let mut rep = 0
+    while rep < 2000 {
+        total = total + solve(col, n, 0)
+        rep = rep + 1
+    }
+    let t1 = now_ns()
+    print(total)
+    print("T")
+    print(t1 - t0)
+}
