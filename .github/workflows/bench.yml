@@ -95,7 +95,7 @@ jobs:
         shell: pwsh
         run: |
           # Tee-Object 会把 python 的退出码吞掉，显式检查一次
-          python bench/speed/run.py --langs quelmara quelmara0 c go python --reps $env:REPS --markdown 2>&1 | Tee-Object -FilePath bench.md
+          python bench/speed/run.py --langs quelmara quelmara0 c cpp go --reps $env:REPS --markdown 2>&1 | Tee-Object -FilePath bench.md
           if ($LASTEXITCODE -ne 0) { Write-Error "run.py 失败（rc=$LASTEXITCODE）"; exit 1 }
 
       - name: 编译器轴（qlmc vs stage-0）
@@ -195,7 +195,7 @@ jobs:
           # 非零退出码吞掉 —— v2.58 第一次跑就踩了（macOS 上 ELF 跑不了，
           # python 抛 OSError，但 step 仍然报成功）。
           set -o pipefail
-          python bench/speed/run.py --langs quelmara0 c cpp go rust zig nim fortran python --reps "$REPS" --markdown 2>&1 | tee bench.md
+          python bench/speed/run.py --langs quelmara0 c cpp go rust zig nim fortran --reps "$REPS" --markdown 2>&1 | tee bench.md
 
       - name: 写 job summary
         if: always()
