@@ -286,6 +286,35 @@ def build_all(langs, only):
                 continue
             built[("python", b)] = [py, os.path.join(HERE, "python", b + ".py")]
 
+    # ---- v3.99：数据驱动的多语言接入（v3.99 起从 c/go/python 扩到 11 种）----
+    #
+    # 每种语言只要在 `EXTRA_LANGS` 里登记 (扩展名, 找编译器, 拼构建命令,
+    # 可选的自有 build 目录)，下面这段就统一处理。**没有编译器就明确跳过
+    # 并记进 notes**，不假装测过。
+    for lang in langs:
+        if lang not in EXTRA_LANGS:
+            continue
+        ext, find_cc, mk_cmd, need_dir = EXTRA_LANGS[lang]
+        cc = find_cc()
+        if not cc:
+            notes[lang] = f"跳过：没有找到 {lang} 的编译器（{EXTRA_HINT.get(lang, '')}）"
+            continue
+        for b, _ in BENCHES:
+            if only and b not in only:
+                continue
+            src = os.path.join(HERE, lang, b + ext)
+            if not os.path.exists(src):
+                continue
+            exe = os.path.join(OUT, lang + "_" + b + EXE)
+            cmd = mk_cmd(cc, src, exe)
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               cwd=os.path.join(HERE, lang) if need_dir else None)
+            if r.returncode != 0:
+                notes.setdefault(lang, f"{b} 编译失败: " +
+                                 (r.stdout + r.stderr).strip()[:200])
+                continue
+            built[(lang, b)] = [exe]
+
     return built, notes
 
 
@@ -294,7 +323,65 @@ def build_all(langs, only):
 # quelmara0  = stage-0（参考编译器）编出来的产物，**win / linux / macos 都有后端**
 #   加这一列是为了拿到"同一个语言在不同平台上"的数字（也就是适配度），
 #   同时它和 quelmara 列在同一台 Windows 机器上的差就是**后端差距**。
-LANGS = ["quelmara", "quelmara0", "c", "go", "python"]
+LANGS = ["quelmara", "quelmara0", "c", "go", "python",
+         "cpp", "rust", "zig", "nim", "d", "csharp", "ada", "fortran"]
+
+# v3.99：数据驱动接入。每项 = (源码扩展名, 找编译器, 拼命令, 是否在语言目录里构建)
+#
+# **为什么用数据而不是每种语言写一段 if**：原来 c/go/python 各写了一段，
+# 加第 4 种就要复制一遍 20 行。现在加语言只改这张表。
+#
+# 找编译器的顺序是"优先用 PATH 里第一个能跑通的"，找不到就 `None`
+# → 上层明确跳过并在结果里写"Why"，**不假装测过**。
+def _find(*names):
+    def f():
+        for n in names:
+            p = shutil.which(n)
+            if p:
+                return p
+        return None
+    return f
+
+
+EXTRA_LANGS = {
+    # C++：与 C 同一套 bench.h（计时宏在头文件里）
+    # C++ 复用 C 的 bench.h，所以要把 c/ 放进 include 路径
+    "cpp": (".cpp", _find("g++", "clang++"),
+            lambda cc, src, out: [cc, "-O2", "-I",
+                                  os.path.join(HERE, "c"), "-o", out, src], False),
+    # Rust：bench/*.rs 里自己做了单调时钟，rustc -O
+    "rust": (".rs", _find("rustc"),
+             lambda cc, src, out: [cc, "-O", "-o", out, src], False),
+    # Zig：`zig build-exe -O ReleaseFast`
+    "zig": (".zig", _find("zig"),
+            lambda cc, src, out: [cc, "build-exe", "-O", "ReleaseFast",
+                                  "-femit-bin=" + out, src], False),
+    # Nim：`nim c -d:release --out:...`（要 --hints:off 免得刷屏）
+    "nim": (".nim", _find("nim"),
+            lambda cc, src, out: [cc, "c", "-d:release", "--hints:off",
+                                  "--out:" + out, src], False),
+    # D（LDC）
+    "d": (".d", _find("ldc2"),
+          lambda cc, src, out: [cc, "-O3", "-of=" + out, src], False),
+    # C#（.NET）。**只支持 net6+ 的 top-level program**，且构建慢，
+    # 所以单独放在 csharp/ 目录里用 `dotnet run` 不方便——改成
+    # 预生成 .csproj 太复杂，这里用 `csc`/`dotnet script` 都不可靠，
+    # 暂时只登记不启用（见 EXTRA_HINT）。
+    "ada": (".adb", _find("gnatmake"),
+            lambda cc, src, out: [cc, "-O2", "-o", out, src], False),
+    "fortran": (".f90", _find("gfortran"),
+                lambda cc, src, out: [cc, "-O2", "-o", out, src], False),
+}
+
+EXTRA_HINT = {
+    "cpp": "g++ / clang++",
+    "rust": "rustc（rustup component）",
+    "zig": "zig（ziglang.org 下载版）",
+    "nim": "nim（choosenim）",
+    "d": "ldc2（D 的 LLVM 版）",
+    "ada": "gnat（GNAT Community / gnatmake）",
+    "fortran": "gfortran（gcc-fortran 包）",
+}
 
 
 def report_checksums(fails, rows):

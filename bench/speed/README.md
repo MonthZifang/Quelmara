@@ -138,6 +138,34 @@ gh run download <run-id> -n bench-windows   # 取结果
 ```bash
 python bench/speed/run.py --langs quelmara quelmara0 c go python   # Windows 全五列
 python bench/speed/run.py --langs quelmara0 c go python            # 跨平台
+
+# v3.99 起支持更多语言（按本机装了什么自动启停）：
+python bench/speed/run.py --langs quelmara0 c cpp go rust zig nim d python
+```
+
+## 语言接入状态（v3.99）
+
+「每种语言只写一份源码，算法与其它语言逐字等价 —— 否则比出来的是
+实现差异而不是编译器差异。」这条纪律对**所有**语言都适用。
+
+| 语言 | 状态 | 编译器 | 说明 |
+|---|---|---|---|
+| `c` | ✅ 24/24 | gcc / clang | 主对手 |
+| `cpp` | ✅ 24/24 | g++ / clang++ | 复用 C 的 `bench.h` |
+| `go` | ✅ 24/24 | go | 主对手 |
+| `python` | ✅ 24/24 | python3 | 参考下限（比它快是理所当然） |
+| `rust` | 🟡 已登记 | rustc | 源码待补 |
+| `zig` | 🟡 已登记 | zig | 源码待补 |
+| `nim` | 🟡 已登记 | nim | 源码待补 |
+| `d` | 🟡 已登记 | ldc2 | 源码待补 |
+| `ada` | 🟡 已登记 | gnatmake | 源码待补 |
+| `fortran` | 🟡 已登记 | gfortran | 源码待补 |
+| `csharp` | ❌ 未接 | — | .NET 需要 csproj 工程，`dotnet run` 的启动开销会污染计时 |
+
+**没有编译器时 runner 会明确跳过并写进结果**（`[rust] 跳过：没有找到…`），
+不会假装测过。
+
+```
 ```
 
 ### 平台矩阵与"适配度"
