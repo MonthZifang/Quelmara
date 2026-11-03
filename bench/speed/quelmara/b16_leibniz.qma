@@ -1,0 +1,17 @@
+// b16_leibniz —— 浮点：Leibniz 级数 π，2000 万项
+fn main() {
+    let n = 20000000
+    let t0 = now_ns()
+    let mut s = 0.0
+    let mut i = 0
+    while i < n {
+        let d = to_float(2 * i + 1)
+        if i % 2 == 0 { s = s + 1.0 / d } else { s = s - 1.0 / d }
+        i = i + 1
+    }
+    let pi = s * 4.0
+    let t1 = now_ns()
+    print(pi)
+    print("T")
+    print(t1 - t0)
+}

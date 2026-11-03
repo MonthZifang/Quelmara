@@ -1,0 +1,18 @@
+// b14_fibiter —— 迭代 fib(5000 万)：纯循环 vs 递归对照
+fn main() {
+    let n = 50000000
+    let t0 = now_ns()
+    let mut a = 0
+    let mut b = 1
+    let mut i = 0
+    while i < n {
+        let t = a + b
+        a = b
+        b = t % 1000000007
+        i = i + 1
+    }
+    let t1 = now_ns()
+    print(a)
+    print("T")
+    print(t1 - t0)
+}
