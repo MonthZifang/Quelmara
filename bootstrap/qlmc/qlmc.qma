@@ -12900,15 +12900,34 @@ fn _bi_now_ns_pe(fc: FnCtx) -> int {
 }
 
 fn _bi_now_ns_elf(fc: FnCtx) -> int {
-
-            let buf = _vnew(fc)
-            fc.vty.set(buf, TY_INT)
-            // 32 字节够放 struct timespec{int64 sec; int64 nsec}
-            let sz = _vnew(fc)
-            fc.vty.set(sz, TY_INT)
-            _ir_emit(fc, OP_CONST, sz, 0, 0, 32)
-            _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
-            _ir_emit(fc, OP_CALLRT, buf, 0, 0, RT_ALLOC)
+            // **buf 放在帧槽里，不用 `RT_ALLOC`**（v4.03）。
+            //
+            // 原来用 `CALLRT RT_ALLOC` 拿 32 字节，返回值是个临时 vreg。
+            // 问题：分配器可能把它和后面的 `LOAD` 结果放进**同一个寄存器**，
+            // 于是 `LOAD dst, [buf+0]` 就地覆盖了 buf 指针，后面再读
+            // `[buf+8]`（nsec）就落到垃圾地址 —— 表现为 `t1` 拿到
+            // 完全错误的值（实测 `print(t1-t0)` 打出 -5e14 这种负数）。
+            //
+            // 用 `OP_ADDRV` 直接取一个**帧槽的地址**：槽是函数固定的，
+            // 不会被任何分配决策复用，`ADDRV` 的 dst 是每次新开的临时值，
+            // 用完即弃 —— 从根上避开别名。
+            let slot = _st_units(fc, 4)          // 4 个 8 字节 = 32 字节
+            // **`buf` 必须是变量（`_pin`），不能是临时值**。
+            //
+            // 分配器会给临时值挑"当前空闲"的寄存器 —— 它在 `ADDRV` 那一刻
+            // 看 buf 的活跃区间只到 `LOAD` 为止，于是可能把它和后面的
+            // `MOV t1, ...` 放进**同一个寄存器**（实测落到 RDI）。
+            // 之后 `LOADD [buf+8]` 读 nsec 就落到垃圾地址，`t1` 变成
+            // 循环耗时那种值，`t1 - t0` 打出负数。
+            //
+            // `_pin` 把它变成变量：变量在函数内**固定一个位置**，
+            // 分配器不会拿它当临时值复用。`RT_CGT` 只用 rax/rdi/rsi 且
+            // 自己 push/pop，所以跨调用也安全。
+            let raw = _vnew(fc)
+            fc.vty.set(raw, TY_INT)
+            // `OP_ADDRV` 的 imm 是 `-槽号-1`（负偏移编码），不是槽号本身。
+            _ir_emit(fc, OP_ADDRV, raw, 0, 0, 0 - slot - 1)
+            let buf = _pin(fc, raw)
             // sys_clock_gettime(228)：rdi=CLOCK_MONOTONIC(1)，rsi=&ts
             // 包成 RT_CGT 例程走既有通路（IR 层没有 syscall 操作码）。
             // **注意只有一次 OP_ARG**：`RT_CGT` 的入参是 rcx=&timespec。
@@ -16451,6 +16470,13 @@ fn _gen_cgt_elf(ctx: Ctx) {
     // rdi/rsi，所以不经保存就用就是"静默改掉别人的变量"。
     // 症状极有迷惑性：**只有 `now_ns` 和"循环里多条赋值"同时出现才崩**
     // —— 因为多一个活跃变量才会用到第 6/7 个寄存器（§7.50）。
+    // **必须先建立栈帧再 push**：`RT_CGT` 是被 `call` 进来的，此时
+    // `[rsp]` 是**返回地址**。直接 `push rdi` 会把返回地址挤下去没问题，
+    // 但 `syscall` 之后如果 rsp 有任何偏移，`ret` 就跳到垃圾地址
+    // （实测：两个 now_ns 都打印出正确值，然后 SIGSEGV）。
+    // 用 `push rbp; mov rbp, rsp` 双保险，最后 `mov rsp, rbp; pop rbp` 复原。
+    _push_rbp(code)
+    _mov_rbp_rsp(code)
     _b(code, 0x57)                         // push rdi
     _b(code, 0x56)                         // push rsi
     _mov_imm(code, RDI, 1)                 // CLOCK_MONOTONIC
@@ -16459,6 +16485,8 @@ fn _gen_cgt_elf(ctx: Ctx) {
     _syscall(code)
     _b(code, 0x5E)                         // pop rsi
     _b(code, 0x5F)                         // pop rdi
+    _mov_rsp_rbp(code)
+    _pop_rbp(code)
     _ret(code)
 }
 
@@ -16470,6 +16498,9 @@ fn _gen_syscall_elf(ctx: Ctx) {
     // 同 `_gen_cgt_elf`：RSI/RDI 是变量寄存器池的第 6/7 个，必须保存。
     // 另外 RAX/RDX 是发射器暂存不算，但 R8/R9 是**临时值池**，把参数
     // 搬进它们之前也要保住 —— 这里用 push 一次解决。
+    // 同 `_gen_cgt_elf`：先建栈帧，否则 push 会把返回地址挤乱。
+    _push_rbp(code)
+    _mov_rbp_rsp(code)
     _b(code, 0x57)                         // push rdi
     _b(code, 0x56)                         // push rsi
     _mov_rr(code, RAX, RCX)                // rax = 号
@@ -16479,6 +16510,8 @@ fn _gen_syscall_elf(ctx: Ctx) {
     _syscall(code)
     _b(code, 0x5E)                         // pop rsi
     _b(code, 0x5F)                         // pop rdi
+    _mov_rsp_rbp(code)
+    _pop_rbp(code)
     _ret(code)
 }
 
