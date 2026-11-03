@@ -151,6 +151,28 @@ jobs:
           go-version: stable
           cache: false
 
+      # v4.01：把对比语言装齐。**每一步都 `|| true`**，因为
+      # 某一种语言装不上不该让整条基准确链失败 —— `run.py` 找不到
+      # 编译器时会明确跳过并把原因写进结果，不会假装测过。
+      - name: 额外对比语言（rust / zig / nim / gfortran）
+        continue-on-error: true
+        run: |
+          set -x
+          # Rust：官方脚本，装到 ~/.cargo
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal || true
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          # Zig：直接下预编译包（比包管理器快且版本确定）
+          ZV=0.13.0
+          curl -sSLo /tmp/zig.tar.xz "https://ziglang.org/download/${ZV}/zig-linux-x86_64-${ZV}.tar.xz" || true
+          mkdir -p "$HOME/zigpkg" && tar -xJf /tmp/zig.tar.xz -C "$HOME/zigpkg" --strip-components=1 2>/dev/null || true
+          echo "$HOME/zigpkg" >> "$GITHUB_PATH"
+          # Nim：用 choosenim（失败就算了）
+          curl -sSf https://nim-lang.org/choosenim/init.sh -o /tmp/niminit.sh && sh /tmp/niminit.sh -y || true
+          echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
+          # Fortran（Ubuntu 预装 gfortran 的概率不低，缺了再装）
+          which gfortran || (sudo apt-get update -qq && sudo apt-get install -y -qq gfortran) || true
+          true
+
       - name: 机器信息
         run: |
           if [ "$(uname -s)" = "Darwin" ]; then
@@ -168,7 +190,7 @@ jobs:
           # 非零退出码吞掉 —— v2.58 第一次跑就踩了（macOS 上 ELF 跑不了，
           # python 抛 OSError，但 step 仍然报成功）。
           set -o pipefail
-          python bench/speed/run.py --langs quelmara0 c go python --reps "$REPS" --markdown 2>&1 | tee bench.md
+          python bench/speed/run.py --langs quelmara0 c cpp go rust zig nim fortran python --reps "$REPS" --markdown 2>&1 | tee bench.md
 
       - name: 写 job summary
         if: always()
