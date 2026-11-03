@@ -35,7 +35,7 @@ fn main() {
 
     // 3) 限定调用返回 pub struct：字段访问
     let p = ns_lib.make_point(3, 4)
-    assert(p.x == 3 and p.y == 4, "qualified returning struct")
+    assert(p.x == 3 && p.y == 4, "qualified returning struct")
 
     // 4) 自有枚举不受限定语法影响
     let o = Own.B(v: 7)

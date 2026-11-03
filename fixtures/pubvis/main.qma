@@ -12,7 +12,7 @@ import pubvis_lib
 fn main() {
     // 1) pub fn + pub struct：构造与字段
     let p = make_point(3, 4)
-    assert(p.x == 3 and p.y == 4, "pub struct flat use")
+    assert(p.x == 3 && p.y == 4, "pub struct flat use")
 
     // 2) 库内部用非 pub helper：bake(5) = 5*2+1 = 11
     assert(bake(5) == 11, "internal helper through pub fn")

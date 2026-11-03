@@ -112,8 +112,8 @@ fn main() {
     let r7 = spin_wg(n)
     let t7 = now_cycle()
 
-    assert(r1 == n and r2 == n and r3 == n, "bench counter")
-    assert(r4 == 0 and r5 == 0, "bench stack drained")
+    assert(r1 == n && r2 == n && r3 == n, "bench counter")
+    assert(r4 == 0 && r5 == 0, "bench stack drained")
     assert(r7 == 0, "bench wg zero")
     assert(r6 >= 0, "bench chan")
 
