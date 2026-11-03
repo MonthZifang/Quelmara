@@ -5648,7 +5648,17 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         _ir_emit(fc, OP_CONST, t, 0, 0, nd.b)
         _ir_emit(fc, OP_STORE, 0, a0, t, 8)
         if nd.c >= 0 {
-            let pv = _lower_expr(fc, nd.c)
+            let mut pv = _lower_expr(fc, nd.c)
+            // v3.92（收 §7.46）：enum 窄载荷在构造点截断
+            let pty = _ent_ptype(fc, nd.a, nd.b)
+            let nb = _ty_narrow_bits(pty)
+            if nb > 0 {
+                let tv = _vnew(fc)
+                fc.vty.set(tv, TY_INT)
+                _ir_emit(fc, OP_TRUNC, tv, pv, 0,
+                         (nb << 1) | _ty_narrow_signed(pty))
+                pv = tv
+            }
             let a1 = _vnew(fc)
             fc.vty.set(a1, TY_INT)
             _ir_emit(fc, OP_ADDRF, a1, a0, 0, 8)
@@ -5694,8 +5704,20 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         return a
     }
     if nd.op == E_ARRLIT {
-        eprint("qlmc: 数组字面量只能出现在 let / 赋值 / 字段初始化里")
-        exit(2)
+        // 数组字面量当**值**用（v3.92，收 §7.49）：与 `E_STRUCTLIT` 同一套路
+        // —— 开一块临时区域逐元素写进去，值 = 区域地址。
+        // 以前这里直接 `exit(2)`（"只能出现在 let / 赋值 / 字段初始化里"），
+        // 于是 `assert(a[0] == 44 && a[1] == 1, ...)` 里嵌的 `[...]` 编不过。
+        //
+        // 元素类型从字面量第一个元素推（与 `_ty_of_expr` 的口径一致；
+        // 声明侧的 `[N]u8` 由 `_lower_into_agg` 负责截断）。
+        let ty = TY_ARRAY + (nd.b << 8) + TY_INT
+        let d = _new_var(fc, -1, ty)
+        _lower_into_agg(fc, nid, d, ty)
+        let a = _vnew(fc)
+        fc.vty.set(a, ty)
+        _ir_emit(fc, OP_ADDRV, a, 0, 0, -fc.vloc.get(d) - 1)
+        return a
     }
     eprint("qlmc: 不支持的表达式节点 " + nd.op.to_str())
     exit(2)
@@ -5774,7 +5796,18 @@ fn _lower_into_agg(fc: FnCtx, nid: int, dst: int, dty: int) {
                 eprint("qlmc: 嵌套聚合字段本版不支持")
                 exit(2)
             }
-            let v = _lower_expr(fc, fd.b)
+            let mut v = _lower_expr(fc, fd.b)
+            // v3.92（收 §7.46）：**struct 窄字段在写入点截断**。
+            // 语义与 stage-0 一致 —— uN 零扩展、iN 符号扩展，
+            // 表达式内部按 64 位算、不中途回绕。
+            let nb = _ty_narrow_bits(fty)
+            if nb > 0 {
+                let tv = _vnew(fc)
+                fc.vty.set(tv, TY_INT)
+                _ir_emit(fc, OP_TRUNC, tv, v, 0,
+                         (nb << 1) | _ty_narrow_signed(fty))
+                v = tv
+            }
             let a0 = _vnew(fc)
             fc.vty.set(a0, TY_INT)
             _ir_emit(fc, OP_ADDRV, a0, 0, 0, base_imm)
@@ -5797,7 +5830,17 @@ fn _lower_into_agg(fc: FnCtx, nid: int, dst: int, dty: int) {
         _ir_emit(fc, OP_CONST, t, 0, 0, nd.b)
         _ir_emit(fc, OP_STORE, 0, a0, t, 8)
         if nd.c >= 0 {
-            let pv = _lower_expr(fc, nd.c)
+            let mut pv = _lower_expr(fc, nd.c)
+            // v3.92（收 §7.46）：enum 窄载荷在构造点截断
+            let pty = _ent_ptype(fc, nd.a, nd.b)
+            let nb = _ty_narrow_bits(pty)
+            if nb > 0 {
+                let tv = _vnew(fc)
+                fc.vty.set(tv, TY_INT)
+                _ir_emit(fc, OP_TRUNC, tv, pv, 0,
+                         (nb << 1) | _ty_narrow_signed(pty))
+                pv = tv
+            }
             let a1 = _vnew(fc)
             fc.vty.set(a1, TY_INT)
             _ir_emit(fc, OP_ADDRF, a1, a0, 0, 8)
@@ -5806,11 +5849,22 @@ fn _lower_into_agg(fc: FnCtx, nid: int, dst: int, dty: int) {
         return
     }
     if nd.op == E_ARRLIT {
+        // v3.92（收 §7.46）：**定长数组的窄元素在字面量构造点截断**。
+        // 元素类型从 dst 的声明类型取（`TY_ARRAY + (count<<8) + elem`）。
+        let ety = _ty_elem(dty)
+        let nb = _ty_narrow_bits(ety)
         let mut e = nd.a
         let mut i = 0
         while e >= 0 {
             let en = fc.nodes.get(e)
-            let v = _lower_expr(fc, en.a)
+            let mut v = _lower_expr(fc, en.a)
+            if nb > 0 {
+                let tv = _vnew(fc)
+                fc.vty.set(tv, TY_INT)
+                _ir_emit(fc, OP_TRUNC, tv, v, 0,
+                         (nb << 1) | _ty_narrow_signed(ety))
+                v = tv
+            }
             let a0 = _vnew(fc)
             fc.vty.set(a0, TY_INT)
             _ir_emit(fc, OP_ADDRV, a0, 0, 0, base_imm)
@@ -6279,7 +6333,16 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
     if nd.op == S_ASG_FIELD {
         let a = _addr_field(fc, nd.a, nd.b)
         let fty = fc.cells.get(C_ADDRTY)
-        let v = _lower_expr(fc, nd.c)
+        let mut v = _lower_expr(fc, nd.c)
+        // v3.92（收 §7.46）：struct 窄字段在**赋值点**截断
+        let nb = _ty_narrow_bits(fty)
+        if nb > 0 {
+            let tv = _vnew(fc)
+            fc.vty.set(tv, TY_INT)
+            _ir_emit(fc, OP_TRUNC, tv, v, 0,
+                     (nb << 1) | _ty_narrow_signed(fty))
+            v = tv
+        }
         if _ty_is_agg(fty) {
             _ir_emit(fc, OP_COPY, 0, a, v, _ty_size(fc, fty))
         } else {
@@ -6290,7 +6353,16 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
     if nd.op == S_ASG_INDEX {
         let a = _addr_index(fc, nd.a, nd.b)
         let ety = fc.cells.get(C_ADDRTY)      // 先取走：_lower_expr 会覆盖它
-        let v = _lower_expr(fc, nd.c)
+        let mut v = _lower_expr(fc, nd.c)
+        // v3.92（收 §7.46）：vec 元素 / 定长数组 / 切片别名的**窄元素在写入点截断**
+        let nb = _ty_narrow_bits(ety)
+        if nb > 0 {
+            let tv = _vnew(fc)
+            fc.vty.set(tv, TY_INT)
+            _ir_emit(fc, OP_TRUNC, tv, v, 0,
+                     (nb << 1) | _ty_narrow_signed(ety))
+            v = tv
+        }
         if _ty_is_agg(ety) {
             _ir_emit(fc, OP_COPY, 0, a, v, _ty_size(fc, ety))
         } else if ety == TY_BYTE {
@@ -6682,6 +6754,34 @@ fn _lower_fn(fc: FnCtx, fi: int) {
         fc.vty.set(a0, TY_INT)
         _ir_emit(fc, OP_ADDRV, a0, 0, 0, -fc.vloc.get(v) - 1)
         _ir_emit(fc, OP_COPY, 0, a0, pp, _ty_size(fc, pty))
+        // v3.92（收 §7.46）：**定长数组的窄元素在形参入口逐个截断**。
+        // 数组按值拷进来之后，每个元素都要按声明宽度重截一次 ——
+        // 调用方可以传任意 64 位值（`first_of([300, 5])` 里 300 要变成 44）。
+        if pty >= TY_ARRAY {
+            let cnt = (pty - TY_ARRAY) >> 8
+            let ety = _ty_elem(pty)
+            let nb = _ty_narrow_bits(ety)
+            if nb > 0 {
+                let mut ei = 0
+                while ei < cnt {
+                    let ea = _vnew(fc)
+                    fc.vty.set(ea, TY_INT)
+                    _ir_emit(fc, OP_ADDRV, ea, 0, 0, -fc.vloc.get(v) - 1)
+                    let pa = _vnew(fc)
+                    fc.vty.set(pa, TY_INT)
+                    _ir_emit(fc, OP_ADDRF, pa, ea, 0, ei * 8)
+                    let ld = _vnew(fc)
+                    fc.vty.set(ld, TY_INT)
+                    _ir_emit(fc, OP_LOAD, ld, pa, 0, 8)
+                    let tv = _vnew(fc)
+                    fc.vty.set(tv, TY_INT)
+                    _ir_emit(fc, OP_TRUNC, tv, ld, 0,
+                             (nb << 1) | _ty_narrow_signed(ety))
+                    _ir_emit(fc, OP_STORE, 0, pa, tv, 8)
+                    ei = ei + 1
+                }
+            }
+        }
         pi = pi + 3
     }
     _lower_block(fc, f.body, ep)
@@ -15909,7 +16009,17 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
             eprint("qlmc: push 需要一个实参")
             exit(2)
         }
-        let x = _pin(fc, _lower_expr(fc, nd.c))
+        let mut x = _lower_expr(fc, nd.c)
+        // v3.92（收 §7.46）：vec 窄元素在 push 点截断
+        let nb = _ty_narrow_bits(et)
+        if nb > 0 {
+            let tv = _vnew(fc)
+            fc.vty.set(tv, TY_INT)
+            _ir_emit(fc, OP_TRUNC, tv, x, 0,
+                     (nb << 1) | _ty_narrow_signed(et))
+            x = tv
+        }
+        x = _pin(fc, x)
         let hp = _pin(fc, h)
         // 常见路径只要"比较一次"：满了才进冷路径（_vec_grow_body 自己重读头字段）
         let len0 = _vec_field(fc, hp, 8)
@@ -16030,7 +16140,16 @@ fn _lower_method(fc: FnCtx, nd: Node) -> int {
             exit(2)
         }
         let i = _lower_expr(fc, nd.c)
-        let x = _lower_expr(fc, nd.n)
+        let mut x = _lower_expr(fc, nd.n)
+        // v3.92（收 §7.46）：vec 窄元素在 set 点截断
+        let nb = _ty_narrow_bits(et)
+        if nb > 0 {
+            let tv = _vnew(fc)
+            fc.vty.set(tv, TY_INT)
+            _ir_emit(fc, OP_TRUNC, tv, x, 0,
+                     (nb << 1) | _ty_narrow_signed(et))
+            x = tv
+        }
         _vec_check(fc, h, i)
         let data = _vec_field(fc, h, 0)
         let addr = _vec_elem_addr(fc, data, i, stride)

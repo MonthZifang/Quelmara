@@ -78,7 +78,7 @@ fn main() {
     // 4) let 标注 / 结构体字面量 / 调用返回
     let p: Point = Point { x: 3, y: 4 }
     let q = ident(p)
-    assert(q.x == 3 and q.y == 4, "infer from anno")
+    assert(q.x == 3 && q.y == 4, "infer from anno")
     let r = ident(Point { x: 5, y: 6 })
     assert(r.x == 5, "infer from structlit")
     let s = ident(mk_point())
@@ -96,7 +96,7 @@ fn main() {
 
     // 7) T{} 字面量 + 多字符结构体名
     let big = xscale(Point { x: 6, y: 7 }, 10)
-    assert(big.x == 60 and big.y == 70, "tp lit multi-char")
+    assert(big.x == 60 && big.y == 70, "tp lit multi-char")
 
     // 8) 跨文件泛型（std/gen，import 后隐式调用）
     assert(gen_min(3, 8) == 3, "gen_min int")
@@ -114,7 +114,7 @@ fn main() {
     assert(gen_index_of(v, -1) == 1, "index_of")
     assert(gen_index_of(v, 99) == -1, "index_of miss")
     gen_reverse(v)
-    assert(gen_first(v) == 7 and gen_last(v) == 3, "reverse")
+    assert(gen_first(v) == 7 && gen_last(v) == 3, "reverse")
 
     print("generic infer ok")
 }

@@ -54,19 +54,19 @@ fn main() {
     // 1) Ok struct + match 解构
     let r = use_it("ab")
     match r {
-        Result.Ok(p) => { assert(p.x == 2 and p.y == 2, "ok payload") }
+        Result.Ok(p) => { assert(p.x == 2 && p.y == 2, "ok payload") }
         Result.Err(e) => { assert(false, "should be ok") }
     }
     // 2) Err struct + match 解构
     let r2 = use_it("a")
     match r2 {
         Result.Ok(p) => { assert(false, "should be err") }
-        Result.Err(e) => { assert(e.code == 1 and e.pos == 0, "err payload") }
+        Result.Err(e) => { assert(e.code == 1 && e.pos == 0, "err payload") }
     }
     // 3) ? 链式传播（Ok 分支改字段、Err 原样穿两层）
     let r3 = use_it2("xy")
     match r3 {
-        Result.Ok(p) => { assert(p.x == 20 and p.y == 7, "chained ok") }
+        Result.Ok(p) => { assert(p.x == 20 && p.y == 7, "chained ok") }
         Result.Err(e) => { assert(false, "should be ok2") }
     }
     let r4 = use_it2("z")
@@ -78,7 +78,7 @@ fn main() {
     let r5 = label("")
     match r5 {
         Result.Ok(s) => { assert(false, "should be err3") }
-        Result.Err(e) => { assert(e.code == 7 and e.pos == 42, "err struct T/E flip") }
+        Result.Err(e) => { assert(e.code == 7 && e.pos == 42, "err struct T/E flip") }
     }
     let r6 = label("hi")
     match r6 {
@@ -88,7 +88,7 @@ fn main() {
     // 5) option[struct]
     let o1 = find_p(true)
     match o1 {
-        Option.Some(p) => { assert(p.x == 9 and p.y == 8, "opt some") }
+        Option.Some(p) => { assert(p.x == 9 && p.y == 8, "opt some") }
         Option.None => { assert(false, "should be some") }
     }
     let o2 = find_p(false)

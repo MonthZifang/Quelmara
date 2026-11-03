@@ -24,14 +24,14 @@ fn main() {
     m.set("a", P { x: 1, y: 2 })
     m.set("b", P { x: 3, y: 4 })
     let pa = m.get("a")
-    assert(pa.x == 1 and pa.y == 2, "struct value get")
-    assert(m.has("a") and !m.has("zz"), "has")
+    assert(pa.x == 1 && pa.y == 2, "struct value get")
+    assert(m.has("a") && !m.has("zz"), "has")
     assert(len(m) == 2, "len")
 
     // 覆盖写（聚合值走 _n 路径的更新分支）
     m.set("a", P { x: 9, y: 9 })
     let pa2 = m.get("a")
-    assert(pa2.x == 9 and pa2.y == 9, "overwrite")
+    assert(pa2.x == 9 && pa2.y == 9, "overwrite")
 
     // 拷出是副本：改副本不影响表内
     pa2.x = 100
@@ -46,14 +46,14 @@ fn main() {
     assert(len(big) == n, "len after grow")
     for k in big {
         let v = big.get(k)
-        assert(v.x == k and v.y == k * 2, "grow keeps values")
+        assert(v.x == k && v.y == k * 2, "grow keeps values")
     }
 
     // 3) del + 墓碑复用
     big.del(5)
-    assert(!big.has(5) and len(big) == n - 1, "del")
+    assert(!big.has(5) && len(big) == n - 1, "del")
     big.set(5, P { x: 50, y: 100 })
-    assert(big.get(5).x == 50 and big.get(5).y == 100, "reuse after del")
+    assert(big.get(5).x == 50 && big.get(5).y == 100, "reuse after del")
 
     // 4) 含句柄字段的 struct（句柄 1 字随值拷贝、底层共享）
     let r = map[str]Rec.new(4)
@@ -61,7 +61,7 @@ fn main() {
     t.push("x")
     r.set("r1", Rec { name: "n1", score: 7, tags: t })
     let got = r.get("r1")
-    assert(got.name == "n1" and got.score == 7, "rec fields")
+    assert(got.name == "n1" && got.score == 7, "rec fields")
     assert(got.tags.get(0) == "x", "handle field survives map roundtrip")
     got.tags.push("y")
     assert(t.len() == 2, "handle semantics: shared backing")
@@ -78,7 +78,7 @@ fn main() {
     let scalar = map[str]int.new(4)
     scalar.set("s", 5)
     m.set("c", P { x: 7, y: 8 })
-    assert(scalar.get("s") == 5 and m.get("c").x == 7, "scalar+agg coexist")
+    assert(scalar.get("s") == 5 && m.get("c").x == 7, "scalar+agg coexist")
 
     print("mapstruct ok")
 }

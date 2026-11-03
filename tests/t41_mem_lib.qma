@@ -11,7 +11,7 @@ fn main() {
     let a = slab_alloc(h)
     let b = slab_alloc(h)
     let c = slab_alloc(h)
-    assert(a == 0 and b == 1 and c == 2, "slab 顺序分配")
+    assert(a == 0 && b == 1 && c == 2, "slab 顺序分配")
     let pa = slab_ptr(h, a)
     mem_store64(pa, 1, 1234)
     assert(mem_load64(slab_ptr(h, a), 1) == 1234, "slab ptr 稳定")

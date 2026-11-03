@@ -2948,7 +2948,19 @@ class Parser:
         return ("pat", path, binds)
 
     def parse_args(self):
-        """調用實參：支持 `f(a, b)` 與命名實參 `f(x: 1, y: 2)`（枚舉變體構造用）"""
+        """調用實參：支持 `f(a, b)` 與命名實參 `f(x: 1, y: 2)`（枚舉變體構造用）
+
+        **v3.92：实参之间必须有逗号，否则 fail-fast。**
+
+        以前这里缺那条检查：解析完一个实参后，只要下一个记号不是 `,`，
+        就当成"实参列表结束"继续循环 —— 于是 `assert(a == 30 and b == 40)`
+        被拆成三个实参 `[a == 30, and, b == 40]`，`and` 被当作第二个实参
+        （`assert` 只把非 str 的第二参忽略掉），**后半条断言被静默丢弃**。
+
+        后果比崩溃严重得多：`tests/` 里有 33 处 `assert(... and ...)`，
+        **它们从来没有真正验证过后半段**，一直显示"通过"。
+        详见 docs/07-gaps.md §7.48。
+        """
         args = []
         while not self.at("SYM", ")"):
             if self.peek().kind == "NAME" and self.peek(1).kind == "SYM" \
@@ -2960,6 +2972,14 @@ class Parser:
                 args.append(self.parse_expr())
             if self.at("SYM", ","):
                 self.next()
+            elif not self.at("SYM", ")"):
+                # 既不是逗号也不是右括号 —— 这里一定有问题，别静默吞掉。
+                # 最常见的是把 `and` / `or` 当运算符写（本语言只认 `&&` / `||`）。
+                t = self.peek()
+                raise SyntaxError(
+                    f"line {t.line}: 实参之间缺逗号（得到 {t.val!r}）"
+                    + ("；本语言用 `&&` / `||`，不是 `and` / `or`"
+                       if t.val in ("and", "or") else ""))
         self.eat("SYM", ")")
         return args
 

@@ -69,7 +69,7 @@ fn main() {
     // 4) T 字面量构造（struct 按值语义）
     let p = P { x: 3, y: 4 }
     let q = xscale[P](p, 10)
-    assert(q.x == 30 and q.y == 40, "generic struct lit")
+    assert(q.x == 30 && q.y == 40, "generic struct lit")
 
     // 5) vec 容器实参
     let v = vec[int].new(4)

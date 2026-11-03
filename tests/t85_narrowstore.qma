@@ -56,7 +56,7 @@ fn main() {
 
     // 4) 定长数组窄元素
     let a: [3]u8 = [300, 1, 258]
-    assert(a[0] == 44 and a[1] == 1 and a[2] == 2, "narrow array literal truncates")
+    assert(a[0] == 44 && a[1] == 1 && a[2] == 2, "narrow array literal truncates")
     a[0] = 512
     assert(a[0] == 0, "narrow array index assign truncates")
     a[1] += 256
@@ -66,9 +66,9 @@ fn main() {
     let mut b: [3]u8 = [0, 0, 0]
     let c: [3]u8 = [1000, 1000, 1000]
     b = c
-    assert(b[0] == 232 and b[2] == 232, "array copy-in truncates to u8")
+    assert(b[0] == 232 && b[2] == 232, "array copy-in truncates to u8")
     b = a
-    assert(b[0] == 0 and b[1] == 1, "array copy-in keeps stored values")
+    assert(b[0] == 0 && b[1] == 1, "array copy-in keeps stored values")
 
     // 形参入口截断（数组实参按值拷贝）
     assert(first_of([300, 5]) == 44, "narrow array param truncates at entry")

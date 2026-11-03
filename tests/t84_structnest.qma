@@ -36,8 +36,8 @@ fn main() {
 
     // 2) map 字段
     r.m.set("b", 7)
-    assert(r.m.get("a") == 5 and r.m.get("b") == 7, "map field")
-    assert(r.m.has("b") and !r.m.has("zz"), "map field has")
+    assert(r.m.get("a") == 5 && r.m.get("b") == 7, "map field")
+    assert(r.m.has("b") && !r.m.has("zz"), "map field has")
 
     // 3) chan 字段
     let b = Box { ch: chan[int].open(1) }
@@ -48,7 +48,7 @@ fn main() {
     // 4) slice 字段（2 字：早期 1 字 store 丢 len，静默错编）
     let a = [10, 20, 30]
     let w = Win { s: a[0..3] }
-    assert(w.s[0] == 10 and w.s[2] == 30, "slice field index")
+    assert(w.s[0] == 10 && w.s[2] == 30, "slice field index")
     assert(len(w.s) == 3, "slice field len")
 
     // 5) str 字段

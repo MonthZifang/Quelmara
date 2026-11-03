@@ -126,7 +126,7 @@ fn main() {
     let jw2 = join(w2h)
     assert(mem_load64(w2, 0) == 0, "wg zero after wait")
     assert(t1 - t0 >= 5000000, "wg_wait actually waited (>=5ms)")
-    assert(jw1 == 0 and jw2 == 0, "wg joins")
+    assert(jw1 == 0 && jw2 == 0, "wg joins")
 
     print("sync mpmc ok")
 }
