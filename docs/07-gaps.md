@@ -79,6 +79,7 @@
 | 平台 | 状态 | 前置 |
 |---|---|---|
 | Windows PE32+ | ✅ 主平台 | — |
+| **qlmc → ELF64** | ✅ **v3.94** | qlmc 以前**只能产 PE**，所以 CI 的 ubuntu job 里 `quelmara` 列一直是空的（只能跑 `quelmara0` = stage-0）。v3.94 加了自研 ELF64 后端（`build_elf` + 6 个 syscall 版运行库例程），`qlmc build x.qma --target elf` 产出可直接 `execve` 的静态可执行文件。**边界**：`spawn`/`join` 仍走 `CreateThread`、`@ffi`/文件/网络仍是 Windows API —— 纯计算的基准不受影响，线程类与 I/O 类待补 |
 | Linux ELF64 | ✅ 构建级（CI 执行） | ~~**`tcp_*` 内建没有 Linux 实现**~~ ✅ **v2.92**：`tcp_listen/accept/send/recv/close` 本来就有 raw syscall 路径，缺的只有 `tcp_connect`（派发里一句无条件的 windows 检查 + 运行库里一个提前 `return` 跳过了后续生成器）。现在 Linux 上 `listen/accept/send/recv/connect` 全链路可用，`tests/run_native_tests.sh [24]` 有真 socket 自环。**边界**：只支持 IPv4 点分字面量，域名显式 fail-fast（Linux resolver 要 dlopen nsswitch 插件，与"无 libc"定位冲突）；`tcp_listen6` 仍 Windows-only。**v3.15 曾把 `std/sync` 钉死在 PE**（`WaitOnAddress` 的 `@ffi` 直接写进模块），**v3.16 已恢复**：park 搬到 `std/park`（只编 PE），`std/sync` 回到零 `@ffi` + 注入式，native/arm64 重新可编、CI 的 `[7]` 段（`t122_syncport` 跑 A64 模拟器）恢复绿。**v3.18 补上 `syscall(n,...)` 用户内建**（`02-language.md` 内建表），Linux 侧终于能自己发系统调用；真做 futex 只剩"编号架构相关 + 无条件编译"这一条障碍（§5） |
 | Linux io_uring | ✅ | 5.1+ 内核 |
 | AArch64 | 🟡 模拟器执行级 | 需补 chan/map/spawn/SHA（**atomic/acquire-release 已接**，v1.98）；~~vtable~~ ✅ v1.97（`tests/a64_iface_test.py` 执行级 7 用例） |

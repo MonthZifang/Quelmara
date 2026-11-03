@@ -3104,6 +3104,25 @@ const OPT_SIZE = 240
 const SCN_CODE = 0x60000020
 const SCN_RDATA = 0xC0000040
 
+// ELF64 常量（v3.94 新增自研 ELF 后端，收 07-gaps §4 的 Linux 平台缺口）。
+//
+// 布局沿用 stage-0 的口径（`tools/stage0/qlm_native.py` 的 `write_elf`）：
+// **单 RWX PT_LOAD、无重定位、无动态链接器**，基址 0x400000，入口紧跟
+// ehdr(64) + phdr(56) 之后。这样产物是纯静态可执行文件，直接 `execve`
+// 就能跑 —— 不需要 libc、不需要 ld.so，与 PE 那边"无 CRT"的纪律一致。
+//
+// **这是 Quelmara 自己实现的后端**（不是调用 Python）：ELF 头、段表、
+// syscall 版运行库全部在 qlmc.qma 里。stage-0 的 ELF 后端只用于差分对拍。
+const ELF_BASE = 0x400000
+const ELF_EHDR = 64              // ELF64 头长度
+const ELF_PHDR = 56              // 程序头长度
+const ELF_ENTRY_OFF = ELF_EHDR + ELF_PHDR   // 代码起点（= 0x78）
+const ELF_TEXT_RVA = ELF_ENTRY_OFF
+// Linux syscall 号（x86-64）
+const SYS_WRITE = 1
+const SYS_EXIT = 60
+const SYS_EXIT_GROUP = 231
+
 // 导入符号（顺序 = IAT 槽顺序，别乱动）
 const I_GETSTD = 0
 const I_WRITE = 1
@@ -3563,6 +3582,14 @@ fn _mov_rsp_rbp(code: vec[int]) {
     _b(code, 0xEC)
 }
 
+/// `syscall` 指令（0F 05）：Linux x86-64 的系统调用入口。
+/// 约定与 C 库同口径：rax=号，rdi/rsi/rdx/r10/r8/r9=参数，返回值在 rax。
+/// **只给 ELF 后端用**（v3.94）。
+fn _syscall(code: vec[int]) {
+    _b(code, 0x0F)
+    _b(code, 0x05)
+}
+
 fn _sub_rsp(code: vec[int], n: int) {
     _b(code, 0x48)
     _b(code, 0x81)
@@ -3875,6 +3902,10 @@ struct Ctx {
     fdll: vec[str]      // @ffi 的 DLL 名（与 fsym 平行）
     fsym: vec[str]      // @ffi 的符号名
     is_lib: int         // v3.37：1 = 编库（不要求 main、不发入口）
+    // v3.94：目标容器格式。0 = PE32+（Windows），1 = ELF64（Linux）。
+    // 只影响**外层容器 + 运行库的 syscall 版本**；IR、优化器、寄存器分配、
+    // 机器码编码全部共用 —— 两条后端共享 99% 的代码。
+    target: int
 }
 
 // 单个函数的编译状态。结构体按值传，**标量字段改了不会回传**，
@@ -16206,6 +16237,302 @@ fn _gen_print_i64(ctx: Ctx) {
     _ret(code)
 }
 
+// ---------------------------------------------------------------------------
+// ELF / Linux 运行库（v3.94）
+//
+// **为什么单独一套而不是在 PE 版里 if/else**：两边的调用约定差得太远 ——
+// Windows 走 `WriteFile(handle, buf, len, &written, NULL)` 五参数 + IAT 间接
+// 调用；Linux 走 `write(fd, buf, len)` 三参数 + `syscall`。硬塞进一个函数会让
+// 那些本来就贴着帧上限的 `_gen_*` 更危险（v3.90 / v3.91 已经因为帧顶爆
+// 翻过两次车）。所以整段重写，只共享 `_len_of` / `_mov_*` 这些编码器原语。
+//
+// **约定与 PE 版保持一致**，上层 `RT_*` 调用点一个都不用改：
+//   __print_i64(rax = 值)       __print_str(rcx = str)
+//   __print_bool(rax = 值)      __eprint_str(rcx = str)
+//   __exit(rax = 退出码)
+// ---------------------------------------------------------------------------
+
+/// 把 rax 里的退出码交给内核：`exit_group(code)`。
+/// 用 `exit_group` 而不是 `exit` —— 多线程时前者会结束**所有**线程
+/// （b8 那两个基准就是多线程的，用 `exit` 会留下孤儿线程）。
+fn _elf_exit(code: vec[int]) {
+    _mov_imm(code, RDI, 0)                 // 先清零，下面把 rax 搬过去
+    _mov_rr(code, RDI, RAX)
+    _mov_imm(code, RAX, SYS_EXIT_GROUP)
+    _syscall(code)
+}
+
+/// `write(fd, buf, len)`：fd 放 RDI、buf 放 RSI、len 放 RDX（内核 ABI）。
+/// 参数由调用方按自己的寄存器准备好后调这个宏。
+fn _elf_write(code: vec[int], fd: int, buf_reg: int, len_reg: int) {
+    _mov_imm(code, RDI, fd)
+    if buf_reg != RSI {
+        _mov_rr(code, RSI, buf_reg)
+    }
+    if len_reg != RDX {
+        _mov_rr(code, RDX, len_reg)
+    }
+    _mov_imm(code, RAX, SYS_WRITE)
+    _syscall(code)
+}
+
+/// 入口：调 main，把返回值交给 exit_group。
+fn _gen_entry_elf(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    if ctx.is_lib == 1 {
+        _ret(code)
+        return
+    }
+    _sub_rsp(code, 0x28)
+    let p = _call_rel(code)
+    _addfix(ctx.fixes, p, -1, 0)           // id -1 = main
+    _elf_exit(code)
+}
+
+/// `__print_str(rcx = str)`：写 len 字节 + 换行。
+/// str 的值是**数据指针**，长度在 `[ptr-8]`（与 PE 版同一套 str 布局）。
+fn _gen_print_str_elf(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    ctx.rt_pos.set(RT_PSTR, len(code))
+    _sub_rsp(code, 0x28)
+    _mov_rsp_store(code, 0x20, RCX)        // 存 str
+    // 主体
+    _mov_imm(code, RDI, 1)                 // fd = stdout
+    _mov_rr(code, RSI, RCX)
+    _len_of(code, RDX, RCX)
+    _mov_imm(code, RAX, SYS_WRITE)
+    _syscall(code)
+    // 换行（id -3 = 换行字节）
+    // **fixup 必须加在 lea 的 disp32 上** —— `_lea_rip` 一次写完整 7 字节，
+    // 所以位置是"调用前 + 3"（REX + 8D + ModRM 之后）。写成 `len(code)`
+    // 会落到指令末尾，回填的是下一条指令的操作数（第一次实测就是这里崩的）。
+    let at = len(code) + 3
+    _lea_rip(code, RSI, 0)
+    _addfix(ctx.fixes, at, -3, 2)
+    _mov_imm(code, RDI, 1)
+    _mov_imm(code, RDX, 1)
+    _mov_imm(code, RAX, SYS_WRITE)
+    _syscall(code)
+    _add_rsp(code, 0x28)
+    _ret(code)
+}
+
+/// `__print_bool(rax = 值)`：0 打 "false"，非 0 打 "true"，各带换行。
+fn _gen_print_bool_elf(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_PBOOL, len(code))
+    let lf = _newlab(labs)
+    let le = _newlab(labs)
+    _cmp_imm0(code, RAX)                    // cmp rax, 0
+    let p = _jcc(code, 0x84)                // je -> false
+    _addfix(ctx.fixes, p, lf, FK_LAB)
+    // true
+    let at = len(code) + 3
+    _lea_rip(code, RCX, 0)
+    _addfix(ctx.fixes, at, ctx.str_true, FK_STR)
+    _call_rt(ctx, RT_PSTR)
+    let p2 = _jmp(code)
+    _addfix(ctx.fixes, p2, le, FK_LAB)
+    _setlab(labs, code, lf)
+    // false
+    let at2 = len(code) + 3
+    _lea_rip(code, RCX, 0)
+    _addfix(ctx.fixes, at2, ctx.str_false, FK_STR)
+    _call_rt(ctx, RT_PSTR)
+    _setlab(labs, code, le)
+    _ret(code)
+}
+
+/// `__i64_fmt(rcx = buf, rdx = v) -> rax = 字节数`（**ELF 版**，v3.94）。
+///
+/// PE 版靠 `wsprintfA("%I64d")` —— Linux 上没有这个 API，所以这里**完全自己算**：
+/// 除 10 取余、从临时区尾部往前填、最后整体挪到 buf 开头。
+///
+/// **符号处理**：先判符号（`test r8,r8` + `jns`），负数先写 `'-'` 再 `neg`。
+/// 不用"先取绝对值再判号"——那样 `INT64_MIN` 会溢出（§7.19 的老坑）；
+/// 用 `neg` 对 INT64_MIN 正好得到 2^63 的无符号位模式，配合**无符号 `div`** 正确。
+///
+/// 约定与 PE 版的 `RT_I64FMT` 完全一致（rcx=buf, rdx=v → rax=长度），
+/// 所以 `__print_i64` 和所有 `to_str()` 调用点都不用改。
+fn _gen_i64_fmt_elf(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_I64FMT, len(code))
+    _push_rbp(code)
+    _mov_rbp_rsp(code)
+    _sub_rsp(code, 0x40)
+    _mov_rr(code, RDI, RCX)                    // rdi = buf
+    _mov_rsp_store(code, 0x28, RCX)            // 存 buf 原值（rcx 后面会被除法的 10 覆盖）
+    _lea_rbp(code, RSI, -32)                   // rsi = rbp-32（临时区尾）
+    _mov_rr(code, R8, RDX)                     // r8 = v
+    _b(code, 0x4D)                             // test r8, r8
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let lpos = _newlab(labs)
+    let p0 = _jcc(code, 0x89)                  // jns -> 非负
+    _addfix(ctx.fixes, p0, lpos, FK_LAB)
+    _b(code, 0x48)                             // mov byte [rdi], 45
+    _b(code, 0xC6)
+    _b(code, 0x07)
+    _b(code, 45)
+    _b(code, 0x48)                             // inc rdi
+    _b(code, 0xFF)
+    _b(code, 0xC7)
+    _b(code, 0x49)                             // neg r8
+    _b(code, 0xF7)
+    _b(code, 0xD8)
+    _setlab(labs, code, lpos)
+    _mov_rr(code, RAX, R8)                     // rax = |v|
+    _mov_rr(code, R9, RSI)                     // r9 = 尾部（后面算长度）
+    _b(code, 0x48)                             // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let ldig = _newlab(labs)
+    let lzero = _newlab(labs)
+    let p1 = _jcc(code, 0x85)                  // jne -> 有值
+    _addfix(ctx.fixes, p1, ldig, FK_LAB)
+    _b(code, 0x48)                             // dec rsi
+    _b(code, 0xFF)
+    _b(code, 0xCE)
+    _b(code, 0x48)                             // mov byte [rsi], 48
+    _b(code, 0xC6)
+    _b(code, 0x06)
+    _b(code, 48)
+    let p2 = _jmp(code)
+    _addfix(ctx.fixes, p2, lzero, FK_LAB)
+    _setlab(labs, code, ldig)
+    let lloop = _newlab(labs)
+    _setlab(labs, code, lloop)
+    _b(code, 0x48)                             // xor edx, edx
+    _b(code, 0x31)
+    _b(code, 0xD2)
+    _b(code, 0x48)                             // mov rcx, 10
+    _b(code, 0xC7)
+    _b(code, 0xC1)
+    _w32(code, 10)
+    _b(code, 0x48)                             // div rcx
+    _b(code, 0xF7)
+    _b(code, 0xF1)
+    _b(code, 0x48)                             // dec rsi
+    _b(code, 0xFF)
+    _b(code, 0xCE)
+    _b(code, 0x80)                             // add dl, 48
+    _b(code, 0xC2)
+    _b(code, 48)
+    _b(code, 0x88)                             // mov [rsi], dl
+    _b(code, 0x16)
+    _b(code, 0x48)                             // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let p3 = _jcc(code, 0x85)
+    _addfix(ctx.fixes, p3, lloop, FK_LAB)
+    _setlab(labs, code, lzero)
+    _mov_rr(code, RAX, R9)                     // rax = 尾
+    _b(code, 0x48)                             // sub rax, rsi
+    _b(code, 0x29)
+    _b(code, 0xF0)
+    // 长度要**算上符号位**：`rdi` 已经被 inc 到 buf+1（写 `-` 之后），
+    // 复制也从 rdi 开始，但调用方是从 buf 起读 len 字节。少算 1 就会把
+    // 最后一位截掉（第一次实测：`print(-12345)` 打成 `-1234`）。
+    //
+    // `rcx` 进来时是 buf 原值，`rdi - rcx` 就是符号位占的字节数（0 或 1）。
+    _b(code, 0x49)                             // mov r10, rdi
+    _b(code, 0x89)
+    _b(code, 0xFA)
+    _mov_rsp_load(code, RCX, 0x28)             // rcx = buf 原值
+    _b(code, 0x49)                             // sub r10, rcx
+    _b(code, 0x29)
+    _b(code, 0xCA)
+    _b(code, 0x4C)                             // add rax, r10
+    _b(code, 0x01)
+    _b(code, 0xD0)
+    _mov_rsp_store(code, 0x20, RAX)            // 存总长度（含符号位）
+    let lcopy = _newlab(labs)
+    let ldone = _newlab(labs)
+    _setlab(labs, code, lcopy)
+    _b(code, 0x48)                             // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let p4 = _jcc(code, 0x84)
+    _addfix(ctx.fixes, p4, ldone, FK_LAB)
+    _b(code, 0x8A)                             // mov dl, [rsi]
+    _b(code, 0x16)
+    _b(code, 0x88)                             // mov [rdi], dl
+    _b(code, 0x17)
+    _b(code, 0x48)                             // inc rsi
+    _b(code, 0xFF)
+    _b(code, 0xC6)
+    _b(code, 0x48)                             // inc rdi
+    _b(code, 0xFF)
+    _b(code, 0xC7)
+    _b(code, 0x48)                             // dec rax
+    _b(code, 0xFF)
+    _b(code, 0xC8)
+    let p5 = _jmp(code)
+    _addfix(ctx.fixes, p5, lcopy, FK_LAB)
+    _setlab(labs, code, ldone)
+    _mov_rsp_load(code, RAX, 0x20)
+    _add_rsp(code, 0x40)
+    _pop_rbp(code)
+    _ret(code)
+}
+
+/// `__print_i64(rax = 值)`：先格式化成十进制（走自研的 `RT_I64FMT`），
+/// 再 `write(1, buf, len)` + 换行。
+///
+/// **不用 `wsprintfA`** —— 那是 Windows 的 API，Linux 上没有。整数转十进制
+/// 已经有 Quelmara 自己实现的 `RT_I64FMT`（PE 侧也在用它算 `to_str`），
+/// 这里直接复用，正是"运行库自己实现、不依赖平台 API"的体现。
+fn _gen_print_i64_elf(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    ctx.rt_pos.set(RT_PINT, len(code))
+    _sub_rsp(code, 0x38)
+    // 缓冲在 [rsp+0x20]，24 字节够放 int64 + 符号
+    _lea_rsp(code, RCX, 0x20)
+    _mov_rr(code, RDX, RAX)                // RDX = 值（RT_I64FMT 的入参）
+    let p = _call_rel(code)
+    _addfix(ctx.fixes, p, RT_I64FMT, FK_RT)
+    _mov_rr(code, RDX, RAX)                // RDX = 长度（返回值）
+    _mov_rsp_store(code, 0x28, RDX)
+    _lea_rsp(code, RSI, 0x20)
+    _mov_imm(code, RDI, 1)
+    _mov_imm(code, RAX, SYS_WRITE)
+    _syscall(code)
+    // 换行
+    let a1 = len(code) + 3
+    _lea_rip(code, RSI, 0)
+    _addfix(ctx.fixes, a1, -3, 2)
+    _mov_imm(code, RDI, 1)
+    _mov_imm(code, RDX, 1)
+    _mov_imm(code, RAX, SYS_WRITE)
+    _syscall(code)
+    _add_rsp(code, 0x38)
+    _ret(code)
+}
+
+/// `__eprint_str(rcx = str)`：写 stderr（fd=2）+ 换行。
+fn _gen_eprint_str_elf(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    ctx.rt_pos.set(RT_EPRINT, len(code))
+    _sub_rsp(code, 0x28)
+    _mov_rsp_store(code, 0x20, RCX)
+    _mov_imm(code, RDI, 2)
+    _mov_rr(code, RSI, RCX)
+    _len_of(code, RDX, RCX)
+    _mov_imm(code, RAX, SYS_WRITE)
+    _syscall(code)
+    let at = len(code) + 3
+    _lea_rip(code, RSI, 0)
+    _addfix(ctx.fixes, at, -3, 2)
+    _mov_imm(code, RDI, 2)
+    _mov_imm(code, RDX, 1)
+    _mov_imm(code, RAX, SYS_WRITE)
+    _syscall(code)
+    _add_rsp(code, 0x28)
+    _ret(code)
+}
+
 /// __print_str(rcx = str)：写 len 字节 + 一个换行
 fn _gen_print_str(ctx: Ctx) {
     let code: vec[int] = ctx.code
@@ -16984,8 +17311,13 @@ fn _fn_index_ctx(ctx: Ctx, nid: int) -> int {
     return -1
 }
 
+/// 把 fixup 的目标换算成"相对 text_base 的偏移"。
+///
+/// `text_base` 是**代码段在地址空间里的起始偏移** —— PE 是 `TEXT_RVA`(0x1000)，
+/// ELF 是 `ELF_ENTRY_OFF`(0x78)。所有 `- text_base` 的地方都靠这个参数分叉，
+/// 这样机器码发射、优化器、分配器完全共用，只有容器格式不同（v3.94）。
 fn _target_of(ctx: Ctx, id: int, kind: int, rdata_rva: int, bss_rva: int,
-              iat: vec[int]) -> int {
+              iat: vec[int], text_base: int) -> int {
     if kind == FK_FN {
         if id == -1 {
             // v3.37：lib 模式不发入口（_gen_entry 已提前 return），
@@ -17014,37 +17346,38 @@ fn _target_of(ctx: Ctx, id: int, kind: int, rdata_rva: int, bss_rva: int,
     }
     if kind == FK_STR {
         if id == -2 {
-            return rdata_rva + ctx.strpos.get(len(ctx.strpos) - 1) - TEXT_RVA
+            return rdata_rva + ctx.strpos.get(len(ctx.strpos) - 1) - text_base
         }
         if id == -3 {
-            return rdata_rva + ctx.nl.get(0) - TEXT_RVA
+            return rdata_rva + ctx.nl.get(0) - text_base
         }
         if id == -4 {
-            return rdata_rva + ctx.nl.get(1) - TEXT_RVA   // "%I64d"（无换行）
+            return rdata_rva + ctx.nl.get(1) - text_base   // "%I64d"（无换行）
         }
-        return rdata_rva + ctx.strpos.get(id) - TEXT_RVA
+        return rdata_rva + ctx.strpos.get(id) - text_base
     }
     if kind == FK_IAT {
-        return iat.get(id) - TEXT_RVA
+        return iat.get(id) - text_base
     }
     if kind == FK_BSS {
-        return bss_rva + id - TEXT_RVA
+        return bss_rva + id - text_base
     }
     return ctx.rt_pos.get(id)
 }
 
-fn resolve_seq(ctx: Ctx, rdata_rva: int, bss_rva: int, iat: vec[int]) {
+fn resolve_seq(ctx: Ctx, rdata_rva: int, bss_rva: int, iat: vec[int],
+               text_base: int) {
     let mut i = 0
     while i < len(ctx.fixes) {
         let fx = ctx.fixes.get(i)
-        let target = _target_of(ctx, fx.id, fx.kind, rdata_rva, bss_rva, iat)
+        let target = _target_of(ctx, fx.id, fx.kind, rdata_rva, bss_rva, iat, text_base)
         _patch32(ctx.code, fx.pos, target - (fx.pos + 4))
         i = i + 1
     }
 }
 
 fn resolve_fn(ctx: Ctx, arb: int, fi: int, base: int, rdata_rva: int,
-              bss_rva: int, iat: vec[int]) {
+              bss_rva: int, iat: vec[int], text_base: int) {
     let h = HDR_BASE + fi * FN_HDR
     let rbase = mem_load64(arb, h + 6)
     let loff = mem_load64(arb, h + 2)
@@ -17064,7 +17397,7 @@ fn resolve_fn(ctx: Ctx, arb: int, fi: int, base: int, rdata_rva: int,
             }
             target = base + mem_load64(rbase, loff / 8 + id)
         } else {
-            target = _target_of(ctx, id, kind, rdata_rva, bss_rva, iat)
+            target = _target_of(ctx, id, kind, rdata_rva, bss_rva, iat, text_base)
         }
         let pos = base + p
         _patch32(ctx.code, pos, target - (pos + 4))
@@ -17075,6 +17408,79 @@ fn resolve_fn(ctx: Ctx, arb: int, fi: int, base: int, rdata_rva: int,
 // PE32+ 写出（三节：.text / .rdata / .bss）
 // ---------------------------------------------------------------------------
 
+
+/// ELF64 写出（v3.94）：单 RWX PT_LOAD、无重定位、无动态链接器。
+///
+/// **布局**（与 stage-0 的 `write_elf` 同口径，方便差分对拍）：
+///
+/// ```
+/// 0x00  ELF64 ehdr (64 字节)
+/// 0x40  ELF64 phdr (56 字节)  —— 1 个 PT_LOAD，p_flags=7(RWX)
+/// 0x78  .text（机器码）+ .rdata（字符串/常量）+ .bss（零初始化）
+/// ```
+///
+/// 三段**连成一片**放在同一个 PT_LOAD 里：代码里所有 RIP 相对引用
+/// （字符串地址、函数地址）算出来就是文件偏移 + `ELF_BASE`，不需要
+/// 重定位、不需要段表里的 `p_filesz`/`p_memsz` 分开处理 —— `.bss`
+/// 那部分文件里不占字节，靠 `memsz > filesz` 让内核补零。
+///
+/// **为什么要自己写 ELF 而不是复用 PE**：两种容器格式的头完全不同，
+/// 而机器码本身（x86-64）是同一套。所以 `_emit_fn` / 优化器 / 分配器
+/// 全部共用，只有"外层容器 + 运行库的 syscall 版本"按平台分叉。
+///
+/// `code` 是机器码，`rdata` 是字符串/常量区，`bss_size` 是需要补零的字节数。
+/// 返回写入的总长度（给调用方校验用）。
+fn build_elf(code: vec[int], rdata: vec[int], bss_size: int,
+             blob: vec[int]) -> int {
+    let text_len = len(code)
+    let rdata_len = len(rdata)
+    let total = ELF_ENTRY_OFF + text_len + rdata_len
+    let memsz = total + bss_size
+    // ---- ehdr ----
+    _b(blob, 0x7F)
+    _b(blob, 0x45)                   // 'E'
+    _b(blob, 0x4C)                   // 'L'
+    _b(blob, 0x46)                   // 'F'
+    _b(blob, 2)                      // EI_CLASS = ELFCLASS64
+    _b(blob, 1)                      // EI_DATA = ELFDATA2LSB
+    _b(blob, 1)                      // EI_VERSION = EV_CURRENT
+    _b(blob, 0)                      // EI_OSABI = SYSV
+    _zero(blob, 8)                   // EI_PAD
+    _w16(blob, 2)                    // e_type = ET_EXEC
+    _w16(blob, 0x3E)                 // e_machine = EM_X86_64
+    _w32(blob, 1)                    // e_version
+    _w64(blob, ELF_BASE + ELF_ENTRY_OFF)   // e_entry
+    _w64(blob, ELF_EHDR)             // e_phoff
+    _w64(blob, 0)                    // e_shoff（无节表）
+    _w32(blob, 0)                    // e_flags
+    _w16(blob, ELF_EHDR)             // e_ehsize
+    _w16(blob, ELF_PHDR)             // e_phentsize
+    _w16(blob, 1)                    // e_phnum
+    _w16(blob, 0)                    // e_shentsize
+    _w16(blob, 0)                    // e_shnum
+    _w16(blob, 0)                    // e_shstrndx
+    // ---- phdr：PT_LOAD, RWX, 覆盖整个文件 ----
+    _w32(blob, 1)                    // p_type = PT_LOAD
+    _w32(blob, 7)                    // p_flags = R|W|X
+    _w64(blob, 0)                    // p_offset
+    _w64(blob, ELF_BASE)             // p_vaddr
+    _w64(blob, ELF_BASE)             // p_paddr
+    _w64(blob, total)                // p_filesz
+    _w64(blob, memsz)                // p_memsz（> filesz 的部分内核补零）
+    _w64(blob, 0x1000)               // p_align
+    // ---- 代码 + 数据 ----
+    let mut i = 0
+    while i < text_len {
+        _b(blob, code.get(i))
+        i = i + 1
+    }
+    i = 0
+    while i < rdata_len {
+        _b(blob, rdata.get(i))
+        i = i + 1
+    }
+    return total
+}
 
 fn build_pe(code: vec[int], rdata: vec[int], blob: vec[int]) -> int {
     let text_len = len(code)
@@ -17653,6 +18059,9 @@ fn main() {
     // "失败"变成"能编"。产物仍是 PE，只是 AddressOfEntryPoint 指向
     // 一段 ret 桩（Windows 不会执行它，因为它是 DLL/被链接用）。
     let mut is_lib = 0
+    // v3.94：目标容器格式。`--target elf` / `--target pe`（默认 pe，与历史行为一致）。
+    // 机器码完全相同，只有外层容器和运行库的 syscall 版本不同。
+    let mut tgt = 0
     let mut i = 2
     while i < len(a) {
         if a[i] == "-o" && i + 1 < len(a) {
@@ -17663,6 +18072,16 @@ fn main() {
         }
         if a[i] == "-lib" {
             is_lib = 1
+        }
+        if a[i] == "--target" && i + 1 < len(a) {
+            if a[i + 1] == "elf" || a[i + 1] == "linux" {
+                tgt = 1
+            } else if a[i + 1] == "pe" || a[i + 1] == "win" {
+                tgt = 0
+            } else {
+                eprint("qlmc: --target 只支持 pe / elf（得到 " + a[i + 1] + "）")
+                exit(2)
+            }
         }
         i = i + 1
     }
@@ -17887,13 +18306,27 @@ fn main() {
                     names: names, strs: strs, fns: fns, fnpos: fnpos,
                     rdata: rdata, strpos: strpos, str_true: s_true, str_false: s_false,
                     nl: nl, rt_pos: rt_pos, fdll: fdll, fsym: fsym,
-                    is_lib: is_lib }
+                    is_lib: is_lib, target: tgt }
 
-    // **入口必须落在 .text 偏移 0**（AddressOfEntryPoint 恒等于 TEXT_RVA）
-    _gen_entry(ctx)
-    _gen_print_i64(ctx)
-    _gen_print_str(ctx)
-    _gen_print_bool(ctx)
+    // **入口必须落在 .text 偏移 0**（PE 的 AddressOfEntryPoint / ELF 的 e_entry）
+    //
+    // v3.94：四个与操作系统直接打交道的例程按 target 分叉 —— 它们要么走
+    // Windows API（GetStdHandle / WriteFile / wsprintfA / ExitProcess），
+    // 要么走 Linux `syscall`，没有中间地带。其余运行库（memcpy / alloc /
+    // str_cat / f64 / 原子操作…）全是纯机器码，两条后端**完全共用**。
+    if tgt == 1 {
+        _gen_entry_elf(ctx)
+        _gen_print_i64_elf(ctx)
+        _gen_print_str_elf(ctx)
+        _gen_print_bool_elf(ctx)
+        _gen_i64_fmt_elf(ctx)
+    } else {
+        _gen_entry(ctx)
+        _gen_print_i64(ctx)
+        _gen_print_str(ctx)
+        _gen_print_bool(ctx)
+        _gen_i64_fmt(ctx)
+    }
     _gen_memcpy(ctx)
     _gen_cpuid1ecx(ctx)
     _gen_alloc(ctx)
@@ -17910,7 +18343,6 @@ _gen_memxchg(ctx)
     _gen_atomic_add(ctx)
     _gen_atomic_cas(ctx)
 _gen_memcmp(ctx)
-    _gen_i64_fmt(ctx)
     _gen_str_to_int(ctx)
     _gen_fparse(ctx)
     _gen_fop(ctx, RT_FADD, 0x58)     // addsd
@@ -17974,22 +18406,46 @@ _gen_memcmp(ctx)
         fi = fi + 1
     }
 
-    let rdata_rva = TEXT_RVA + _align_up(len(code), SECT_ALIGN)
+    // ---- 布局与回填：PE 和 ELF 的基址/对齐完全不同 ----
+    //
+    //   PE  : .text 从 TEXT_RVA(0x1000) 起，按 SECT_ALIGN(0x1000) 页对齐
+    //   ELF : 代码紧跟 ehdr(64)+phdr(56) 之后（0x78），**不做页对齐**
+    //         —— 单 PT_LOAD 覆盖整个文件，段内偏移是连续的
+    //
+    // 两边都用同一个 `resolve_seq` / `resolve_fn`，只把 `text_base` 传下去。
+    // 这样"机器码里所有 RIP 相对引用的基准"就按 target 自动切换。
+    let mut text_base = TEXT_RVA
+    let mut rdata_rva = 0
+    if tgt == 1 {
+        text_base = ELF_ENTRY_OFF
+        rdata_rva = ELF_ENTRY_OFF + len(code)
+    } else {
+        rdata_rva = TEXT_RVA + _align_up(len(code), SECT_ALIGN)
+    }
     build_rdata(ctx, rdata_rva, iat)
-    let real_bss = rdata_rva + _align_up(len(rdata), SECT_ALIGN)
-    resolve_seq(ctx, rdata_rva, real_bss, iat)
+    let real_bss = 0
+    if tgt == 1 {
+        real_bss = rdata_rva + len(rdata)
+    } else {
+        real_bss = rdata_rva + _align_up(len(rdata), SECT_ALIGN)
+    }
+    resolve_seq(ctx, rdata_rva, real_bss, iat, text_base)
     fi = 0
     while fi < nfunc {
-        resolve_fn(ctx, arb, fi, fnpos.get(fi), rdata_rva, real_bss, iat)
+        resolve_fn(ctx, arb, fi, fnpos.get(fi), rdata_rva, real_bss, iat, text_base)
         fi = fi + 1
     }
 
     let blob = vec[int].new(8192)
-    let pe_bss = build_pe(code, rdata, blob)
-    if pe_bss != real_bss {
-        eprint("qlmc: 内部错误：bss RVA 不一致 " + pe_bss.to_str() +
-               " vs " + real_bss.to_str())
-        exit(2)
+    if tgt == 1 {
+        let _t = build_elf(code, rdata, BSS_SIZE, blob)
+    } else {
+        let pe_bss = build_pe(code, rdata, blob)
+        if pe_bss != real_bss {
+            eprint("qlmc: 内部错误：bss RVA 不一致 " + pe_bss.to_str() +
+                   " vs " + real_bss.to_str())
+            exit(2)
+        }
     }
     write_file(out, blob)
     let t_all = (now_ns() - t0) / 1000

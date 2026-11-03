@@ -4711,6 +4711,47 @@ push；`b1_int` 那种延迟敏感的循环直接被访存打回慢。
 §7.31 到此为止：(a)(b)(c)(d) 全部有结论，(a) 甚至反转成 qlmc 更快
 （`b1_int` 0.93×）。
 
+### 3.132 qlmc 自研 ELF64 后端（v3.94）
+
+**这是"在 Linux 上和 C/Go 同台对比"的前提。** 在此之前 qlmc 只能产 PE，
+CI 的 ubuntu job 里 `quelmara` 列一直是空的。
+
+`qlmc build x.qma --target elf -o x` 现在产出可直接 `execve` 的**静态 ELF64**
+（单 RWX PT_LOAD、无重定位、无动态链接器）。
+
+**全部用 Quelmara 自己写**：ELF 头、段表、syscall 版运行库都在
+`bootstrap/qlmc/qlmc.qma` 里，没有调用 Python 或外部汇编器/链接器。
+
+**两条后端共享 99% 代码**：机器码是同一套 x86-64，所以 IR / 优化器 /
+线性扫描分配器 / 指令编码全部共用。只分叉两处 ——
+外层容器（`build_pe` vs `build_elf`）和与 OS 打交道的 6 个运行库例程
+（PE 走 `WriteFile`/`wsprintfA`/`ExitProcess`，ELF 走 `syscall`）。
+
+**整数格式化是自己实现的**：PE 版靠 `wsprintfA("%I64d")`，Linux 上没有。
+`_gen_i64_fmt_elf` 用机器码除 10 取余、从尾部往前填。符号用
+`test/jns` + `neg`（不是"先取绝对值再判号"—— 那样 `INT64_MIN` 溢出，
+§7.19 的老坑）。
+
+**踩到的三个坑**（都是手写机器码的经典错误）：
+
+① `lea` 的 fixup 位置：`_lea_rip` 一次写 7 字节，`len(code)` 已经指向下一条
+指令，回填会改掉别人的操作数。必须是 `len(code) + 3`。
+
+② 8 位操作多加了 REX.W：`add dl,48` 写成 `48 80 C2 30`，CPU 会按 64 位解析
+后续字节，得到完全不同的指令。
+
+③ 长度没算符号位：`print(-12345)` 打成 `-1234`（**每一位负数都少一位**）。
+而且 `rcx` 中途被 `mov rcx,10`（除法）覆盖，算 `rdi - buf` 不能直接用 `rcx`，
+必须在入口把 buf 原值存栈。
+
+**验证**：`hello`/负数边界（-1…-123456）/循环取模累加 100 次 全部正确且与
+stage-0 一致；`tests/qlmc_test.py` **PASS=110 FAIL=0**（PE 后端无回归）；
+`tests/bootstrap_test.py` 1/2/2.5 级 PASS。
+
+**边界**：`spawn`/`join` 仍走 `CreateThread`，`@ffi`/文件/网络仍是 Windows API。
+纯计算基准不受影响，线程类与 I/O 类待补。
+
+
 
 ## 4. 自举
 
