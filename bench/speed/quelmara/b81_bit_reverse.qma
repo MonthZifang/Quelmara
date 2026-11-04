@@ -1,0 +1,25 @@
+// b81_bit_reverse —— 微基准：位反转 100 万次
+fn bitrev(x: int) -> int {
+    let mut v = x
+    let mut r = 0
+    let mut i = 0
+    while i < 32 {
+        r = (r << 1) | (v & 1)
+        v = v >> 1
+        i = i + 1
+    }
+    return r
+}
+fn main() {
+    let t0 = now_ns()
+    let mut acc = 0
+    let mut j = 0
+    while j < 1000000 {
+        acc = acc ^ bitrev(j)
+        j = j + 1
+    }
+    let t1 = now_ns()
+    print(acc)
+    print("T")
+    print(t1 - t0)
+}

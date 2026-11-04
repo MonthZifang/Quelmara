@@ -1,0 +1,20 @@
+// b84_pair_swap —— 数据结构：键值对交换 100 万
+fn main() {
+    let keys = vec[int].new(1000000)
+    let vals = vec[int].new(1000000)
+    let mut i = 0
+    while i < 1000000 { keys.push(i)  vals.push(i * 2)  i = i + 1 }
+    let t0 = now_ns()
+    let mut j = 0
+    while j < 1000000 {
+        let k = keys.get(j)
+        let v = vals.get(j)
+        keys.set(j, v)
+        vals.set(j, k)
+        j = j + 1
+    }
+    let t1 = now_ns()
+    print(keys.get(0) + vals.get(0))
+    print("T")
+    print(t1 - t0)
+}
