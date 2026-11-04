@@ -12528,6 +12528,34 @@ fn _map_has(fc: FnCtx, nd: Node, h: int) -> int {
 
 /// 读头字段：[h + off]（off = 0 数据指针 / 8 长度 / 16 容量）
 fn _vec_field(fc: FnCtx, h: int, off: int) -> int {
+    // v4.15：极窄缓存——只复用最近 15 条内的 ADDRF h,off + LOAD。
+    // **安全条件**：中间不能有任何非纯指令（用 _opt_pure 判定），
+    // 不能写 h。只在同一条直线代码序列内复用。
+    let ir = fc.ir
+    let nk = len(ir)
+    let mut kk = nk - 1
+    let mut steps = 0
+    while kk >= 0 && steps < 15 {
+        let w = ir.get(kk)
+        if w.op == OP_ADDRF && w.a == h && w.imm == off && w.dst > 0 {
+            if kk + 1 < nk {
+                let nx = ir.get(kk + 1)
+                if nx.op == OP_LOAD && nx.a == w.dst && nx.dst > 0 {
+                    return nx.dst
+                }
+            }
+        }
+        // 任何非纯指令都停（含 PRINT/ARG/EXIT/JMP 等全部副作用）
+        if _opt_pure(w.op) == 0 {
+            break
+        }
+        // 写 h 也停
+        if w.dst == h && _opt_writes(w.op) == 1 {
+            break
+        }
+        kk = kk - 1
+        steps = steps + 1
+    }
     let a = _vnew(fc)
     fc.vty.set(a, TY_INT)
     _ir_emit(fc, OP_ADDRF, a, h, 0, off)
