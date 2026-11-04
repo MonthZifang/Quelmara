@@ -204,6 +204,7 @@ jobs:
           wine --version || true
           python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe
           chmod +x build/qlmc.exe
+          file build/qlmc.exe
           ls -la build/qlmc.exe
 
       - name: 语言基准（quelmara + C/C++/Go/...）
@@ -212,7 +213,8 @@ jobs:
           # 非零退出码吞掉 —— v2.58 第一次跑就踩了（macOS 上 ELF 跑不了，
           # python 抛 OSError，但 step 仍然报成功）。
           set -o pipefail
-          python bench/speed/run.py --langs quelmara c cpp go rust zig nim fortran --reps "$REPS" --markdown 2>&1 | tee bench.md
+          # qlmc.exe 是 Windows PE，Linux 上要 wine 包装
+          QLMC="wine build/qlmc.exe" python bench/speed/run.py --langs quelmara c cpp go rust zig nim fortran --reps "$REPS" --markdown 2>&1 | tee bench.md
 
       - name: 写 job summary
         if: always()
