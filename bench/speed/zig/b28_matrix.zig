@@ -15,9 +15,9 @@ pub fn main() !void {
     var seed: u64 = 7;
     for (0..sz) |i| {
         seed = (seed *% 1103515245 +% 12345) % 2147483648;
-        a[i] = @intCast(seed % 100);
+        a[i] = @intCast(@rem(seed, 100));
         seed = (seed *% 1103515245 +% 12345) % 2147483648;
-        b[i] = @intCast(seed % 100);
+        b[i] = @intCast(@rem(seed, 100));
     }
     @memset(c, 0);
     const t0 = std.time.nanoTimestamp();
