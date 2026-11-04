@@ -1,0 +1,20 @@
+// b45_accumulate —— 数值：多项式求值 100 万次
+fn main() {
+    let t0 = now_ns()
+    let mut acc = 0
+    let mut n = 1
+    while n <= 1000000 {
+        let mut s = 0
+        let mut k = 0
+        while k < 10 {
+            s = s * n + k
+            k = k + 1
+        }
+        acc = acc + s % 1000003
+        n = n + 1
+    }
+    let t1 = now_ns()
+    print(acc)
+    print("T")
+    print(t1 - t0)
+}
