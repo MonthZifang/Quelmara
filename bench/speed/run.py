@@ -335,6 +335,8 @@ def build_all(langs, only):
                     continue
                 src = os.path.join(HERE, "go", b + ".go")
                 exe = os.path.join(OUT, "go_" + b + EXE)
+                if not os.path.exists(src):
+                    continue
                 r = subprocess.run([go_exe(), "build", "-o", exe, src],
                                    capture_output=True, text=True,
                                    cwd=os.path.join(HERE, "go"))
