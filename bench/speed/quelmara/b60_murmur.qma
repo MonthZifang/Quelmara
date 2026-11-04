@@ -1,0 +1,24 @@
+// b60_murmur —— 微基准：MurmurHash 100 万次
+fn murmur(h: int, k: int) -> int {
+    let mut hash = h
+    let mut key = k
+    key = key * -862048943
+    key = (key << 13) | ((key >> 51) & 0x1FFFFFFFFFFF)
+    key = key * -862048943
+    hash = hash ^ key
+    hash = (hash << 13) | ((hash >> 51) & 0x1FFFFFFFFFFF)
+    return hash * 5 + 1
+}
+fn main() {
+    let t0 = now_ns()
+    let mut acc = 0
+    let mut i = 0
+    while i < 1000000 {
+        acc = murmur(acc, i)
+        i = i + 1
+    }
+    let t1 = now_ns()
+    print(acc)
+    print("T")
+    print(t1 - t0)
+}
