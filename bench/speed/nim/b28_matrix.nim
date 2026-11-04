@@ -9,9 +9,9 @@ when isMainModule:
   var c = newSeq[int64](sz)
   var seed: uint64 = 7
   for i in 0..<sz:
-    seed = (seed * 1103515245 + 12345) mod 2147483648
+    seed = (seed * 1103515245 + 12345) mod 2147483648'u64
     a[i] = int64(seed mod 100)
-    seed = (seed * 1103515245 + 12345) mod 2147483648
+    seed = (seed * 1103515245 + 12345) mod 2147483648'u64
     b[i] = int64(seed mod 100)
   let t0 = cpuTime()
   for r in 0..<n:

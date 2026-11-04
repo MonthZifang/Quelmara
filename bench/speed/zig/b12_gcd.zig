@@ -2,7 +2,7 @@
 const std = @import("std");
 fn gcd(a: i64, b: i64) i64 {
     var x = a; var y = b;
-    while (y != 0) { const t = y; y = x % y; x = t; }
+    while (y != 0) { const t = y; y = @rem(x, y); x = t; }
     return x;
 }
 pub fn main() !void {
