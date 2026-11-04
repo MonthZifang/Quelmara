@@ -12925,8 +12925,13 @@ fn _bi_now_ns_elf(fc: FnCtx) -> int {
             // 自己 push/pop，所以跨调用也安全。
             let raw = _vnew(fc)
             fc.vty.set(raw, TY_INT)
-            // `OP_ADDRV` 的 imm 是 `-槽号-1`（负偏移编码），不是槽号本身。
-            _ir_emit(fc, OP_ADDRV, raw, 0, 0, 0 - slot - 1)
+            // `OP_ADDRV` 的 imm 是**槽号本身**（不是负偏移编码）。
+            // v4.03 写成 `0 - slot - 1` 是错的：那会算出
+            // `_slot_disp(-s-1) = 8s`，指向 **rbp 上方**（保存的 RBP/返回地址），
+            // `clock_gettime` 直接覆盖它们 —— 这就是计时负数的根因。
+            // 参考 `_new_var` 里的写法：`_ir_emit(fc, OP_ADDRV, ..., -vloc-1)`
+            // 其中 `vloc = -(slot+1)`，所以 `imm = slot`。
+            _ir_emit(fc, OP_ADDRV, raw, 0, 0, slot)
             let buf = _pin(fc, raw)
             // sys_clock_gettime(228)：rdi=CLOCK_MONOTONIC(1)，rsi=&ts
             // 包成 RT_CGT 例程走既有通路（IR 层没有 syscall 操作码）。
