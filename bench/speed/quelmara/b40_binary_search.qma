@@ -1,0 +1,28 @@
+// b40_binary_search —— 搜索：二分查找 100 万次
+fn bsearch(a: vec[int], target: int) -> int {
+    let mut lo = 0
+    let mut hi = len(a) - 1
+    while lo <= hi {
+        let mid = (lo + hi) / 2
+        if a.get(mid) == target { return mid }
+        if a.get(mid) < target { lo = mid + 1 } else { hi = mid - 1 }
+    }
+    return -1
+}
+fn main() {
+    let n = 1000000
+    let a = vec[int].new(n)
+    let mut i = 0
+    while i < n { a.push(i * 2)  i = i + 1 }
+    let t0 = now_ns()
+    let mut found = 0
+    let mut j = 0
+    while j < 1000000 {
+        if bsearch(a, j * 2) >= 0 { found = found + 1 }
+        j = j + 1
+    }
+    let t1 = now_ns()
+    print(found)
+    print("T")
+    print(t1 - t0)
+}

@@ -1,0 +1,23 @@
+// b42_matrix_transpose —— 数值：矩阵转置 500x500
+fn main() {
+    let n = 500
+    let sz = n * n
+    let a = vec[int].new(sz)
+    let mut i = 0
+    while i < sz { a.push(i)  i = i + 1 }
+    let b = vec[int].new(sz)
+    let t0 = now_ns()
+    let mut r = 0
+    while r < n {
+        let mut c = 0
+        while c < n {
+            b.push(a.get(c * n + r))
+            c = c + 1
+        }
+        r = r + 1
+    }
+    let t1 = now_ns()
+    print(b.get(sz - 1))
+    print("T")
+    print(t1 - t0)
+}
