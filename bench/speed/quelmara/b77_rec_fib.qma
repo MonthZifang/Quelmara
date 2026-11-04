@@ -1,0 +1,13 @@
+// b77_rec_fib —— 递归：fib(25) 朴素递归
+fn fib(n: int) -> int {
+    if n <= 1 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+fn main() {
+    let t0 = now_ns()
+    let r = fib(25)
+    let t1 = now_ns()
+    print(r)
+    print("T")
+    print(t1 - t0)
+}
