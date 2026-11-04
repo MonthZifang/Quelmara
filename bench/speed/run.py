@@ -84,6 +84,8 @@ BENCHES = [
     ("b48_sum_matrix", "数值：矩阵行求和 500x500"),
     ("b49_floyd", "图算法：Floyd-Warshall 100 节点"),
     ("b50_permute", "算法：全排列 10! 求和"),
+    ("b52_io_scan", "IO：顺序扫描 100 万个整数"),
+    ("b53_thread_sim", "并发：模拟 4 路并行累加"),
     ("b14_fibiter", "迭代 fib(5000 万)：纯循环 vs 递归对照"),
     ("b16_leibniz", "浮点：Leibniz 级数 π，2000 万项"),
     ("b18_insertion", "排序：插入排序 8 万（最坏情况移动）"),

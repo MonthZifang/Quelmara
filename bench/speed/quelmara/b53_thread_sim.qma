@@ -1,0 +1,19 @@
+// b53_thread_sim —— 并发：模拟 4 路并行累加
+fn work(start: int, end: int) -> int {
+    let mut s = 0
+    let mut i = start
+    while i < end { s = s + i * 2 + 1  i = i + 1 }
+    return s
+}
+fn main() {
+    let n = 10000000
+    let t0 = now_ns()
+    let a = work(0, n / 4)
+    let b = work(n / 4, n / 2)
+    let c = work(n / 2, 3 * n / 4)
+    let d = work(3 * n / 4, n)
+    let t1 = now_ns()
+    print(a + b + c + d)
+    print("T")
+    print(t1 - t0)
+}
