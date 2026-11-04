@@ -108,6 +108,8 @@ BENCHES = [
     ("b75_fib_matrix", "数值：矩阵快速幂 fib 1000"),
     ("b76_io_line", "IO：逐行扫描 100 万行"),
     ("b77_rec_fib", "递归：fib(25) 朴素递归"),
+    ("b78_sum_digits", "数值：数位求和 100 万"),
+    ("b79_binary_tree", "数据结构：BST 插入 5 万"),
     ("b14_fibiter", "迭代 fib(5000 万)：纯循环 vs 递归对照"),
     ("b16_leibniz", "浮点：Leibniz 级数 π，2000 万项"),
     ("b18_insertion", "排序：插入排序 8 万（最坏情况移动）"),
