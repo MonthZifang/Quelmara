@@ -3399,6 +3399,11 @@ fn _mov_imm_mem(code: vec[int], base: int, disp: int, v: int) {
 
 // mov dst, src（寄存器到寄存器）
 fn _mov_rr(code: vec[int], dst: int, src: int) {
+    // v4.41：同寄存器不发 mov —— 省掉白费的一条指令。
+    // 发射器层面优化，不改 IR，自举等价性不受影响。
+    if dst == src {
+        return
+    }
     _rex2(code, 1, src, dst)
     _b(code, 0x89)
     _modrm(code, 3, src, dst)
