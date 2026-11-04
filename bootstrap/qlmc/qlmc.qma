@@ -12931,7 +12931,12 @@ fn _bi_now_ns_elf(fc: FnCtx) -> int {
             // `clock_gettime` 直接覆盖它们 —— 这就是计时负数的根因。
             // 参考 `_new_var` 里的写法：`_ir_emit(fc, OP_ADDRV, ..., -vloc-1)`
             // 其中 `vloc = -(slot+1)`，所以 `imm = slot`。
-            _ir_emit(fc, OP_ADDRV, raw, 0, 0, slot)
+            // **帧槽向负方向增长**：slot N 在 `[rbp - 8*(N+1)]`。
+            // timespec 的 sec 在 `[buf+0]`、nsec 在 `[buf+8]`。
+            // buf = slot 0 (`[rbp-8]`) 时 `[buf+8] = [rbp]` = **保存的 RBP**！
+            // buf 必须指向**第二个槽**（slot+1），让 `[buf+8]` 落到 slot 0。
+            // _st_units 已经分配了 4 个槽（够放 2 个 int64），不会越界。
+            _ir_emit(fc, OP_ADDRV, raw, 0, 0, slot + 1)
             let buf = _pin(fc, raw)
             // sys_clock_gettime(228)：rdi=CLOCK_MONOTONIC(1)，rsi=&ts
             // 包成 RT_CGT 例程走既有通路（IR 层没有 syscall 操作码）。
