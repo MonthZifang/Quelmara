@@ -1,0 +1,25 @@
+// b38_prime —— 算法：试除法判定 10 万个素数
+fn is_prime(n: int) -> bool {
+    if n < 2 { return false }
+    if n == 2 { return true }
+    if n % 2 == 0 { return false }
+    let mut d = 3
+    while d * d <= n {
+        if n % d == 0 { return false }
+        d = d + 2
+    }
+    return true
+}
+fn main() {
+    let t0 = now_ns()
+    let mut cnt = 0
+    let mut i = 0
+    while i < 100000 {
+        if is_prime(i) { cnt = cnt + 1 }
+        i = i + 1
+    }
+    let t1 = now_ns()
+    print(cnt)
+    print("T")
+    print(t1 - t0)
+}
