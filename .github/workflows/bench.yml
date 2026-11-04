@@ -203,6 +203,7 @@ jobs:
             sudo apt-get install -y -qq --no-install-recommends wine
           wine --version || true
           python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe
+          chmod +x build/qlmc.exe
           ls -la build/qlmc.exe
 
       - name: 语言基准（quelmara + C/C++/Go/...）
