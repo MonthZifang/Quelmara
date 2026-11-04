@@ -14,9 +14,9 @@ pub fn main() !void {
     defer alloc.free(c);
     var seed: u64 = 7;
     for (0..sz) |i| {
-        seed = (seed *% 1103515245 +% 12345) % 2147483648;
+        seed = @rem(seed *% 1103515245 +% 12345, 2147483648);
         a[i] = @intCast(@rem(seed, 100));
-        seed = (seed *% 1103515245 +% 12345) % 2147483648;
+        seed = @rem(seed *% 1103515245 +% 12345, 2147483648);
         b[i] = @intCast(@rem(seed, 100));
     }
     @memset(c, 0);
@@ -31,6 +31,6 @@ pub fn main() !void {
     }
     const t1 = std.time.nanoTimestamp();
     var chk: i64 = 0;
-    for (0..sz) |i| chk = (chk + c[i]) % 1000000007;
+    for (0..sz) |i| chk = @rem(chk + c[i], 1000000007);
     std.debug.print("{d}\nT\n{d}\n", .{ chk, t1 - t0 });
 }
