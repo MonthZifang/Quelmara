@@ -95,6 +95,7 @@ BENCHES = [
     ("b60_murmur", "微基准：MurmurHash 100 万次"),
     ("b61_cache_scan", "微基准：缓存扫描 1000 万次"),
     ("b62_pred_branch", "微基准：不可预测分支 500 万次"),
+    ("b65_random_walk", "模拟：随机游走 200 万步"),
     ("b14_fibiter", "迭代 fib(5000 万)：纯循环 vs 递归对照"),
     ("b16_leibniz", "浮点：Leibniz 级数 π，2000 万项"),
     ("b18_insertion", "排序：插入排序 8 万（最坏情况移动）"),
