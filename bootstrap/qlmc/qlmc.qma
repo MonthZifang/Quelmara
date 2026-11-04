@@ -12528,39 +12528,6 @@ fn _map_has(fc: FnCtx, nd: Node, h: int) -> int {
 
 /// 读头字段：[h + off]（off = 0 数据指针 / 8 长度 / 16 容量）
 fn _vec_field(fc: FnCtx, h: int, off: int) -> int {
-    // v4.14：**复用最近的同址 LOAD**。`vec.get`/`vec.set` 每次都重读
-    // vec 头的 data 指针（`[h+0]`）；热循环里同一个 vec 被读 2-3 次。
-    // 向后扫 IR 找最近的 `LOADD dst, [h+off]`，若中间无副作用就复用。
-    // **安全条件**：中间不能有 STORE/CALL（可能改 vec 头或内存）。
-    let ir = fc.ir
-    let mut k = len(ir) - 1
-    let mut guard = 0
-    let mut addr_v = 0
-    while k >= 0 && guard < 64 {
-        let w = ir.get(k)
-        // 降级期 IR 是 ADDRF+LOAD（不是 LOADD），所以要找这两条
-        if w.op == OP_ADDRF && w.a == h && w.imm == off && w.dst > 0 {
-            // ADDRF 后面紧跟 LOAD（降级期的固定模式），直接看下一条
-            if k + 1 < len(ir) {
-                let nx = ir.get(k + 1)
-                if nx.op == OP_LOAD && nx.a == w.dst && nx.dst > 0 {
-                    return nx.dst
-                }
-            }
-        }
-        if w.op == OP_STORE || w.op == OP_STORED || w.op == OP_STOREX ||
-           w.op == OP_STORE8 || w.op == OP_STORE8D || w.op == OP_STORE8X ||
-           w.op == OP_STORE8I || w.op == OP_CALL || w.op == OP_CALLRT ||
-           w.op == OP_CALLIAT || w.op == OP_MEMCPYN || w.op == OP_COPY ||
-           w.op == OP_ZERO || w.op == OP_ZERON {
-            break
-        }
-        if w.dst == h && _opt_writes(w.op) == 1 {
-            break
-        }
-        k = k - 1
-        guard = guard + 1
-    }
     let a = _vnew(fc)
     fc.vty.set(a, TY_INT)
     _ir_emit(fc, OP_ADDRF, a, h, 0, off)
