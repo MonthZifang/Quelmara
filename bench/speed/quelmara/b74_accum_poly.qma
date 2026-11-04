@@ -1,0 +1,20 @@
+// b74_accum_poly —— 数值：多项式累加 500 万
+fn main() {
+    let t0 = now_ns()
+    let mut acc = 0
+    let mut n = 1
+    while n <= 5000000 {
+        let mut s = 0
+        let mut k = 0
+        while k < 5 {
+            s = s * n + k * 3 + 1
+            k = k + 1
+        }
+        acc = acc + s % 1000003
+        n = n + 1
+    }
+    let t1 = now_ns()
+    print(acc % 1000003)
+    print("T")
+    print(t1 - t0)
+}

@@ -1,0 +1,28 @@
+// b72_sort_insert —— 排序：插入排序 1 万
+fn main() {
+    let n = 10000
+    let a = vec[int].new(n)
+    let mut seed = 777
+    let mut i = 0
+    while i < n {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        a.push(seed % 100000)
+        i = i + 1
+    }
+    let t0 = now_ns()
+    let mut x = 1
+    while x < n {
+        let key = a.get(x)
+        let mut y = x - 1
+        while y >= 0 && a.get(y) > key {
+            a.set(y + 1, a.get(y))
+            y = y - 1
+        }
+        a.set(y + 1, key)
+        x = x + 1
+    }
+    let t1 = now_ns()
+    print(a.get(0))
+    print("T")
+    print(t1 - t0)
+}
