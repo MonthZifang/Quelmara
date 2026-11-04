@@ -1,0 +1,18 @@
+// b33_startup —— 启动：函数调用 + 初始化开销
+fn init() -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < 1000 { s = s + i  i = i + 1 }
+    return s
+}
+fn main() {
+    let t0 = now_ns()
+    let a = init()
+    let b = init()
+    let c = init()
+    let d = init()
+    let t1 = now_ns()
+    print(a + b + c + d)
+    print("T")
+    print(t1 - t0)
+}
