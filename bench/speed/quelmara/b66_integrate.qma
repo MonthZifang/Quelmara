@@ -1,0 +1,17 @@
+// b66_integrate —— 数值：数值积分 100 万步
+fn f(x: int) -> int {
+    return (x * x + 3 * x + 5) % 1000003
+}
+fn main() {
+    let t0 = now_ns()
+    let mut acc = 0
+    let mut i = 0
+    while i < 1000000 {
+        acc = (acc + f(i)) % 1000003
+        i = i + 1
+    }
+    let t1 = now_ns()
+    print(acc)
+    print("T")
+    print(t1 - t0)
+}
