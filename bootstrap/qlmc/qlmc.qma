@@ -16416,6 +16416,8 @@ fn _gen_entry_elf(ctx: Ctx) {
 fn _gen_print_str_elf(ctx: Ctx) {
     let code: vec[int] = ctx.code
     ctx.rt_pos.set(RT_PSTR, len(code))
+    _b(code, 0x56)  // push rsi
+    _b(code, 0x57)  // push rdi
     _sub_rsp(code, 0x28)
     _mov_rsp_store(code, 0x20, RCX)        // 存 str
     // 主体
@@ -16436,6 +16438,8 @@ fn _gen_print_str_elf(ctx: Ctx) {
     _mov_imm(code, RAX, SYS_WRITE)
     _syscall(code)
     _add_rsp(code, 0x28)
+    _b(code, 0x5F)  // pop rdi
+    _b(code, 0x5E)  // pop rsi
     _ret(code)
 }
 
@@ -16677,6 +16681,13 @@ fn _gen_i64_fmt_elf(ctx: Ctx) {
 fn _gen_print_i64_elf(ctx: Ctx) {
     let code: vec[int] = ctx.code
     ctx.rt_pos.set(RT_PINT, len(code))
+    // **必须保存 RSI/RDI**（v4.12）：`write(fd, buf, len)` 用 RDI=fd、
+    // RSI=buf。它们是变量寄存器池第 6/7 个 —— 调用者可能把变量放在那里。
+    // 不保存就是静默改掉别人的变量。症状：`print(x)` 之后再用某个变量，
+    // 值变成 write 的返回值（字节数）或 buf 指针。
+    // 实测：`print(acc)` 后 `t1-t0` 变负数，调换打印顺序就正常。
+    _b(code, 0x56)  // push rsi
+    _b(code, 0x57)  // push rdi
     _sub_rsp(code, 0x40)
     // **缓冲区必须与"长度暂存槽"分开**：`_mov_rsp_store(0x28, ...)` 写的是
     // [rsp+0x28, rsp+0x30)，而缓冲区从 [rsp+0x20] 起要放最多 20 位 ——
@@ -16701,6 +16712,8 @@ fn _gen_print_i64_elf(ctx: Ctx) {
     _mov_imm(code, RAX, SYS_WRITE)
     _syscall(code)
     _add_rsp(code, 0x40)
+    _b(code, 0x5F)  // pop rdi
+    _b(code, 0x5E)  // pop rsi
     _ret(code)
 }
 
@@ -16708,6 +16721,8 @@ fn _gen_print_i64_elf(ctx: Ctx) {
 fn _gen_eprint_str_elf(ctx: Ctx) {
     let code: vec[int] = ctx.code
     ctx.rt_pos.set(RT_EPRINT, len(code))
+    _b(code, 0x56)  // push rsi
+    _b(code, 0x57)  // push rdi
     _sub_rsp(code, 0x28)
     _mov_rsp_store(code, 0x20, RCX)
     _mov_imm(code, RDI, 2)
@@ -16723,6 +16738,8 @@ fn _gen_eprint_str_elf(ctx: Ctx) {
     _mov_imm(code, RAX, SYS_WRITE)
     _syscall(code)
     _add_rsp(code, 0x28)
+    _b(code, 0x5F)  // pop rdi
+    _b(code, 0x5E)  // pop rsi
     _ret(code)
 }
 
