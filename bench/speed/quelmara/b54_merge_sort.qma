@@ -1,0 +1,37 @@
+// b54_merge_sort —— 排序：归并排序 10 万
+fn merge(a: vec[int], lo: int, mid: int, hi: int) {
+    let tmp = vec[int].new(0)
+    let mut i = lo
+    let mut j = mid
+    while i < mid && j < hi {
+        if a.get(i) <= a.get(j) { tmp.push(a.get(i))  i = i + 1 } else { tmp.push(a.get(j))  j = j + 1 }
+    }
+    while i < mid { tmp.push(a.get(i))  i = i + 1 }
+    while j < hi { tmp.push(a.get(j))  j = j + 1 }
+    let mut k = 0
+    while k < len(tmp) { a.set(lo + k, tmp.get(k))  k = k + 1 }
+}
+fn msort(a: vec[int], lo: int, hi: int) {
+    if hi - lo <= 1 { return }
+    let mid = (lo + hi) / 2
+    msort(a, lo, mid)
+    msort(a, mid, hi)
+    merge(a, lo, mid, hi)
+}
+fn main() {
+    let n = 100000
+    let a = vec[int].new(n)
+    let mut seed = 12345
+    let mut i = 0
+    while i < n {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        a.push(seed % 1000000)
+        i = i + 1
+    }
+    let t0 = now_ns()
+    msort(a, 0, n)
+    let t1 = now_ns()
+    print(a.get(0))
+    print("T")
+    print(t1 - t0)
+}

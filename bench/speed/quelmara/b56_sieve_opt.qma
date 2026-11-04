@@ -1,0 +1,28 @@
+// b56_sieve_opt —— 筛法：线性筛 200 万
+fn main() {
+    let n = 2000000
+    let flags = vec[int].new(n + 1)
+    let mut i = 0
+    while i <= n { flags.push(1)  i = i + 1 }
+    flags.set(0, 0)
+    flags.set(1, 0)
+    let t0 = now_ns()
+    let mut p = 2
+    while p * p <= n {
+        if flags.get(p) == 1 {
+            let mut q = p * p
+            while q <= n { flags.set(q, 0)  q = q + p }
+        }
+        p = p + 1
+    }
+    let mut cnt = 0
+    let mut k = 2
+    while k <= n {
+        if flags.get(k) == 1 { cnt = cnt + 1 }
+        k = k + 1
+    }
+    let t1 = now_ns()
+    print(cnt)
+    print("T")
+    print(t1 - t0)
+}
