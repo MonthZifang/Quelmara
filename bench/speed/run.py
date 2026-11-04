@@ -472,7 +472,7 @@ def main():
         print("|" + "---|" * (len(langs) + 3))
         for r in rows:
             ts = [r["t"][l] for l in langs if l in r["t"]]
-            ratio = (max(ts) / min(ts)) if len(ts) > 1 else 0
+            ratio = (max(ts) / max(min(ts), 1e-9)) if len(ts) > 1 else 0
             cells = []
             for l in langs:
                 cells.append(f"{r['t'][l]*1000:.1f}" if l in r["t"] else "—")
