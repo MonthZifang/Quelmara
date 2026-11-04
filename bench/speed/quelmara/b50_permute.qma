@@ -1,0 +1,33 @@
+// b50_permute —— 算法：全排列 10! 求和
+fn perm(arr: vec[int], k: int, n: int, acc: int) -> int {
+    if k == n {
+        let mut h = 0
+        let mut i = 0
+        while i < n { h = h * 31 + arr.get(i)  i = i + 1 }
+        return acc + (h % 1000003)
+    }
+    let mut s = acc
+    let mut i = k
+    while i < n {
+        let tmp = arr.get(k)
+        arr.set(k, arr.get(i))
+        arr.set(i, tmp)
+        s = perm(arr, k + 1, n, s)
+        let tmp2 = arr.get(k)
+        arr.set(k, arr.get(i))
+        arr.set(i, tmp2)
+        i = i + 1
+    }
+    return s
+}
+fn main() {
+    let a = vec[int].new(10)
+    let mut i = 0
+    while i < 10 { a.push(i + 1)  i = i + 1 }
+    let t0 = now_ns()
+    let r = perm(a, 0, 10, 0)
+    let t1 = now_ns()
+    print(r)
+    print("T")
+    print(t1 - t0)
+}
