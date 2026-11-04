@@ -1,0 +1,23 @@
+// b69_hash_fib —— 哈希：Fibonacci 散列 50 万次
+fn fib_hash(key: int, cap: int) -> int {
+    return ((key * 2654435761) % cap + cap) % cap
+}
+fn main() {
+    let cap = 524288
+    let tab = vec[int].new(cap)
+    let mut i = 0
+    while i < cap { tab.push(0)  i = i + 1 }
+    let t0 = now_ns()
+    let mut cnt = 0
+    let mut j = 0
+    while j < 500000 {
+        let h = fib_hash(j, cap)
+        tab.set(h, tab.get(h) + 1)
+        cnt = cnt + 1
+        j = j + 1
+    }
+    let t1 = now_ns()
+    print(cnt)
+    print("T")
+    print(t1 - t0)
+}

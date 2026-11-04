@@ -1,0 +1,23 @@
+// b70_lin_search —— 搜索：线性搜索 100 万次
+fn main() {
+    let n = 1000
+    let a = vec[int].new(n)
+    let mut i = 0
+    while i < n { a.push(i * 3 + 7)  i = i + 1 }
+    let t0 = now_ns()
+    let mut found = 0
+    let mut j = 0
+    while j < 1000000 {
+        let target = (j * 37 + 11) % 3000
+        let mut k = 0
+        while k < n {
+            if a.get(k) == target { found = found + 1 }
+            k = k + 1
+        }
+        j = j + 1
+    }
+    let t1 = now_ns()
+    print(found)
+    print("T")
+    print(t1 - t0)
+}
