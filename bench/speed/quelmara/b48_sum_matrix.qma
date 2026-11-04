@@ -1,0 +1,22 @@
+// b48_sum_matrix —— 数值：矩阵行求和 500x500
+fn main() {
+    let n = 500
+    let sz = n * n
+    let a = vec[int].new(sz)
+    let mut i = 0
+    while i < sz { a.push(i)  i = i + 1 }
+    let t0 = now_ns()
+    let mut total = 0
+    let mut r = 0
+    while r < n {
+        let mut s = 0
+        let mut c = 0
+        while c < n { s = s + a.get(r * n + c)  c = c + 1 }
+        total = total + s
+        r = r + 1
+    }
+    let t1 = now_ns()
+    print(total)
+    print("T")
+    print(t1 - t0)
+}

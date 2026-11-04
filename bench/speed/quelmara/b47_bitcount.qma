@@ -1,0 +1,20 @@
+// b47_bitcount —— 微基准：位计数 1000 万次
+fn popcount(x: int) -> int {
+    let mut n = x
+    let mut c = 0
+    while n != 0 { c = c + (n & 1)  n = n >> 1 }
+    return c
+}
+fn main() {
+    let t0 = now_ns()
+    let mut acc = 0
+    let mut i = 0
+    while i < 10000000 {
+        acc = acc + popcount(i)
+        i = i + 1
+    }
+    let t1 = now_ns()
+    print(acc)
+    print("T")
+    print(t1 - t0)
+}
