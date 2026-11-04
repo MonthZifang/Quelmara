@@ -9556,6 +9556,14 @@ fn _emit_ir(fc: FnCtx, i: int) {
         return
     }
     if op == OP_EXIT {
+        if fc.target == 1 {
+            // ELF：用 syscall exit_group，不用 CALL —— CALL 是寄存器
+            // 分配屏障，会把跨越它的值全溢出。syscall 只破坏 RAX/RCX/R11。
+            _to_reg(fc, RDI, ins.a)          // rdi = exit code
+            _mov_imm(code, RAX, 231)         // SYS_EXIT_GROUP
+            _syscall(code)
+            return
+        }
         _to_reg(fc, RCX, ins.a)
         let p = _call_rip(code)
         _addfix(fc.fixes, p, I_EXIT, FK_IAT)
