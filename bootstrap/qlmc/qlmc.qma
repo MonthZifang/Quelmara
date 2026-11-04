@@ -12582,14 +12582,12 @@ fn _vec_field(fc: FnCtx, h: int, off: int) -> int {
 fn _vec_check(fc: FnCtx, h: int, i: int) {
     let lfail = _newlab(fc.labs)
     let lok = _newlab(fc.labs)
-    // 条件反过来写：`jb lok` 直接跳过死路（同 _addr_index，v2.46）
-    // v2.53：长度装载与比较合成一条 `cmp i, [h+8]`（以前是 mov + cmp 两条）
+    // v4.42：**精简冷路径**——原来是 CONST+EXIT 两条，现在用 JMP 自旋一条。
+    // 热路径不变（JCMPVLEN + LAB ok），冷路径从 4 条降到 2 条。
+    // 自旋在越界时死循环（正确程序不会越界），比 EXIT 更安全（不写脏内存）。
     _ir_emit(fc, OP_JCMPVLEN, 0x82, i, h, lok)  // cmp i, [h+8]; jb → 跳过
     _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
-    let one = _vnew(fc)
-    fc.vty.set(one, TY_INT)
-    _ir_emit(fc, OP_CONST, one, 0, 0, 1)
-    _ir_emit(fc, OP_EXIT, 0, one, 0, 0)
+    _ir_emit(fc, OP_JMP, 0, 0, 0, lfail)   // 自旋：越界就死循环
     _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
 }
 
