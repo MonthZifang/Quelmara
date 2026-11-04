@@ -1,0 +1,28 @@
+// b59_mat_vec —— 数值：矩阵向量乘 500x500
+fn main() {
+    let n = 500
+    let sz = n * n
+    let mat = vec[int].new(sz)
+    let vec_ = vec[int].new(n)
+    let mut i = 0
+    while i < sz { mat.push((i * 7 + 3) % 100)  i = i + 1 }
+    let mut j = 0
+    while j < n { vec_.push((j * 13 + 1) % 100)  j = j + 1 }
+    let t0 = now_ns()
+    let mut total = 0
+    let mut r = 0
+    while r < n {
+        let mut s = 0
+        let mut c = 0
+        while c < n {
+            s = s + mat.get(r * n + c) * vec_.get(c)
+            c = c + 1
+        }
+        total = total + s
+        r = r + 1
+    }
+    let t1 = now_ns()
+    print(total)
+    print("T")
+    print(t1 - t0)
+}

@@ -1,0 +1,18 @@
+// b58_rec_sum —— 递归：递归求和 100 万
+fn rec_sum(n: int) -> int {
+    if n <= 0 { return 0 }
+    return n + rec_sum(n - 1)
+}
+fn main() {
+    let t0 = now_ns()
+    let mut acc = 0
+    let mut i = 1
+    while i <= 100 {
+        acc = acc + rec_sum(10000)
+        i = i + 1
+    }
+    let t1 = now_ns()
+    print(acc)
+    print("T")
+    print(t1 - t0)
+}
