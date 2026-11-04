@@ -16546,6 +16546,11 @@ fn _gen_i64_fmt_elf(ctx: Ctx) {
     ctx.rt_pos.set(RT_I64FMT, len(code))
     _push_rbp(code)
     _mov_rbp_rsp(code)
+    // **保存 RSI/RDI**（v4.13）：函数内部用 RDI 做计算。
+    // 浮点打印（`print(pi)`）会走到这里，如果调用者把变量放在 RSI/RDI
+    // 就会被踩掉。症状：`print(pi)` 后 `t1-t0` 变负数。
+    _b(code, 0x56)  // push rsi
+    _b(code, 0x57)  // push rdi
     _sub_rsp(code, 0x40)
     _mov_rr(code, RDI, RCX)                    // rdi = buf
     // **用 R11 保存 buf，不用栈槽**：临时区是 [rbp-32, rbp)，而帧只有
@@ -16668,6 +16673,8 @@ fn _gen_i64_fmt_elf(ctx: Ctx) {
     _setlab(labs, code, ldone)
     _mov_rsp_load(code, RAX, 0x00)
     _add_rsp(code, 0x40)
+    _b(code, 0x5F)  // pop rdi
+    _b(code, 0x5E)  // pop rsi
     _pop_rbp(code)
     _ret(code)
 }
