@@ -1,0 +1,26 @@
+// RT 用例：vec grow 后句柄在结构体字段里的有效性
+// 复现 v4.52 附录的"labs 容量边界"问题：
+// ctx.labs = vec.new(64)，push 到 65 触发 grow 换块，
+// 若【结构体字段里的句柄】没随 grow 更新，后续 set 丢到旧块。
+// 这里用局部 vec + 函数传递模拟：grow 必然发生（cap 4 → 256）。
+// 结果：PASS —— grow 本身与句柄更新机制正常。v4.52 的 labs 边界
+// 问题另有机制（候选：struct 构造表达式中的 vec 路径，见附录），
+fn fill(v: vec[int], n: int) {
+    let mut i = 0
+    while i < n {
+        v.push(i * 3 + 1)
+        i = i + 1
+    }
+}
+fn main() {
+    let v = vec[int].new(4)
+    fill(v, 300)
+    // 全量校验：若 grow 后句柄 stale，fill 里 push 的数据丢一半
+    let mut bad = 0
+    let mut i = 0
+    while i < 300 {
+        if v.get(i) != i * 3 + 1 { bad = bad + 1 }
+        i = i + 1
+    }
+    print(bad)
+}
