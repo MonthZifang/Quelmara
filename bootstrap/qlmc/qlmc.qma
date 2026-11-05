@@ -13244,7 +13244,16 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         let w = _lower_expr(fc, nd.c)
         let a = _vnew(fc)
         fc.vty.set(a, TY_INT)
-        _ir_emit(fc, OP_ADDRX, a, p, w, 8)
+        // v4.51：常量下标 lowering 端换算字节（同 mem_store64）
+        if nd.c > 0 && fc.nodes.get(nd.c).op == E_NUM {
+            let cw = fc.nodes.get(nd.c).a
+            let cw8 = _vnew(fc)
+            fc.vty.set(cw8, TY_INT)
+            _ir_emit(fc, OP_CONST, cw8, 0, 0, cw * 8)
+            _ir_emit(fc, OP_ADD, a, p, cw8, 0)
+        } else {
+            _ir_emit(fc, OP_ADDRX, a, p, w, 8)
+        }
         let d = _vnew(fc)
         fc.vty.set(d, TY_INT)
         _ir_emit(fc, OP_LOAD, d, a, 0, 8)
@@ -13256,7 +13265,22 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         let v = _lower_expr(fc, nd.n)
         let a = _vnew(fc)
         fc.vty.set(a, TY_INT)
-        _ir_emit(fc, OP_ADDRX, a, p, w, 8)
+        // v4.51：**常量下标在 lowering 端换算成字节**。
+        // 语义是槽索引（×8，同 stage-0 的 mem_store64(p,w) 注释与
+        // docs/02-language.md L1261）。此前把常量 w 交给 ADDR X，
+        // 优化层把它折叠成 `p + w`（漏 ×8）—— 常量偏移写错位 8 倍。
+        // 变量下标仍走 ADDR X（发射器 shl rcx,3 恒正确）。
+        // 判断常量：_opt 的 cval 机制在 lowering 期没有 —— 这里用
+        // 【重放一次】的办法不可靠，改为直接查节点是否字面量。
+        if nd.c > 0 && fc.nodes.get(nd.c).op == E_NUM {
+            let cw = fc.nodes.get(nd.c).a
+            let cw8 = _vnew(fc)
+            fc.vty.set(cw8, TY_INT)
+            _ir_emit(fc, OP_CONST, cw8, 0, 0, cw * 8)
+            _ir_emit(fc, OP_ADD, a, p, cw8, 0)
+        } else {
+            _ir_emit(fc, OP_ADDRX, a, p, w, 8)
+        }
         _ir_emit(fc, OP_STORE, 0, a, v, 8)
         let d = _vnew(fc)
         fc.vty.set(d, TY_INT)

@@ -1,0 +1,21 @@
+// RT 用例：mem_copy 非重叠正确性 + 字节尾部
+// mem_copy 是 memcpy 语义（重叠未定义，与 C 一致）；对照用 load8。
+// v4.50 的 8 字节块 + 尾部必须与逐字节参考在非重叠场景一致。
+fn main() {
+    let a = mem_alloc(64)
+    let b = mem_alloc(64)
+    let mut i = 0
+    while i < 8 {
+        mem_store8(a + i * 8, 0, i * 11 + 3)
+        i = i + 1
+    }
+    // 拷 37 字节（4 qword + 5 字节尾部），非重叠
+    mem_copy(b, a, 37)
+    let mut bad = 0
+    let mut j = 0
+    while j < 37 {
+        if mem_load8(b + j, 0) != mem_load8(a + j, 0) { bad = bad + 1 }
+        j = j + 1
+    }
+    print(bad)
+}
