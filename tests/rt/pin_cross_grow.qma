@@ -1,0 +1,27 @@
+// RT 用例：_pin 缓存的 vec 句柄跨 grow 后写入是否落新块
+// 复现 labs 机制候选 5：_gen_* 里 labs 句柄若被 _pin 缓存，
+// grow 换块后 set 写旧块 —— 数据"丢"在新块之外。
+// 构造：v = new(4)；p = _pin 语义（此处用函数参数模拟缓存句柄）；
+// 经参数反复 push 越过容量 → grow 多次 → 回到调用方经【原字段】读。
+fn fill2(va: vec[int], vb: vec[int], n: int) {
+    // 两个 vec 交替 push，逼它们的 grow 交错发生
+    let mut i = 0
+    while i < n {
+        va.push(i)
+        vb.push(n - i)
+        i = i + 1
+    }
+}
+fn main() {
+    let a = vec[int].new(4)
+    let b = vec[int].new(4)
+    fill2(a, b, 100)
+    let mut bad = 0
+    let mut i = 0
+    while i < 100 {
+        if a.get(i) != i { bad = bad + 1 }
+        if b.get(i) != 100 - i { bad = bad + 1 }
+        i = i + 1
+    }
+    print(bad)
+}

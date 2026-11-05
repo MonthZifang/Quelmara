@@ -96,3 +96,13 @@ RT 编号 0..31 = 32 个例程，`rt_pos = vec[int].new(RT_COUNT=32)`
 
 规避（labs 128 / fixes 256）已生效；候选 5 的验证需要
 stage2 生成期内存观测，留待qlmc 内部调试工具成熟。
+
+### 机制候选 5（_pin 跨 grow）也否定 —— 排查矩阵闭环
+
+`pin_cross_grow`：两 vec 交替 push 各 grow 5 次、参数句柄跨 grow
+—— PASS。5 个候选全灭。
+
+静态分析结论：变体 I 的唯一效果是"后续标签 id +2"，回填链路
+（set/get/resolve_seq）逐环审计无顺序假设。机制超出静态分析
+可达范围——需要运行期观测 stage2 生成过程（winedbg/自行插桩）。
+搁置维持，规避（预分配 128/256）已验证。RT 6/6。
