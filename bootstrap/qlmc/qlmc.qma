@@ -18802,7 +18802,7 @@ fn main() {
 
     let code = vec[int].new(4096)
     let labs = vec[int].new(128)
-    let fixes = vec[Fix].new(64)
+    let fixes = vec[Fix].new(256)
     let rdata = vec[int].new(2048)
     let strpos = vec[int].new(len(strs) + 1)
     let mut si = 0
