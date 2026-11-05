@@ -230,3 +230,76 @@ i-cache / 分支对齐变化"相比是净亏。这类现象在 x86 上不罕见�
 任何"全局开关"在 x86 上都要逐基准验证。这次差一点就把
 `bounds_check = false` 当成"普适优化"写进文档——那会误导后来的人
 在 b70 这类基准上白花时间。
+
+---
+
+# 附录 3：vec 内联布局第四次尝试（v4.48）—— 又修 2 个 bug，仍不通过
+
+## 本轮修掉的真 bug
+
+继 v4.47 拆出 `_map_cap` 之后，本轮又发现 **map / vec 的 `off=8` 也混淆**：
+
+| 类型 | `[h+8]` |
+|---|---|
+| vec | len |
+| map | **count** |
+
+`_vec_field(fc, h, 8)` 在 vec 上映射到 len，在 map 上却当 count 用。
+`_map_put` / `_map_del` 三处混用。已拆出 `_map_count(fc, h)`。
+
+## 还有一个更隐蔽的 bug：`_pin` 造成的迭代内副本
+
+`_vec_push` 原来是：
+
+```quelmara
+let hp = _pin(fc, h)          // 造出一个"本迭代内"的新变量
+...
+_vec_grow_body(fc, hp, stride) // 里面 MOV hp, 新块基址
+```
+
+`_vec_grow_body` 确实更新了 `hp`，但 `hp` 是**每次迭代重新从 `h` 复制出来的
+临时变量**。扩容后下一轮迭代，`MOV hp, h` 又把**旧句柄**读回来 ——
+于是永远往旧块写，旧块满了之后越界/死循环。
+
+实测现象：`min2.qma`（`new(4)` + 100 次 push）**挂起不返回**。
+
+修法：`let hp = h`（不 pin）。`h` 本身就是 vec 变量的 vreg。
+
+## 修完仍然失败
+
+加上 `_map_cap` / `_map_count` / `_pin` 三处修复后：
+
+* ✅ `min2.qma`（vec 扩容）正常：`100 99 0`
+* ❌ **stage-2 仍然连 `print(42)` 都编不出**，且 `irdump` 无输出
+
+第四个混淆点没找到。已知故障区间：`dump` 正常（lexer+parser OK）→
+`irdump` 无输出（lowering 里早退）。
+
+我排查过的、**已排除**的方向：
+
+* `_cmd_irdump` 里那 8 个 `vec[int].new(512)` —— 单独构造 22 个 vec 的
+  程序跑得通
+* `_new_fc` 里 20+ 个 vec 字段 —— 同上
+* 大 vec（1000 万元素）—— 正常
+* struct vec / 嵌套 vec —— 正常
+
+## 结论
+
+**放弃。** 这是第 4 次尝试（v4.44 / v4.46 / v4.47 前置清理 / v4.48），
+累计修掉 4 个真 bug（重复 pin、死变量、`_map_cap`、`_map_count`），
+但自举始终过不去。
+
+补丁存于 `/tmp/vec_inline_v4_48_attempt.patch`（554 行）。
+
+## 保留了什么
+
+`_map_cap` / `_map_count` 的语义分离**已提交**（v4.47 及后续），
+这是独立的正确性改进：以前 map 和 vec 靠"布局恰好兼容"共享函数，
+现在显式分开。即使不做 vec 内联，这个修复也应当保留。
+
+## 给下一个人
+
+如果还要碰 vec 布局，**先给 qlmc 加一个能在 stage-2 里打印进度的
+诊断通道**（比如 `QLMC_TRACE=1` 环境变量控制 `eprint`），否则每轮
+12 分钟的构建只能盲猜。当前状态下，故障在 lowering 且完全静默，
+没有诊断寸步难行。
