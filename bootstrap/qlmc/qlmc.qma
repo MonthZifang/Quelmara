@@ -770,6 +770,9 @@ const SW_HEAPMB = 8
 /// 关掉越界检查（对应 `Quelmara.toml [build] bounds_check = false`）。
 /// 1 = 检查已关（更快，但越界即 UB）。由 `--no-bounds-check` 或 run.py 设置。
 const SW_NOBOUNDS = 9
+/// lowering/codegen 进度追踪（`--trace` 打开）。1 = 开。
+/// 用途：stage-2 出问题时能看到它卡在哪个函数、哪个阶段（否则完全静默）。
+const SW_TRACE = 10
 const SW_GT_N = 5
 const SW_GT_BASE = 8
 const GT_STRIDE = 4
@@ -4428,6 +4431,29 @@ fn _no_bounds() -> int {
 
 fn _set_no_bounds(v: int) {
     mem_store64(static_word(SW_NOBOUNDS), 0, v)
+}
+
+/// 追踪是否打开。
+fn _trace_on() -> int {
+    return mem_load64(static_word(SW_TRACE), 0)
+}
+
+fn _set_trace(v: int) {
+    mem_store64(static_word(SW_TRACE), 0, v)
+}
+
+/// 打一条追踪（只在 `--trace` 时输出，写 stderr 不污染 stdout）。
+fn _tr(msg: str) {
+    if _trace_on() == 1 {
+        eprint("[trace] " + msg)
+    }
+}
+
+/// 打一条带整数的追踪。
+fn _tri(tag: str, v: int) {
+    if _trace_on() == 1 {
+        eprint("[trace] " + tag + "=" + v.to_str())
+    }
 }
 
 /// 有效堆字节数：`--heap-mb` 设了就用它，否则用 `HEAP_SIZE`。
@@ -10403,6 +10429,7 @@ fn _frame_bytes(fc: FnCtx) -> int {
 
 /// 一个函数：序言（保存用到的 callee-saved）+ 体 + 尾声
 fn _emit_fn(fc: FnCtx) {
+    _tri("emit_fn vregs", len(fc.vloc))
     let code = fc.code
     let used = vec[int].new(N_VARREG)
     let mut i = 0
@@ -11909,7 +11936,11 @@ fn _compile_range(hdr: int, wid: int, nodes: vec[Node], names: vec[str],
     let hi = mem_load64(hdr, wid * 8 + 1)
     let base = mem_load64(hdr, wid * 8 + 2)
     let cap = mem_load64(hdr, wid * 8 + 3)
+    _tri("compile_range wid", wid)
+    _tri("  lo", lo)
+    _tri("  hi", hi)
     let fc = _new_fc(nodes, names, fns, rt, stt)
+    _tr("  new_fc ok")
     // 优化层的复用缓冲（每线程一份，跨函数复用）
     // 分配器 / 优化层的复用缓冲（每线程一份，跨函数复用）
     let ucnt = vec[int].new(512)
@@ -11926,11 +11957,17 @@ fn _compile_range(hdr: int, wid: int, nodes: vec[Node], names: vec[str],
     let mut off = 0
     let mut fi = lo
     while fi < hi {
+        _tri("  fn idx", fi)
         _fc_reset(fc)
+        _tr("    reset ok")
         _lower_fn(fc, fi)
+        _tri("    lower ok, ir=", len(fc.ir))
         _opt(fc, cok, cval, use, ndef, out)
+        _tri("    opt ok, ir=", len(fc.ir))
         _alloc(fc, ucnt, baked, csb, lpm)
+        _tr("    alloc ok")
         _emit_fn(fc)
+        _tr("    emit ok")
         let code = fc.code
         let labs = fc.labs
         let fixes = fc.fixes
@@ -18442,6 +18479,9 @@ fn main() {
         }
         if a[i] == "-lib" {
             is_lib = 1
+        }
+        if a[i] == "--trace" {
+            _set_trace(1)
         }
         if a[i] == "--no-bounds-check" {
             _set_no_bounds(1)
