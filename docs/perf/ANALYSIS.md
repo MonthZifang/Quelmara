@@ -79,3 +79,94 @@ C 版本：`mov rax, [base+idx*8]` = **1 条**。
 3. 更好的寄存器分配 —— 大改动
 
 **决策**：接受当前性能水平。目标 (1)(2)(3) + CI + 文档已完成。
+
+---
+
+# 附录：vec 内联布局的两次失败（v4.44 / v4.46）
+
+## 目标
+
+把 vec 从三块布局 `[data_ptr][len][cap]` 改成单块 `[len][cap][data...]`，
+让 `v.get(i)` 从**两次访存**降到**一次**（与 C 的 `a[i]` 等价）。
+
+## 结果摘要
+
+| 尝试 | 正确性 | 性能 | 自举 | 结论 |
+|---|---|---|---|---|
+| v4.44 | ✅ 校验和全对 | `b28_matrix` 811→**661ms（-18%）** | ❌ | 回退 |
+| v4.46 | ✅ 校验和全对 | 同上 | ❌ | 回退 |
+
+**性能收益是真的（-18%），但自举过不去。**
+
+## 关键诊断过程（给接手的人省时间）
+
+第一次（v4.44）表现为 `bootstrap_test` **超时 900 秒**，卡在
+`stage-2 编 s15_bitops.qma`。看上去像 hang。第二次（v4.46）修了一个
+明显的 bug 后仍失败，于是做了更细的定位：
+
+1. **stage-1 编 42 个 selfhost 文件：全成功**。
+   → 说明 qlmc 源码本身没问题，问题在"新 qlmc 编出来的二进制"。
+
+2. **stage-2 跑 `version`：正常**（字符串打印 OK）。
+   **stage-2 跑 `dump`：正常**（lexer+parser+nodes 计数都对）。
+   **stage-2 跑 `irdump`：无任何输出**。
+   → **故障点在 lowering（IR 生成）**，不在前端。
+
+3. **stage-2 编 `print(42)`：无输出、无文件、退出码 0**。
+   → 不是 crash，是**静默提前退出**。
+
+4. 进程状态观察：不是 hang（进程很快消失），是早退。
+
+所以 selfhost 超时的真正原因不是"死循环"，而是 stage-2 在 lowering
+某个环节静默退出，`bootstrap_test` 的 `subprocess` 一直等文件出现。
+
+## 定位到的两个真 bug（都已修，但仍不通过）
+
+**bug 1：`_vec_grow_body` 里重复 `_pin`。**
+
+```quelmara
+let hp = _pin(fc, h)   // h 已经是 _vec_push 里 _pin 出来的变量
+```
+
+`_pin` 会 `_new_var` + `MOV`，造出**第三个变量**。后面
+`MOV hp, dp`（扩容后把句柄改成新块）只改这一层，调用方手里的句柄
+仍是旧块地址 → 扩容后继续往旧块写。
+
+修法：`let hp = h`（不 pin），因为调用方传进来的本就是变量。
+
+**bug 2：`_lower_vecnew` 里残留死变量 `hdr`。**
+
+```quelmara
+let hdr = _vnew(fc)          // 创建了但只发射了一条 CONST
+fc.vty.set(hdr, TY_INT)
+_ir_emit(fc, OP_CONST, hdr, 0, 0, 16)   // 这条不参与后续任何计算
+```
+
+无害但会多占一个 vreg，已删。
+
+## 修完这两个 bug 之后仍然失败
+
+stage-2 依旧连 `print(42)` 都编不出，且**完全静默**。第三个 bug 没找到。
+
+按项目纪律（v3.84 / v4.00 的教训：**没有差分验证就不算修好**），
+**回退**。补丁留在 `/tmp/vec_inline_wip.patch`。
+
+## 下一步的最优路径
+
+不要在 qlmc 单边改。正确顺序是：
+
+1. 先改 **stage-0**（`tools/stage0/qlm_native.py` 的 `__vec_new` /
+   `__vec_get` / `__vec_set` / `__vec_grow` 四个运行时函数）到新布局；
+2. 再改 qlmc 对应处；
+3. 用 `bootstrap_test` 验证 stage-1/stage-2 逐字节一致。
+
+只改 qlmc 一边时，stage-1 是"旧 qlmc 编出的编译器"、stage-2 是"新源码
+编出的编译器"，两者行为必然分叉——这是自举编译器的结构性约束，
+不是运气问题。
+
+## 另一个可能的收益点
+
+即使 vec 布局不动，`_vec_check` 的越界检查在热循环里每元素仍要
+`cmp+jcc` 两条。`Quelmara.toml` 已有 `[build] bounds_check = true`
+开关，但 qlmc **没实现它**（只有 stage-0 读）。把它接进 qlmc 是一条
+低风险、可量化的优化路径。
