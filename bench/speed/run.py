@@ -180,7 +180,7 @@ def parse_out(out):
     的真实负载只有几毫秒到几十毫秒 —— 用挂钟量等于在量 CreateProcess。所以每个
     程序自己用单调时钟圈住负载，只把负载时间打出来。
     """
-    lines = [l for l in (out or "").splitlines()]
+    lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
     if "T" not in lines:
         return (out or "").strip(), None
     i = lines.index("T")
