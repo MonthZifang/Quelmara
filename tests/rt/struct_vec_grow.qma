@@ -1,0 +1,23 @@
+// RT 用例：struct 字段中的 vec 跨 grow 有效性
+// v4.52 附录收窄：ctx.labs 是 struct（Ctx{}）构造表达式里的 vec，
+// 其容量边界问题的候选机制 —— struct 字段 vec 与局部 vec 路径不同。
+// 这里 struct 持有 vec，在函数间 grow（必须多次扩容），再校验。
+struct Box { v: vec[int]  n: int }
+fn fill(b: Box, n: int) {
+    let mut i = 0
+    while i < n {
+        b.v.push(i * 5 + 2)
+        i = i + 1
+    }
+}
+fn main() {
+    let b = Box { v: vec[int].new(4), n: 0 }
+    fill(b, 200)
+    let mut bad = 0
+    let mut i = 0
+    while i < 200 {
+        if b.v.get(i) != i * 5 + 2 { bad = bad + 1 }
+        i = i + 1
+    }
+    print(bad)
+}
