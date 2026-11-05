@@ -6572,7 +6572,7 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
             _ir_emit(fc, OP_MOV, hp2, hv2, 0, 0)
             // kty = 键类型（map 类型编码是 TY_MAP + (K<<8) + V）
             let kty = (hty - TY_MAP) >> 8
-            let cap2 = _pin(fc, _vec_field(fc, hp2, 0))
+            let cap2 = _pin(fc, _map_cap(fc, hp2))
             let base2 = _pin(fc, _map_base(fc, hp2))
             let idx2 = _new_var(fc, -3, TY_INT)
             let z2 = _vnew(fc)
@@ -12196,7 +12196,7 @@ fn _pin(fc: FnCtx, v: int) -> int {
 /// map 扩容：容量翻倍 + 拷旧数据 + **清零新槽位**（键 0 表示空槽，不清零会被当成命中）。
 fn _map_grow(fc: FnCtx, h: int) {
     let hp = _pin(fc, h)
-    let cap = _pin(fc, _vec_field(fc, hp, 0))
+    let cap = _pin(fc, _map_cap(fc, hp))
     let two = _map_const(fc, 2)
     let ncap = _vnew(fc)
     fc.vty.set(ncap, TY_INT)
@@ -12288,6 +12288,19 @@ fn _map_slot_of(fc: FnCtx, h: int, k0: int) -> int {
     _ir_emit(fc, OP_MOV, slot, zz, 0, 0)
     _ir_emit(fc, OP_LAB, 0, 0, 0, ldone)
     return slot
+}
+
+/// 读 map 的容量。**不要用 `_vec_field(fc, h, 0)`** —— 那个函数在 vec 上
+/// 返回数据块基址，而 map 的 `[h+0]` 存的是容量。两者 off=0 的语义完全不同。
+/// 以前混用是靠"布局恰好兼容"侥幸过的；一旦 vec 布局变化就会一起带坏。
+fn _map_cap(fc: FnCtx, h: int) -> int {
+    let a = _vnew(fc)
+    fc.vty.set(a, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a, h, 0, 0)
+    let d = _vnew(fc)
+    fc.vty.set(d, TY_INT)
+    _ir_emit(fc, OP_LOAD, d, a, 0, 8)
+    return d
 }
 
 fn _map_new(fc: FnCtx, nd: Node) -> int {
@@ -12461,7 +12474,7 @@ fn _map_del(fc: FnCtx, nd: Node, h: int) -> int {
     let zz = _map_const(fc, 0)
     _ir_emit(fc, OP_STORE, 0, slot, zz, 8)
 
-    let cap = _pin(fc, _vec_field(fc, hp, 0))
+    let cap = _pin(fc, _map_cap(fc, hp))
     let base = _pin(fc, _map_base(fc, hp))
     let sixteen = _pin(fc, _map_const(fc, 16))
     // cur 从被删槽的**下一个**开始
