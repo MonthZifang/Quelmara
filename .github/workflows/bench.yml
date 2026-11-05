@@ -214,12 +214,16 @@ jobs:
           # python 抛 OSError，但 step 仍然报成功）。
           set -o pipefail
           # qlmc.exe 是 Windows PE，Linux 上要 wine 包装
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends wine64 || sudo apt-get install -y -qq --no-install-recommends wine
-          export PATH="/usr/bin:$PATH"
-          WINE=$(which wine || which wine64 || echo "/usr/bin/wine")
-          $WINE --version
-          QLMC="$WINE build/qlmc.exe" python bench/speed/run.py --langs quelmara c cpp go rust zig nim fortran --reps "$REPS" --markdown 2>&1 | tee bench.md
+          if [ "$(uname -s)" = "Linux" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends wine64 || sudo apt-get install -y -qq --no-install-recommends wine
+            export PATH="/usr/bin:$PATH"
+            WINE=$(which wine || which wine64 || echo "/usr/bin/wine")
+            $WINE --version
+            QLMC="$WINE build/qlmc.exe" python bench/speed/run.py --langs quelmara c cpp go rust zig nim fortran --reps "$REPS" --markdown 2>&1 | tee bench.md
+          else
+            python bench/speed/run.py --langs quelmara c cpp go rust zig nim fortran --reps "$REPS" --markdown 2>&1 | tee bench.md
+          fi
 
       - name: 写 job summary
         if: always()
