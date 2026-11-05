@@ -1,0 +1,31 @@
+// 运行库单测：mem_copy 的前向重叠语义
+// mem_copy(dst, src, n)：v4.50 的 8 字节块必须与"逐字节参考"一致。
+// 参考实现：手动逐字节循环（不调 mem_copy）。
+fn main() {
+    let n = 40
+    let a = mem_alloc(n)
+    let ref = mem_alloc(n)
+    let mut i = 0
+    while i < n {
+        mem_store64(a, i * 8, i * 3 + 7)
+        mem_store64(ref, i * 8, i * 3 + 7)
+        i = i + 1
+    }
+    // 1) 不重叠：整块
+    mem_copy(a + 8 * 20, a, 8 * 20)
+    // 2) 前向重叠 dst = src+8：逐字节语义 = [v0,v0,v1,...]
+    mem_copy(a + 8, a, 8 * 10)
+    // 对照 ref 上做同样的手动逐字节拷贝
+    let mut j = 9
+    while j >= 1 {
+        mem_store64(ref, j * 8, mem_load64(ref, (j - 1) * 8))
+        j = j - 1
+    }
+    let mut k = 1
+    let mut bad = 0
+    while k <= 10 {
+        if mem_load64(a, k * 8) != mem_load64(ref, k * 8) { bad = bad + 1 }
+        k = k + 1
+    }
+    print(bad)
+}

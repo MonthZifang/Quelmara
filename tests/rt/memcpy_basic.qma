@@ -1,0 +1,20 @@
+// 运行库单测：mem_copy 不重叠的基础正确性（含尾部非 8 倍数）
+fn main() {
+    let a = mem_alloc(64)
+    let b = mem_alloc(64)
+    let mut i = 0
+    while i < 8 {
+        mem_store64(a, i * 8, i * 11 + 3)
+        i = i + 1
+    }
+    // 拷 37 字节（非 8 倍数：4 个 qword + 5 字节尾部）
+    mem_copy(b, a, 37)
+    // 校验前 4 个 qword
+    let mut bad = 0
+    let mut j = 0
+    while j < 4 {
+        if mem_load64(b, j * 8) != mem_load64(a, j * 8) { bad = bad + 1 }
+        j = j + 1
+    }
+    print(bad)
+}
