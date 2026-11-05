@@ -767,6 +767,9 @@ const SW_MOD_ID = 0       // 当前 parse 的模块号（0 = 主文件，1.. = �
 const SW_TARGET = 6
 /// 堆上限（MB）。0 = 用编译期默认（HEAP_SIZE）。由 `--heap-mb N` 设置。
 const SW_HEAPMB = 8
+/// 关掉越界检查（对应 `Quelmara.toml [build] bounds_check = false`）。
+/// 1 = 检查已关（更快，但越界即 UB）。由 `--no-bounds-check` 或 run.py 设置。
+const SW_NOBOUNDS = 9
 const SW_GT_N = 5
 const SW_GT_BASE = 8
 const GT_STRIDE = 4
@@ -4416,6 +4419,15 @@ fn _cur_heap_mb() -> int {
 /// 写堆上限（MB）。
 fn _set_heap_mb(mb: int) {
     mem_store64(static_word(SW_HEAPMB), 0, mb)
+}
+
+/// 越界检查是否已关（`[build] bounds_check = false`）。
+fn _no_bounds() -> int {
+    return mem_load64(static_word(SW_NOBOUNDS), 0)
+}
+
+fn _set_no_bounds(v: int) {
+    mem_store64(static_word(SW_NOBOUNDS), 0, v)
 }
 
 /// 有效堆字节数：`--heap-mb` 设了就用它，否则用 `HEAP_SIZE`。
@@ -12606,6 +12618,10 @@ fn _vec_field(fc: FnCtx, h: int, off: int) -> int {
 
 /// 越界就 exit(1)：`jb` 是**无符号**比较，负数下标也会被拦下
 fn _vec_check(fc: FnCtx, h: int, i: int) {
+    // v4.46：`[build] bounds_check = false` 时整段省掉（每元素省 2 条 cmp+jcc）。
+    if _no_bounds() == 1 {
+        return
+    }
     let lfail = _newlab(fc.labs)
     let lok = _newlab(fc.labs)
     // v4.42：**精简冷路径**——原来是 CONST+EXIT 两条，现在用 JMP 自旋一条。
@@ -18413,6 +18429,9 @@ fn main() {
         }
         if a[i] == "-lib" {
             is_lib = 1
+        }
+        if a[i] == "--no-bounds-check" {
+            _set_no_bounds(1)
         }
         if a[i] == "--heap-mb" && i + 1 < len(a) {
             let mb = a[i + 1].to_int()

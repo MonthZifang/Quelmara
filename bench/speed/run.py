@@ -36,6 +36,8 @@ IS_WIN = os.name == "nt"
 # v4.45：qlmc 的堆上限（MB）。None = 不传，用 qlmc 的编译期默认。
 # 由 main() 按"命令行 > Quelmara.toml"决定。
 HEAP_MB = None
+# v4.46：[build] bounds_check。None = 不传（qlmc 默认开）。
+NO_BOUNDS = None
 EXE = ".exe" if IS_WIN else ""
 if IS_WIN:
     import ctypes.wintypes as wt
@@ -179,6 +181,36 @@ if IS_WIN:
         ]
 
 
+def bounds_check_from_toml():
+    """读 `[build] bounds_check`。返回 True/False；没配就 None（= 默认开）。
+
+    v4.46：qlmc 没实现这个开关（只有 stage-0 读），所以在 run.py 里读出来
+    再通过 `--no-bounds-check` 传进去。
+    """
+    cfg = os.path.join(ROOT, "Quelmara.toml")
+    if not os.path.exists(cfg):
+        return None
+    sect = None
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    sect = line[1:-1].strip()
+                    continue
+                if sect != "build" or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() != "bounds_check":
+                    continue
+                return v.strip().lower() not in ("false", "0", "no", "off")
+    except OSError:
+        return None
+    return None
+
+
 def _peak_ws(handle):
     if not IS_WIN:
         return 0
@@ -307,6 +339,8 @@ def build_all(langs, only):
                 # v4.45：把 Quelmara.toml 的 [memory] heap_limit_mb 传给 qlmc
                 if HEAP_MB:
                     cmd += ["--heap-mb", str(HEAP_MB)]
+                if NO_BOUNDS:
+                    cmd += ["--no-bounds-check"]
                 r = subprocess.run(cmd, capture_output=True, text=True)
                 if r.returncode != 0:
                     notes.setdefault("quelmara", f"{b} 编译失败: " +
@@ -516,6 +550,8 @@ def main():
     ap.add_argument("--langs", nargs="*", default=LANGS)
     ap.add_argument("--markdown", action="store_true")
     ap.add_argument("--mem", action="store_true", help="同时采峰值内存（慢）")
+    ap.add_argument("--no-bounds-check", action="store_true",
+                    help="关掉 vec 越界检查（对应 [build] bounds_check = false）")
     ap.add_argument("--heap-mb", type=int, default=None,
                     help="传给 qlmc 的堆上限（MB）。不填则读 Quelmara.toml "
                          "的 [memory] heap_limit_mb")
@@ -523,6 +559,10 @@ def main():
     # v4.45：命令行 > Quelmara.toml > 不传（qlmc 用编译期默认）
     global HEAP_MB
     HEAP_MB = args.heap_mb if args.heap_mb else heap_mb_from_toml()
+    global NO_BOUNDS
+    NO_BOUNDS = args.no_bounds_check or (bounds_check_from_toml() is False)
+    if NO_BOUNDS:
+        print("[bounds] 越界检查已关（更快，越界即 UB）")
     if HEAP_MB:
         print(f"[heap] 堆上限 {HEAP_MB} MB"
               f"（{'命令行 --heap-mb' if args.heap_mb else 'Quelmara.toml'}）")
