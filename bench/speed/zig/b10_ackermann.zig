@@ -9,5 +9,5 @@ pub fn main() !void {
     const t0 = std.time.nanoTimestamp();
     const r = ack(2, 8);
     const t1 = std.time.nanoTimestamp();
-    std.debug.print("{d}\nT\n{d}\n", .{ r, t1 - t0 });
+    std.io.getStdOut().writer().print("{d}\nT\n{d}\n", .{ r, t1 - t0 });
 }

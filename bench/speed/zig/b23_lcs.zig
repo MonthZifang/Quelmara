@@ -27,5 +27,5 @@ pub fn main() !void {
         for (0..n + 1) |i| prev[i] = cur[i];
     }
     const t1 = std.time.nanoTimestamp();
-    std.debug.print("{d}\nT\n{d}\n", .{ prev[n], t1 - t0 });
+    std.io.getStdOut().writer().print("{d}\nT\n{d}\n", .{ prev[n], t1 - t0 });
 }

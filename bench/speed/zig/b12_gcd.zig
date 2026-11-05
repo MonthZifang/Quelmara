@@ -12,5 +12,5 @@ pub fn main() !void {
     var i: i64 = 1;
     while (i <= n) : (i += 1) s += gcd(i, 1000000 - i);
     const t1 = std.time.nanoTimestamp();
-    std.debug.print("{d}\nT\n{d}\n", .{ s, t1 - t0 });
+    std.io.getStdOut().writer().print("{d}\nT\n{d}\n", .{ s, t1 - t0 });
 }

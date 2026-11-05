@@ -32,5 +32,5 @@ pub fn main() !void {
     const t1 = std.time.nanoTimestamp();
     var chk: i64 = 0;
     for (0..sz) |i| chk = @rem(chk + c[i], 1000000007);
-    std.debug.print("{d}\nT\n{d}\n", .{ chk, t1 - t0 });
+    std.io.getStdOut().writer().print("{d}\nT\n{d}\n", .{ chk, t1 - t0 });
 }
