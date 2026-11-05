@@ -106,3 +106,11 @@ stage2 生成期内存观测，留待qlmc 内部调试工具成熟。
 （set/get/resolve_seq）逐环审计无顺序假设。机制超出静态分析
 可达范围——需要运行期观测 stage2 生成过程（winedbg/自行插桩）。
 搁置维持，规避（预分配 128/256）已验证。RT 6/6。
+
+### 16 字节块实测（对比 C）
+
+b31_memcpy 322ms vs C 208ms（1.55x，改善前 1.62x）。
+注意 b31 实际是【vec push/get 循环】（每元素 2 次 vec 访问），
+不是 mem_copy —— memcpy 提速对它稀释；差距主体是 vec 双重访存
+（三大结构阻碍之首，见 PERF-ROADMAP）。mem_copy 的直接受益场景
+是 vec_grow 内部扩容，16 字节块在已完成的三级拷贝中生效。
