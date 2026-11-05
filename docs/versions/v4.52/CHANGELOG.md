@@ -49,3 +49,14 @@ fix 回填拿到垃圾 → 产物错 → stage-2 rc=1。
 交互、grow 后旧块读取。这是 **vec 运行时实现的潜在 bug**，影响
 任何"接近预分配容量"的 vec —— 本次用 128 规避，但根子问题需要
 单独一轮：给 vec.grow 写压力测试（RT 通道）。
+
+## 追加：vec.grow 压力测试 —— 否定 grow-stale 假设
+
+`tests/rt/vec_grow_stale.qma`：vec.new(4) 经 fill() push 300 项
+（触发 7 次 grow），跨函数逐项校验 —— **PASS**。
+
+→ grow 本身与句柄更新机制正常。labs 容量边界问题的真机制不在
+grow，候选收窄到【struct 构造表达式中的 vec 路径】（ctx.labs 的
+new 发生在 Ctx{} 构造内联里，与局部 vec 不同代码路径）。
+
+RT 单测 4/4。
