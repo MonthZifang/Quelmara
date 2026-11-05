@@ -765,6 +765,8 @@ const SW_MOD_ID = 0       // 当前 parse 的模块号（0 = 主文件，1.. = �
 // 会波及十几个函数签名，所以用 static_word（编译期单值，与 SW_MOD_ID 同理）。
 // 槽 6/7 之前没人用。
 const SW_TARGET = 6
+/// 堆上限（MB）。0 = 用编译期默认（256）。由 `--heap-mb N` 设置。
+const SW_HEAPMB = 8
 const SW_GT_N = 5
 const SW_GT_BASE = 8
 const GT_STRIDE = 4
@@ -4404,6 +4406,30 @@ fn _cur_target() -> int {
 /// 写当前目标容器。
 fn _set_target(t: int) {
     mem_store64(static_word(SW_TARGET), 0, t)
+}
+
+/// 读堆上限（MB）。0 = 用编译期默认。
+fn _cur_heap_mb() -> int {
+    return mem_load64(static_word(SW_HEAPMB), 0)
+}
+
+/// 有效堆字节数：`--heap-mb` 设了就用它，否则用 `HEAP_SIZE`。
+/// 上限是 **imm32**（`mov edx/esi, imm`），所以最大 2 GiB。
+fn _heap_bytes() -> int {
+    let mb = _cur_heap_mb()
+    if mb <= 0 {
+        return HEAP_SIZE
+    }
+    let b = mb * 1048576
+    if b > 2147483647 {
+        return 2147483647
+    }
+    return b
+}
+
+/// 写堆上限（MB）。`--heap-mb N` 调它。
+fn _set_heap_mb(mb: int) {
+    mem_store64(static_word(SW_HEAPMB), 0, mb)
 }
 
 fn _vnew(fc: FnCtx) -> int {
@@ -17138,8 +17164,8 @@ fn _gen_alloc(ctx: Ctx) {
     _sub_rsp(code, 32)
     _b(code, 0x31)                         // xor ecx, ecx（lpAddress = 0）
     _b(code, 0xC9)
-    _b(code, 0xBA)                         // mov edx, HEAP_SIZE
-    _w32(code, HEAP_SIZE)
+    _b(code, 0xBA)                         // mov edx, heap bytes（--heap-mb 可配）
+    _w32(code, _heap_bytes())
     _b(code, 0x41)                         // mov r8d, 0x3000（MEM_COMMIT|MEM_RESERVE）
     _b(code, 0xB8)
     _w32(code, 0x3000)
@@ -17164,8 +17190,8 @@ fn _gen_alloc(ctx: Ctx) {
         _b(code, 0x50)
         _b(code, 0x31)                     // xor edi, edi（addr = NULL）
         _b(code, 0xFF)
-        _b(code, 0xBE)                     // mov esi, HEAP_SIZE
-        _w32(code, HEAP_SIZE)
+        _b(code, 0xBE)                     // mov esi, heap bytes（--heap-mb 可配）
+        _w32(code, _heap_bytes())
         _b(code, 0xBA)                     // mov edx, 3（PROT_READ|PROT_WRITE）
         _w32(code, 3)
         _b(code, 0x41)                     // mov r10d, 0x22（MAP_PRIVATE|MAP_ANON）
@@ -17228,10 +17254,10 @@ fn _gen_alloc(ctx: Ctx) {
     let f7 = len(code)
     _w32(code, 0)
     _addfix(ctx.fixes, f7, 0, 4)
-    _b(code, 0x4C)                         // lea r8, [rax+HEAP_SIZE]
+    _b(code, 0x4C)                         // lea r8, [rax+heap_bytes]（上限）
     _b(code, 0x8D)
     _b(code, 0x80)
-    _w32(code, HEAP_SIZE)
+    _w32(code, _heap_bytes())
     _b(code, 0x4C)                         // mov [rip+bss+24], r8（上限）
     _b(code, 0x89)
     _b(code, 0x05)
@@ -18387,6 +18413,14 @@ fn main() {
         }
         if a[i] == "-lib" {
             is_lib = 1
+        }
+        if a[i] == "--heap-mb" && i + 1 < len(a) {
+            let mb = a[i + 1].to_int()
+            if mb < 1 || mb > 65536 {
+                eprint("qlmc: --heap-mb 取值 1..65536（得到 " + a[i + 1] + "）")
+                exit(2)
+            }
+            _set_heap_mb(mb)
         }
         if a[i] == "--target" && i + 1 < len(a) {
             if a[i + 1] == "elf" || a[i + 1] == "linux" {
