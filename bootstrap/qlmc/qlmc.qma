@@ -10534,14 +10534,51 @@ fn _gen_zero(ctx: Ctx) {
     let code: vec[int] = ctx.code
     let labs: vec[int] = ctx.labs
     ctx.rt_pos.set(RT_ZERO, len(code))
-    let ltop = _newlab(labs)
+    // v4.50：8 字节块清零（同 _gen_memcpy 的改法）。
+    // 原逐字节循环每字节 5 条指令；qword 循环每 8 字节 5 条 = 8 倍吞吐。
+    // r8 = 游标（v2.51 约定），rax = 块数。
+    let lq = _newlab(labs)
+    let lb = _newlab(labs)
     let ldone = _newlab(labs)
+    _b(code, 0x48)                         // mov rax, rcx
+    _b(code, 0x89)
+    _b(code, 0xC8)
+    _b(code, 0x48)                         // shr rax, 3
+    _b(code, 0xC1)
+    _b(code, 0xE8)
+    _b(code, 0x03)
+    _b(code, 0x48)                         // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let p0 = _jcc(code, 0x84)              // jz .bytail
+    _addfix(ctx.fixes, p0, lb, 1)
+    // --- qword 循环 ---
+    _setlab(labs, code, lq)
+    _b(code, 0x49)                         // mov qword [r8], 0
+    _b(code, 0xC7)
+    _b(code, 0x00)
+    _w32(code, 0)
+    _b(code, 0x49)                         // add r8, 8
+    _b(code, 0x83)
+    _b(code, 0xC0)
+    _b(code, 0x08)
+    _b(code, 0x48)                         // dec rax
+    _b(code, 0xFF)
+    _b(code, 0xC8)
+    let p1 = _jcc(code, 0x85)              // jnz .qloop
+    _addfix(ctx.fixes, p1, lq, 1)
+    // --- 尾部 ---
+    _b(code, 0x48)                         // and rcx, 7
+    _b(code, 0x83)
+    _b(code, 0xE1)
+    _b(code, 0x07)
+    // --- 字节循环 ---
+    _setlab(labs, code, lb)
     _b(code, 0x48)                         // test rcx, rcx
     _b(code, 0x85)
     _b(code, 0xC9)
-    let p0 = _jcc(code, 0x84)
-    _addfix(ctx.fixes, p0, ldone, FK_LAB)
-    _setlab(labs, code, ltop)
+    let p2 = _jcc(code, 0x84)              // jz .done
+    _addfix(ctx.fixes, p2, ldone, 1)
     _b(code, 0x41)                         // mov byte [r8], 0
     _b(code, 0xC6)
     _b(code, 0x00)
@@ -10552,8 +10589,8 @@ fn _gen_zero(ctx: Ctx) {
     _b(code, 0x48)                         // dec rcx
     _b(code, 0xFF)
     _b(code, 0xC9)
-    let p1 = _jcc(code, 0x85)
-    _addfix(ctx.fixes, p1, ltop, FK_LAB)
+    let p3 = _jcc(code, 0x85)              // jnz .bloop
+    _addfix(ctx.fixes, p3, lb, 1)
     _setlab(labs, code, ldone)
     _ret(code)
 }
