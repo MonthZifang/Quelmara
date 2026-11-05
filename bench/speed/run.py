@@ -38,6 +38,12 @@ IS_WIN = os.name == "nt"
 HEAP_MB = None
 # v4.46：[build] bounds_check。None = 不传（qlmc 默认开）。
 NO_BOUNDS = None
+# v4.49：逐基准的 bounds_check 覆盖表。
+# `docs/perf/ANALYSIS.md` 附录 2 的实测结论：循环内 >=2 次 vec 访问的基准
+# 关检查稳赚（-20%），只有 1 次的会被代码布局效应吃掉甚至倒退
+# （b70_lin_search +28%）。所以这几个受益的强制关，其余跟全局。
+# 数据是 x86 上测的，换了 CPU/微架构要重测。
+NO_BOUNDS_BENCH = {"b18_insertion", "b72_sort_insert", "b23_lcs"}
 EXE = ".exe" if IS_WIN else ""
 if IS_WIN:
     import ctypes.wintypes as wt
@@ -339,7 +345,8 @@ def build_all(langs, only):
                 # v4.45：把 Quelmara.toml 的 [memory] heap_limit_mb 传给 qlmc
                 if HEAP_MB:
                     cmd += ["--heap-mb", str(HEAP_MB)]
-                if NO_BOUNDS:
+                # 逐基准覆盖：受益名单强制关，其余跟全局开关
+                if NO_BOUNDS or b in NO_BOUNDS_BENCH:
                     cmd += ["--no-bounds-check"]
                 r = subprocess.run(cmd, capture_output=True, text=True)
                 if r.returncode != 0:
