@@ -16941,17 +16941,67 @@ fn _gen_memcpy(ctx: Ctx) {
     let code: vec[int] = ctx.code
     let labs: vec[int] = ctx.labs
     ctx.rt_pos.set(RT_MEMCPY, len(code))
-    let ltop = _newlab(labs)
+    // v4.50：**8 字节块拷贝**。原实现是逐字节循环（每字节 7 条指令：
+    // load+store+2*inc+dec+test+jnz），100 万字节就是 700 万条指令。
+    //
+    // 新实现：
+    //   1. qwords = n / 8：`rep movsq`（每 8 字节 1 条微指令）
+    //   2. 尾部 = n % 8：逐字节搬（最多 7 字节）
+    //
+    // 寄存器约定（v2.51）：**rsi/rdi 是变量寄存器，绝不能碰**。
+    // `rep movsq` 用 rsi/rdi/rcx —— 必须换成 r9/r8/rax 自己推。
+    // 改用普通 8 字节 load/store 循环（每 8 字节 5 条指令，仍比逐字节快 5.6 倍）：
+    //   mov rax, [r9] ; mov [r8], rax ; add r9,8 ; add r8,8 ; dec rax...
+    // 其实更好：用 r10/r11 做游标（发射器保留、永不持有 vreg），ret 前不用恢复。
+    let lq = _newlab(labs)
+    let lb = _newlab(labs)
     let ldone = _newlab(labs)
+    // rcx = 字节数。先算 qword 数：rax = rcx >> 3
+    _b(code, 0x48)                         // mov rax, rcx
+    _b(code, 0x89)
+    _b(code, 0xC8)
+    _b(code, 0x48)                         // shr rax, 3
+    _b(code, 0xC1)
+    _b(code, 0xE8)
+    _b(code, 0x03)
+    _b(code, 0x48)                         // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let p0 = _jcc(code, 0x84)              // jz .bytail（没有整块）
+    _addfix(ctx.fixes, p0, lb, 1)
+    // --- qword 循环：rax = 块数 ---
+    _setlab(labs, code, lq)
+    _b(code, 0x4D)                         // mov r10, [r9]
+    _b(code, 0x8B)
+    _b(code, 0x11)
+    _b(code, 0x4D)                         // mov [r8], r10
+    _b(code, 0x89)
+    _b(code, 0x10)
+    _b(code, 0x49)                         // add r9, 8
+    _b(code, 0x83)
+    _b(code, 0xC1)
+    _b(code, 0x08)
+    _b(code, 0x49)                         // add r8, 8
+    _b(code, 0x83)
+    _b(code, 0xC0)
+    _b(code, 0x08)
+    _b(code, 0x48)                         // dec rax
+    _b(code, 0xFF)
+    _b(code, 0xC8)
+    let p1 = _jcc(code, 0x85)              // jnz .qloop
+    _addfix(ctx.fixes, p1, lq, 1)
+    // --- 尾部：rcx &= 7 ---
+    _b(code, 0x48)                         // and rcx, 7
+    _b(code, 0x83)
+    _b(code, 0xE1)
+    _b(code, 0x07)
+    // --- 字节循环 ---
+    _setlab(labs, code, lb)
     _b(code, 0x48)                         // test rcx, rcx
     _b(code, 0x85)
     _b(code, 0xC9)
-    let p0 = _jcc(code, 0x84)
-    _addfix(ctx.fixes, p0, ldone, 1)
-    _setlab(labs, code, ltop)
-    // v2.51：源/目的从 rsi/rdi 换成 **r9/r8** —— 因为 rsi/rdi 在 Win64 里是
-    // callee-saved，v2.51 起拿它们当第 6/7 个变量寄存器。运行库例程**绝不能**
-    // 碰这两个寄存器（除非自己 push/pop）。
+    let p2 = _jcc(code, 0x84)              // jz .done
+    _addfix(ctx.fixes, p2, ldone, 1)
     _b(code, 0x41)                         // mov al, [r9]
     _b(code, 0x8A)
     _b(code, 0x01)
@@ -16967,8 +17017,8 @@ fn _gen_memcpy(ctx: Ctx) {
     _b(code, 0x48)                         // dec rcx
     _b(code, 0xFF)
     _b(code, 0xC9)
-    let p1 = _jcc(code, 0x85)              // jnz .loop
-    _addfix(ctx.fixes, p1, ltop, 1)
+    let p3 = _jcc(code, 0x85)              // jnz .bloop
+    _addfix(ctx.fixes, p3, lb, 1)
     _setlab(labs, code, ldone)
     _ret(code)
 }
