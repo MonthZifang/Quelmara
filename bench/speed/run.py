@@ -33,12 +33,49 @@ import time
 # Linux/macOS 只跑 C/Go/Python —— 那三个是可移植的，用来给"同一道题在不同
 # 机器上是什么样"做参照（也就是"适配度"那一列）。
 IS_WIN = os.name == "nt"
+# v4.45：qlmc 的堆上限（MB）。None = 不传，用 qlmc 的编译期默认。
+# 由 main() 按"命令行 > Quelmara.toml"决定。
+HEAP_MB = None
 EXE = ".exe" if IS_WIN else ""
 if IS_WIN:
     import ctypes.wintypes as wt
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def heap_mb_from_toml():
+    """读 `Quelmara.toml` 的 `[memory] heap_limit_mb`，返回 MB；没配就 None。
+
+    v4.45：qlmc 自己没有 toml 解析器（`_read_text` 走 Win32 API，Linux 上
+    不可用），所以由**这个跨平台脚本**读配置，再用 `--heap-mb` 传给 qlmc。
+    命令行给了 `--heap-mb` 的话以命令行为准（见 main）。
+    """
+    cfg = os.path.join(ROOT, "Quelmara.toml")
+    if not os.path.exists(cfg):
+        return None
+    sect = None
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    sect = line[1:-1].strip()
+                    continue
+                if sect != "memory":
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() != "heap_limit_mb":
+                    continue
+                n = int(v.strip())
+                return n if n > 0 else None
+    except (OSError, ValueError):
+        return None
+    return None
 OUT = os.path.join(ROOT, "build", "speed")
 
 # 基准表：(id, 一句话说明)
@@ -267,6 +304,9 @@ def build_all(langs, only):
                 cmd = runner + ["build", src, "-o", exe]
                 if ELF:
                     cmd += ["--target", "elf"]
+                # v4.45：把 Quelmara.toml 的 [memory] heap_limit_mb 传给 qlmc
+                if HEAP_MB:
+                    cmd += ["--heap-mb", str(HEAP_MB)]
                 r = subprocess.run(cmd, capture_output=True, text=True)
                 if r.returncode != 0:
                     notes.setdefault("quelmara", f"{b} 编译失败: " +
@@ -476,7 +516,16 @@ def main():
     ap.add_argument("--langs", nargs="*", default=LANGS)
     ap.add_argument("--markdown", action="store_true")
     ap.add_argument("--mem", action="store_true", help="同时采峰值内存（慢）")
+    ap.add_argument("--heap-mb", type=int, default=None,
+                    help="传给 qlmc 的堆上限（MB）。不填则读 Quelmara.toml "
+                         "的 [memory] heap_limit_mb")
     args = ap.parse_args()
+    # v4.45：命令行 > Quelmara.toml > 不传（qlmc 用编译期默认）
+    global HEAP_MB
+    HEAP_MB = args.heap_mb if args.heap_mb else heap_mb_from_toml()
+    if HEAP_MB:
+        print(f"[heap] 堆上限 {HEAP_MB} MB"
+              f"（{'命令行 --heap-mb' if args.heap_mb else 'Quelmara.toml'}）")
 
     built, notes = build_all(args.langs, args.only)
     for k, v in notes.items():
