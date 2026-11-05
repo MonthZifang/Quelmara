@@ -1,31 +1,32 @@
-// 运行库单测：mem_copy 的前向重叠语义
-// mem_copy(dst, src, n)：v4.50 的 8 字节块必须与"逐字节参考"一致。
-// 参考实现：手动逐字节循环（不调 mem_copy）。
+// RT 用例：mem_copy 前向重叠 —— 逐字节前向语义
+// store/load 用槽索引（×8），字节级校验用 load8。
 fn main() {
-    let n = 40
-    let a = mem_alloc(n)
-    let ref = mem_alloc(n)
+    let n = 16
+    let a = mem_alloc(n * 2)
+    let refb = mem_alloc(n * 2)
     let mut i = 0
     while i < n {
-        mem_store64(a, i * 8, i * 3 + 7)
-        mem_store64(ref, i * 8, i * 3 + 7)
+        mem_store64(a, i, i * 3 + 7)
+        mem_store64(refb, i, i * 3 + 7)
         i = i + 1
     }
-    // 1) 不重叠：整块
-    mem_copy(a + 8 * 20, a, 8 * 20)
-    // 2) 前向重叠 dst = src+8：逐字节语义 = [v0,v0,v1,...]
-    mem_copy(a + 8, a, 8 * 10)
-    // 对照 ref 上做同样的手动逐字节拷贝
-    let mut j = 9
-    while j >= 1 {
-        mem_store64(ref, j * 8, mem_load64(ref, (j - 1) * 8))
-        j = j - 1
+    // dst = a+8字节 = 槽 1；拷 16 字节 = 槽 0..2 的前向重叠
+    // mem_copy 语义（前向逐字节）：槽1 <- 槽0旧值，槽2 <- 槽1旧值
+    mem_copy(a + 8, a, 16)
+    // 在 refb 上手动模拟逐字节前向重叠（字节地址 = 槽*8）
+    let src = refb
+    let dst = refb + 8
+    let mut k = 15
+    while k >= 0 {
+        mem_store8(dst + k, 0, mem_load8(src + k, 0))
+        k = k - 1
     }
-    let mut k = 1
+    // 逐字节比对 a 与 refb 的前 16 字节
     let mut bad = 0
-    while k <= 10 {
-        if mem_load64(a, k * 8) != mem_load64(ref, k * 8) { bad = bad + 1 }
-        k = k + 1
+    let mut j = 0
+    while j < 16 {
+        if mem_load8(a + 8 + j, 0) != mem_load8(refb + 8 + j, 0) { bad = bad + 1 }
+        j = j + 1
     }
     print(bad)
 }

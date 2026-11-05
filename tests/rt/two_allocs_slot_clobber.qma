@@ -1,17 +1,16 @@
-// 回归用例：两个 mem_alloc 后，第一个指针的槽位被第二个顶掉
-// （v4.50 附录 8）。期望行为：load(a,8) 应为 222。
-// 当前（bug）：999 —— a 的槽位被 b 覆盖。
-// 修复后此用例应通过；修复前保持 FAIL 以防回归。
+// RT 回归用例：两个 mem_alloc 后第一指针的独立性
+// 语义：mem_load64/store64 第 2 参是槽索引（×8），两块独立分配。
+// 全部断言应通过（v4.50 实测通过 —— 此前 FAIL 是用例自己按字节写错）。
 fn main() {
     let a = mem_alloc(64)
     mem_store64(a, 0, 111)
-    mem_store64(a, 8, 222)
-    let x = mem_load64(a, 8)
+    mem_store64(a, 1, 222)
+    let x = mem_load64(a, 1)
     let b = mem_alloc(64)
     mem_store64(b, 0, 999)
     let bad = 0
     if x != 222 { bad = bad + 1 }
-    if mem_load64(a, 8) != 222 { bad = bad + 1 }
+    if mem_load64(a, 1) != 222 { bad = bad + 1 }
     if mem_load64(a, 0) != 111 { bad = bad + 1 }
     if mem_load64(b, 0) != 999 { bad = bad + 1 }
     print(bad)

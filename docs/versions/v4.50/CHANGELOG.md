@@ -250,3 +250,56 @@ a[0]=111  a[8]=111(被改!)  b[0]=111(被改!)  b[8]=888(未变)
 修复要动 `_alloc`/寄存器分配器 —— 与 vec 内联（5 次失败）
 同级别的风险。回归用例已提交：`tests/rt/two_allocs_slot_clobber.qma`
 （当前 FAIL=1，修复后应转 PASS；RT 单测整体 0/3，全部同一根因）。
+
+## 追加 9（最终章）：gdb+反汇编锁定真凶 —— 常量偏移的 ×8 折叠缺失
+
+### 完整证据链（本轮全部用真实产物验证）
+
+1. **gdb 断点 memcpy 入口**：rcx=16, r8=b, r9=a 全对 —— memcpy 无罪
+2. **调用时 src[8]=0** → store(a,1,222) 没写进槽 1
+3. **反汇编 main 真身**（entry call 0x400b99，序言 saved→rbp→sub 全对）：
+   ```
+   store(a,1,222) → mov [rbx + rcx*8], rcx   其中 rcx=1
+   ```
+   等等——是 `4A 89 8C C3 ...` = **[rbx + rax*8]**？不——最终 irdump 定案：
+
+4. **irdump IR（决定性）**：
+   ```
+   11  BINI  dst=10  a=1  b=3  imm=1
+   ```
+   b=3 = **OP_ADD**！优化层把 `ADDRX(v1, 常量1)` 折叠成 `v10 = v1 + 1`
+   —— **漏乘 8**（应 v1 + 8）
+
+5. **变量下标正确**：b6_hash 的 h（变量）走 `_emit_ir` 的 ADDR X
+   （`shl rcx,3`）→ ×8 正确 → b6 校验和一直绿
+
+### 结论
+
+**编译器真 bug：ADDRX 的常量下标在优化层折叠成 ADD 时漏了 ×8。**
+
+* 常量下标（`mem_store64(a, 1, x)`）→ 写 `a+1` 字节（错，应 a+8）
+* 变量下标（`mem_store64(a, h, x)` h 是变量）→ 写 `a+h*8`（对）
+* 单块程序"写读同错自洽"（store/load 都走同一折叠）→ 差分、
+  自举、基准全绿；只有 mem_copy（字节 n、真地址）跨块访问才暴露
+* s20_mem 差分全绿：stage-0 Python 端有同构错位，两边一致
+
+### 语义澄清
+
+`mem_load64/store64` 的偏移语义 = **槽索引（×8）**，与文档
+`02-language.md L1261` 一致（"mem_load64/store64 的偏移是槽索引
+（×8），mem_load8/32 是字节偏移"）。此前我两度误判（先说字节、
+再说 lowering 错），都是错的 —— 文档是对的，错的是【常量下标的
+优化折叠】。
+
+### 修复方向（未做）
+
+lowering 端最稳：`mem_store64/mem_load64` 的常量 w 直接传 `w*8`
+（或 `ADDRX` 折叠处补 `imm*8`）。但修复会让"常量偏移"代码从错变对，
+s20_mem 的差分期望值、b6 等按"现状"写的代码需逐个重验 ——
+牵动全链路，留给下一轮带完整回归窗口时做。
+
+### RT 单测现状
+
+`tests/rt/` 三用例按槽索引语义重写后 1/3：
+memcpy_basic PASS、two_allocs_slot_clobber FAIL(1)（常量槽 1 折叠错）、
+memcpy_overlap FAIL(8)（同根因）。修复后应 3/3。
