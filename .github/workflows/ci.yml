@@ -81,7 +81,9 @@ jobs:
           sudo apt-get update -qq || true
           sudo apt-get install -y -qq --no-install-recommends winehq-stable || \
             sudo apt-get install -y -qq --no-install-recommends wine64 || true
-          WINE=$(command -v wine || command -v wine64 || command -v /usr/lib/wine/wine64 || ls /usr/lib/wine/wine64 2>/dev/null | head -1 || true)
+          WINE=$(command -v wine || command -v wine64 || true)
+          [ -z "$WINE" ] && [ -x /usr/lib/wine/wine64/wine ] && WINE=/usr/lib/wine/wine64/wine
+          [ -z "$WINE" ] && [ -x /usr/lib/wine/wine ] && WINE=/usr/lib/wine/wine
           if [ -z "$WINE" ]; then
             echo "##[warning]wine 不可用，RT 单测跳过（bench job 已覆盖）"
             exit 0
