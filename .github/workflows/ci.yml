@@ -72,9 +72,16 @@ jobs:
           WINEDEBUG: -all
           WINEDLLOVERRIDES: "mscoree,mshtml="
         run: |
+          # winehq 官方源（Ubuntu mirror 快照过期时仍可用，v4.54 实测 404）
+          sudo mkdir -pm755 /etc/apt/keyrings || true
+          wget -qO- https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/Release.key \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/winehq-archive.key || true
+          wget -qNC https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/winehq-jammy.sources \
+            -O /etc/apt/sources.list.d/winehq-jammy.sources || true
           sudo apt-get update -qq || true
-          sudo apt-get install -y -qq --no-install-recommends wine64 ||             sudo apt-get install -y -qq --no-install-recommends wine || true
-          WINE=$(command -v wine64 || command -v wine || true)
+          sudo apt-get install -y -qq --no-install-recommends winehq-stable || \
+            sudo apt-get install -y -qq --no-install-recommends wine64 || true
+          WINE=$(command -v wine || command -v wine64 || true)
           if [ -z "$WINE" ]; then
             echo "##[warning]wine 不可用，RT 单测跳过（bench job 已覆盖）"
             exit 0
