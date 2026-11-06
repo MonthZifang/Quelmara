@@ -1,0 +1,30 @@
+// RT 用例：vec.grow 边界 —— 恰好在 cap 边界 push（v4.52 labs 边界的
+// 直接复现形态：new(64) 的第 65 次 push）
+// 若 grow 有踩状态问题，这里会丢数据/崩。
+fn main() {
+    // 精确边界：cap 64 → 第 65 次 push 触发 grow
+    let v = vec[int].new(64)
+    let mut i = 0
+    while i < 65 {
+        v.push(i * 13 + 5)
+        i = i + 1
+    }
+    let mut bad = 0
+    let mut j = 0
+    while j < 65 {
+        if v.get(j) != j * 13 + 5 { bad = bad + 1 }
+        j = j + 1
+    }
+    // 连续多级边界：64→128→256
+    let mut k = 65
+    while k < 300 {
+        v.push(k * 2)
+        k = k + 1
+    }
+    let mut j2 = 65
+    while j2 < 300 {
+        if v.get(j2) != j2 * 2 { bad = bad + 1 }
+        j2 = j2 + 1
+    }
+    print(bad)
+}
