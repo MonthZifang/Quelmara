@@ -161,6 +161,7 @@ BENCHES = [
     ("b84_pair_swap", "数据结构：键值对交换 100 万"),
     ("b85_count_ones", "微基准：popcount 500 万"),
     ("b86_matrix_diag", "数值：矩阵对角线求和 1000x1000"),
+    ("b87_memcopy_big", "内存：mem_copy 大块 100MB（三级拷贝直连）"),
     ("b14_fibiter", "迭代 fib(5000 万)：纯循环 vs 递归对照"),
     ("b16_leibniz", "浮点：Leibniz 级数 π，2000 万项"),
     ("b18_insertion", "排序：插入排序 8 万（最坏情况移动）"),
