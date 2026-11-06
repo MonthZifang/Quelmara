@@ -767,10 +767,15 @@ def test_ws_e2e():
     if not IS_WIN:
         skip("WebSocket E2E：非 Windows 平台（服务端运行时仅 PE）")
         return
-    r = subprocess.run([sys.executable,
-                        os.path.join(ROOT, "tests/ws_e2e_test.py")],
-                       cwd=ROOT, capture_output=True, text=True,
-                       errors="replace", timeout=300)
+    # 网络抖动防护（同 SSE）：10054 重试一次
+    def _ws_once():
+        return subprocess.run([sys.executable,
+                               os.path.join(ROOT, "tests/ws_e2e_test.py")],
+                              cwd=ROOT, capture_output=True, text=True,
+                              errors="replace", timeout=300)
+    r = _ws_once()
+    if r.returncode not in (0, 2) and "10054" in (r.stdout + r.stderr):
+        r = _ws_once()
     if r.returncode == 2:
         skip("WebSocket E2E：18150 已被占用，跳过")
     elif r.returncode == 0 and "WS_E2E: PASS=" in r.stdout:
@@ -798,10 +803,17 @@ def test_sse_e2e():
     if not IS_WIN:
         skip("SSE E2E：非 Windows 平台（服务端运行时仅 PE）")
         return
-    r = subprocess.run([sys.executable,
-                        os.path.join(ROOT, "tests/sse_e2e_test.py")],
-                       cwd=ROOT, capture_output=True, text=True,
-                       errors="replace", timeout=300)
+    # CI 的 Windows runner 对 socket 服务端偶发 10054（远端重置）——
+    # 两次纯文档提交假红实录（d17bb0b / 8f9db70）。网络类 E2E 重试
+    # 一次，两次都挂才算真失败。
+    def _sse_once():
+        return subprocess.run([sys.executable,
+                               os.path.join(ROOT, "tests/sse_e2e_test.py")],
+                              cwd=ROOT, capture_output=True, text=True,
+                              errors="replace", timeout=300)
+    r = _sse_once()
+    if r.returncode not in (0, 2) and "10054" in (r.stdout + r.stderr):
+        r = _sse_once()          # 网络瞬断，重试一次
     if r.returncode == 2:
         skip("SSE E2E：8093 已被占用，跳过")
     elif r.returncode == 0 and "SSE_E2E: PASS=" in r.stdout:
