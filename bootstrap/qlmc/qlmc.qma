@@ -10537,15 +10537,63 @@ fn _gen_zero(ctx: Ctx) {
     let code: vec[int] = ctx.code
     let labs: vec[int] = ctx.labs
     ctx.rt_pos.set(RT_ZERO, len(code))
-    // v4.50：8 字节块清零（同 _gen_memcpy 的改法）。
-    // 原逐字节循环每字节 5 条指令；qword 循环每 8 字节 5 条 = 8 倍吞吐。
-    // r8 = 游标（v2.51 约定），rax = 块数。
+    // v4.58：三级清零 16B(movdqu)→8B→尾部（memcpy 16B 同款，v4.52 验证）
+    // 标签 5 个（labs 128 容量足够，v4.52 起）
+    let lX = _newlab(labs)
     let lq = _newlab(labs)
+    let lqloop = _newlab(labs)
     let lb = _newlab(labs)
     let ldone = _newlab(labs)
+    // 保存 xmm0（qlmc SSE 池 XMM0-15 全占用）
+    _b(code, 0x48)                         // sub rsp, 24
+    _b(code, 0x83)
+    _b(code, 0xEC)
+    _b(code, 0x18)
+    _b(code, 0xF3)                         // movdqu [rsp], xmm0
+    _b(code, 0x0F)
+    _b(code, 0x7F)
+    _b(code, 0x04)
+    _b(code, 0x24)
+    // rax = n / 16
     _b(code, 0x48)                         // mov rax, rcx
     _b(code, 0x89)
     _b(code, 0xC8)
+    _b(code, 0x48)                         // shr rax, 4
+    _b(code, 0xC1)
+    _b(code, 0xE8)
+    _b(code, 0x04)
+    _b(code, 0x48)                         // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let pX = _jcc(code, 0x84)              // jz .qseg
+    _addfix(ctx.fixes, pX, lq, 1)
+    _setlab(labs, code, lX)
+    _b(code, 0x0F)                         // xorps xmm0, xmm0（清一次复用）
+    _b(code, 0x57)
+    _b(code, 0xC0)
+    _b(code, 0xF3)                         // movdqu [r8], xmm0
+    _b(code, 0x41)
+    _b(code, 0x0F)
+    _b(code, 0x7F)
+    _b(code, 0x00)
+    _b(code, 0x49)                         // add r8, 16
+    _b(code, 0x83)
+    _b(code, 0xC0)
+    _b(code, 0x10)
+    _b(code, 0x48)                         // dec rax
+    _b(code, 0xFF)
+    _b(code, 0xC8)
+    let pX2 = _jcc(code, 0x85)             // jnz .xloop
+    _addfix(ctx.fixes, pX2, lX, 1)
+    // ===== 8 字节段：rax = (n%16)/8 =====
+    _setlab(labs, code, lq)
+    _b(code, 0x48)                         // mov rax, rcx
+    _b(code, 0x89)
+    _b(code, 0xC8)
+    _b(code, 0x48)                         // and rax, 15
+    _b(code, 0x83)
+    _b(code, 0xE0)
+    _b(code, 0x0F)
     _b(code, 0x48)                         // shr rax, 3
     _b(code, 0xC1)
     _b(code, 0xE8)
@@ -10555,8 +10603,7 @@ fn _gen_zero(ctx: Ctx) {
     _b(code, 0xC0)
     let p0 = _jcc(code, 0x84)              // jz .bytail
     _addfix(ctx.fixes, p0, lb, 1)
-    // --- qword 循环 ---
-    _setlab(labs, code, lq)
+    _setlab(labs, code, lqloop)
     _b(code, 0x49)                         // mov qword [r8], 0
     _b(code, 0xC7)
     _b(code, 0x00)
@@ -10569,13 +10616,12 @@ fn _gen_zero(ctx: Ctx) {
     _b(code, 0xFF)
     _b(code, 0xC8)
     let p1 = _jcc(code, 0x85)              // jnz .qloop
-    _addfix(ctx.fixes, p1, lq, 1)
-    // --- 尾部 ---
-    _b(code, 0x48)                         // and rcx, 7
+    _addfix(ctx.fixes, p1, lqloop, 1)
+    // ===== 尾部 and rcx,7 =====
+    _b(code, 0x48)
     _b(code, 0x83)
     _b(code, 0xE1)
     _b(code, 0x07)
-    // --- 字节循环 ---
     _setlab(labs, code, lb)
     _b(code, 0x48)                         // test rcx, rcx
     _b(code, 0x85)
@@ -10595,6 +10641,16 @@ fn _gen_zero(ctx: Ctx) {
     let p3 = _jcc(code, 0x85)              // jnz .bloop
     _addfix(ctx.fixes, p3, lb, 1)
     _setlab(labs, code, ldone)
+    // 恢复 xmm0
+    _b(code, 0xF3)                         // movdqu xmm0, [rsp]
+    _b(code, 0x0F)
+    _b(code, 0x6F)
+    _b(code, 0x04)
+    _b(code, 0x24)
+    _b(code, 0x48)                         // add rsp, 24
+    _b(code, 0x83)
+    _b(code, 0xC4)
+    _b(code, 0x18)
     _ret(code)
 }
 
