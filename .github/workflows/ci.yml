@@ -67,6 +67,10 @@ jobs:
           bash tests/test_uring.sh
 
       - name: RT 运行库单测（memcpy/zero 边界 + vec grow 全形态）
+        timeout-minutes: 10
+        env:
+          WINEDEBUG: -all
+          WINEDLLOVERRIDES: "mscoree,mshtml="
         run: |
           sudo apt-get update -qq || true
           sudo apt-get install -y -qq --no-install-recommends wine64 ||             sudo apt-get install -y -qq --no-install-recommends wine || true
