@@ -6729,7 +6729,17 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
             } else {
                 let t = _lower_expr(fc, nd.a)
                 vty = fc.vty.get(t)
-                v = _pin(fc, t)
+                // v4.61：**无 defer 且 t 是临时 → 不 pin**。
+                // pin 用 _new_var（vpin=1）递增占 callee-saved 寄存器，
+                // 递归/多 return 函数每个 return 白占一个 csb →
+                // 序言 push 增多 → 调用开销大增（b3 3.45x 的主体）。
+                // RET 紧随本语句，t 不会被覆盖；有 defer 时仍 pin
+                // （defer 可能含赋值，需钉住返回值）。
+                if fc.cells.get(C_DEF) == 0 && fc.vpin.get(t) == 0 {
+                    v = t
+                } else {
+                    v = _pin(fc, t)
+                }
                 fc.vty.set(v, vty)
             }
         }
