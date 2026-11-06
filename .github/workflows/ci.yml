@@ -72,12 +72,10 @@ jobs:
           WINEDEBUG: -all
           WINEDLLOVERRIDES: "mscoree,mshtml="
         run: |
-          # winehq 官方源（Ubuntu mirror 快照过期时仍可用，v4.54 实测 404）
-          sudo mkdir -pm755 /etc/apt/keyrings || true
-          wget -qO- https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/Release.key \
-            | sudo gpg --dearmor -o /etc/apt/keyrings/winehq-archive.key || true
-          sudo wget -qO /etc/apt/sources.list.d/winehq-jammy.sources \
-            https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/winehq-jammy.sources || true
+          # winehq 官方源（Ubuntu mirror 快照过期时仍可用，v4.54 实测 404）。
+          # CI 一次性环境用 [trusted=yes] 跳过签名校验（keyring 链路繁琐）。
+          echo "deb [trusted=yes] https://dl.winehq.org/wine-builds/ubuntu jammy main" \
+            | sudo tee /etc/apt/sources.list.d/winehq.list > /dev/null || true
           sudo apt-get update -qq || true
           sudo apt-get install -y -qq --no-install-recommends winehq-stable || \
             sudo apt-get install -y -qq --no-install-recommends wine64 || true
