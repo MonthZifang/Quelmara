@@ -76,12 +76,12 @@ jobs:
           sudo mkdir -pm755 /etc/apt/keyrings || true
           wget -qO- https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/Release.key \
             | sudo gpg --dearmor -o /etc/apt/keyrings/winehq-archive.key || true
-          wget -qNC https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/winehq-jammy.sources \
-            -O /etc/apt/sources.list.d/winehq-jammy.sources || true
+          wget -qO /etc/apt/sources.list.d/winehq-jammy.sources \
+            https://dl.winehq.org/wine-builds/ubuntu/dists/jammy/winehq-jammy.sources || true
           sudo apt-get update -qq || true
           sudo apt-get install -y -qq --no-install-recommends winehq-stable || \
             sudo apt-get install -y -qq --no-install-recommends wine64 || true
-          WINE=$(command -v wine || command -v wine64 || true)
+          WINE=$(command -v wine || command -v wine64 || command -v /usr/lib/wine/wine64 || ls /usr/lib/wine/wine64 2>/dev/null | head -1 || true)
           if [ -z "$WINE" ]; then
             echo "##[warning]wine 不可用，RT 单测跳过（bench job 已覆盖）"
             exit 0
