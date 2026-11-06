@@ -47,15 +47,25 @@ def main():
     for src in cases:
         name = os.path.basename(src)[:-4]
         exe = os.path.join(outdir, name + ("" if not IS_WIN else ".exe"))
-        r = subprocess.run(runner + ["build", src, "-o", exe, "--target", "elf"],
-                           capture_output=True, text=True, timeout=120)
+        try:
+            r = subprocess.run(runner + ["build", src, "-o", exe, "--target", "elf"],
+                               capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            print(f"[FAIL] {name}: 编译超时 120s")
+            fails += 1
+            continue
         if r.returncode != 0 or not os.path.exists(exe):
             print(f"[FAIL] {name}: 编译失败 " + (r.stdout + r.stderr).strip()[:120])
             fails += 1
             continue
         os.chmod(exe, 0o755)
         cmd = [exe] if not IS_WIN else exe
-        rr = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        try:
+            rr = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            print(f"[FAIL] {name}: 运行超时 30s（wine 前缀/挂起）")
+            fails += 1
+            continue
         out = rr.stdout.strip().splitlines()
         got = int(out[0]) if out and out[0].lstrip("-").isdigit() else -999
         if got == 0 and rr.returncode == 0:

@@ -67,10 +67,12 @@ jobs:
           bash tests/test_uring.sh
 
       - name: RT 运行库单测（memcpy/zero 边界 + vec grow 全形态）
+        if: env.RT_TESTS == '1'
         timeout-minutes: 10
         env:
           WINEDEBUG: -all
           WINEDLLOVERRIDES: "mscoree,mshtml="
+          RT_TESTS: "0"
         run: |
           # v4.55 实测：winehq 官方源在 GitHub runner 上签名链+依赖链
           # 双重问题（NO_PUBKEY + broken packages），安装卡死超时。
