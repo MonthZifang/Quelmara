@@ -86,6 +86,11 @@ jobs:
             echo "##[warning]wine 不可用，RT 单测跳过（bench job 已覆盖）"
             exit 0
           fi
+          # wine 前缀显式初始化（卡死保护 60s）：wine9 首跑可能等待
+          timeout 60 "$WINE" wineboot --init || {
+            echo "##[warning]wineboot 失败/超时，RT 单测跳过"
+            exit 0
+          }
           QLMC="$WINE build/qlmc.exe" python tests/rt/run_rt_test.py
 
   windows:
