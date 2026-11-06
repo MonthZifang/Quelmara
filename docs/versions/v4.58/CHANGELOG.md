@@ -26,3 +26,11 @@
 
 mem_zero 是 vec.new 扩容清零（_map_grow 清槽）、str 拼接等
 的底层——与 memcpy 同频使用。16B 段使大块清零吞吐翻倍。
+
+
+## 效果实测（RT_ZERO 16B 落地后）
+
+b87_memcopy_big（min of 3）：**quelmara 214.8ms vs C 232.8ms = 0.92x，
+反超 C**（RT_ZERO 16B 前 224 vs 219 = 1.02x）——mem_alloc 的 ZERON
+清零路径升级后，b87 成为【第一个跑赢 C 的大块负载基准】。
+校验和双端一致。
