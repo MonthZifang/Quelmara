@@ -8108,9 +8108,12 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     }
     // 拷贝传播放在融合之前：它先把纯搬运消掉，融合看到的形状更干净
     _opt_copy(fc, ir, use, ndef)
+    _tri("    opt: copy ir=", len(ir))
     // 融合要用到完整的 use[]，所以放在标记之后、DCE 之前
     _opt_fuse(fc, ir, use, ndef)
+    _tri("    opt: fuse ir=", len(ir))
     _opt_dce(fc, use)
+    _tri("    opt: dce ir=", len(ir))
     // ---- 空跳：`jmp L` 后面（跳过连续的 LAB）就是 L 本身 → 删掉 ----
     i = 0
     while i < n {
