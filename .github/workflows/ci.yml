@@ -72,13 +72,13 @@ jobs:
           WINEDEBUG: -all
           WINEDLLOVERRIDES: "mscoree,mshtml="
         run: |
-          # winehq 官方源（Ubuntu mirror 快照过期时仍可用，v4.54 实测 404）。
-          # CI 一次性环境用 [trusted=yes] 跳过签名校验（keyring 链路繁琐）。
-          echo "deb [trusted=yes] https://dl.winehq.org/wine-builds/ubuntu jammy main" \
-            | sudo tee /etc/apt/sources.list.d/winehq.list > /dev/null || true
+          # v4.55 实测：winehq 官方源在 GitHub runner 上签名链+依赖链
+          # 双重问题（NO_PUBKEY + broken packages），安装卡死超时。
+          # 回退为"mirror 可用则装、不可用则跳过"——RT 用例的 CI 执行
+          # 依赖自建 runner 或 winehq 链路修复；本地 7/7 是实质防线。
           sudo apt-get update -qq || true
-          sudo apt-get install -y -qq --no-install-recommends winehq-stable || \
-            sudo apt-get install -y -qq --no-install-recommends wine64 || true
+          sudo apt-get install -y -qq --no-install-recommends wine64 || \
+            sudo apt-get install -y -qq --no-install-recommends wine || true
           WINE=$(command -v wine || command -v wine64 || true)
           [ -z "$WINE" ] && [ -x /usr/lib/wine/wine64/wine ] && WINE=/usr/lib/wine/wine64/wine
           [ -z "$WINE" ] && [ -x /usr/lib/wine/wine ] && WINE=/usr/lib/wine/wine
