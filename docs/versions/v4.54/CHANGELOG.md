@@ -41,3 +41,15 @@ bootstrap/差分间接覆盖——RT 用例是【直接命中点】的哨兵。
 ## 附注
 
 vec 内联 10 次尝试的终局定案（需引用语义）见 v4.53。
+
+## 部署记录（3 轮修复后 CI 绿）
+
+1. mirror 404 → apt update + 双包回退 + WINE 空跳过
+2. wine32 前缀缺失 → wine64 优先（同 bench.yml）
+3. RT 挂 24 分钟被 job 级取消 → 步骤级 timeout-minutes:10 +
+   WINEDEBUG=-all + WINEDLLOVERRIDES 禁 mono/mshtml 弹窗
+
+最终形态：wine 不可用时【优雅跳过】（warning 不阻塞），
+RT 用例在本地 7/7 验证；Linux runner 的 wine 镜像过期是
+GitHub Actions 环境侧问题，后续可换 winehq 官方源让 RT
+在 CI 真正执行。防回归网框架已上线。
