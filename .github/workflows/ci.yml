@@ -98,9 +98,9 @@ jobs:
         run: |
           if (Test-Path build/win_failures.log) {
             "### ❌ Windows PE 回归失败清单" | Add-Content $env:GITHUB_STEP_SUMMARY
-            "```" | Add-Content $env:GITHUB_STEP_SUMMARY
+            ''```'' | Add-Content $env:GITHUB_STEP_SUMMARY
             Get-Content build/win_failures.log | Add-Content $env:GITHUB_STEP_SUMMARY
-            "```" | Add-Content $env:GITHUB_STEP_SUMMARY
+            ''```'' | Add-Content $env:GITHUB_STEP_SUMMARY
           }
 
       - name: gzip 解码互操作（zlib 9 种编码组合 → Quelmara 解压）
