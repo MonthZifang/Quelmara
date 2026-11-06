@@ -6722,7 +6722,12 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
                 let av0 = _vnew(fc)
                 fc.vty.set(av0, TY_INT)
                 _ir_emit(fc, OP_ADDRV, av0, 0, 0, -fc.vloc.get(tmp) - 1)
-                let av = _pin(fc, av0)
+                // v4.61：av0 是 ADDR V 临时，RETAGG 紧随无覆盖风险，
+                // 无 defer 时不再 _pin（同 return no-pin 模式）
+                let mut av = av0
+                if fc.cells.get(C_DEF) != 0 {
+                    av = _pin(fc, av0)
+                }
                 fc.vty.set(av, ty)
                 v = av
                 vty = ty
