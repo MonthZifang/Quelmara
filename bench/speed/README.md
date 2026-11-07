@@ -1,7 +1,7 @@
-# `bench/speed/` —— Quelmara vs C / Go / Python 同题基准
+# `bench/speed/` —— Quelmara vs 11 种语言同题基准
 
-四份**同一道题**的实现，放在一起量语言本身的速度，而不是各家的库。
-每个基准都打印一个校验和，**四个语言的输出必须逐字节相同** —— 不同就说明有一份
+多份**同一道题**的实现，放在一起量语言本身的速度，而不是各家的库。
+每个基准都打印一个校验和，**所有语言的输出必须逐字节相同** —— 不同就说明有一份
 写错了，这时时间数字一概不看。
 
 实测结果见 [`RESULTS.md`](RESULTS.md)。
@@ -49,7 +49,7 @@ python bench/speed/compiler.py --sizes 200 1000 5000
 python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe
 ```
 
-## 十个基准
+## 75 项基准（七类：微基准 / 字符串 / 算法 / 数值 / 并发 / IO / 启动）
 
 | id | 覆盖 | 规模 |
 |---|---|---|
@@ -126,8 +126,8 @@ gh run download <run-id> -n bench-windows   # 取结果
 
 | 列 | 编译器 | 后端 | 用来看什么 |
 |---|---|---|---|
-| `quelmara` | qlmc（stage-1 自举） | **仅 Windows PE** | qlmc 的真实水平 |
-| `quelmara0` | stage-0（参考实现） | PE / ELF64 | 跨平台适配度；与 `quelmara` 之差 = **后端差距** |
+| `quelmara` | qlmc（stage-1 自举） | **Windows PE + Linux ELF64** | qlmc 的真实水平（跨平台） |
+| `quelmara0` | stage-0（参考实现） | PE / ELF64 / arm64 | 跨平台适配度；与 `quelmara` 之差 = **后端差距** |
 
 `qlmc` 目前只有 PE 后端，所以 posix 上没有 `quelmara` 列。为了让"quelmara
 在 Linux / macOS 上是什么样"也能测，`run.py` 加了 `quelmara0`：用
@@ -143,24 +143,26 @@ python bench/speed/run.py --langs quelmara0 c go python            # 跨平台
 python bench/speed/run.py --langs quelmara0 c cpp go rust zig nim d python
 ```
 
-## 语言接入状态（v3.99）
+## 语言接入状态（v4.64）
 
 「每种语言只写一份源码，算法与其它语言逐字等价 —— 否则比出来的是
-实现差异而不是编译器差异。」这条纪律对**所有**语言都适用。
+实现差异而不是编译器差异。」这条纪律对**所有**语言都适用。基准已从 24 项
+核心扩展到 **75 项**（七类），源码覆盖随各语言工具链就绪度逐步补齐。
 
 | 语言 | 状态 | 编译器 | 说明 |
 |---|---|---|---|
-| `c` | ✅ 24/24 | gcc / clang | 主对手 |
-| `cpp` | ✅ 24/24 | g++ / clang++ | 复用 C 的 `bench.h` |
-| `go` | ✅ 24/24 | go | 主对手 |
-| `python` | ✅ 24/24 | python3 | 参考下限（比它快是理所当然） |
-| `rust` | 🟡 已登记 | rustc | 源码待补 |
-| `zig` | 🟡 已登记 | zig | 源码待补 |
-| `nim` | 🟡 已登记 | nim | 源码待补 |
-| `d` | 🟡 已登记 | ldc2 | 源码待补 |
-| `ada` | 🟡 已登记 | gnatmake | 源码待补 |
-| `fortran` | 🟡 已登记 | gfortran | 源码待补 |
-| `csharp` | ❌ 未接 | — | .NET 需要 csproj 工程，`dotnet run` 的启动开销会污染计时 |
+| `c` | ✅ 全覆盖 | gcc / clang | 主对手 |
+| `cpp` | ✅ 复用 `bench.h` | g++ / clang++ | 与 C 共用计时宏 |
+| `go` | ✅ 已扩展 | go | 主对手 |
+| `python` | ✅ 参考下限 | python3 | 比它快是理所当然 |
+| `rust` | 🟡 扩展中 | rustc | 源码随版本补齐 |
+| `zig` | 🟡 扩展中 | zig | 源码随版本补齐 |
+| `nim` | 🟡 扩展中 | nim | 源码随版本补齐 |
+| `d` | 🟡 扩展中 | ldc2 | 源码随版本补齐 |
+| `ada` | 🟡 扩展中 | gnatmake | 源码随版本补齐 |
+| `fortran` | 🟡 扩展中 | gfortran | 源码随版本补齐 |
+| `java` | 🟡 已接（javac） | javac | 本机可验证 |
+| `csharp` | 🟡 已接（dotnet） | dotnet / csc | 仅 CI windows 能真跑（本机无 SDK） |
 
 **没有编译器时 runner 会明确跳过并写进结果**（`[rust] 跳过：没有找到…`），
 不会假装测过。
@@ -185,10 +187,10 @@ python bench/speed/run.py --langs quelmara0 c cpp go rust zig nim d python
 > macOS 需要 **Mach-O 后端**，记在 `docs/07-gaps.md` §4 平台表里。
 > 补上之后把 `run.py` 里那段 `sys.platform == "darwin"` 的跳过删掉即可。
 
-**`quelmara` 列在 posix 上是空的**（qlmc 还没有 ELF 后端），但
-`quelmara0` 列有数 —— 那是**参考编译器**在同一份源码、同一平台上跑出来的，
-所以"语言层面的平台适配度"这一栏已经能读了。等 qlmc 的 ELF 后端落地，
-把 `run.py` 里那句跳过去掉，两条列就都能跨平台比。
+**`quelmara` 列在 posix 上已有数据**（qlmc 的 ELF64 后端自 v3.94 起就能跑
+真实基准，posix CI 矩阵已把它和 C/C++/Go/Rust/Zig/Nim/Fortran 同台对比）。
+`quelmara0` 列也有数 —— 那是**参考编译器**在同一份源码、同一平台上跑出来的，
+所以"语言层面的平台适配度"这一栏能读了。两边的对照见下方"两条 Quelmara 列"。
 
 为了让 C 能在三个平台都跑，`c/bench.h` 把计时抽象掉了（Windows 用 QPC、
 POSIX 用 `CLOCK_MONOTONIC`），`b8_threads4.c` 用 `CreateThread`/`pthread`

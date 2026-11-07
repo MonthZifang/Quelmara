@@ -8732,6 +8732,75 @@ fn _reg_busy_at(fc: FnCtx, r: int, i: int) -> int {
 /// 全程允许回绕（我们要的就是模 2^64 的值）。
 fn _emit_divc(fc: FnCtx, code: vec[int], ins: Ir, i: int) {
     let d = ins.imm
+    // v4.64：**d 是 2 的幂 → 位操作序列**（DIV 6 条 / MOD 9 条，魔数 ~15）。
+    // 有符号向零截断（C 语义，s25_divmod 负数夹具钉死）：
+    //   t = (x sar 63) & (d-1)   —— 负数 = d-1，非负 = 0（sar 不能 shr！）
+    //   DIV: dst = (x + t) sar k
+    //   MOD: y = x + t; r = x - ((y sar k) shl k)   —— 必须用 x，不是 y！
+    //        （y-q*d 会把 -1%2 算成 0：差一个 t，向零截断要求 r 同号于 x）
+    let mut pw2 = 1
+    let mut kk = 0
+    while pw2 < d {
+        pw2 = pw2 << 1
+        kk = kk + 1
+    }
+    if pw2 == d && d >= 2 {
+        _to_reg(fc, RCX, ins.a)                // rcx = x
+        // mov rax, rcx
+        _b(code, 0x48)
+        _b(code, 0x89)
+        _b(code, 0xC8)
+        // sar rax, 63（算术右移：负数=全 1）
+        _b(code, 0x48)
+        _b(code, 0xC1)
+        _b(code, 0xF8)
+        _b(code, 63)
+        // and rax, d-1（imm32）
+        _b(code, 0x48)
+        _b(code, 0x25)
+        _w32(code, d - 1)
+        if ins.b == OP_DIV {
+            // add rax, rcx → y = x + t
+            _b(code, 0x48)
+            _b(code, 0x01)
+            _b(code, 0xC8)
+            // sar rax, kk
+            _b(code, 0x48)
+            _b(code, 0xC1)
+            _b(code, 0xF8)
+            _b(code, kk)
+        } else {
+            // mov rdx, rax（t 备份）—— modrm 11 000 010 = 目标 rdx, 源 rax
+            _b(code, 0x48)
+            _b(code, 0x89)
+            _b(code, 0xC2)
+            // add rax, rcx → rax = y
+            _b(code, 0x48)
+            _b(code, 0x01)
+            _b(code, 0xC8)
+            // sar rax, kk（q）
+            _b(code, 0x48)
+            _b(code, 0xC1)
+            _b(code, 0xF8)
+            _b(code, kk)
+            // shl rax, kk（q*d = q<<kk，d=2^kk）
+            _b(code, 0x48)
+            _b(code, 0xC1)
+            _b(code, 0xE0)
+            _b(code, kk)
+            // sub rax, rcx → rax = q*d - x
+            _b(code, 0x48)
+            _b(code, 0x29)
+            _b(code, 0xC8)
+            // neg rax → rax = x - q*d（同号于 x，向零 ✓）
+            _b(code, 0x48)
+            _b(code, 0xF7)
+            _b(code, 0xD8)
+        }
+        // dst ← rax（_store_rax 统一处理寄存器/栈槽）
+        _store_rax(fc, fc.vloc.get(ins.dst))
+        return
+    }
     let mut l = 0
     let mut pw = 1
     while pw < d {
