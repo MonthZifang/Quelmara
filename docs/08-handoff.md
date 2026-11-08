@@ -214,6 +214,36 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 > 所以 v3.60 / v3.61 两个提交**只落在本地**。接手时先 `git log` 对一下
 > 远端 SHA，缺的用上面任一条路补推。
 
+### 5.3.1 推送环境实测（v4.81 之后，覆盖上面的旧断言）
+
+上面的"无凭据"描述已过时。**当前本机实际状态**（2026-11-08 实测）：
+
+- `gh` **已安装且已登录** MonthZifang 账号（token scopes 含 `repo`/`workflow`），
+  `gh auth setup-git` 可写入 credential helper。`GITHUB_TOKEN` 环境变量虽未必设置，
+  但 `gh` 的 stored credential 可用。
+- `~/.ssh/id_ed25519_1panel` 存在（ed25519，注释 `root@monthzifang`）。**它尚未登记到
+  GitHub 账号**，所以裸 `ssh -T git@github.com` 仍是 `Permission denied (publickey)`。
+- **网络层的关键事实**：到 `github.com` 的 **git HTTPS TLS 被中段代理间歇阻断**
+  （TCP 443 通，但 TLS 握手被砍，报 `GnuTLS recv error (-110)`）；而
+  `api.github.com` 的 TLS **正常**（返回 200），`ssh.github.com:443`（SSH over 443）
+  握手也正常。**拦截是按主机/协议做的，不是全封**。
+
+**可用的推送路径（按可靠度）**：
+
+1. **HTTPS + gh token（间歇可用）**：`git remote` 用
+   `https://github.com/MonthZifang/Quelmara.git`，并设
+   `git config --local credential.https://github.com.helper '!gh auth git-credential'`。
+   **这条会偶发被 TLS 中段打断，重试几次通常能过**（v4.73–v4.80、v4.81 都是这么推的）。
+2. **SSH over 443（最稳，待登记 key）**：在 `~/.ssh/config` 加
+   `Host github.com / HostName ssh.github.com / Port 443 / IdentityFile ~/.ssh/id_ed25519_1panel`，
+   remote 用 `git@github.com:MonthZifang/Quelmara.git`。通道已验证通，**只要把
+   `~/.ssh/id_ed25519_1panel.pub` 加到 GitHub 账号的 SSH keys，就能稳定推送**，彻底绕开
+   `github.com` 的 TLS 中段。公钥内容见本机 `~/.ssh/id_ed25519_1panel.pub`。
+
+**诊断口诀**：`git push` 卡住超 60s 或报 `GnuTLS recv error (-110)` 不是凭据问题，是
+`github.com` TLS 被中段——换上面路径 1 重试，或走路径 2（需先登记 key）。不要反复
+`gh auth setup-git`（凭据本来就在），那解决不了 TLS 中段。
+
 ### 5.4 已知的偶发失败
 
 `tests/debugger_test.py` 的"[3] 调试信息不改变程序行为"偶尔 FAIL
