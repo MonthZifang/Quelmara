@@ -32,3 +32,12 @@ bench/speed/**/*.ali
 bench/speed/**/*.mod
 bench/speed/**/*.class
 bench/speed/**/*.bin/
+# fortran/ada 等编译器把产物写在 cwd（仓库根），统一忽略
+/*.o
+/*.ali
+/*.mod
+/*.class
+# zig 临时编译目录
+.zig-cache/
+zig-cache/
+bench/speed/zig/.*.tmpdir/
