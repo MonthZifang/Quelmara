@@ -44,6 +44,13 @@ NO_BOUNDS = None
 # （b70_lin_search +28%）。所以这几个受益的强制关，其余跟全局。
 # 数据是 x86 上测的，换了 CPU/微架构要重测。
 NO_BOUNDS_BENCH = {"b18_insertion", "b72_sort_insert", "b23_lcs"}
+# v4.78：基准公平性 + 性能。C / Go / Rust 等被比对象**默认不发射越界检查**，
+# 而 qlmc 默认发射（每元素多 2 条 cmp+jcc）。为让 quelmara 列与它们站在同一起跑线，
+# 基准构建**默认关掉越界检查**（仅保留校验和无变化的纯加速），除已实测会回退的
+# `b70_lin_search`（关检查反而 +28%，见 docs/perf/ANALYSIS.md 附录 2）外。
+# 显式 `--bounds-check` 可强制全开（用于回归/安全验证）。
+KEEP_BOUNDS_BENCH = {"b70_lin_search"}
+KEEP_BOUNDS_FORCE = False  # 显式 --bounds-check 时置 True
 EXE = ".exe" if IS_WIN else ""
 if IS_WIN:
     import ctypes.wintypes as wt
@@ -346,8 +353,10 @@ def build_all(langs, only):
                 # v4.45：把 Quelmara.toml 的 [memory] heap_limit_mb 传给 qlmc
                 if HEAP_MB:
                     cmd += ["--heap-mb", str(HEAP_MB)]
-                # 逐基准覆盖：受益名单强制关，其余跟全局开关
-                if NO_BOUNDS or b in NO_BOUNDS_BENCH:
+                # 逐基准覆盖：默认关检查以匹配 C/Go 的无检查基线；
+                # 仅 b70_lin_search 实测关检查会 +28% 回退，保留其检查。
+                # 显式 --no-bounds-check（NO_BOUNDS=True）时全部关。
+                if (NO_BOUNDS or b not in KEEP_BOUNDS_BENCH) and not KEEP_BOUNDS_FORCE:
                     cmd += ["--no-bounds-check"]
                 r = subprocess.run(cmd, capture_output=True, text=True)
                 if r.returncode != 0:
@@ -569,6 +578,8 @@ def main():
     ap.add_argument("--mem", action="store_true", help="同时采峰值内存（慢）")
     ap.add_argument("--no-bounds-check", action="store_true",
                     help="关掉 vec 越界检查（对应 [build] bounds_check = false）")
+    ap.add_argument("--bounds-check", action="store_true",
+                    help="强制保留所有基准的 vec 越界检查（覆盖 v4.78 默认关检查的公平性设置）")
     ap.add_argument("--heap-mb", type=int, default=None,
                     help="传给 qlmc 的堆上限（MB）。不填则读 Quelmara.toml "
                          "的 [memory] heap_limit_mb")
@@ -576,8 +587,9 @@ def main():
     # v4.45：命令行 > Quelmara.toml > 不传（qlmc 用编译期默认）
     global HEAP_MB
     HEAP_MB = args.heap_mb if args.heap_mb else heap_mb_from_toml()
-    global NO_BOUNDS
+    global NO_BOUNDS, KEEP_BOUNDS_FORCE
     NO_BOUNDS = args.no_bounds_check or (bounds_check_from_toml() is False)
+    KEEP_BOUNDS_FORCE = args.bounds_check
     if NO_BOUNDS:
         print("[bounds] 越界检查已关（更快，越界即 UB）")
     if HEAP_MB:
