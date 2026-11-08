@@ -4861,3 +4861,26 @@ PE 侧 110 项差分全过，ELF 侧只验了 9 个基准和十几个小程序�
 | `and` 用 64 位立即数（≥2^63）曾算错 | SWAR 位运算踩过：改成 `>>7 & 0x0101…` 规避 | v1.29 已规避，根因未定位（见 `07-gaps.md` §7.2） |
 | `f64` 比较曾整型化 | `if a > b` 对负浮点给出相反结果（v1.19 已修） | 根因：`branch()` 直接发 `jcc` 未走 `fcmpset`；回归 `tests/t64_math.qma` |
 | `std` 里 6 个模块 0 个 `pub` 导出、2 个模块解析失败 | 用户代码一引用就编译失败；`examples/{ws_demo,sse_demo}` 构建不过 | v2.01 审计、**v2.08 重测**（`std/ds` 补 13 个 `pub`、`std/timer` 重写后 5 个 `pub`，`http`/`net/core` 由同期另一条轨补齐）：剩 `core`/`gen`/`serialize`/`sse`/`time`/`ws` 共 69 个声明。清单与复现见 `07-gaps.md` §7.13 |
+
+## 7. bench/speed 跨语言接线
+
+> 口径（v4.65 起）：`bench/speed/` 里每个规范基准（C 为参照）在 11 种语言下各有一份
+> 同源实现，统一打印 `结果行…T<换行>纳秒`；校验和 = `T` 之前的内容。所有语言必须与 C
+> 的校验和**逐字节一致**，否则 `run.py` 的差分门禁判该行 FAIL。CI posix 矩阵真跑
+> `quelmara c cpp go rust zig nim fortran`，windows 矩阵真跑 `quelmara c cpp go`，
+> `python/java/csharp/ada/d` 部分本地无 SDK / 仅参考下限，CI 视矩阵各自真跑或跳过。
+> 逐项校验命令：`python3 tools/benchgen/verify_lang.py <lang>`。
+
+| 语言 | 源码项 | 校验和一致 | 本地可校验 | 备注 |
+|---|---|---|---|---|
+| C（参照） | 76 | —（基准） | ✅ | `collect_c.py` 产出 `c_checksums.json` |
+| C++ | 76 | 76/76 | ✅ | v4.67 |
+| Go | 76 | 76/76 | ✅ | v4.66 |
+| Rust | 76 | 76/76 | ✅ | v4.68 |
+| Fortran | 70 | 70/70 | ✅ | v4.69（仅 70 项有 Fortran 友好形态） |
+| Nim | 3 | 3/3 | ✅ | v4.70（子集） |
+| Ada | 5 | 5/5 | ✅ | v4.71（子集，且需 `C_Mod` 语义对齐 C `%`） |
+| Zig | 76 | 76/76 | ✅ | v4.73（`b60_murmur` 用 u64+算术右移对齐 C 的 int64 回绕） |
+| Python | 76 | 抽样一致 | ⚠️ | v4.79（参考下限；全量 75 项本地 1200s 受纯 Python 重循环拖累超时未跑完，但零 mismatch；`b15_loopsum` 病态项本地超时归 TIMEOUT） |
+| C# | 76 | 待 CI | ❌ | v4.76（本机无 `dotnet`，仅 windows 矩阵真跑） |
+| D | 2 | 2/2 | ✅ | v4.77（子集） |
