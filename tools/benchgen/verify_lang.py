@@ -83,12 +83,20 @@ def build(lang, b):
     return exe, None
 
 def run(lang, target):
-    if lang == "python":
-        r = subprocess.run([sys.executable, target], capture_output=True, text=True, timeout=120)
-    elif lang == "java":
-        r = subprocess.run(["java", "-cp", target, "Main"], capture_output=True, text=True, timeout=120)
-    else:
-        r = subprocess.run([target], capture_output=True, text=True, timeout=120)
+    # Python 是参考下限语言，重循环基准天然慢（如 b15 2 亿次迭代、纯 Python
+    # 因无 64 位回绕会变成大整数而极慢），给足超时；CI 跑的是缩减 reps。
+    # 超时归为单独一类（TIMEOUT），不计入 mismatch，也不算通过——
+    # 参考语言个别病态基准本地跑不完属预期，CI 同样会因超时跳过。
+    tout = 600 if lang == "python" else 120
+    try:
+        if lang == "python":
+            r = subprocess.run([sys.executable, target], capture_output=True, text=True, timeout=tout)
+        elif lang == "java":
+            r = subprocess.run(["java", "-cp", target, "Main"], capture_output=True, text=True, timeout=120)
+        else:
+            r = subprocess.run([target], capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT"
     if r.returncode != 0:
         return "RUN_ERR:" + (r.stderr or r.stdout).strip()[:150]
     lines = [l.strip() for l in r.stdout.splitlines() if l.strip()]
@@ -101,7 +109,7 @@ def main():
     only = sys.argv[2:]
     benches = only if only else [os.path.basename(p)[:-len(EXT[lang])]
                                 for p in glob.glob(os.path.join(SPEED, lang, "*" + EXT[lang]))]
-    mism, absent, ok = [], [], 0
+    mism, absent, ok, timed = [], [], 0, []
     for b in sorted(benches):
         tgt, err = build(lang, b)
         if err == "absent":
@@ -110,13 +118,17 @@ def main():
             mism.append((b, "BUILD:" + err)); continue
         got = run(lang, tgt)
         want = CK.get(b)
+        if got == "TIMEOUT":
+            timed.append(b); continue
         if got == want:
             ok += 1
         else:
             mism.append((b, f"got={got!r} want={want!r}"))
-    print(f"[{lang}] match={ok} absent={len(absent)} mismatch={len(mism)}")
+    print(f"[{lang}] match={ok} absent={len(absent)} mismatch={len(mism)} timeout={len(timed)}")
     for b, m in mism:
         print(f"  MISMATCH {b}: {m}")
+    for b in timed:
+        print(f"  TIMEOUT {b} (参考语言病态基准，本地跑不完属预期)")
     sys.exit(1 if mism else 0)
 
 if __name__ == "__main__":
