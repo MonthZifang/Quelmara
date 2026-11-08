@@ -520,6 +520,15 @@ EXTRA_LANGS = {
             lambda cc, src, out: [cc, "-O2", "-o", out, src], False),
     "fortran": (".f90", _find("gfortran"),
                 lambda cc, src, out: [cc, "-O2", "-o", out, src], False),
+    # Java：javac 编到临时目录，run() 用 `java -cp <dir> Main` 跑（无包名）。
+    # 源码必须是 `public class Main`（toolchain 约定，见 verify_lang.py）。
+    "java": (".java", _find("javac"),
+             lambda cc, src, out: [cc, "-d", out + ".d", src], True),
+    # C#：需要 .NET SDK（dotnet）。本机若无 dotnet 则 runner 跳过并写进 notes，
+    # 不假装测过；CI 的 windows runner 有 dotnet，可真跑。
+    "csharp": (".cs", _find("dotnet", "csc"),
+               lambda cc, src, out: [cc, "build", "-c", "Release", "-o",
+                                     out + ".bin", src], True),
 }
 
 EXTRA_HINT = {
