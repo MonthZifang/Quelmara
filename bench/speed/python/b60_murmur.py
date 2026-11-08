@@ -1,6 +1,6 @@
 # b60_murmur
 import time
-MASK49 = 0x1FFFFFFFFFFFF
+MASK49 = 0x1FFFFFFFFFFF
 def i64(x):
     return x & 0xFFFFFFFFFFFFFFFF
 def s64(x):

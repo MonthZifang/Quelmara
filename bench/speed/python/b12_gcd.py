@@ -1,8 +1,11 @@
 # b12_gcd —— 3000 万次辗转相除
 import time
+def cmod(a, b):
+    # C 语义取模：符号随被除数（Python 地板取模在负数时结果不同）
+    return (abs(a) % abs(b)) * (1 if a >= 0 else -1)
 def gcd(a, b):
     while b:
-        a, b = b, a % b
+        a, b = b, cmod(a, b)
     return a
 n = 30000000
 t0 = time.perf_counter_ns()
