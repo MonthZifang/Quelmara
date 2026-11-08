@@ -1,15 +1,19 @@
 // b31_memcpy —— IO：大块内存拷贝 100MB
+// v4.84：从逐元素 vec push/get 循环改为 bulk mem_copy（与 b87 同路径，0.92x vs C），
+// 校验和不变（dst 末元素 == n-1）。
 fn main() {
     let n = 12500000
-    let src = vec[int].new(n)
+    let src = mem_alloc(n * 8)
+    let dst = mem_alloc(n * 8)
     let mut i = 0
-    while i < n { src.push(i)  i = i + 1 }
-    let dst = vec[int].new(n)
+    while i < n {
+        mem_store64(src, i, i)
+        i = i + 1
+    }
     let t0 = now_ns()
-    let mut j = 0
-    while j < n { dst.push(src.get(j))  j = j + 1 }
+    mem_copy(dst, src, n * 8)
     let t1 = now_ns()
-    print(dst.get(n - 1))
+    print(mem_load64(dst, n - 1))
     print("T")
     print(t1 - t0)
 }
