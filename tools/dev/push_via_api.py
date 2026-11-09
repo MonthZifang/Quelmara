@@ -31,6 +31,10 @@ REPO_FALLBACK = "MonthZifang/Rosoto"  # legacy-ok：改名前的仓库名，302 
 API = "https://api.github.com"
 
 
+def sh(*args, **kw):
+    return subprocess.run(args, capture_output=True, text=True, **kw).stdout
+
+
 def repo_from_origin():
     """从 `git remote get-url origin` 推 `owner/name`；推不出返回 None。"""
     url = sh("git", "remote", "get-url", "origin").strip()
@@ -49,10 +53,6 @@ def repo_from_origin():
 
 
 REPO = repo_from_origin() or REPO_FALLBACK
-
-
-def sh(*args, **kw):
-    return subprocess.run(args, capture_output=True, text=True, **kw).stdout
 
 
 def token():
