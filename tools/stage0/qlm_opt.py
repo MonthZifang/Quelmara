@@ -38,6 +38,13 @@ LICM 的安全性论证:
 #   ('args', [dsts]) ('winargs', [dsts])
 # ---------------------------------------------------------------------------
 
+SIMD_OPS = ("vload32", "vload64", "vstore32", "vstore64", 
+            "vzero", "vadd", "vsub", "vmul", "vdot", "vhsum")
+
+def is_simd_op(op):
+    """检查是否是 SIMD 操作"""
+    return op in SIMD_OPS
+
 BRANCHES = ("jmp", "jz", "jnz", "jcc", "ret")
 COMMUTATIVE = ("add", "mul", "and", "or", "xor")
 # 绝不陷入的纯运算:可被投机执行(LICM 安全集)
@@ -54,12 +61,6 @@ PURE = {"mov", "bin", "neg", "not", "cmpset", "load", "load8", "load32", "movadd
 # SIMD 向量指令扩展与自动向量化优化器
 # ===========================================================================
 
-SIMD_OPS = ("vload32", "vload64", "vstore32", "vstore64", 
-            "vzero", "vadd", "vsub", "vmul", "vdot", "vhsum")
-
-def is_simd_op(op):
-    """检查是否是 SIMD 操作"""
-    return op in SIMD_OPS
 
 def opt_vectorize(fn):
     """
