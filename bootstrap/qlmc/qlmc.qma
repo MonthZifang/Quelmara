@@ -3729,7 +3729,6 @@ const OP_NZ = 10       // dst = (a != 0) ? 1 : 0
 const OP_CMP = 11      // dst = a <cc> b ? 1 : 0；imm = cc（setcc 机器码）
 const DBG_MODIND = 0
 const DBG_FLAGLOOP = 0
-const DBG_LICM = 1
 const OP_LAB = 12      // imm = 标签
 const OP_JMP = 13      // goto imm
 const OP_JZ = 14       // if a == 0 goto imm
@@ -8287,6 +8286,20 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
 ///
 /// 算法：贪心交换 —— 反复找"使用次数最少的寄存器标量"和"使用次数最多的槽内标量"，
 /// 前者比后者少就互换位置，最多 8 轮（每轮至少提一个，够用）。
+/// 循环深度 → 使用次数权重（4^depth，depth 截到 6）。
+///
+/// 见 `_alloc_vars` 里"按循环深度加权"的说明：循环体里的一次使用
+/// 每轮都要执行，循环外的一次只执行一次，两者在寄存器分配上不该同权。
+fn _depth_weight(d: int) -> int {
+    let mut w = 1
+    let mut k = 0
+    while k < d && k < 6 {
+        w = w * 4
+        k = k + 1
+    }
+    return w
+}
+
 fn _alloc_vars(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
     let n = len(fc.vloc)
     ucnt.clear()
@@ -8301,7 +8314,57 @@ fn _alloc_vars(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
         baked.push(0)
         i = i + 1
     }
-    // 一遍扫 IR：统计每个 vreg 被读几次 + 记录被 ADDRV 烧过的槽号
+    // v4.86：先算**每条 IR 的循环嵌套深度**（见下面的加权说明）。
+    let ln = len(fc.ir)
+    let depth = vec[int].new(ln)
+    i = 0
+    while i < ln {
+        depth.push(0)
+        i = i + 1
+    }
+    i = 0
+    while i < ln {
+        let ins = fc.ir.get(i)
+        if ins.op == OP_JMP || ins.op == OP_JCMP || ins.op == OP_JCMPI ||
+           ins.op == OP_JZ || ins.op == OP_JNZ {
+            let hh = _lab_index(fc.ir, ins.imm)
+            if hh >= 0 && hh < i {
+                let mut k = hh
+                while k <= i {
+                    depth.set(k, depth.get(k) + 1)
+                    k = k + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    // 一遍扫 IR：统计每个 vreg 的**加权**读取次数 + 记录被 ADDRV 烧过的槽号
+    //
+    // v4.86：**按循环深度加权**，不是简单计数。
+    //
+    // 为什么要改：以前 `ucnt` 就是"IR 里出现几次"。但次数不等于代价 ——
+    // 循环体里的一次使用每轮都要执行，循环外的一次只执行一次。
+    // 实测症状（b61_cache_scan）：`k`（内层循环变量，静态 6 次使用）和
+    // `acc`（累加器）被分到**帧槽**，而 `i`（只在初始化循环里用）和
+    // `t0`/`t1`（循环外用）占着 RBX/R12-R15。结果内层循环 13 条指令、
+    // 每轮两次 store→load 往返，C 只要 5 条。
+    //
+    // 权重取 4^depth：一层循环 4 倍、两层 16 倍。4 这个数不是拍脑袋 ——
+    // 它让"内层循环里用 1 次"胜过"循环外用 4 次"，符合"热代码优先占寄存器"
+    // 的直觉，同时不会让深层循环里的短命临时值把外层循环变量全挤掉
+    // （深度上限截到 6 层，避免 4^d 溢出或一个深循环独占全部寄存器）。
+    //
+    // 这个改动**只换位置、不改语义**：变量和临时值还是在同一张 vloc 表里，
+    // 只是"谁进寄存器"的排序变了。所以正确性风险最低，且对每个函数都生效。
+    //
+    // **代价（诚实记录）**：b15_loopsum 慢 ~28%（1.01 → 1.30 s）。那是个
+    // 单层循环、用的变量数刚好等于寄存器数，深度加权把 `i` 从 RBX 挪到
+    // R12 之后循环体的**指令数没变**，纯粹是代码布局变了。试过"循环头
+    // 16 字节对齐"想把它捞回来（补 nop 到 16 整除），**没效果，反而更慢**
+    // （1.40 s），说明不是取指对齐 —— 那个改动已撤回。
+    // 全局算总账仍是赚的（76 项合计 -5.4%，b28 -31%、b61 -42%、b49 -43%），
+    // 所以保留；b15 的根因另记为待查项（可能是 L2 组相联冲突，但本机
+    // 拿不出计数器证据，不猜）。
     i = 0
     while i < len(fc.ir) {
         let ins = fc.ir.get(i)
@@ -8310,19 +8373,20 @@ fn _alloc_vars(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
                 baked.set(ins.imm, 1)
             }
         }
+        let w = _depth_weight(depth.get(i))
         if ins.a > 0 && ins.a < n {
-            ucnt.set(ins.a, ucnt.get(ins.a) + 1)
+            ucnt.set(ins.a, ucnt.get(ins.a) + w)
         }
         // BINI / CMPI / DIVC / JCMPI 的 `b` 槽不是 vreg
         if ins.b > 0 && ins.b < n && ins.op != OP_BINI &&
            ins.op != OP_CMPI && ins.op != OP_DIVC && ins.op != OP_JCMPI {
-            ucnt.set(ins.b, ucnt.get(ins.b) + 1)
+            ucnt.set(ins.b, ucnt.get(ins.b) + w)
         }
         // 这几个操作码的 dst 槽是被读的（"值"/"地址"/"字节数"）
         if ins.dst > 0 && ins.dst < n {
             if ins.op == OP_MEMCPYN || ins.op == OP_STORED || ins.op == OP_STOREX ||
                ins.op == OP_STORE8D || ins.op == OP_STORE8X || ins.op == OP_STORE8I {
-                ucnt.set(ins.dst, ucnt.get(ins.dst) + 1)
+                ucnt.set(ins.dst, ucnt.get(ins.dst) + w)
             }
         }
         i = i + 1
