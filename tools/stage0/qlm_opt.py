@@ -200,7 +200,6 @@ def run_vectorization_pass(fns):
     return total_changed
 
 
-        "fbin", "fneg", "fcmpset", "fcvt", "cssub"}
 
 
 def vreg_mentions(ins):
