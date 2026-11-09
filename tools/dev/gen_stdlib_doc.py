@@ -97,6 +97,7 @@ DESC = {
     "std/net/udp.qma": "UDP 封装与地址解析",
     "std/net/udp6.qma": "UDP over IPv6：文本地址转换 + 便捷发送（udp_open6/udp_bind6 内建）",
     "std/net/dns.qma": "自研 DNS 解析器（RFC 1035 最小子集：A 记录 / 压缩指针 / resolv.conf）",
+    "std/ucore.qma": "统一核心：用户只调一个入口，运行时把全部核当成一个核用（动态领块 + 每 worker 独立归约槽）",
 }
 
 

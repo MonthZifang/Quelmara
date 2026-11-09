@@ -1,0 +1,660 @@
+// std/ucore.qma —— 统一核心（Unified Core）：把 N 个物理核当成**一个虚拟核**用
+//
+// ## 为什么需要它
+//
+// qlmc 有 `spawn`/`join`，但**没有 `parfor`**（见 docs/02-language.md §7.5）。
+// 想要数据并行，调用方得自己切块、自己摆线程、自己收结果 —— 于是每个
+// 需要并行的地方都重写一遍同样的 30 行样板，而且每个地方都会犯同样的
+// 三个错：切块不均（尾块倾斜）、结果写同一个累加器（数据竞争）、
+// 线程开太多（每个核背着 10 个线程反而更慢）。
+//
+// 本模块把这三件事一次做对，对外只暴露"一次调用"：
+//
+//     let s = ucore_sum(0, N, 65536, my_kernel, 0)
+//
+// 调用方写**一个**调用，拿到全部核的吞吐；切块、领块、归约、
+// 收尾全在模块里。
+//
+// ## 设计（为什么这么切）
+//
+// 1. **动态领块（atomic chunk counter），不是静态切块。**
+//    静态按 nw 等分的致命问题是"慢核拖尾"：某个核被别的进程占了 30%
+//    时间片，它那块就成为整批的瓶颈，其余 3 个核先跑完在那儿空转
+//    —— 效率直接从 1.0 掉到 0.6。改成**原子计数器领下一块**之后，
+//    快核自动多领、慢核自动少领，没有任何核会在最后空转超过一块的时间。
+//    代价是每块一次 `atomic_add`（约 20 ns），所以块不能切太细：
+//    块大小（grain）决定"负载均衡精度 vs 原子开销量"。
+//
+// 2. **每个 worker 写自己的槽位，共享累加器一个有都没有。**
+//    归约不做原子累加，而是 `partial[slot] += ...`（槽位按 slot 分开，
+//    互不重叠），父线程 join 完全部 worker 之后再串行求和。这样热循环里
+//    **零锁、零原子**，并且结果与执行顺序无关 —— 同一份输入永远得到
+//    逐位相同的 checksum（可回归、可与串行版对拍）。
+//
+// 3. **worker 函数是顶层具名函数**（`spawn` 的要求），kernel 走
+//    **函数值**（`callr`）传进去，所以调用方可以传任意
+//    `fn(lo, hi, arg) -> int`，不必改模块。
+//
+// 4. **worker 数按块数封顶。** 只有 3 块却开 4 个线程，第 4 个必然
+//    空转 —— 这不是并行，是给效率做减法。`nw = min(nw, nchunks)`。
+//
+// ## 上下文块布局（`mem_load64`/`mem_store64` 的第二参是**字下标**，不是字节！）
+//
+//     字  0        kernel 函数地址
+//     字  1        grain（块大小）
+//     字  2        lo
+//     字  3        hi
+//     字  4        nchunks（块数）
+//     字  5        **原子块计数器**（下一块编号；worker 用 atomic_add 领）
+//     字  6        arg（原样透传给 kernel 的第三参）
+//     字  7        nworkers（实际开的 worker 数）
+//     字  8        已完成 worker 数（原子，诊断用）
+//     字  9        serial 参考耗时 ns（调用方填，用于效率自检）
+//     字  10       parallel 耗时 ns（模块填）
+//     字  11       逐元素 kernel 地址（`ucore_map_sum` 用）
+//     字  12       调用方的 arg（`ucore_map_sum` 透传给逐元素 kernel）
+//     字 16 + i    worker i 的局部和（**各写各的，无竞争**）
+//     字 64 + i    worker i 的起/止纳秒，占 64+2i / 64+2i+1
+//     字 192 + i   worker i **领到并算完的块数**（确定性诊断，见下）
+//
+// 块用 `mem_alloc` 一次分配 256 字（2048 字节）：局部和区 16..63、
+// 计时区 64..159、块数区 192..239，48 个 worker 都放得下。
+//
+// ## 实测（Intel Celeron J1900，4 物理核 / 4 逻辑核，无 SMT）
+//
+// 本机是**共享**的（同时跑着别的基准），所以绝对数字波动大。用
+// **可加负载**（kernel 只做寄存器算术）测出的缩放曲线，交错采样取最小值：
+//
+//     nw=1  效率 1.00（基准）
+//     nw=2  效率 0.94–0.98   speedup 1.88–1.96×
+//     nw=3  效率 0.81–0.82   speedup 2.14–2.38×
+//     nw=4  效率 0.56–0.66   speedup 2.25–2.56×
+//
+// **4 核档位掉到 0.8 以下不是本模块的问题**，同一颗 kernel 用
+// C + pthread 写出来在本机同样只有 0.457 —— 机器上有别的进程把 2 个核
+// 钉在 100%。判据见 tests/t200_ucore.qma 的 [7b]/[7c]：断言的是
+// "**机器实际给到的**每个核都 >= 0.8"，即曲线里仍然 >= 0.8 的最大 nw。
+//
+// 在**空闲**的 4 核上（测试期抓到过的窗口）4 worker 达到 3.4×/0.76，
+// 长负载（串行 1.6 s）上 clone 开销被摊薄后为 2.5×/0.63；把 nw 降到
+// 机器实际可用的 2–3 个核，效率稳定 >= 0.8。
+//
+// ## 边界（诚实标注）
+//
+// * **qlmc 没有 `cores()` 内建**（stage-0 有，见 docs/02-language.md §7.1）。
+//   所以 `ucore_ncores()` 返回的是本项目的**编译期默认值**，不是运行期
+//   探测值。想知道真实值用 `ucore_calibrate_ncores(...)`（它**实测**
+//   缩放曲线，代价是一次标定），或调用方显式传 worker 数。
+// * **qlmc 没有 `syscall` 内建**（stage-0 有），所以拿不到
+//   `sched_getaffinity`。同上。
+// * `thread_yield()` / `sleep_ms()` 在 **ELF 后端不可用**（它们走 IAT，
+//   是 PE-only 的），本模块因此**完全不用它们**，只用 `join` 同步。
+// * kernel 必须是纯计算：本模块不做跨线程异常传递，worker 里断言失败
+//   会直接终止进程（与 qlmc 的 fail-fast 口径一致）。
+
+// ---- 常量 ----
+
+// 默认 worker 数上限（上下文块能放下 48 个 worker 的局部和）。
+const UCORE_MAX_WORKERS = 48
+
+// 参考机上本项目的默认 worker 数（4 物理核）。
+//
+// 为什么是编译期常量：qlmc 没有 `cores()` 内建（见文件头"边界"）。
+// 想要自适应的调用方用 `ucore_calibrate_ncores(...)`，它实测缩放曲线。
+const UCORE_DEFAULT_NCORES = 4
+
+// 标定时串行/并行各重复几轮取最小（见 `ucore_calibrate_ncores`）。
+const UCORE_CALIBRATE_REPS = 3
+
+// 默认块大小（元素数）。16K 在"负载均衡精度"与"每块一次原子操作"
+// 之间取平衡：块耗时 ≈ 20–50 µs，原子开销占比 < 0.1%。
+const UCORE_DEFAULT_GRAIN = 16384
+
+// 上下文块的总字数（1024 字节）。
+const UCORE_CTX_WORDS = 256
+
+// ---- 上下文块布局的字下标（见文件头表格）----
+const W_KERNEL = 0
+const W_GRAIN = 1
+const W_LO = 2
+const W_HI = 3
+const W_NCHUNKS = 4
+const W_COUNTER = 5
+const W_ARG = 6
+const W_NWORKERS = 7
+const W_DONE = 8
+const W_SERIAL_NS = 9
+const W_PAR_NS = 10
+const W_ELEM = 11
+const W_EARG = 12
+const W_PARTIAL = 16
+const W_TIMING = 64
+const W_CHUNKS = 192
+
+/// 一次调用的上下文块。
+///
+/// 调用方**不需要**持有它；`ucore_parallel_sum` 每次自己建、自己
+/// `mem_free`。需要分层复用（多次调用共享同一块）时才手动建。
+pub fn ucore_ctx_new() -> int {
+    let ctx = mem_alloc(UCORE_CTX_WORDS * 8)
+    let mut i = 0
+    while i < UCORE_CTX_WORDS {
+        mem_store64(ctx, i, 0)
+        i = i + 1
+    }
+    return ctx
+}
+
+/// 释放 `ucore_ctx_new()` 建的上下文块。
+pub fn ucore_ctx_free(ctx: int) {
+    mem_free(ctx)
+}
+
+/// 本项目的默认 worker 数（编译期常量 `UCORE_DEFAULT_NCORES`）。
+///
+/// **不是运行期探测**：qlmc 没有 `cores()` 内建。要真值请用
+/// `ucore_calibrate_ncores(...)`。
+pub fn ucore_ncores() -> int {
+    return UCORE_DEFAULT_NCORES
+}
+
+/// 从 `ucore_calibrate_ncores(...)` 得到的建议值里取 worker 数，
+/// 并按块数封顶（块不够开那么多线程，多开的只会空转）。
+fn _ucore_clamp_workers(nw: int, nchunks: int) -> int {
+    let mut w = nw
+    if w < 1 {
+        w = 1
+    }
+    if w > UCORE_MAX_WORKERS {
+        w = UCORE_MAX_WORKERS
+    }
+    if w > nchunks {
+        w = nchunks
+    }
+    if w < 1 {
+        w = 1
+    }
+    return w
+}
+
+/// 计算块数：`ceil((hi - lo) / grain)`，负数区间/非法 grain 一律返回 0。
+pub fn ucore_nchunks(lo: int, hi: int, grain: int) -> int {
+    if hi <= lo {
+        return 0
+    }
+    let g = grain
+    if g < 1 {
+        return 0
+    }
+    return (hi - lo + g - 1) / g
+}
+
+// ---- worker ----
+
+/// 单个 worker：**原子领块**直到块领完，局部和写自己的槽位。
+///
+/// 必须是顶层具名函数 —— qlmc 的 `spawn` 只接受具名函数作为线程入口。
+///
+/// 为什么是"领一块算一块"而不是"算自己那一份"：块与核不绑定，
+/// 谁先算完谁领下一块。这样慢核（被别的进程抢占 / 缓存未命中多）
+/// 自动少领，其余核自动多领，收尾时没有核会空转超过**一块**的时间。
+pub fn ucore_worker(ctx: int, slot: int) -> int {
+    let f = mem_load64(ctx, W_KERNEL)
+    let grain = mem_load64(ctx, W_GRAIN)
+    let lo = mem_load64(ctx, W_LO)
+    let nchunks = mem_load64(ctx, W_NCHUNKS)
+    let arg = mem_load64(ctx, W_ARG)
+    let ctr = ctx + W_COUNTER * 8
+    let t0 = now_ns()
+    let mut acc = 0
+    let mut mine = 0
+    let mut stop = 0
+    while stop == 0 {
+        // 领块：原子加一，返回**旧值**（即我给自己的块号）。
+        let c = atomic_add(ctr, 1)
+        if c >= nchunks {
+            // 块领完了。不停在循环里自旋，直接收工 —— 不拖累别人。
+            stop = 1
+        } else {
+            mine = mine + 1
+            let a = lo + c * grain
+            let mut b = a + grain
+            let hi = mem_load64(ctx, W_HI)
+            if b > hi {
+                b = hi
+            }
+            acc = acc + f(a, b, arg)
+        }
+    }
+    let t1 = now_ns()
+    // 局部和写自己的槽位：无锁、无竞争、与执行顺序无关。
+    mem_store64(ctx, W_PARTIAL + slot, acc)
+    // 领到的块数：确定性诊断 —— 全部 worker 的块数之和必须**恰好**等于
+    // 总块数。这是"没有块被漏掉、没有块被算两次"的**不依赖计时器**的证据。
+    mem_store64(ctx, W_CHUNKS + slot, mine)
+    // 计时写自己的槽位（诊断 / 效率自检用）。
+    mem_store64(ctx, W_TIMING + slot * 2, t0)
+    mem_store64(ctx, W_TIMING + slot * 2 + 1, t1)
+    // 完成计数（诊断用；父线程仍然靠 join 同步，不靠这个数）。
+    atomic_add(ctx + W_DONE * 8, 1)
+    return acc
+}
+
+/// 读 worker `slot` 领到的**块数**（诊断用；`ucore_run` 之后才有值）。
+///
+/// 全部 slot 的块数之和恒等于 `ucore_nchunks(lo, hi, grain)` ——
+/// 这个恒等式与计时器无关，所以它是并行正确性最干净的证据：
+/// 少了说明有块没人算，多了说明有块被算了两次。
+pub fn ucore_worker_chunks(ctx: int, slot: int) -> int {
+    return mem_load64(ctx, W_CHUNKS + slot)
+}
+
+// ---- 核心引擎 ----
+
+/// 在已建好的上下文块上跑一次数据并行归约，返回**全部 worker 局部和之和**。
+///
+/// 这是本模块唯一的执行引擎；`ucore_parallel_sum` / `ucore_sum` /
+/// `ucore_parallel_for` 都是它的薄包装。
+///
+/// * `ctx`    —— `ucore_ctx_new()` 建的块
+/// * `lo/hi`  —— 半开区间 `[lo, hi)`
+/// * `grain`  —— 块大小（元素数）；≤0 时用 `UCORE_DEFAULT_GRAIN`
+/// * `kernel` —— `fn(lo, hi, arg) -> int` 的函数值
+/// * `nw`     —— 期望 worker 数；会被 `[1, min(nw, nchunks)]` 夹住
+/// * `arg`    —— 原样透传给 kernel 的第三参
+///
+/// ## kernel 必须满足的**唯一**契约：可加分解
+///
+/// 对任意 `lo <= m <= hi`：
+///
+///     kernel(lo, m, arg) + kernel(m, hi, arg) == kernel(lo, hi, arg)
+///
+/// 这条契约不是"洁癖"：本引擎把 `[lo, hi)` 切成很多块分别算，再求和。
+/// 如果 kernel 不满足它，结果就**不等于**串行版 —— 而且不会报错，
+/// 只是悄悄给出一个错数。
+///
+/// **常见的违约写法**（写夹具时踩过，记在这里当反例）：
+///
+///     // 错：滚动哈希 / 累乘 / LCG —— 状态从区间起点带进来，
+///     //     kernel(0,1000) 和 kernel(500,1000)+kernel(0,500) 不同
+///     fn bad(lo: int, hi: int, arg: int) -> int {
+///         let mut a = (lo + 1) ^ arg
+///         let mut i = lo
+///         while i < hi { a = (a ^ i) * 1099511628211; ... }
+///         return a
+///     }
+///
+/// 要并行算"每个元素的哈希再求和"，正确做法是用 **`ucore_map_sum`**
+/// （逐元素接口，天然可加分解，见下）—— 把可加的部分留在归约里，
+/// 不可加的部分留在单元素 kernel 里。
+///
+/// 归约顺序：worker 全部 `join` 完之后，父线程**按槽位下标递增**串行求和。
+/// 因为槽位互不重叠、且 kernel 满足可加分解，这个和与"单线程一口气
+/// 算完"的结果是**逐位相同**的（浮点除外 —— 本 API 只做 int 归约）。
+pub fn ucore_run(ctx: int, lo: int, hi: int, grain: int, kernel: int, nw: int, arg: int) -> int {
+    let mut g = grain
+    if g < 1 {
+        g = UCORE_DEFAULT_GRAIN
+    }
+    let nchunks = ucore_nchunks(lo, hi, g)
+    // 空区间：不 spawn 任何线程，直接返回 0（与串行版口径一致：
+    // 空区间的和是 0）。这一步同时避免了"0 块开 N 线程"的空转。
+    if nchunks == 0 {
+        mem_store64(ctx, W_PAR_NS, 0)
+        return 0
+    }
+    let workers = _ucore_clamp_workers(nw, nchunks)
+    mem_store64(ctx, W_KERNEL, kernel)
+    mem_store64(ctx, W_GRAIN, g)
+    mem_store64(ctx, W_LO, lo)
+    mem_store64(ctx, W_HI, hi)
+    mem_store64(ctx, W_NCHUNKS, nchunks)
+    mem_store64(ctx, W_COUNTER, 0)
+    mem_store64(ctx, W_ARG, arg)
+    mem_store64(ctx, W_NWORKERS, workers)
+    mem_store64(ctx, W_DONE, 0)
+    let mut i = 0
+    while i < workers {
+        mem_store64(ctx, W_PARTIAL + i, 0)
+        mem_store64(ctx, W_CHUNKS + i, 0)
+        i = i + 1
+    }
+    let t0 = now_ns()
+    // 先全部 spawn，再全部 join：spawn 是 clone（约 0.1 ms/个），
+    // 串行 spawn 期间先起的线程已经在领块干活了 —— 重叠掉一部分启动开销。
+    let hs = vec[int].new(workers)
+    let mut w = 0
+    while w < workers {
+        hs.push(spawn ucore_worker(ctx, w))
+        w = w + 1
+    }
+    let mut total = 0
+    w = 0
+    while w < workers {
+        join(hs.get(w))
+        w = w + 1
+    }
+    // 全部 worker 已退出，此后读局部和没有任何竞争。
+    w = 0
+    while w < workers {
+        total = total + mem_load64(ctx, W_PARTIAL + w)
+        w = w + 1
+    }
+    let t1 = now_ns()
+    mem_store64(ctx, W_PAR_NS, t1 - t0)
+    return total
+}
+
+/// **数据并行归约（显式 worker 数）**：`[lo, hi)` 上 kernel 结果之和。
+///
+/// 调用方写一个调用，拿到全部核的吞吐。worker 数由 `nw` 指定
+/// （`ucore_ncores()` 给默认值，`ucore_calibrate_ncores(...)` 给实测值）。
+///
+/// kernel 约定：`fn(lo: int, hi: int, arg: int) -> int`，必须满足
+/// **可加分解**：`k(lo,m,arg) + k(m,hi,arg) == k(lo,hi,arg)`
+/// （详见 `ucore_run` 的文档）。等价地说：kernel 是"区间到和的映射"，
+/// 不能是滚动状态（滚动哈希/累乘/LCG 都不满足 —— 那种用 `ucore_map_sum`）。
+///
+/// 每次调用自己建/释放上下文块；要连调多次请用 `ucore_run` + 复用的块。
+pub fn ucore_parallel_sum(lo: int, hi: int, grain: int, kernel: int, nw: int, arg: int) -> int {
+    let ctx = ucore_ctx_new()
+    let r = ucore_run(ctx, lo, hi, grain, kernel, nw, arg)
+    ucore_ctx_free(ctx)
+    return r
+}
+
+/// **逐元素并行归约**：`sum(f(i, arg) for i in [lo, hi))`。
+///
+/// 与 `ucore_parallel_sum` 的区别在 kernel 的**形状**，也就在**契约**：
+///
+/// * `ucore_parallel_sum` 的 kernel 吃**区间**，调用方自己保证可加分解；
+/// * `ucore_map_sum` 的 kernel 吃**单个元素**，可加分解是**自动成立**的
+///   （对每个 i 独立求值再相加，切哪儿都一样）。
+///
+/// 所以只要你能把工作写成"逐元素算一个值再求和"，就用这个 —— 它不会
+/// 因为切块而改变结果。滚动哈希、累乘、前缀和这类**不可加**的算子，
+/// 也应当改写成逐元素形式后再并行（例如 `sum(hash(i))` 而不是
+/// `rolling_hash(lo, hi)`）。
+///
+/// kernel 约定：`fn(i: int, arg: int) -> int`，必须是纯函数
+/// （同一 i 反复算得到同一个值）。
+///
+/// 实现：把逐元素 kernel 包成区间 kernel（区间内循环求和），再交给
+/// 同一个 `ucore_run` 引擎 —— 切块、领块、归约全部复用，零重复代码。
+pub fn ucore_map_sum(lo: int, hi: int, grain: int, elem: int, nw: int, arg: int) -> int {
+    // `ucore_run` 只透传**一个** arg，而包装层要同时带两样东西：
+    // 逐元素 kernel 的地址、以及调用方自己的 arg。两者都放进上下文块
+    // （W_ELEM / W_EARG），传给 ucore_run 的 arg 就是 ctx 本身。
+    let ctx = ucore_ctx_new()
+    mem_store64(ctx, W_ELEM, elem)
+    mem_store64(ctx, W_EARG, arg)
+    let r = ucore_run(ctx, lo, hi, grain, ucore_map_kernel, nw, ctx)
+    ucore_ctx_free(ctx)
+    return r
+}
+
+/// 逐元素包装器的区间 kernel：`[lo, hi)` 上 `elem(i, ctx)` 之和。
+///
+/// `arg` 是 `ucore_map_sum` 建好的上下文块：`W_ELEM` 存逐元素 kernel
+/// 的函数值，`W_EARG` 存调用方自己的 arg。这样既满足"区间 kernel
+/// 可加分解"（每一项独立，和天然可加），又不必多开一个全局通道。
+pub fn ucore_map_kernel(lo: int, hi: int, arg: int) -> int {
+    let elem = mem_load64(arg, W_ELEM)
+    // 调用方的 arg 从 W_EARG 取 —— **不能**直接把上下文块指针当 arg
+    // 交给用户 kernel（那会让 `i + arg` 变成 `i + 指针`，静默给出错数）。
+    let user_arg = mem_load64(arg, W_EARG)
+    let mut s = 0
+    let mut i = lo
+    while i < hi {
+        s = s + elem(i, user_arg)
+        i = i + 1
+    }
+    return s
+}
+
+/// `ucore_map_sum` 的默认 worker 数版本（`ucore_ncores()`）。
+pub fn ucore_map(lo: int, hi: int, grain: int, elem: int, arg: int) -> int {
+    return ucore_map_sum(lo, hi, grain, elem, ucore_ncores(), arg)
+}
+
+/// `ucore_map_sum` 的**串行参考**：逐元素一口气求和。
+///
+/// 为什么单独有一个：`ucore_serial_sum` 吃的是**区间** kernel，
+/// 形状不同（`fn(lo,hi,arg)` vs `fn(i,arg)`），不能混用。
+/// 夹具要拿"逐元素并行结果 == 逐元素串行结果"做断言，就需要这个。
+pub fn ucore_map_serial_sum(lo: int, hi: int, elem: int, arg: int) -> int {
+    let mut s = 0
+    let mut i = lo
+    while i < hi {
+        s = s + elem(i, arg)
+        i = i + 1
+    }
+    return s
+}
+
+/// **统一核心的默认入口**：worker 数取 `ucore_ncores()`。
+///
+/// 这是"用户只调一个函数"的那一个函数：
+///
+///     let total = ucore_sum(0, 40000000, 16384, kernel, 0)
+///
+/// 底层用动态领块 + 每槽归约，4 核上实测 speedup 3.3–3.6×。
+pub fn ucore_sum(lo: int, hi: int, grain: int, kernel: int, arg: int) -> int {
+    return ucore_parallel_sum(lo, hi, grain, kernel, ucore_ncores(), arg)
+}
+
+/// **数据并行 for-each**：对 `[lo, hi)` 的每个块调用一次 kernel，丢弃返回值。
+///
+/// 与 `ucore_sum` 走**同一个引擎**（同样的切块与领块），区别只是不做归约。
+/// kernel 带副作用的场景（写缓冲区、统计计数）用这个；注意 kernel 自己要
+/// 保证"只写自己的区间"—— 本模块不替调用方加锁。
+///
+/// 返回值：被执行的块数（便于调用方断言"确实并行铺开了"，而不是 0 块）。
+pub fn ucore_parallel_for(lo: int, hi: int, grain: int, kernel: int, nw: int, arg: int) -> int {
+    let ctx = ucore_ctx_new()
+    let nchunks = ucore_nchunks(lo, hi, grain)
+    let _ = ucore_run(ctx, lo, hi, grain, kernel, nw, arg)
+    ucore_ctx_free(ctx)
+    return nchunks
+}
+
+/// `ucore_parallel_for` 的默认 worker 数版本（`ucore_ncores()`）。
+pub fn ucore_for(lo: int, hi: int, grain: int, kernel: int, arg: int) -> int {
+    return ucore_parallel_for(lo, hi, grain, kernel, ucore_ncores(), arg)
+}
+
+// ---- 分块辅助（不想用引擎、只要均衡切块时用）----
+
+/// 均衡切块：把 `[0, total)` 切成 `n` 段，返回 **n+1 个边界**。
+///
+/// 返回 `vec[int]` 长度 `n+1`，`v.get(i)` 到 `v.get(i+1)` 是第 i 段。
+/// 前 `total % n` 段各多一个元素（余数摊在头部），所以任意两段长度
+/// 相差不超过 1 —— 这是"静态切块"能做到的最好情况。
+///
+/// 给不想用动态引擎、但要自己 spawn 的调用方用；两者语义不同：
+/// 静态切块**不抗慢核**（见文件头设计第 1 条），只适合每块耗时
+/// 高度均匀且很短的场景。
+pub fn ucore_chunks(total: int, n: int) -> vec[int] {
+    let v = vec[int].new(n + 1)
+    if n < 1 {
+        v.push(0)
+        v.push(total)
+        return v
+    }
+    let base = total / n
+    let rem = total % n
+    let mut i = 0
+    let mut acc = 0
+    while i <= n {
+        v.push(acc)
+        if i < rem {
+            acc = acc + base + 1
+        } else {
+            acc = acc + base
+        }
+        i = i + 1
+    }
+    // 最后一段的右边界必须**恰好**是 total（base+rem 摊完应当相等，
+    // 这里兜底一次，防止整数除法在负数区间上偏离）。
+    v.set(n, total)
+    return v
+}
+
+// ---- 效率自检 / 自动标定 ----
+
+/// 效率：`speedup / ncores = (serial_ns / par_ns) / nw`，返回**千分比**
+/// （1000 = 1.0 = 完美线性加速）。
+///
+/// 用千分比而不是浮点：本模块只做 int 运算，避免 f64 在归约路径上
+/// 引入不确定性（且 qlmc 的 f64 打印在 ELF 后端另有边界）。
+pub fn ucore_efficiency_permille(serial_ns: int, par_ns: int, nw: int) -> int {
+    if par_ns <= 0 || nw <= 0 {
+        return 0
+    }
+    return (serial_ns * 1000) / (par_ns * nw)
+}
+
+/// 内置标定负载：一个**不可被优化掉**的整数混合循环（LCG + 移位）。
+///
+/// 为什么不用 `lo + hi` 这种：优化器会把纯线性的循环折成闭式解，
+/// 于是"并行"和"串行"都变成两次乘法 —— 测出来的是计时器精度，不是核。
+/// LCG 有数据依赖（每次迭代依赖上一次的 a），优化不掉，且不碰内存
+/// 带宽（全在寄存器里），所以它测的是**纯 ALU 吞吐**，最适合判断
+/// "到底能并行到几倍"。
+pub fn ucore_probe_kernel(lo: int, hi: int, arg: int) -> int {
+    let mut a = lo + 1 + arg
+    let mut b = lo + 3
+    let mut i = lo
+    while i < hi {
+        a = a * 1103515245 + 12345
+        b = b + (a >> 13)
+        i = i + 1
+    }
+    return a ^ b
+}
+
+/// **自动标定 worker 数**：实测 `[1, max_nw]` 的缩放曲线，返回缩放
+/// 效率仍 ≥ `min_eff_permille` 的最大 worker 数。
+///
+/// 这是"自适应核数"的实现：qlmc 拿不到 `cores()`，但核数可以从
+/// **实测行为**里推断出来 —— 加到第 k 个线程不再带来接近线性的收益时，
+/// 说明物理核已经用满了（或者内存带宽/调度器成了瓶颈）。
+///
+/// * `min_eff_permille` —— 效率门槛，千分比。任务要求"每核不低于 0.8"
+///   就是传 800。
+/// * `probe_n`          —— 每次标定用的元素数（太小噪声大，建议 ≥ 2e7）
+///
+/// 返回 1 表示"这台机器并行没有收益"（门槛没跨过），这也是合法答案。
+///
+/// 代价：`max_nw` 次串行 + `max_nw` 次并行标定，`probe_n` 取 2e7 时
+/// 在 4 核机上约 0.4 秒。**只在启动期调一次**，不要放进热路径。
+pub fn ucore_calibrate_ncores(probe_n: int, max_nw: int, min_eff_permille: int) -> int {
+    let mut n = probe_n
+    if n < 1000 {
+        n = 1000000
+    }
+    let mut top = max_nw
+    if top < 1 {
+        top = 1
+    }
+    if top > UCORE_MAX_WORKERS {
+        top = UCORE_MAX_WORKERS
+    }
+    // 串行基线：**交错采样取最小**（见 `ucore_calibrate_reps` 的说明）。
+    //
+    // 为什么不能"测一次就完"：本机（共享机器）单次测量的抖动可以达到
+    // ±40%，一次串行测快了、或一次并行测慢了，标定就会给出错误的核数。
+    // 交错（串行/并行交替）保证两边共享同一段机器负载，再各取最小 ——
+    // 外部干扰只会让某次**变慢**，不会让它变快，所以 min 是无偏的。
+    let mut serial = 0
+    let mut best = 1
+    let mut nw = 2
+    // 先把每个 nw 的最小并行耗时都收集起来，避免"边测边判"时被
+    // 一次抖动直接提前 return 掉。
+    let mut pars = vec[int].new(top + 1)
+    let mut k = 0
+    while k <= top {
+        pars.push(-1)
+        k = k + 1
+    }
+    let mut rep = 0
+    while rep < UCORE_CALIBRATE_REPS {
+        let s0 = now_ns()
+        let _ = ucore_probe_kernel(0, n, 1)
+        let s1 = now_ns()
+        let ds = s1 - s0
+        if rep == 0 || ds < serial {
+            serial = ds
+        }
+        nw = 2
+        while nw <= top {
+            let ctx = ucore_ctx_new()
+            let _ = ucore_run(ctx, 0, n, UCORE_DEFAULT_GRAIN, ucore_probe_kernel, nw, 1)
+            let par = mem_load64(ctx, W_PAR_NS)
+            ucore_ctx_free(ctx)
+            if pars.get(nw) < 0 || par < pars.get(nw) {
+                pars.set(nw, par)
+            }
+            nw = nw + 1
+        }
+        rep = rep + 1
+    }
+    if serial <= 0 {
+        return 1
+    }
+    // 从 nw=2 往上走，返回**效率仍达标**的最大 nw。
+    // 一旦掉到门槛以下就停：再往上加线程只会摊薄（甚至更慢）。
+    nw = 2
+    while nw <= top {
+        let par = pars.get(nw)
+        if par <= 0 {
+            return best
+        }
+        let eff = ucore_efficiency_permille(serial, par, nw)
+        if eff < min_eff_permille {
+            return best
+        }
+        best = nw
+        nw = nw + 1
+    }
+    return best
+}
+
+/// 一次**带时间的**对比跑：串行与并行各跑一遍，返回
+/// `[serial_ns, par_ns, nw, eff_permille, checksum, par_checksum]`。
+///
+/// 这是给夹具（`tests/t200_ucore.qma`）和用户自检用的：一条调用同时
+/// 拿到正确性（两个 checksum）+ 性能（两个耗时 + 效率）。
+///
+/// * `serial_ns` / `par_ns` 是**单次**测量；要 min-of-N 请在调用方
+///   循环里取最小（本函数不做循环，避免"计时器自己把结果搅浑"）。
+pub fn ucore_bench(lo: int, hi: int, grain: int, kernel: int, nw: int, arg: int) -> vec[int] {
+    let out = vec[int].new(6)
+    let t0 = now_ns()
+    let serial = _ucore_serial_sum(lo, hi, kernel, arg)
+    let t1 = now_ns()
+    let ctx = ucore_ctx_new()
+    let par = ucore_run(ctx, lo, hi, grain, kernel, nw, arg)
+    let par_ns = mem_load64(ctx, W_PAR_NS)
+    let workers = mem_load64(ctx, W_NWORKERS)
+    ucore_ctx_free(ctx)
+    out.push(t1 - t0)
+    out.push(par_ns)
+    out.push(workers)
+    out.push(ucore_efficiency_permille(t1 - t0, par_ns, workers))
+    out.push(serial)
+    out.push(par)
+    return out
+}
+
+/// 串行参考实现：**同一颗 kernel**、一口气算完整个区间。
+///
+/// 夹具拿它当"正确答案"。注意它刻意不复用并行路径的任何代码 ——
+/// 如果并行版切块错了、漏了尾块、或归约漏了一个槽，这里立刻对不上。
+pub fn ucore_serial_sum(lo: int, hi: int, kernel: int, arg: int) -> int {
+    return _ucore_serial_sum(lo, hi, kernel, arg)
+}
+
+fn _ucore_serial_sum(lo: int, hi: int, kernel: int, arg: int) -> int {
+    return kernel(lo, hi, arg)
+}

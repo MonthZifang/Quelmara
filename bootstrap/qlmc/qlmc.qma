@@ -3135,6 +3135,21 @@ const ELF_TEXT_RVA = ELF_ENTRY_OFF
 const SYS_WRITE = 1
 const SYS_EXIT = 60
 const SYS_EXIT_GROUP = 231
+const SYS_MMAP = 9
+const SYS_MUNMAP = 11
+const SYS_CLONE = 56
+const SYS_FUTEX = 202
+// clone 标志（v4.85：ELF 原生线程）
+const CLONE_VM = 0x100
+const CLONE_FS = 0x200
+const CLONE_FILES = 0x400
+const CLONE_SIGHAND = 0x800
+const CLONE_THREAD = 0x10000
+const CLONE_SYSVSEM = 0x40000
+const CLONE_THR_FLAGS = 0x50F00   // VM|FS|FILES|SIGHAND|THREAD|SYSVSEM
+// futex 操作
+const FUTEX_WAIT = 0
+const FUTEX_WAKE = 1
 
 // 导入符号（顺序 = IAT 槽顺序，别乱动）
 const I_GETSTD = 0
@@ -3714,6 +3729,7 @@ const OP_NZ = 10       // dst = (a != 0) ? 1 : 0
 const OP_CMP = 11      // dst = a <cc> b ? 1 : 0；imm = cc（setcc 机器码）
 const DBG_MODIND = 0
 const DBG_FLAGLOOP = 0
+const DBG_LICM = 1
 const OP_LAB = 12      // imm = 标签
 const OP_JMP = 13      // goto imm
 const OP_JZ = 14       // if a == 0 goto imm
@@ -4069,7 +4085,8 @@ const RT_CPUID1ECX = 29
 //   RT_SYSCALL : 通用 `syscall(n, ...)` 内建（ELF 侧直通内核）
 const RT_CGT = 30
 const RT_SYSCALL = 31
-const RT_COUNT = 32      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
+const RT_SPAWN_ELF = 32  // v4.85：ELF 原生 spawn 调用方（clone），替代 Win32 CreateThread
+const RT_COUNT = 33      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
 
 fn _slot_disp(slot: int) -> int {
     return -8 * (slot + 1)
@@ -4134,6 +4151,14 @@ fn _out_arg_reg(k: int) -> int {
 /// v2.51 加了 `RSI`/`RDI` —— 它们在 Win64 ABI 里也是非易失的，以前白放着没用。
 /// 加之前必须确认**没有任何运行库例程碰它们**（或者碰了就自己 push/pop）：
 /// `__memcpy` 的指针实参改成了 `r8/r9`，`__str_cat` 加了 `push rdi/push rsi`。
+///
+/// v4.85 修正（**ELF 多核崩溃的根因**）：上面这条只适用于 Win64。在 ELF64(SysV)
+/// 里 `RSI`/`RDI` 是 **caller-saved（易失）**，而 `alloc` / `spawn` / `join` 等
+/// 运行库例程（尤其 `_gen_spawn_elf_caller` 会写 `edi`/`rsi`）一调用就把它们踩掉。
+/// 之前把用户变量（如 `let c = spawn(...)`）分到 `rdi`，结果线程 4 在 `c` 还活着
+/// 的时候插入的 `alloc`/`spawn` 把 `rdi` 改成了上一个 join 的 `&done`，`join(c)`
+/// 拿到的是垃圾记录指针 → SIGSEGV（t2 不崩只因没走到那条 clobber 路径）。
+/// 修法：ELF 目标下变量池只剩 RBX/R12-R15 共 5 个；`RSI`/`RDI` 不再参与分配。
 const N_VARREG = 7
 
 fn _cs_reg(i: int) -> int {
@@ -4152,8 +4177,21 @@ fn _cs_index(r: int) -> int {
     if r == 13 { return 2 }
     if r == 14 { return 3 }
     if r == 15 { return 4 }
-    if r == RSI { return 5 }
-    if r == RDI { return 6 }
+    // v4.86：**ELF 下 RSI/RDI 仍然不进变量池**。
+    //
+    // 试过把它们加回来（想让 ELF 和 Win64 一样有 7 个），但实测
+    // `spawn`/`join` 会 **SIGSEGV**：`tests/t200_ucore.qma` 与最小
+    // 双线程程序在 5 个寄存器下正常、7 个下当场崩。逐个补 push/pop
+    // 没能收敛（`_gen_alloc` 的 mmap、`_gen_spawn_elf_caller` 的
+    // clone、子线程入口的栈切换都碰这两个寄存器，审计漏一个就崩），
+    // 而测出来的单线程基准**一个都没变快** —— 收益为零、风险是崩溃。
+    // 所以维持 v4.85 的结论：ELF 下 5 个变量寄存器。
+    // 真要 7 个，得先把运行库全部改成"只用 rcx/rdx/r8-r11 传参"，
+    // 那是独立的一次改造。记在 docs/07-gaps.md。
+    if _cur_target() != 1 {
+        if r == RSI { return 5 }
+        if r == RDI { return 6 }
+    }
     return -1
 }
 
@@ -4654,8 +4692,11 @@ fn _new_var(fc: FnCtx, nid: int, ty: int) -> int {
         fc.vval.push(v)
         return v
     }
+    // v4.86：ELF 下仍是 5 个（RSI/RDI 不入池，原因见 `_cs_index` 的注释）。
+    let mut nv = N_VARREG
+    if fc.target == 1 { nv = 5 }
     let n = fc.cells.get(C_NV)
-    if n < N_VARREG {
+    if n < nv {
         fc.vloc.set(v, _cs_reg(n) + 1)
         fc.cells.set(C_NV, n + 1)
     } else {
@@ -5664,6 +5705,19 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
             argbase = 1
         }
         let av = _call_args(fc, nd)
+        // v4.86：**实参个数必须与形参个数一致**。
+        //
+        // 以前这里不查，于是 `fn f(a,b,c)` 调 `f(1,2)` 编译通过、第三个形参
+        // 读到**垃圾寄存器**（实测返回 4 而不是报错）。spawn 那边一直有这条
+        // 检查（见 `_lower_spawn`），普通调用却漏了 —— 这是**静默算错**，
+        // 比编译失败糟得多。stage-0 也接受这种写法，但那是另一个后端的
+        // 历史行为；qlmc 这边按 fail-fast 处理（正确性优先于"宽松"）。
+        if len(av) != fc.fns.get(fi).np {
+            eprint("qlmc: 函数 " + fc.names.get(nd.a) + " 需要 " +
+                   fc.fns.get(fi).np.to_str() + " 个实参，给了 " +
+                   len(av).to_str() + " 个")
+            exit(2)
+        }
         let vals = vec[int].new(4)
         let mut ai = 0
         while ai < len(av) {
@@ -7273,10 +7327,20 @@ fn _opt_strength(fc: FnCtx, ir: vec[Ir], i: int, op: int, ins: Ir,
         }
     }
     // ---- 常数除法 → 魔数乘法（v2.48）----
-    // 只处理 2 <= d <= 2^31-1：再大 `2^s*r64` 会溢出 int64。
+    // 只处理 2 <= d <= 2^31：再大 `2^s*r64` 会溢出 int64，
+    // 且 `_emit_divc` 的 2 的幂快路径要用 `and rax, d-1` 的 **imm32** ——
+    // d = 2^31 时 d-1 = 2^31-1 正好装得下，再大就得换 64 位掩码。
+    //
+    // v4.86：上界从 2147483647 放宽到 **2147483648**。原来恰好把 2^31 挡在
+    // 门外，而 `% 2147483648` 是 LCG / 哈希类代码里最常见的取模
+    // （b83_lcg_random 用的就是它），结果一路落到 `idiv`（20–40 周期）。
+    // 2^31 是 2 的幂，走 `_emit_divc` 的移位序列只要 9 条指令。
+    // 区间 (2^31-1, 2^31] 里只有 2^31 一个整数，且它一定是 2 的幂，
+    // 所以放宽这一格不会让任何非幂次的 d 进魔数快路径。
+    //
     // d 是 1 的情况上面已经化成 MOV/CONST；d <= 0 保持 idiv（符号要另外处理）。
     if op == OP_DIV || op == OP_MOD {
-        if cv >= 2 && cv <= 2147483647 {
+        if cv >= 2 && cv <= 2147483648 {
             ir.set(i, Ir { op: OP_DIVC, dst: ins.dst, a: ins.a, b: op, imm: cv })
         }
         return
@@ -7831,6 +7895,7 @@ fn _opt_mod_ind(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
 ///
 /// **循环外的写不管**：`h` 之前由 ① 约束；`> e` 的写只是重新定义，不影响
 /// 退出那一刻的值。
+///
 fn _opt_flag_loop(fc: FnCtx, use: vec[int], ndef: vec[int]) {
     let ir = fc.ir
     let mut n = len(ir)
@@ -8121,6 +8186,22 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
         }
         i = i + 1
     }
+    // v4.86：**没有 LICM**。两版实现都被 checksum 打回，原因见 `docs/07-gaps.md`：
+    //   ① 判据"操作数在 h 之前有定义"对非 SSA 的 vreg 不成立（`b1_int` 归零）；
+    //   ② 补上"循环内 dst 集合"后，`b11_nqueens` 仍从 184000 变 36000 ——
+    //      因为**内存写**（`col.set(r,c)`、聚合字段）改的不是 vreg，
+    //      要正确判定得先有别名分析。收益（b28 -5.7%）撑不起这个风险。
+    //
+    // 两版都试过，都被 checksum 打回：
+    //   第一版判据是"操作数在 h 之前有定义" —— 对非 SSA 的 vreg 根本不成立，
+    //   `b1_int` 的 acc 直接归零。
+    //   第二版加了"循环内 dst 集合"，`b1_int`/`b9_json` 都对上了，但
+    //   `b11_nqueens` 的 184000 变成 36000 —— 因为**内存写**（`col.set(r,c)`、
+    //   写 `vec`/聚合字段）改的不是 vreg，`dst` 集合看不见它。要正确判定，
+    //   必须建模"循环内可能被写的内存"（别名分析），那是另一个量级的工程。
+    //
+    // 单线程纯算术基准的收益（b28 -5.7%）撑不起"递归/数组/容器全类别
+    // 可能算错"的风险，所以关掉。下一步见 docs/07-gaps.md。
     // 拷贝传播放在融合之前：它先把纯搬运消掉，融合看到的形状更干净
     _opt_copy(fc, ir, use, ndef)
     _tri("    opt: copy ir=", len(ir))
@@ -8455,12 +8536,15 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int], csb: vec[int], lpm: vec[in
             }
             if crosses > 0 && inloop == 1 && fc.vty.get(v) != TY_F64 {
                 // v2.57：**循环里**跨调用的临时值先试空着的 callee-saved 寄存器。
-                // 变量没占满 7 个寄存器是常态（`fib` 只有 1 个参数），空着的
-                // RBX/R12-R15/RSI/RDI 白放着。溢出是每轮两条内存往返，占用一个
+                // 变量没占满寄存器是常态（`fib` 只有 1 个参数），空着的
+                // callee-saved 白放着。溢出是每轮两条内存往返，占用一个
                 // callee-saved 只是每函数一次 push/pop。序言/尾声的 push/pop
                 // 由 `_emit_fn` 从 vloc 自动推出，不用另记。
+                // v4.86：ELF 下只扫 RBX/R12-R15（5 个），原因见 `_cs_index`。
                 let mut k = 0
-                while k < N_VARREG {
+                let mut klim = N_VARREG
+                if fc.target == 1 { klim = 5 }
+                while k < klim {
                     if csb.get(k) == 0 {
                         csb.set(k, 1)
                         fc.vloc.set(v, _cs_reg(k) + 1)
@@ -10741,6 +10825,10 @@ fn _gen_zero(ctx: Ctx) {
 /// __join(h)：等线程结束并取返回值（v2.32）。h = 0 直接返回 0。
 ///   rcx = 句柄记录：[0]=线程句柄 [1]=参数块；参数块 [0]=返回值
 fn _gen_join(ctx: Ctx) {
+    if ctx.target == 1 {
+        _gen_join_elf(ctx)
+        return
+    }
     let code: vec[int] = ctx.code
     let labs: vec[int] = ctx.labs
     ctx.rt_pos.set(RT_JOIN, len(code))
@@ -10875,11 +10963,11 @@ fn _gen_spawn(ctx: Ctx) {
     _b(code, 0xD1)
     let p2 = _jcc(code, 0x83)                  // jae .done
     _addfix(ctx.fixes, p2, ldone, FK_LAB)
-    _b(code, 0x48)                             // mov rax, [rbx+rcx*8+24]
+    _b(code, 0x48)                             // mov rax, [rbx+rcx*8+32]
     _b(code, 0x8B)
     _b(code, 0x44)
     _b(code, 0xCB)
-    _b(code, 24)
+    _b(code, 32)
     _b(code, 0x48)                             // mov [rsp+rcx*8], rax
     _b(code, 0x89)
     _b(code, 0x04)
@@ -10891,38 +10979,217 @@ fn _gen_spawn(ctx: Ctx) {
     _addfix(ctx.fixes, p3, ltop, FK_LAB)
     _setlab(labs, code, ldone)
     _setlab(labs, code, lreg)
-    _b(code, 0x48)                             // mov rcx, [rbx+24]
+    _b(code, 0x48)                             // mov rcx, [rbx+32]
     _b(code, 0x8B)
     _b(code, 0x4B)
-    _b(code, 24)
-    _b(code, 0x48)                             // mov rdx, [rbx+32]
+    _b(code, 32)
+    _b(code, 0x48)                             // mov rdx, [rbx+40]
     _b(code, 0x8B)
     _b(code, 0x53)
-    _b(code, 32)
-    _b(code, 0x4C)                             // mov r8, [rbx+40]
+    _b(code, 40)
+    _b(code, 0x4C)                             // mov r8, [rbx+48]
     _b(code, 0x8B)
     _b(code, 0x43)
-    _b(code, 40)
-    _b(code, 0x4C)                             // mov r9, [rbx+48]
+    _b(code, 48)
+    _b(code, 0x4C)                             // mov r9, [rbx+56]
     _b(code, 0x8B)
     _b(code, 0x4B)
-    _b(code, 48)
+    _b(code, 56)
     _b(code, 0xFF)                             // call [rbx+8]
     _b(code, 0x53)
     _b(code, 0x08)
     _b(code, 0x48)                             // mov [rbx], rax（写回返回值）
     _b(code, 0x89)
     _b(code, 0x03)
-    _b(code, 0x48)                             // mov rsp, rbp
-    _b(code, 0x89)
-    _b(code, 0xEC)
-    _b(code, 0x41)                             // pop r12
-    _b(code, 0x5C)
-    _b(code, 0x5B)                             // pop rbx
-    _b(code, 0x5D)                             // pop rbp
-    _b(code, 0x31)                             // xor eax, eax（ThreadProc 返回 0）
+    if ctx.target == 1 {
+        // v4.85：ELF 原生线程退出路径 —— 置完成标志 + futex_wake + exit(0)。
+        // 块布局：[0]=返回值 [16]=实参个数 n [24]=完成标志（done）[32..]=实参。
+        // rbx = 块指针（前面已设）。done 在固定偏移 [rbx+24]，避免计算地址。
+        _b(code, 0x48)                         // lea rax, [rbx+24]（&done）
+        _b(code, 0x8D)
+        _b(code, 0x43)
+        _b(code, 24)
+        _b(code, 0x48)                         // mov qword [rax], 1（done = 1）
+        _b(code, 0xC7)
+        _b(code, 0x00)
+        _w32(code, 1)
+        _b(code, 0x48)                         // mov rdi, rax（&done）
+        _b(code, 0x89)
+        _b(code, 0xC7)
+        _b(code, 0xBE)                         // mov esi, FUTEX_WAKE(1)
+        _w32(code, 1)
+        _b(code, 0x31)                         // xor edx, edx
+        _b(code, 0xD2)
+        _b(code, 0x45)                         // xor r10d, r10d
+        _b(code, 0x31)
+        _b(code, 0xD2)
+        _b(code, 0x45)                         // xor r8d, r8d
+        _b(code, 0x31)
+        _b(code, 0xC0)
+        _b(code, 0xB8)                         // mov eax, SYS_FUTEX(202)
+        _w32(code, SYS_FUTEX)
+        _syscall(code)
+        _b(code, 0x31)                         // xor edi, edi（exit(0)）
+        _b(code, 0xFF)
+        _b(code, 0xB8)                         // mov eax, SYS_EXIT(60)
+        _w32(code, SYS_EXIT)
+        _syscall(code)
+        // （线程不返回：exit 终结该线程；CLONE_THREAD 下不影响进程）
+    } else {
+        _b(code, 0x48)                         // mov rsp, rbp
+        _b(code, 0x89)
+        _b(code, 0xEC)
+        _b(code, 0x41)                         // pop r12
+        _b(code, 0x5C)
+        _b(code, 0x5B)                         // pop rbx
+        _b(code, 0x5D)                         // pop rbp
+        _b(code, 0x31)                         // xor eax, eax（ThreadProc 返回 0）
+        _b(code, 0xC0)
+        _ret(code)
+    }
+}
+
+/// v4.85：ELF 原生 join（RT_JOIN 的 ELF 分支）。句柄（rcx）= 记录 [0]=child_tid [8]=bp。
+/// 块布局：[0]=返回值 [16]=n [24]=完成标志(done) [32..]=实参。
+/// 自旋 futex_wait(&done, 0) 直到 worker 置 done=1；返回 [bp]。
+fn _gen_join_elf(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_JOIN, len(code))
+    let lloop = _newlab(labs)
+    _push_rbp(code)
+    _mov_rbp_rsp(code)
+    _b(code, 0x53)                              // push rbx
+    _b(code, 0x48)                              // mov rbx, [rcx+8]（= bp）
+    _b(code, 0x8B)
+    _b(code, 0x59)
+    _b(code, 8)
+    _setlab(labs, code, lloop)
+    _b(code, 0x48)                              // lea rdi, [rbx+24]（&done）
+    _b(code, 0x8D)
+    _b(code, 0x7B)
+    _b(code, 24)
+    _b(code, 0x31)                              // xor esi, esi（FUTEX_WAIT=0）
+    _b(code, 0xF6)
+    _b(code, 0x31)                              // xor edx, edx（val=0）
+    _b(code, 0xD2)
+    _b(code, 0x45)                              // xor r10d, r10d（timeout=0）
+    _b(code, 0x31)
+    _b(code, 0xD2)
+    _b(code, 0x45)                              // xor r8d, r8d（uaddr2=0）
+    _b(code, 0x31)
     _b(code, 0xC0)
+    _b(code, 0xB8)                              // mov eax, SYS_FUTEX(202)
+    _w32(code, SYS_FUTEX)
+    _syscall(code)
+    _b(code, 0x48)                              // mov rax, [rbx+24]（*done）
+    _b(code, 0x8B)
+    _b(code, 0x43)
+    _b(code, 24)
+    _b(code, 0x48)                              // cmp rax, 1
+    _b(code, 0x83)
+    _b(code, 0xF8)
+    _b(code, 1)
+    let pj = _jcc(code, 0x85)                   // jne .loop
+    _addfix(ctx.fixes, pj, lloop, FK_LAB)
+    _b(code, 0x48)                              // mov rax, [rbx]（返回值）
+    _b(code, 0x8B)
+    _b(code, 0x03)
+    _b(code, 0x5B)                              // pop rbx
+    _mov_rsp_rbp(code)
+    _pop_rbp(code)
     _ret(code)
+}
+
+/// v4.85：ELF 原生 spawn（RT_SPAWN_ELF=32）。bp 在 rcx。
+/// 为子线程 mmap 1MB 栈，把 bp 存到栈顶，clone(CLONE_THR_FLAGS)，父返回 [tid,bp] 记录，
+/// 子线程 pop 出 bp 后 call RT_SPAWN（通用入口），由 RT_SPAWN 置 done+exit(0)。
+fn _gen_spawn_elf_caller(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_SPAWN_ELF, len(code))
+    let lchild = _newlab(labs)
+    _push_rbp(code)
+    _mov_rbp_rsp(code)
+    _b(code, 0x53)                              // push rbx
+    _b(code, 0x48)                              // mov rbx, rcx（rbx = bp）
+    _b(code, 0x89)
+    _b(code, 0xCB)
+    // mmap(0, 0x100000, PROT_RW=3, MAP_PRIV|MAP_ANON=0x22, -1, 0)
+    _b(code, 0x31)                              // xor edi, edi（addr=0）
+    _b(code, 0xFF)
+    _b(code, 0xBE)                              // mov esi, 0x100000
+    _w32(code, 0x100000)
+    _b(code, 0xBA)                              // mov edx, 3（PROT_READ|PROT_WRITE）
+    _w32(code, 3)
+    _b(code, 0x41)                              // mov r10d, 0x22
+    _b(code, 0xBA)
+    _w32(code, 0x22)
+    _b(code, 0x49)                              // mov r8, -1
+    _b(code, 0xC7)
+    _b(code, 0xC0)
+    _w32(code, -1)
+    _b(code, 0x45)                              // xor r9d, r9d（offset=0）
+    _b(code, 0x31)
+    _b(code, 0xC9)
+    _b(code, 0xB8)                              // mov eax, SYS_MMAP(9)
+    _w32(code, SYS_MMAP)
+    _syscall(code)
+    _b(code, 0x48)                              // mov rsi, rax（栈基址）
+    _b(code, 0x89)
+    _b(code, 0xC6)
+    _b(code, 0x48)                              // add rsi, 0x100000
+    _b(code, 0x81)
+    _b(code, 0xC6)
+    _w32(code, 0x100000)
+    _b(code, 0x48)                              // sub rsi, 8（child_rsp）
+    _b(code, 0x83)
+    _b(code, 0xEE)
+    _b(code, 8)
+    _b(code, 0x48)                              // mov [rsi], rbx（存 bp 到栈顶）
+    _b(code, 0x89)
+    _b(code, 0x1E)
+    // clone(CLONE_THR_FLAGS=0x51F00, rsi(child_rsp), 0,0,0)
+    _b(code, 0xBF)                              // mov edi, 0x50F00
+    _w32(code, 0x50F00)
+    _b(code, 0x31)                              // xor edx, edx
+    _b(code, 0xD2)
+    _b(code, 0x45)                              // xor r10d, r10d
+    _b(code, 0x31)
+    _b(code, 0xD2)
+    _b(code, 0x45)                              // xor r8d, r8d
+    _b(code, 0x31)
+    _b(code, 0xC0)
+    _b(code, 0xB8)                              // mov eax, SYS_CLONE(56)
+    _w32(code, SYS_CLONE)
+    _syscall(code)
+    _b(code, 0x48)                              // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let pj = _jcc(code, 0x84)                   // je .child（子线程 rax=0）
+    _addfix(ctx.fixes, pj, lchild, FK_LAB)
+    // 父线程：构造记录 [child_tid, bp]
+    _b(code, 0x50)                              // push rax（保存 child_tid）
+    _b(code, 0x48)                              // mov rcx, 16（RT_ALLOC 字节数）
+    _b(code, 0xC7)
+    _b(code, 0xC1)
+    _w32(code, 16)
+    _call_rt(ctx, RT_ALLOC)                     // rax = 记录指针
+    _b(code, 0x5A)                              // pop rdx（child_tid）
+    _b(code, 0x48)                              // mov [rax], rdx（rec[0]=tid）
+    _b(code, 0x89)
+    _b(code, 0x10)
+    _b(code, 0x48)                              // mov [rax+8], rbx（rec[1]=bp）
+    _b(code, 0x89)
+    _b(code, 0x58)
+    _b(code, 8)
+    _b(code, 0x5B)                              // pop rbx
+    _mov_rsp_rbp(code)
+    _pop_rbp(code)
+    _ret(code)
+    _setlab(labs, code, lchild)
+    _b(code, 0x59)                              // pop rcx（bp 从 [child_rsp]）
+    _call_rt(ctx, RT_SPAWN)                     // 子线程跑用户函数→置done→exit(0)
 }
 
 /// __eprint_str(rcx = str)：写 stderr + 换行（v2.33）。与 __print_str 同形，
@@ -13075,9 +13342,26 @@ fn _lower_spawn(fc: FnCtx, nd: Node) -> int {
     while i < n {
         let ax = _vnew(fc)
         fc.vty.set(ax, TY_INT)
-        _ir_emit(fc, OP_ADDRF, ax, bp, 0, 24 + 8 * i)
+        _ir_emit(fc, OP_ADDRF, ax, bp, 0, 32 + 8 * i)
         _ir_emit(fc, OP_STORE, 0, ax, vals.get(i), 8)
         i = i + 1
+    }
+    if fc.target == 1 {
+        // v4.85：ELF 原生 spawn —— 调用 RT_SPAWN_ELF(bp) 走 clone+futex，
+        // 块布局改为 [0]=返回值 [8]=入口 [16]=n [24]=done [32..]=实参。
+        // 先把 done 标志清零（bump 分配器不保证归零），避免 join 误判已完成。
+        let zd2 = _vnew(fc)
+        fc.vty.set(zd2, TY_INT)
+        _ir_emit(fc, OP_CONST, zd2, 0, 0, 0)
+        let ad2 = _vnew(fc)
+        fc.vty.set(ad2, TY_INT)
+        _ir_emit(fc, OP_ADDRF, ad2, bp, 0, 24)
+        _ir_emit(fc, OP_STORE, 0, ad2, zd2, 8)
+        _ir_emit(fc, OP_ARG, 0, bp, 0, 0)
+        let d = _vnew(fc)
+        fc.vty.set(d, TY_INT)
+        _ir_emit(fc, OP_CALLRT, d, 0, 0, RT_SPAWN_ELF)
+        return d
     }
     // CreateThread(0, 0, &__spawn_entry, blk, 0, 0)：6 个实参，后两个走栈
     let entry = _vnew(fc)
@@ -16785,6 +17069,19 @@ fn _gen_print_bool_elf(ctx: Ctx) {
     ctx.rt_pos.set(RT_PBOOL, len(code))
     let lf = _newlab(labs)
     let le = _newlab(labs)
+    // v4.86：**必须在这里保存 RSI/RDI**。本函数自己不发 syscall，但它两次
+    // `call RT_PSTR`，而 `__print_str` 是**保存/恢复** RSI/RDI 的 —— 所以
+    // 调用方把变量放在 RSI/RDI 里本来也安全。
+    //
+    // 真正的坑在**栈对齐**：下面的 `_call_rt` 是普通的相对调用，被调方
+    // `__print_str` 里有 `syscall`。SysV 要求 `call` 处 rsp ≡ 0 (mod 16)。
+    // 这个例程是 `RET` 结尾的叶子，入口时 rsp ≡ 8，不 push 任何东西就
+    // `call` —— 于是 `__print_str` 拿到的栈是错位的。以前没暴露是因为
+    // 内核的 write 路径对错位栈不敏感；一旦 `__print_str` 里加了 SSE
+    // 对齐访问就会当场炸。
+    //
+    // 一次 push 同时解决两件事：对齐（8→0）与"和其余 ELF 例程同形"。
+    _b(code, 0x56)                          // push rsi（顺带对齐栈到 16）
     _cmp_imm0(code, RAX)                    // cmp rax, 0
     let p = _jcc(code, 0x84)                // je -> false
     _addfix(ctx.fixes, p, lf, FK_LAB)
@@ -16802,6 +17099,7 @@ fn _gen_print_bool_elf(ctx: Ctx) {
     _addfix(ctx.fixes, at2, ctx.str_false, FK_STR)
     _call_rt(ctx, RT_PSTR)
     _setlab(labs, code, le)
+    _b(code, 0x5E)                          // pop rsi（恢复，见函数头注释）
     _ret(code)
 }
 
@@ -19018,6 +19316,9 @@ fn main() {
     _gen_zero(ctx)
     _gen_join(ctx)
     _gen_spawn(ctx)
+    if tgt == 1 {
+        _gen_spawn_elf_caller(ctx)              // v4.85：ELF 原生 spawn（RT_SPAWN_ELF=32）
+    }
     _gen_eprint_str(ctx)
     _gen_memchr(ctx)
 _gen_memdiff(ctx)
