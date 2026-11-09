@@ -117,6 +117,7 @@ const K_MATCH = 21
 const K_DEFER = 22
 const K_SPAWN = 23
 const K_PARFOR = 24     // v4.91：并行区间循环（统一核心的编译器内建）
+const K_REDUCE = 26      // v4.92：parfor ... reduce 的归约子句
 
 // 标点 id（多字符的按"最长匹配"先行）
 const P_LPAREN = 1
@@ -242,6 +243,7 @@ const S_FOR = 18       // a = 循环变量名，b = lo，c = hi，n = 体
 // `Select-String '^const S_'` 全表核一遍。
 const S_FOREACH = 25
 const S_PARFOR = 26    // a = 循环变量名，b = lo，c = hi，n = 体
+                       // v4.92：若 slot > 0 则是 `parfor ... reduce v`，slot = 归约变量名 id
 const S_BREAK = 19
 const S_CONTINUE = 20
 const S_ASG_FIELD = 21   // a = 基址，b = 字段名 id，c = 值
@@ -419,6 +421,7 @@ fn _kw_id(w: str) -> int {
     if w == "defer" { return K_DEFER }
     if w == "spawn" { return K_SPAWN }
     if w == "parfor" { return K_PARFOR }
+    if w == "reduce" { return K_REDUCE }
     return 0
 }
 
@@ -1366,6 +1369,83 @@ fn _str_id(p: P, s: str) -> int {
     return len(p.strs) - 1
 }
 
+/// v4.92：深拷贝一条语句链，返回新链头。
+///
+/// 用途：`parfor` 在解析期把循环体克隆进一个合成的 worker 函数。
+/// **不能共享**同一份节点 —— 降低期两个函数都会顺着 `nx` 链遍历，
+/// 共享会让 worker 的遍历走出函数边界（实测编译器死循环）。
+///
+/// 只拷 `op/a/b/c/n/slot/ty` 与 `nx`；`slot`（帧槽号）在降低期才填，
+/// 这里原样传递不影响（解析期它恒为 0）。
+/// v4.92：把语句链里所有 `a == from` 的名字 id 改成 `to`。
+///
+/// 用途：`parfor ... reduce s` 克隆进 worker 后，worker 里的 `s` 要换成
+/// worker 自己的累加器名字，否则与外层同名变量撞 id。
+/// 只改 `a` 槽（名字 id 在 AST 里固定放 `a`：S_LET/S_ASSIGN/E_VAR），
+/// 并且递归进子块（`n`）与 `else` 链 —— 但**不**跟 `nx`，因为调用方
+/// 按链逐个处理。
+fn _rename_in_list(p: P, head: int, from: int, to: int) {
+    let mut cur = head
+    while cur >= 0 {
+        let nd = p.nodes.get(cur)
+        let mut na = nd.a
+        if nd.op == E_VAR || nd.op == S_LET || nd.op == S_ASSIGN {
+            if nd.a == from {
+                na = to
+            }
+        }
+        p.nodes.set(cur, Node { op: nd.op, a: na, b: nd.b, c: nd.c, n: nd.n,
+                                slot: nd.slot, ty: nd.ty, nx: nd.nx })
+        // 递归子块与 else 链
+        if nd.n >= 0 && nd.op != S_LET && nd.op != S_ASSIGN {
+            _rename_in_list(p, nd.n, from, to)
+        }
+        // 表达式子树里也可能有 E_VAR（如 `s = s + x` 的右值）
+        _rename_expr(p, nd.b, from, to)
+        _rename_expr(p, nd.c, from, to)
+        cur = nd.nx
+    }
+}
+
+/// 在表达式子树里改名字 id（E_VAR 的 a，及左右子节点递归）。
+fn _rename_expr(p: P, e: int, from: int, to: int) {
+    if e < 0 { return }
+    let nd = p.nodes.get(e)
+    if nd.op == E_VAR && nd.a == from {
+        p.nodes.set(e, Node { op: nd.op, a: to, b: nd.b, c: nd.c, n: nd.n,
+                              slot: nd.slot, ty: nd.ty, nx: nd.nx })
+        return
+    }
+    _rename_expr(p, nd.b, from, to)
+    _rename_expr(p, nd.c, from, to)
+    _rename_expr(p, nd.n, from, to)
+}
+
+fn _clone_list(p: P, head: int) -> int {
+    let mut first = -1
+    let mut prev = -1
+    let mut cur = head
+    while cur >= 0 {
+        let nd = p.nodes.get(cur)
+        let nn = _node(p, nd.op, nd.a, nd.b, nd.c)
+        // 先把节点内容完整写好（_node 只建了默认值，nx 必须是 -1）
+        p.nodes.set(nn, Node { op: nd.op, a: nd.a, b: nd.b, c: nd.c, n: nd.n,
+                               slot: nd.slot, ty: nd.ty, nx: -1 })
+        if first < 0 {
+            first = nn
+        } else {
+            // 只改 prev 的 nx，其余字段从它自己读回来原样写 —— 避免整条
+            // 重新构造时把别处刚写进去的字段又覆盖成旧值。
+            let pv = p.nodes.get(prev)
+            p.nodes.set(prev, Node { op: pv.op, a: pv.a, b: pv.b, c: pv.c, n: pv.n,
+                                     slot: pv.slot, ty: pv.ty, nx: nn })
+        }
+        prev = nn
+        cur = nd.nx
+    }
+    return first
+}
+
 fn _node(p: P, op: int, a: int, b: int, c: int) -> int {
     // n 默认 -1：S_IF 用它存 else 链头，0 会被当成"有 else"并去发节点 0
     p.nodes.push(Node { op: op, a: a, b: b, c: c, n: -1, slot: 0,
@@ -2152,10 +2232,96 @@ fn _stmt(p: P, pos: vec[int]) -> int {
         }
         _adv(pos)
         let hi = _expr(p, pos)
+        // v4.92：可选的 `reduce <变量>` 子句。
+        //
+        // 归约是并行循环里**唯一**必须让编译器知道语义的形状：多个 worker
+        // 同时写同一个累加器就是数据竞争。显式写 `reduce s` 之后，编译器
+        // 让每块累到自己那份、最后合并，用户不用碰原子操作。
+        let mut red = -1
+        if _cur(p, pos).k == T_KW && _cur(p, pos).n == K_REDUCE {
+            _adv(pos)
+            let ra = _cur(p, pos)
+            if ra.k != T_NAME {
+                _fail(p, pos, "reduce 后期望归约变量名")
+            }
+            _adv(pos)
+            red = _name_id(p, ra.s)
+        }
         let body = _block(p, pos)
+        // v4.92：**解析期合成 worker 函数**（这是并行的关键）。
+        //
+        // 为什么必须在这里做：`spawn` 只能调**函数**，而 qlmc 的函数表在
+        // 解析结束后就定长（`main` 里 `let nfunc = len(fns)`）。所以 worker
+        // 只能在解析期生成。
+        //
+        // 好处是**变量 id 不用重映射**：AST 里的变量引用存的是**全局名字 id**
+        // （`_name_id`），不是绑定。worker 里的循环变量用一个**全新名字**
+        // （带 `__parfor_` 前缀 + 序号），就自动与外层同名变量隔离开；
+        // 其余名字 id 原样共享（它们指向同一个全局名字表，语义正确）。
+        // 这比"深拷贝子树 + 重映射绑定"简单得多，也是这条路线可行的原因。
+        // **只有带 `reduce` 才合成 worker**。没有归约就没有安全的分块语义
+        // （循环体可能写任意共享状态），此时按串行 `for` 降级。
+        // 早期版本在这里无条件合成，`red = -1` 会让 `S_LET` 的 a = -1，
+        // 降低期直接报"未定义变量"（实测）。
+        if red < 0 {
+            let id0 = _node(p, S_PARFOR, _name_id(p, nm.s), lo, hi)
+            p.nodes.set(id0, Node { op: S_PARFOR, a: _name_id(p, nm.s), b: lo, c: hi,
+                                    n: body, slot: -1, ty: -1, nx: -1 })
+            return id0
+        }
+        let wname = "__parfor_" + len(p.fns).to_str()
+        let wnid = _name_id(p, wname)
+        // worker(lo: int, hi: int) -> int：返回该块自己的累加值
+        let wpbase = len(p.nodes)
+        let lo_nid = _name_id(p, wname + "_lo")
+        let hi_nid = _name_id(p, wname + "_hi")
+        _node(p, E_FPARAM, lo_nid, TY_INT, -1)
+        _node(p, E_FPARAM, hi_nid, TY_INT, -1)
+        // **必须深拷贝用户体**：同一个 AST 子树不能被两个函数共享，否则
+        // 降低时两边都遍历它，`_lower_block` 会顺着 `nx` 链走出函数边界
+        // （实测：编译器死循环）。拷贝后两个函数各有一份独立节点。
+        let body2 = _clone_list(p, body)
+        // worker 体：`let mut acc = 0; for <iv> in lo..hi { 拷贝的体 }; return acc`
+        //
+        // **累加器必须用独立名字**（不是外层那个 `red`）：否则 worker 里的
+        // `let mut s = 0` 会和外层 `s` 撞同一个名字 id，而 worker 的体里
+        // 写的是 `s = s + ...` —— 降低期会把两个不同作用域的 `s` 当成同一个，
+        // 语义直接错（更糟的是 `_var_id` 找不到会崩）。
+        // 所以在拷贝出来的体里，把归约变量的名字 id 换成 worker 自己的。
+        let acc_nid = _name_id(p, wname + "_acc")
+        _rename_in_list(p, body2, red, acc_nid)
+        let zero = _node(p, E_NUM, 0, -1, -1)
+        let lz = _node(p, S_LET, acc_nid, zero, -1)
+        p.nodes.set(lz, Node { op: S_LET, a: acc_nid, b: zero, c: -1, n: 1,
+                               slot: 0, ty: TY_INT, nx: -1 })
+        let flo = _node(p, E_VAR, lo_nid, -1, -1)
+        let fhi = _node(p, E_VAR, hi_nid, -1, -1)
+        let ffor = _node(p, S_FOR, _name_id(p, nm.s), flo, fhi)
+        p.nodes.set(ffor, Node { op: S_FOR, a: _name_id(p, nm.s), b: flo, c: fhi,
+                                 n: body2, slot: 0, ty: TY_INT, nx: -1 })
+        p.nodes.set(lz, Node { op: S_LET, a: acc_nid, b: zero, c: -1, n: 1,
+                               slot: 0, ty: TY_INT, nx: ffor })
+        let rv = _node(p, E_VAR, acc_nid, -1, -1)
+        let retn = _node(p, S_RETURN, rv, -1, -1)
+        p.nodes.set(ffor, Node { op: S_FOR, a: p.nodes.get(ffor).a,
+                                 b: p.nodes.get(ffor).b, c: p.nodes.get(ffor).c,
+                                 n: body2, slot: 0, ty: TY_INT, nx: retn })
+        let wfi = len(p.fns)
+        p.stt.set(FMOD_BASE + wfi, _cur_mod())
+        p.fns.push(Fn { name: wnid, np: 2, pbase: wpbase,
+                        ret_t: TY_INT, body: lz, nbody: 0, nlocals: -1 })
+        if DBG_PARFOR == 1 {
+            eprint("[parfor] worker fi=" + wfi.to_str() + " name=" + wname
+                   + " body=" + lz.to_str() + " nodes=" + len(p.nodes).to_str())
+        }
         let id = _node(p, S_PARFOR, _name_id(p, nm.s), lo, hi)
+        // nx 存 worker 函数下标（-1 表示"没有 worker，退化为串行"）
+        // **worker 下标存 ty 槽**，不能存 nx —— nx 是语句链指针，
+        // `_block` 的 `_set_nx(p, last, id)` 会把下一条语句写进去。
+        // 早期版本存 nx，结果 parfor 之后的第一条语句把它覆盖成节点下标
+        // （实测 `print(s)` 让 nx 从 0 变成 21）。
         p.nodes.set(id, Node { op: S_PARFOR, a: _name_id(p, nm.s), b: lo, c: hi,
-                               n: body, slot: 0, ty: TY_INT, nx: -1 })
+                               n: body, slot: red, ty: wfi, nx: -1 })
         return id
     }
     if t.k == T_KW && t.n == K_FOR {
@@ -3763,6 +3929,7 @@ const OP_NZ = 10       // dst = (a != 0) ? 1 : 0
 const OP_CMP = 11      // dst = a <cc> b ? 1 : 0；imm = cc（setcc 机器码）
 const DBG_MODIND = 0
 const DBG_FLAGLOOP = 0
+const DBG_PARFOR = 0
 const OP_LAB = 12      // imm = 标签
 const OP_JMP = 13      // goto imm
 const OP_JZ = 14       // if a == 0 goto imm
@@ -6625,23 +6792,104 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
         return
     }
     if nd.op == S_PARFOR {
-        // v4.91：`parfor` 的**第一阶段**降级 —— 语义等价于 `for`（串行）。
+        // v4.92：`parfor ... reduce acc` 并行降级。
         //
-        // 为什么先只做等价降级：并行化需要把循环体变成**独立函数**（spawn 只能
-        // 调函数），而 qlmc 的函数表在**解析期**就冻结了（`main` 里
-        // `let nfunc = len(fns)` 之后不能再加）。解析期克隆 AST 子树要把
-        // 变量 id 重映射一遍，那是独立的一次改造，且极可能破坏自举的逐字节
-        // 等价。所以本版先把**语法与语义**立住（用户写 `parfor` 能编能跑、
-        // 结果与 `for` 完全一致），并行化放在 v4.92。
-        //
-        // 这样拆分的好处：`parfor` 的语法契约现在就固定下来，后续版本换成
-        // 并行实现时，用户代码一行都不用改。
-        let lo = _lower_expr(fc, nd.b)
-        let hi = _lower_expr(fc, nd.c)
+        // nx = 解析期合成的 worker 函数下标（-1 = 没合成 → 退化串行）。
+        // worker 签名是 `(lo: int, hi: int) -> int`，返回该块自己的累加值；
+        // 父函数 spawn 它、join 拿回结果、加进归约变量。
+        // **每块独立累加**正是"无数据竞争"的根据：共享的那个 acc 只在
+        // 父线程里被写，worker 写的是自己的局部变量。
+        let wfi = nd.ty
+        if DBG_PARFOR == 1 {
+            eprint("[parfor-lower] wfi=" + nd.ty.to_str() + " slot=" + nd.slot.to_str())
+        }
+        if wfi >= 0 && nd.slot >= 0 {
+            let av0 = _var_id(fc, nd.slot)
+            let lo = _lower_expr(fc, nd.b)
+            let hi = _lower_expr(fc, nd.c)
+            // **切成 4 块并行**（编译期固定的块数）。
+            //
+            // 为什么是 4 而不是 `cpu 数`：qlmc 的 IR 里没有"运行时核数"
+            // 这个值（没有 `cores()` 内建），而块数必须是编译期常量才能
+            // 展开成 N 次 spawn。参考机是 4 核，取 4；块数多于核数会让
+            // 负载更均衡（慢核拖尾时别的核能先领下一块），但也抬高
+            // spawn 开销，所以不取更多。
+            //
+            // 每块区间 = [lo + k*(hi-lo)/4, lo + (k+1)*(hi-lo)/4)，
+            // 整除余数全给最后一块（保证合起来正好覆盖 [lo, hi)）。
+            let nch = 4
+            let span = _vnew(fc)
+            fc.vty.set(span, TY_INT)
+            _ir_emit(fc, OP_SUB, span, hi, lo, 0)
+            let four = _vnew(fc)
+            fc.vty.set(four, TY_INT)
+            _ir_emit(fc, OP_CONST, four, 0, 0, nch)
+            let per = _vnew(fc)
+            fc.vty.set(per, TY_INT)
+            _ir_emit(fc, OP_DIV, per, span, four, 0)
+            // 先 spawn 前 nch-1 块，拿句柄
+            let hs = vec[int].new(nch - 1)
+            let mut k = 0
+            while k < nch - 1 {
+                let kib = _vnew(fc)
+                fc.vty.set(kib, TY_INT)
+                _ir_emit(fc, OP_CONST, kib, 0, 0, k)
+                let s0 = _vnew(fc)
+                fc.vty.set(s0, TY_INT)
+                _ir_emit(fc, OP_MUL, s0, per, kib, 0)
+                let blo = _vnew(fc)
+                fc.vty.set(blo, TY_INT)
+                _ir_emit(fc, OP_ADD, blo, lo, s0, 0)
+                let bhi = _vnew(fc)
+                fc.vty.set(bhi, TY_INT)
+                _ir_emit(fc, OP_ADD, bhi, blo, per, 0)
+                let vv = vec[int].new(2)
+                vv.push(blo)
+                vv.push(bhi)
+                let hh = _emit_spawn_call(fc, wfi, vv)
+                hs.push(hh)
+                k = k + 1
+            }
+            // 最后一块由本线程**自己算**（省一次 spawn/join）
+            let kib2 = _vnew(fc)
+            fc.vty.set(kib2, TY_INT)
+            _ir_emit(fc, OP_CONST, kib2, 0, 0, nch - 1)
+            let s1 = _vnew(fc)
+            fc.vty.set(s1, TY_INT)
+            _ir_emit(fc, OP_MUL, s1, per, kib2, 0)
+            let lastlo = _vnew(fc)
+            fc.vty.set(lastlo, TY_INT)
+            _ir_emit(fc, OP_ADD, lastlo, lo, s1, 0)
+            let tv = vec[int].new(2)
+            tv.push(lastlo)
+            tv.push(hi)
+            let self_v = _vnew(fc)
+            fc.vty.set(self_v, TY_INT)
+            _ir_emit(fc, OP_ARG, 0, lastlo, 0, 0)
+            _ir_emit(fc, OP_ARG, 0, hi, 0, 1)
+            let selfr = _vnew(fc)
+            fc.vty.set(selfr, TY_INT)
+            _ir_emit(fc, OP_CALL, selfr, 0, 0, wfi)
+            _ir_emit(fc, OP_ADD, av0, av0, selfr, 0)
+            // 再 join 前面那些块
+            let mut j = 0
+            while j < len(hs) {
+                _ir_emit(fc, OP_ARG, 0, hs.get(j), 0, 0)
+                let rr = _vnew(fc)
+                fc.vty.set(rr, TY_INT)
+                _ir_emit(fc, OP_CALLRT, rr, 0, 0, RT_JOIN)
+                _ir_emit(fc, OP_ADD, av0, av0, rr, 0)
+                j = j + 1
+            }
+            return
+        }
+        // 退化：等价于 for
+        let lo2 = _lower_expr(fc, nd.b)
+        let hi2 = _lower_expr(fc, nd.c)
         let hiv = _new_var(fc, -2, TY_INT)
-        _ir_emit(fc, OP_MOV, hiv, hi, 0, 0)
+        _ir_emit(fc, OP_MOV, hiv, hi2, 0, 0)
         let iv = _new_var(fc, nd.a, TY_INT)
-        _ir_emit(fc, OP_MOV, iv, lo, 0, 0)
+        _ir_emit(fc, OP_MOV, iv, lo2, 0, 0)
         let ltop = _newlab(fc.labs)
         let lcont = _newlab(fc.labs)
         let lend = _newlab(fc.labs)
@@ -13403,6 +13651,81 @@ fn _lower_vecnew(fc: FnCtx, nd: Node) -> int {
 /// 为什么把"函数地址 + 实参个数"塞进块里：函数体是**并行编译**的，spawn 站点
 /// 在发射期才知道，没法往顺序段里追加"每个站点一个入口例程"。所以做成一个
 /// 通用入口 `__spawn_entry`（见 _gen_spawn），所有形状共用一个。
+/// v4.92：发射一次 `spawn fi(vals...)`，返回线程句柄的 vreg。
+///
+/// 与 `_lower_spawn` 的 IR 形状**逐条一致**（块布局 [0]=返回值 [8]=入口
+/// [16]=n [24]=done [32..]=实参）。抽出来是为了让 `parfor` 复用同一套
+/// 通路，而不是在降低期另发明一套（那会与 ELF/PE 两条 spawn 实现脱节）。
+fn _emit_spawn_call(fc: FnCtx, fi: int, vals: vec[int]) -> int {
+    let n = len(vals)
+    let sz = _vnew(fc)
+    fc.vty.set(sz, TY_INT)
+    _ir_emit(fc, OP_CONST, sz, 0, 0, 32 + 8 * n)
+    _ir_emit(fc, OP_ARG, 0, sz, 0, 0)
+    let blk = _vnew(fc)
+    fc.vty.set(blk, TY_INT)
+    _ir_emit(fc, OP_CALLRT, blk, 0, 0, RT_ALLOC)
+    let bp = _pin(fc, blk)
+    let z = _vnew(fc)
+    fc.vty.set(z, TY_INT)
+    _ir_emit(fc, OP_CONST, z, 0, 0, 0)
+    let a0 = _vnew(fc)
+    fc.vty.set(a0, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a0, bp, 0, 0)
+    _ir_emit(fc, OP_STORE, 0, a0, z, 8)
+    let fa = _vnew(fc)
+    fc.vty.set(fa, TY_INT)
+    _ir_emit(fc, OP_LEAFN, fa, 0, 0, fi)
+    let a1 = _vnew(fc)
+    fc.vty.set(a1, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a1, bp, 0, 8)
+    _ir_emit(fc, OP_STORE, 0, a1, fa, 8)
+    let nn = _vnew(fc)
+    fc.vty.set(nn, TY_INT)
+    _ir_emit(fc, OP_CONST, nn, 0, 0, n)
+    let a2 = _vnew(fc)
+    fc.vty.set(a2, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a2, bp, 0, 16)
+    _ir_emit(fc, OP_STORE, 0, a2, nn, 8)
+    // done 标志清零（bump 分配不保证归零）
+    let a2b = _vnew(fc)
+    fc.vty.set(a2b, TY_INT)
+    _ir_emit(fc, OP_ADDRF, a2b, bp, 0, 24)
+    _ir_emit(fc, OP_STORE, 0, a2b, z, 8)
+    let mut i = 0
+    while i < n {
+        let ax = _vnew(fc)
+        fc.vty.set(ax, TY_INT)
+        _ir_emit(fc, OP_ADDRF, ax, bp, 0, 32 + 8 * i)
+        _ir_emit(fc, OP_STORE, 0, ax, vals.get(i), 8)
+        i = i + 1
+    }
+    let h = _vnew(fc)
+    fc.vty.set(h, TY_INT)
+    _ir_emit(fc, OP_ARG, 0, bp, 0, 0)
+    if fc.target == 1 {
+        _ir_emit(fc, OP_CALLRT, h, 0, 0, RT_SPAWN_ELF)
+    } else {
+        let entry = _vnew(fc)
+        fc.vty.set(entry, TY_INT)
+        _ir_emit(fc, OP_RTADDR, entry, 0, 0, RT_SPAWN)
+        let zz = _vnew(fc)
+        fc.vty.set(zz, TY_INT)
+        _ir_emit(fc, OP_CONST, zz, 0, 0, 0)
+        let a3 = _vnew(fc)
+        fc.vty.set(a3, TY_INT)
+        _ir_emit(fc, OP_CONST, a3, 0, 0, 0)
+        _ir_emit(fc, OP_ARG, 0, zz, 0, 0)
+        _ir_emit(fc, OP_ARG, 0, zz, 0, 1)
+        _ir_emit(fc, OP_ARG, 0, entry, 0, 2)
+        _ir_emit(fc, OP_ARG, 0, bp, 0, 3)
+        _ir_emit(fc, OP_ARG, 0, zz, 0, 4)
+        _ir_emit(fc, OP_ARG, 0, a3, 0, 5)
+        _ir_emit(fc, OP_CALLIAT, h, 0, 0, I_CREATE)
+    }
+    return h
+}
+
 fn _lower_spawn(fc: FnCtx, nd: Node) -> int {
     let fi = _fn_index(fc, nd.a)
     if fi < 0 {
