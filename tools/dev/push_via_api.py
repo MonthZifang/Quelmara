@@ -21,8 +21,34 @@ import sys
 import urllib.error
 import urllib.request
 
-REPO = "MonthZifang/Rosoto"  # legacy-ok：GitHub 仓库名即此，非旧名残留
+# 仓库名。**优先从 origin 的 URL 推导**，这样仓库改名后不用再改脚本；
+# 推导不出来才退回这个常量。
+#
+# 注：`MonthZifang/Rosoto` 是改名前的老名，GitHub 会 302 到 `Quelmara` ——
+# 两者是**同一个仓库**（实测 API 返回同一 master），所以旧名仍然能推，
+# 但新代码一律走 origin 推导，避免"脚本里写死旧名"这种隐患。
+REPO_FALLBACK = "MonthZifang/Rosoto"  # legacy-ok：改名前的仓库名，302 到 Quelmara
 API = "https://api.github.com"
+
+
+def repo_from_origin():
+    """从 `git remote get-url origin` 推 `owner/name`；推不出返回 None。"""
+    url = sh("git", "remote", "get-url", "origin").strip()
+    if not url:
+        return None
+    # https://github.com/owner/name.git  |  git@github.com:owner/name.git
+    for pat in ("github.com/", "github.com:"):
+        if pat in url:
+            tail = url.split(pat, 1)[1]
+            if tail.endswith(".git"):
+                tail = tail[:-4]
+            parts = tail.split("/")
+            if len(parts) >= 2 and parts[0] and parts[1]:
+                return parts[0] + "/" + parts[1]
+    return None
+
+
+REPO = repo_from_origin() or REPO_FALLBACK
 
 
 def sh(*args, **kw):
@@ -71,7 +97,7 @@ def main():
     ref = api("GET", f"/repos/{REPO}/git/ref/heads/master")
     base_sha = ref["object"]["sha"]
     base = api("GET", f"/repos/{REPO}/git/commits/{base_sha}")
-    print(f"远端 master = {base_sha[:10]}")
+    print(f"仓库 {REPO}｜远端 master = {base_sha[:10]}")
 
     rtree = api("GET", f"/repos/{REPO}/git/trees/{base['tree']['sha']}?recursive=1")
     remote = {e["path"]: e["sha"] for e in rtree["tree"] if e["type"] == "blob"}
