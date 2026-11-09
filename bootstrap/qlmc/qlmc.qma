@@ -8212,6 +8212,300 @@ fn _opt_mod_ind(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
 /// **循环外的写不管**：`h` 之前由 ① 约束；`> e` 的写只是重新定义，不影响
 /// 退出那一刻的值。
 ///
+/// v4.93：**循环不变量外提（LICM）—— 只提纯算术**。
+///
+/// 前两次尝试都被 checksum 打回，教训写在下面，这次的判据是**保守到可证明**的：
+///
+///   只提 `_licm_arith` 白名单里的运算（加减乘、位运算、移位、负号）。
+///   **绝不提** MOV / CONST / 任何访存（LOAD* / STORE* / ADDR*）。
+///
+/// 三个必须同时成立的条件：
+///   ① `dst` 是临时值（`vpin == 0`）且在**整个函数**里只有这一处定义
+///      （`ndef == 1`）。这样它不可能被循环里别的指令改掉 —— 判据是
+///      "全局单定义"，不是"循环内没写"，前者更强、也更容易证明。
+///   ② `dst` **不在** `(h, e]` 区间内……其实由 ① 自动保证（唯一一处定义
+///      就在循环外或就在这条指令上）。
+///   ③ 所有操作数（`a` / `b`，仅当它们是真 vreg）也满足 ①，或者它们在
+///      `h` 之前就已经定值且**不在循环内被定义**（用 loop-defs 集合查）。
+///
+/// 为什么不用"循环内 dst 集合"（第二版的做法）：那次 `b11_nqueens` 从
+/// 184000 变 36000 —— 因为**内存写**（`col.set(r,c)`）改的不是 vreg，
+/// dst 集合看不见它。本版把范围收窄到"纯算术 + 全局单定义"，从根上绕开
+/// 别名问题：纯算术不碰内存，全局单定义不可能被任何写（寄存器或内存）
+/// 影响其"值"。
+///
+/// 外提方式：在循环头 `h` 之前插一条算新临时值，原地改成 `MOV dst, new`。
+/// `MOV` 不参与外提（不在白名单里），所以不会无限套娃。
+/// v4.93：**局部公共子表达式消除（CSE）**。
+///
+/// 为什么需要：qlmc 没有 CSE，同一个纯表达式会被反复计算。实测
+/// `b28_matrix` 的内层循环里 `r*n`（`r15*n`）被算了**两次**
+/// （`40149e` 与 `4014fd`），每次都是 `imul` + 一次 store/load 往返。
+///
+/// 实现范围与安全边界（刻意保守）：
+///   · **只在同一个基本块内**做（遇到任何跳转/标签就清空表）——
+///     跨块要支配关系，那是另一个量级的工程。
+///   · 只对 `_cse_ok` 白名单里的**纯算术**做，不碰访存、不碰调用。
+///   · 键 = `(op, a, b, imm)`。因为 `a`/`b` 是 vreg 号、`imm` 是立即数，
+///     同一个键必然算出同一个值（纯运算、无别名）。
+///   · **失效规则**：任何一条指令如果写了 `a` 或 `b`（使其旧值消失），
+///     或者操作数是内存（LOAD/STORE/CALL 等），就把表里**所有**用到
+///     这些 vreg 的条目删掉。这是最保守的做法：宁可少消，不可消错。
+///   · 复用方式是 `MOV dst, existing`（不删原指令），这样所有既有的
+///     活跃区间/使用计数逻辑都不用改。
+fn _opt_cse(fc: FnCtx, ndef: vec[int]) {
+    let ir = fc.ir
+    // 表：每 4 格一条 (op, a, b, imm) → 结果 vreg
+    let mut keys = vec[int].new(16)
+    let mut vals = vec[int].new(4)
+    let mut i = 0
+    while i < len(ir) {
+        let ins = ir.get(i)
+        // 基本块边界：清空整张表
+        if ins.op == OP_LAB || ins.op == OP_JMP || ins.op == OP_JZ ||
+           ins.op == OP_JNZ || ins.op == OP_JCMP || ins.op == OP_JCMPI ||
+           ins.op == OP_JCMPVLEN || ins.op == OP_JCMPSTR {
+            keys.clear()
+            vals.clear()
+        } else {
+            // 这条指令写了某个 vreg → 所有用到它的表项失效
+            if ins.dst > 0 && _opt_writes(ins.op) == 1 {
+                let mut k = 0
+                let mut w = 0
+                while k * 4 + 3 < len(keys) {
+                    let ka = keys.get(k * 4 + 1)
+                    let kb = keys.get(k * 4 + 2)
+                    if ka == ins.dst || kb == ins.dst || ins.dst == 0 {
+                        // 丢弃这一项
+                    } else {
+                        keys.set(w * 4, keys.get(k * 4))
+                        keys.set(w * 4 + 1, ka)
+                        keys.set(w * 4 + 2, kb)
+                        keys.set(w * 4 + 3, keys.get(k * 4 + 3))
+                        vals.set(w, vals.get(k))
+                        w = w + 1
+                    }
+                    k = k + 1
+                }
+                // 压缩到 w 项。**必须按 4 倍关系砍 keys 与 vals** ——
+                // keys 每项 4 格、vals 每项 1 格。早期版本只 pop 了
+                // `len(vals)-w` 组，但循环条件是 `len(vals) > w`，
+                // 而 keys 比 vals 长 4 倍，两者会失去同步（实测
+                // `b49_floyd` checksum 变成 0）。
+                while len(vals) > w {
+                    vals.pop()
+                }
+                while len(keys) > w * 4 {
+                    keys.pop()
+                }
+            }
+            // **`b` 槽不是 vreg 的操作码必须排除**（BINI 的 b 是立即数、
+            // DIVC 的 b 是 OP_DIV/OP_MOD 子操作码）。早期版本把它们收进来，
+            // 于是 `(op,a,b,imm)` 的键会被两个语义完全不同的指令共用
+            // （实测 `b49_floyd` checksum 变 0）。
+            if _cse_ok(ins.op) == 1 && ins.dst > 0 && ins.a > 0 &&
+               ins.op != OP_BINI && ins.op != OP_DIVC &&
+               ins.dst < len(ndef) && ndef.get(ins.dst) == 1 &&
+               fc.vpin.get(ins.dst) == 0 {
+                // 查表
+                let mut hit = -1
+                let mut k = 0
+                while k * 4 + 3 < len(keys) {
+                    if keys.get(k * 4) == ins.op && keys.get(k * 4 + 1) == ins.a &&
+                       keys.get(k * 4 + 2) == ins.b && keys.get(k * 4 + 3) == ins.imm {
+                        hit = vals.get(k)
+                        k = len(vals)
+                    } else {
+                        k = k + 1
+                    }
+                }
+                if hit >= 0 {
+                    // 复用已有结果：就地改成 MOV
+                    ir.set(i, Ir { op: OP_MOV, dst: ins.dst, a: hit, b: 0, imm: 0 })
+                } else {
+                    keys.push(ins.op)
+                    keys.push(ins.a)
+                    keys.push(ins.b)
+                    keys.push(ins.imm)
+                    vals.push(ins.dst)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+/// CSE 白名单：纯算术、无副作用、不读内存。
+fn _cse_ok(op: int) -> int {
+    if op == OP_ADD || op == OP_SUB || op == OP_MUL { return 1 }
+    if op == OP_AND || op == OP_OR || op == OP_XOR { return 1 }
+    if op == OP_SHL || op == OP_SAR || op == OP_SHR { return 1 }
+    if op == OP_NEG || op == OP_BNOT { return 1 }
+    // BINI / DIVC 的 `b` 槽不是 vreg，键无法用它区分，刻意不收。
+    return 0
+}
+
+fn _opt_licm(fc: FnCtx, ndef: vec[int]) {
+    let ir = fc.ir
+    // 先收集全部回边 (h, e)。
+    let mut hs = vec[int].new(8)
+    let mut es = vec[int].new(8)
+    let mut i = 0
+    while i < len(ir) {
+        let ins = ir.get(i)
+        if _is_backedge(ins.op) == 1 {
+            let hh = _lab_index(ir, ins.imm)
+            if hh >= 0 && hh < i {
+                hs.push(hh)
+                es.push(i)
+            }
+        }
+        i = i + 1
+    }
+    let mut li = len(hs) - 1
+    let mut budget = 128
+    while li >= 0 && budget > 0 {
+        let e = es.get(li)
+        let mut h = hs.get(li)
+        li = li - 1
+        if h < 0 || h >= e || e > len(ir) {
+            continue
+        }
+        // 循环内被定义过的 vreg（用 ndef 的变化判断太贵，直接扫一遍）
+        let mut ldef = vec[int].new(16)
+        let mut m = h
+        while m <= e && m < len(ir) {
+            let x = ir.get(m)
+            if x.dst > 0 && _opt_writes(x.op) == 1 {
+                ldef.push(x.dst)
+            }
+            m = m + 1
+        }
+        let mut k = e - 1
+        while k > h && budget > 0 {
+            let w = ir.get(k)
+            if _licm_arith(w.op) == 1 &&
+               w.dst > 0 && w.dst < len(ndef) && ndef.get(w.dst) == 1 &&
+               fc.vpin.get(w.dst) == 0 && _ty_is_agg(fc.vty.get(w.dst)) == 0 &&
+               _licm_inv2(fc, ir, w.a, h, ldef, ndef) == 1 &&
+               (w.b <= 0 || _licm_inv2(fc, ir, w.b, h, ldef, ndef) == 1) {
+                let nv = _vnew(fc)
+                fc.vty.set(nv, fc.vty.get(w.dst))
+                fc.vpin.set(nv, 0)
+                _ir_insert(fc, h, w.op, nv, w.a, w.b, w.imm)
+                // 新 vreg 的活跃区间（`_vnew` 记的是"追加到末尾"）
+                fc.vstart.set(nv, h)
+                fc.vend.set(nv, k + 1)
+                ir.set(k + 1, Ir { op: OP_MOV, dst: w.dst, a: nv, b: 0, imm: 0 })
+                // 操作数最后一次使用挪到循环外
+                if w.a > 0 && w.a < len(fc.vstart) && fc.vstart.get(w.a) > h {
+                    fc.vstart.set(w.a, h)
+                }
+                if w.b > 0 && w.b < len(fc.vstart) && fc.vstart.get(w.b) > h {
+                    fc.vstart.set(w.b, h)
+                }
+                h = h + 1
+                budget = budget - 1
+            }
+            k = k - 1
+        }
+    }
+}
+
+/// 回边判定（与 `_opt_mod_ind` 收集循环时一致）。
+fn _is_backedge(op: int) -> int {
+    if op == OP_JMP || op == OP_JCMP || op == OP_JCMPI ||
+       op == OP_JZ || op == OP_JNZ {
+        return 1
+    }
+    return 0
+}
+
+/// LICM 白名单：**只列纯算术**。特意不含 MOV / CONST / 任何访存。
+fn _licm_arith(op: int) -> int {
+    if op == OP_ADD || op == OP_SUB || op == OP_MUL { return 1 }
+    if op == OP_AND || op == OP_OR || op == OP_XOR { return 1 }
+    if op == OP_SHL || op == OP_SAR || op == OP_SHR { return 1 }
+    if op == OP_NEG || op == OP_BNOT { return 1 }
+    if op == OP_BINI { return 1 }
+    return 0
+}
+
+/// `v` 相对**当前这个循环**（头 `h`）不变吗？
+///
+/// 判据分三层，缺一不可：
+///   ① 不在本循环 `(h, e]` 内被定义；
+///   ② 在本循环**外**、但在 `h` **之前**有定义（否则是未定义值）；
+///   ③ `v` 的定义点**在所有外层循环之外**也不行的话 —— 见下面这条关键注释。
+///
+/// **③ 是 v4.93 第二版踩的坑（必须是最后一道闸）**：
+/// 最早我只看 ①②。但对**嵌套循环**，`v` 可能在本层循环之前定义、
+/// 之后又被**本层循环自己的外层**改写 —— 单调 ①② 会把它当成本层不变量。
+/// 实测 `b28_matrix`：内层 `j` 循环里 `r*n` 的 `r` 是外层循环变量，
+/// 它在 `j` 循环之前"有定义"（外层循环头之前赋过 0），但它每个外层轮次
+/// 都变，把 `r*n` 提出去之后 checksum 从 960991321 变成 326563275。
+///
+/// 所以判据改成**保守版**：`v` 的定义必须**唯一**（`ndef == 1`）——
+/// 全函数只有一处写，那它在任何循环里都不可能被改写，无论嵌套多深。
+/// 这是可证明的：唯一写点要么在本循环内（被 ① 排除），要么在本层循环
+/// 之前执行且之后永不改变。
+fn _licm_inv2(fc: FnCtx, ir: vec[Ir], v: int, h: int, ldef: vec[int],
+              ndef: vec[int]) -> int {
+    if v <= 0 {
+        return 1
+    }
+    if _vec_has(ldef, v) == true {
+        return 0            // 本循环内被写过 → 不是不变量
+    }
+    // **关键判据**：`v` 的每一处定义都必须落在 h **之前且不在任何
+    // 包含本循环的外层循环里**。
+    //
+    // 换一种等价的说法：把 `v` 的所有定义点收集起来，要求它们
+    //   (a) 全部 `< h`，且
+    //   (b) 没有任何一个落在"某个同时包含 h 的外层循环"的区间内。
+    //
+    // (b) 才是嵌套循环的正确判据。`b28_matrix` 的内层 `j` 循环里
+    // `r*n`：`r` 在外层 `r` 循环里被 `r = r + 1` 定义 —— 那处定义虽然在
+    // h 之前，但它在**包住 h 的外层循环**里，所以每一轮外层都要变，
+    // 不能提。反之 `n` 只在函数入口定义一次、在任何循环之外，可以提。
+    //
+    // 形参（OP_PARAM/OP_PARAMSTK）也要排除：递归时每次调用都拿到新值。
+    let mut m = 0
+    while m < h {
+        let x = ir.get(m)
+        if x.dst == v && _opt_writes(x.op) == 1 {
+            if x.op == OP_PARAM || x.op == OP_PARAMSTK {
+                return 0
+            }
+            if _licm_in_outer_loop(ir, m, h) == 1 {
+                return 0        // 定义点在被外层循环里 → 每个外层轮次都会变
+            }
+        }
+        m = m + 1
+    }
+    return 0
+}
+
+/// IR 下标 `defpos` 是否落在某个**同时包含 `h`** 的外层循环里？
+///
+/// 判法：找所有满足 `h2 < defpos` 且 `h2 < h <= e2` 的回边 (h2, e2)。
+/// 若存在这样的外层循环，说明 `defpos` 在它的体内 —— 每次外层迭代都会
+/// 重新执行，那个值对本层循环不是不变量。
+fn _licm_in_outer_loop(ir: vec[Ir], defpos: int, h: int) -> int {
+    let mut i = 0
+    while i < len(ir) {
+        let ins = ir.get(i)
+        if _is_backedge(ins.op) == 1 {
+            let h2 = _lab_index(ir, ins.imm)
+            if h2 >= 0 && h2 < i && h2 < defpos && defpos <= i && h2 < h && i >= h {
+                return 1
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 fn _opt_flag_loop(fc: FnCtx, use: vec[int], ndef: vec[int]) {
     let ir = fc.ir
     let mut n = len(ir)
@@ -8519,6 +8813,11 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     // 单线程纯算术基准的收益（b28 -5.7%）撑不起"递归/数组/容器全类别
     // 可能算错"的风险，所以关掉。下一步见 docs/07-gaps.md。
     // 拷贝传播放在融合之前：它先把纯搬运消掉，融合看到的形状更干净
+    // v4.93：**CSE 已撤回**（实现保留在 `_opt_cse`，但不在流水线里）。
+    // 三版修复都被 checksum 打回：`b49_floyd` 的 5994 变成 0。
+    // 根因尚未定位 —— 我排查过 keys/vals 压缩失配、`b` 槽非 vreg 两类，
+    // 都修了但现象不变，说明对这套 IR 的某条语义理解还有偏差。
+    // 按项目纪律：现象没解释清楚就不留在树上运行。见 docs/07-gaps.md。
     _opt_copy(fc, ir, use, ndef)
     _tri("    opt: copy ir=", len(ir))
     // 融合要用到完整的 use[]，所以放在标记之后、DCE 之前
@@ -8559,6 +8858,9 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     // 放在归纳削减之后：它只改 JMP 目标、不插入指令，所以不需要重算长度；
     // 但它**读了 use/ndef 之外的全函数结构**，放在 DCE 之前让死代码一起收掉。
     _opt_flag_loop(fc, use, ndef)
+    // v4.93：循环不变量外提。放在最后（它插入指令、改活跃区间，
+    // 之后不再有依赖 IR 下标的 pass）。
+    _opt_licm(fc, ndef)
     // **`use` 和 `ndef` 都要先清零再重算**（v3.89）。以前只清了 `use`，
     // `_opt_ndef` 是**累加**语义，于是第二次调用后每个 vreg 的定义次数都翻倍 ——
     // `_opt_copy` 的 `ndef.get(d) == 1` 条件就永远不成立，归纳削减插的
