@@ -7929,7 +7929,7 @@ fn _const_before(ir: vec[Ir], v: int, h: int) -> int {
 /// 归纳削减的**变换**部分（拆出来只为压帧槽：合在 `_opt_mod_ind` 里要 417 个槽，
 /// 上限 416）。参数是已经验证过的形状 + 守卫信息。
 fn _mod_ind_apply(fc: FnCtx, h: int, hit: int, di: int, i0: int, c: int, dd: int,
-                  k0: int, step: int, guard: int, lim: int, dst: int) {
+                  k0: int, k0_rt: int, step: int, guard: int, lim: int, dst: int) {
     let ir = fc.ir
         let r0 = (k0 * c) % dd
         let v = _new_var(fc, -1, TY_INT)
@@ -7944,7 +7944,7 @@ fn _mod_ind_apply(fc: FnCtx, h: int, hit: int, di: int, i0: int, c: int, dd: int
             _ir_insert(fc, hit + 2, OP_LAB, 0, 0, 0, lfast)
             _ir_insert(fc, hit + 3, OP_MOV, dst, v, 0, 0)
             _ir_insert(fc, hit + 4, OP_LAB, 0, 0, 0, ldone)
-            _ir_insert(fc, hit, OP_JCMP, 0x8C, i0, lv, lfast)   // i0 < LIMIT → 快路
+            _ir_insert(fc, hit, OP_JCMP, 0x82, i0, lv, lfast)   // i0 <u LIMIT（负数自动慢路）
             dbase = di + 5
             _ir_insert(fc, h, OP_CONST, lv, 0, 0, lim)
         } else {
@@ -7975,8 +7975,43 @@ fn _mod_ind_apply(fc: FnCtx, h: int, hit: int, di: int, i0: int, c: int, dd: int
         // lskip 不再被任何分支引用，但标签本身保留（标签 id 是全局递增的，
         // 删掉会让后面的 id 错位）
         _ir_insert(fc, dbase + 3, OP_LAB, 0, 0, 0, lskip)
-        // 2) 循环头之前的常量初始化（h 在最前，最后插）
-        _ir_insert(fc, h, OP_CONST, v, 0, 0, r0)
+        // 2) 循环头之前的初始化（h 在最前，最后插）
+        if k0_rt == 1 {
+            // 运行期算 `v = (i0 * C) % D`。
+            // **插入顺序反着来**（后插入的排在前面），所以先插 DIVC。
+            // 新临时值必须用 `_vnew` 并显式写好 vstart/vend —— `_ir_insert`
+            // 只会把已有区间整体移位，不会替新值建区间。漏了会报
+            // "内部错误：值 N 未分配位置"。
+            let tv = _vnew(fc)
+            fc.vty.set(tv, TY_INT)
+            fc.vpin.set(tv, 0)
+            _ir_insert(fc, h, OP_DIVC, v, tv, OP_MOD, dd)
+            _ir_insert(fc, h, OP_BINI, tv, i0, OP_MUL, c)
+            fc.vstart.set(tv, h)
+            fc.vend.set(tv, h + 1)
+            if i0 > 0 && i0 < len(fc.vstart) && fc.vstart.get(i0) > h {
+                fc.vstart.set(i0, h + 1)
+            }
+        } else {
+            _ir_insert(fc, h, OP_CONST, v, 0, 0, r0)
+        }
+}
+
+fn _mod_ind_param_init(ir: vec[Ir], v: int, h: int) -> int {
+    let mut m = 0
+    let mut last = -1
+    while m < h {
+        let x = ir.get(m)
+        if x.dst == v && _opt_writes(x.op) == 1 { last = m }
+        m = m + 1
+    }
+    if last < 0 { return 0 }
+    let d = ir.get(last)
+    if d.op == OP_PARAM || d.op == OP_PARAMSTK { return 1 }
+    if d.op == OP_MOV && d.a > 0 && d.a != v {
+        return _mod_ind_param_init(ir, d.a, last)
+    }
+    return 0
 }
 
 fn _vec_has(v: vec[int], x: int) -> bool {
@@ -8094,9 +8129,13 @@ fn _opt_mod_ind(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
         }
         // 循环外最后一次定义 i0 必须是常量 >= 0
         let k0 = _const_before(ir, i0, h)
+        let mut k0_rt = 0
         if k0 < 0 {
-            if DBG_MODIND == 1 { eprint("[modind] i0 循环外不是常量") }
-            continue
+            if _mod_ind_param_init(ir, i0, h) == 0 {
+                if DBG_MODIND == 1 { eprint("[modind] i0 不是形参") }
+                continue
+            }
+            k0_rt = 1
         }
         // 守卫 `i0 < N`：cc = jge（"到了上界就退出"）。两种形态都要认 ——
         // `while i < 20000000` 折成立即数（JCMPI），`while i < n`（n 是变量）
@@ -8138,7 +8177,7 @@ fn _opt_mod_ind(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
         if DBG_MODIND == 1 { eprint("[modind] 命中：D=" + dd.to_str() + " C=" + c.to_str() + " k0=" + k0.to_str() + " N=" + bound.to_str() + " guard=" + guard.to_str()) }
         let dstd = w.dst
         let nv0 = len(fc.vloc)
-        _mod_ind_apply(fc, h, hit, di, i0, c, dd, k0, step, guard, lim, dstd)
+        _mod_ind_apply(fc, h, hit, di, i0, c, dd, k0, k0_rt, step, guard, lim, dstd)
         // 变换会 `_vnew` 出新临时值，而 `cok/cval/use/ndef` 是按**旧**的 vreg 数
         // 开的 —— `_opt_copy` / `_opt_fuse` 里有几处 `use.get(d)` 没做上界检查，
         // 不补齐就是 "vec index out of bounds"（v2.87 试无分支回绕时踩的）。
