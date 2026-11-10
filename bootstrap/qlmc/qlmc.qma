@@ -13776,8 +13776,35 @@ fn _vec_field(fc: FnCtx, h: int, off: int) -> int {
                 }
             }
         }
-        // 任何非纯指令都停（含 PRINT/ARG/EXIT/JMP 等全部副作用）
-        if _opt_pure(w.op) == 0 {
+        // **哪些指令可以让扫描继续**（v4.96 重写）。
+        //
+        // 原来的判据是 `_opt_pure(w.op) == 0 → break`，但 `_opt_pure` **不含
+        // LOAD**。于是"读一次内存"就让缓存失效 —— 而 `vec.get` 之间必然
+        // 夹着别的 LOAD（比较、下标计算），所以这个缓存实际上只在同一个
+        // 短表达式里有效，跨语句从来命中不了。
+        //
+        // 实测症状：`b18_insertion`（占全部基准总耗时 13.6%）的 `a.get(y)`
+        // 在 `if` 里读一次、在 `a.set(y+1, a.get(y))` 里又读一次，
+        // 两次都重新解引用句柄；`b17_bubble`（46.4%）重复 5 次。
+        //
+        // 正确判据只看**会不会改变缓存值**：
+        //   · 读内存（LOAD/LOADD/LOADX…）不改变 `[h+off]` → 放行；
+        //   · 写数据块（STORE*/COPY/ZERO）不改句柄字段 → 放行；
+        //   · 写句柄槽 `h` → 停（下面的独立判断已覆盖）；
+        //   · 控制流（LAB/JMP/JCC/PRINT/ARG/CALL/EXIT…）→ 停，因为
+        //     前面那次计算可能不在同一支配路径上。
+        let mut stop = 0
+        if w.op == OP_LAB || w.op == OP_JMP || w.op == OP_JZ || w.op == OP_JNZ ||
+           w.op == OP_JCMP || w.op == OP_JCMPI || w.op == OP_JCMPVLEN ||
+           w.op == OP_JCMPSTR || w.op == OP_PRINT || w.op == OP_EXIT ||
+           w.op == OP_ARG || w.op == OP_STKARG || w.op == OP_CALL ||
+           w.op == OP_CALLRT || w.op == OP_CALLIAT || w.op == OP_CALLR ||
+           w.op == OP_CALLV || w.op == OP_RET || w.op == OP_RETAGG ||
+           w.op == OP_RETSRET || w.op == OP_SPIN || w.op == OP_MEMCPYN ||
+           w.op == OP_STKALLOC || w.op == OP_STKFREE {
+            stop = 1
+        }
+        if stop == 1 {
             break
         }
         // 写 h 也停
