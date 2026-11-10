@@ -74,29 +74,63 @@ def disasm(path):
     return rows
 
 
-def hot_loop(rows):
-    """找"cmp 大常数 + jcc" 起头的热循环，返回到回边为止的指令序列。
+def backedges(rows):
+    """收集所有回边 (lo, hi)，hi 是回跳指令的下标。"""
+    out = []
+    for i, (addr, txt) in enumerate(rows):
+        m = re.search(r"j\w+\s+0x([0-9a-f]+)", txt)
+        if not m:
+            continue
+        tgt = int(m.group(1), 16)
+        if tgt > addr:
+            continue
+        lo = None
+        for j, (a2, _) in enumerate(rows):
+            if a2 >= tgt:
+                lo = j
+                break
+        if lo is not None and lo < i:
+            out.append((lo, i))
+    return out
 
-    **要从后往前找**：运行库里也有 `cmp 常数` 的循环（memcpy/alloc 等），
-    而且它们在 .text 前面。用户代码（main）在最后，热循环也在最后。
-    v4.103 第一版从前往后找，五个基准都匹配到同一条运行库循环（都是 43 条），
-    这是明显的识别错误。
+
+def hot_loop(rows):
+    """找**最内层**热循环。
+
+    v4.104 修正：原来靠"`cmp 大常数` + jcc"识别循环头，结果是
+    `b17_bubble` / `b28_matrix` 都匹配到同一个运行库循环（都显示 43 条、
+    7% 浪费），完全没有区分度。
+
+    改成按**回边**识别，并优先选**跨度最小但指令数够多**的那个：
+      · 纯运行库的小循环（分配器自旋等）指令太少，排除；
+      · 嵌套循环取最内层（跨度最小），因为它才是热点。
     """
-    for i in range(len(rows) - 1, -1, -1):
-        txt = rows[i][1]
-        if BIGCMP.search(txt):
-            # 往下找 jcc，再往下找 jmp 回跳
-            for j in range(i, min(i + 3, len(rows))):
-                if re.search(r"\bj(g|l|le|ge|ne|e|b|a)\b", rows[j][1]):
-                    start = j + 1
-                    for k in range(start, min(start + 200, len(rows))):
-                        if re.match(r"jmp\s+0x([0-9a-f]+)", rows[k][1]):
-                            tgt = int(re.match(r"jmp\s+0x([0-9a-f]+)",
-                                               rows[k][1]).group(1), 16)
-                            if tgt <= rows[k][0]:
-                                return rows[start:k + 1]
-                    break
-    return []
+    cands = []
+    for lo, hi in backedges(rows):
+        seq = rows[lo:hi + 1]
+        if len(seq) < 10:         # 太短的多半是运行库自旋，不是基准热循环
+            continue
+        addr_span = rows[hi][0] - rows[lo][0]
+        cands.append((addr_span, len(seq), seq))
+    if not cands:
+        return []
+    # **按"浪费密度"降序**取第一个。
+    #
+    # 迭代过程（都试过）：
+    #   跨度最小  -> 全匹配到运行库 6 条自旋（无区分度）
+    #   指令数最多 -> 匹配到外层循环（b34 显示 50 条 2%，而手工分析是
+    #               最内层 20 条 45%，完全失真）
+    #
+    # 现在按"浪费占比"选 —— 这才是这个工具要回答的问题
+    # （"哪个循环最值得优化"），而不是"哪个循环最大"。
+    scored = []
+    for span, n, seq in cands:
+        a = audit(seq)
+        waste = a["spill"] * 2 + a["movrr"]
+        density = waste / max(a["insn"], 1)
+        scored.append((density, waste, n, seq))
+    scored.sort(key=lambda t: (-t[0], -t[1]))
+    return scored[0][3]
 
 
 def audit(seq):
