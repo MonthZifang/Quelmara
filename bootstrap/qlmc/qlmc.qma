@@ -4286,7 +4286,8 @@ const RT_CPUID1ECX = 29
 const RT_CGT = 30
 const RT_SYSCALL = 31
 const RT_SPAWN_ELF = 32  // v4.85：ELF 原生 spawn 调用方（clone），替代 Win32 CreateThread
-const RT_COUNT = 33      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
+const RT_NCORES = 33     // v4.99：可用 CPU 数（ELF: sched_getaffinity）
+const RT_COUNT = 34      // 加例程时**只改这里**（下面两个 vec 大小都引用它）
 
 fn _slot_disp(slot: int) -> int {
     return -8 * (slot + 1)
@@ -6807,64 +6808,108 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
             let av0 = _var_id(fc, nd.slot)
             let lo = _lower_expr(fc, nd.b)
             let hi = _lower_expr(fc, nd.c)
-            // **切成 4 块并行**（编译期固定的块数）。
+            // **块数 = 运行期 `cores()`**（v4.99）。
             //
-            // 为什么是 4 而不是 `cpu 数`：qlmc 的 IR 里没有"运行时核数"
-            // 这个值（没有 `cores()` 内建），而块数必须是编译期常量才能
-            // 展开成 N 次 spawn。参考机是 4 核，取 4；块数多于核数会让
-            // 负载更均衡（慢核拖尾时别的核能先领下一块），但也抬高
-            // spawn 开销，所以不取更多。
+            // 原来是编译期写死 4 —— 换到 8 核 / 16 核机器只用到 4 个核。
+            // 现在块数从 `cores()` 拿（ELF 下是 sched_getaffinity 的实际
+            // 置位数，会反映 cgroup / taskset 的限制）。
             //
-            // 每块区间 = [lo + k*(hi-lo)/4, lo + (k+1)*(hi-lo)/4)，
-            // 整除余数全给最后一块（保证合起来正好覆盖 [lo, hi)）。
-            let nch = 4
+            // 做法：不再展开成 N 次 spawn，而是**运行期循环** spawn
+            // （`spawn` 在循环里是合法的，实测可用）。最后一块仍由父线程
+            // 自己算，省一次 spawn/join。
+            //
+            // 块数与核数的关系：`ncores` 块分给 `ncores` 个核，每核一块，
+            // 额外的 spawn 开销最小；再细的切块（如 2*ncores）能改善
+            // 慢核拖尾，但 spawn 成本（每次 mmap 1MB 栈 + clone）在
+            // 中小负载上不划算，所以按 1:1。
+            let nch = _vnew(fc)
+            fc.vty.set(nch, TY_INT)
+            _ir_emit(fc, OP_CALLRT, nch, 0, 0, RT_NCORES)
+            // nch = max(1, min(nch, 64)) —— 防止异常环境给出过大值
+            let one_c = _vnew(fc)
+            fc.vty.set(one_c, TY_INT)
+            _ir_emit(fc, OP_CONST, one_c, 0, 0, 1)
+            let lmax = _newlab(fc.labs)
+            let lok1 = _newlab(fc.labs)
+            _ir_emit(fc, OP_JCMP, 0x8D, nch, one_c, lok1)   // nch >= 1 就跳过
+            _ir_emit(fc, OP_LAB, 0, 0, 0, lmax)
+            _ir_emit(fc, OP_MOV, nch, one_c, 0, 0)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, lok1)
+            let c64 = _vnew(fc)
+            fc.vty.set(c64, TY_INT)
+            _ir_emit(fc, OP_CONST, c64, 0, 0, 64)
+            let lok2 = _newlab(fc.labs)
+            _ir_emit(fc, OP_JCMP, 0x8E, nch, c64, lok2)     // nch <= 64 就跳过
+            _ir_emit(fc, OP_MOV, nch, c64, 0, 0)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, lok2)
+            // span = hi - lo; per = span / nch
             let span = _vnew(fc)
             fc.vty.set(span, TY_INT)
             _ir_emit(fc, OP_SUB, span, hi, lo, 0)
-            let four = _vnew(fc)
-            fc.vty.set(four, TY_INT)
-            _ir_emit(fc, OP_CONST, four, 0, 0, nch)
             let per = _vnew(fc)
             fc.vty.set(per, TY_INT)
-            _ir_emit(fc, OP_DIV, per, span, four, 0)
-            // 先 spawn 前 nch-1 块，拿句柄
-            let hs = vec[int].new(nch - 1)
-            let mut k = 0
-            while k < nch - 1 {
-                let kib = _vnew(fc)
-                fc.vty.set(kib, TY_INT)
-                _ir_emit(fc, OP_CONST, kib, 0, 0, k)
-                let s0 = _vnew(fc)
-                fc.vty.set(s0, TY_INT)
-                _ir_emit(fc, OP_MUL, s0, per, kib, 0)
-                let blo = _vnew(fc)
-                fc.vty.set(blo, TY_INT)
-                _ir_emit(fc, OP_ADD, blo, lo, s0, 0)
-                let bhi = _vnew(fc)
-                fc.vty.set(bhi, TY_INT)
-                _ir_emit(fc, OP_ADD, bhi, blo, per, 0)
-                let vv = vec[int].new(2)
-                vv.push(blo)
-                vv.push(bhi)
-                let hh = _emit_spawn_call(fc, wfi, vv)
-                hs.push(hh)
-                k = k + 1
-            }
-            // 最后一块由本线程**自己算**（省一次 spawn/join）
-            let kib2 = _vnew(fc)
-            fc.vty.set(kib2, TY_INT)
-            _ir_emit(fc, OP_CONST, kib2, 0, 0, nch - 1)
+            _ir_emit(fc, OP_DIV, per, span, nch, 0)
+            // 句柄数组：最多 64 块
+            let hbuf = _vnew(fc)
+            fc.vty.set(hbuf, TY_INT)
+            let sz64 = _vnew(fc)
+            fc.vty.set(sz64, TY_INT)
+            _ir_emit(fc, OP_CONST, sz64, 0, 0, 512)
+            _ir_emit(fc, OP_ARG, 0, sz64, 0, 0)
+            _ir_emit(fc, OP_CALLRT, hbuf, 0, 0, RT_ALLOC)
+            let hbp = _pin(fc, hbuf)
+            // k = 0; while k < nch-1 { spawn(k) ; k++ }
+            let kv = _new_var(fc, -3, TY_INT)
+            let zero_k = _vnew(fc)
+            fc.vty.set(zero_k, TY_INT)
+            _ir_emit(fc, OP_CONST, zero_k, 0, 0, 0)
+            _ir_emit(fc, OP_MOV, kv, zero_k, 0, 0)
+            let lastm1 = _vnew(fc)
+            fc.vty.set(lastm1, TY_INT)
+            _ir_emit(fc, OP_SUB, lastm1, nch, one_c, 0)
+            let ltop = _newlab(fc.labs)
+            let lcont = _newlab(fc.labs)
+            let lend = _newlab(fc.labs)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, ltop)
+            _ir_emit(fc, OP_JCMP, 0x8D, kv, lastm1, lend)   // k >= nch-1 退出
+            let s0 = _vnew(fc)
+            fc.vty.set(s0, TY_INT)
+            _ir_emit(fc, OP_MUL, s0, per, kv, 0)
+            let blo = _vnew(fc)
+            fc.vty.set(blo, TY_INT)
+            _ir_emit(fc, OP_ADD, blo, lo, s0, 0)
+            let bhi = _vnew(fc)
+            fc.vty.set(bhi, TY_INT)
+            _ir_emit(fc, OP_ADD, bhi, blo, per, 0)
+            let vv = vec[int].new(2)
+            vv.push(blo)
+            vv.push(bhi)
+            let hh = _emit_spawn_call(fc, wfi, vv)
+            // hbuf[k] = hh
+            let koff = _vnew(fc)
+            fc.vty.set(koff, TY_INT)
+            let eight = _vnew(fc)
+            fc.vty.set(eight, TY_INT)
+            _ir_emit(fc, OP_CONST, eight, 0, 0, 8)
+            _ir_emit(fc, OP_MUL, koff, kv, eight, 0)
+            let kaddr = _vnew(fc)
+            fc.vty.set(kaddr, TY_INT)
+            _ir_emit(fc, OP_ADD, kaddr, hbp, koff, 0)
+            _ir_emit(fc, OP_STORE, 0, kaddr, hh, 8)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, lcont)
+            let ink = _vnew(fc)
+            fc.vty.set(ink, TY_INT)
+            _ir_emit(fc, OP_CONST, ink, 0, 0, 1)
+            _ir_emit(fc, OP_ADD, kv, kv, ink, 0)
+            _ir_emit(fc, OP_JMP, 0, 0, 0, ltop)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, lend)
+            // 最后一块由父线程自己算
             let s1 = _vnew(fc)
             fc.vty.set(s1, TY_INT)
-            _ir_emit(fc, OP_MUL, s1, per, kib2, 0)
+            _ir_emit(fc, OP_MUL, s1, per, lastm1, 0)
             let lastlo = _vnew(fc)
             fc.vty.set(lastlo, TY_INT)
             _ir_emit(fc, OP_ADD, lastlo, lo, s1, 0)
-            let tv = vec[int].new(2)
-            tv.push(lastlo)
-            tv.push(hi)
-            let self_v = _vnew(fc)
-            fc.vty.set(self_v, TY_INT)
             _ir_emit(fc, OP_ARG, 0, lastlo, 0, 0)
             _ir_emit(fc, OP_ARG, 0, hi, 0, 1)
             let selfr = _vnew(fc)
@@ -6872,15 +6917,34 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
             _ir_emit(fc, OP_CALL, selfr, 0, 0, wfi)
             _ir_emit(fc, OP_ADD, av0, av0, selfr, 0)
             // 再 join 前面那些块
-            let mut j = 0
-            while j < len(hs) {
-                _ir_emit(fc, OP_ARG, 0, hs.get(j), 0, 0)
-                let rr = _vnew(fc)
-                fc.vty.set(rr, TY_INT)
-                _ir_emit(fc, OP_CALLRT, rr, 0, 0, RT_JOIN)
-                _ir_emit(fc, OP_ADD, av0, av0, rr, 0)
-                j = j + 1
-            }
+            let jv = _new_var(fc, -4, TY_INT)
+            let zero_j = _vnew(fc)
+            fc.vty.set(zero_j, TY_INT)
+            _ir_emit(fc, OP_CONST, zero_j, 0, 0, 0)
+            _ir_emit(fc, OP_MOV, jv, zero_j, 0, 0)
+            let ltop2 = _newlab(fc.labs)
+            let lcont2 = _newlab(fc.labs)
+            let lend2 = _newlab(fc.labs)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, ltop2)
+            _ir_emit(fc, OP_JCMP, 0x8D, jv, lastm1, lend2)
+            let joff = _vnew(fc)
+            fc.vty.set(joff, TY_INT)
+            _ir_emit(fc, OP_MUL, joff, jv, eight, 0)
+            let jaddr = _vnew(fc)
+            fc.vty.set(jaddr, TY_INT)
+            _ir_emit(fc, OP_ADD, jaddr, hbp, joff, 0)
+            let jh = _vnew(fc)
+            fc.vty.set(jh, TY_INT)
+            _ir_emit(fc, OP_LOAD, jh, jaddr, 0, 8)
+            _ir_emit(fc, OP_ARG, 0, jh, 0, 0)
+            let rr = _vnew(fc)
+            fc.vty.set(rr, TY_INT)
+            _ir_emit(fc, OP_CALLRT, rr, 0, 0, RT_JOIN)
+            _ir_emit(fc, OP_ADD, av0, av0, rr, 0)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, lcont2)
+            _ir_emit(fc, OP_ADD, jv, jv, ink, 0)
+            _ir_emit(fc, OP_JMP, 0, 0, 0, ltop2)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, lend2)
             return
         }
         // 退化：等价于 for
@@ -11914,6 +11978,100 @@ fn _gen_spawn_elf_caller(ctx: Ctx) {
     _call_rt(ctx, RT_SPAWN)                     // 子线程跑用户函数→置done→exit(0)
 }
 
+/// v4.99：`__ncores()` —— 可用 CPU 数（ELF 版）。
+///
+/// `sched_getaffinity(0, 8, &mask)`（syscall 204）取低 64 个 CPU 的位图，
+/// 数置位后返回。affinity 比 `_SC_NPROCESSORS_ONLN` 更合适 —— 它还反映
+/// cgroup / taskset 的限制，正是 `parfor` 分块需要的"我实际能用几个核"。
+///
+/// 数置位用 Brian Kernighan 的 `n &= n-1`（每轮清最低位），不用 `popcnt`
+/// （SSE4.2，老 CPU 没有）。
+///
+/// 返回值恒 >= 1；探测失败返回 1（串行永远安全）。
+///
+/// **所有跳转都用 `_setlab` 建的真实标签**，不能用 `标签 + 偏移` ——
+/// `_setlab` 记的是代码下标，`lab + 8` 不是合法标签，会跳到例程外面的
+/// 任意位置（v4.99 第一版就是这么 SIGSEGV 的）。
+fn _gen_ncores_elf(ctx: Ctx) {
+    let code: vec[int] = ctx.code
+    let labs: vec[int] = ctx.labs
+    ctx.rt_pos.set(RT_NCORES, len(code))
+    let lloop = _newlab(labs)
+    let lzero = _newlab(labs)
+    let lres = _newlab(labs)
+    let lfail = _newlab(labs)
+    let ldone = _newlab(labs)
+    _push_rbp(code)
+    _mov_rbp_rsp(code)
+    _sub_rsp(code, 16)
+    _b(code, 0x31)                              // xor edi, edi（pid = 0）
+    _b(code, 0xFF)
+    _b(code, 0xBE)                              // mov esi, 8（掩码字节数）
+    _w32(code, 8)
+    _b(code, 0x48)                              // mov rdx, rsp（&mask）
+    _b(code, 0x89)
+    _b(code, 0xE2)
+    _b(code, 0xB8)                              // mov eax, 204
+    _w32(code, 204)
+    _syscall(code)
+    _b(code, 0x48)                              // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let pj = _jcc(code, 0x88)                   // js .fail
+    _addfix(ctx.fixes, pj, lfail, FK_LAB)
+    _b(code, 0x48)                              // mov rax, [rsp]
+    _b(code, 0x8B)
+    _b(code, 0x04)
+    _b(code, 0x24)
+    _b(code, 0x31)                              // xor ecx, ecx（计数）
+    _b(code, 0xC9)
+    _b(code, 0x48)                              // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let pz = _jcc(code, 0x84)                   // je .zero
+    _addfix(ctx.fixes, pz, lzero, FK_LAB)
+    _setlab(labs, code, lloop)
+    _b(code, 0x48)                              // lea rdx, [rax-1]
+    _b(code, 0x8D)
+    _b(code, 0x50)
+    _b(code, 0xFF)
+    _b(code, 0x48)                              // and rax, rdx
+    _b(code, 0x21)
+    _b(code, 0xD0)
+    _b(code, 0x48)                              // inc rcx
+    _b(code, 0xFF)
+    _b(code, 0xC1)
+    _b(code, 0x48)                              // test rax, rax
+    _b(code, 0x85)
+    _b(code, 0xC0)
+    let pnz = _jcc(code, 0x85)                  // jne .loop
+    _addfix(ctx.fixes, pnz, lloop, FK_LAB)
+    let p1 = _jmp(code)
+    _addfix(ctx.fixes, p1, lres, FK_LAB)
+    _setlab(labs, code, lzero)
+    _b(code, 0x31)                              // xor ecx, ecx（掩码为 0 → 用 1）
+    _b(code, 0xC9)
+    _b(code, 0x48)                              // mov rcx, 1
+    _b(code, 0xC7)
+    _b(code, 0xC1)
+    _w32(code, 1)
+    _setlab(labs, code, lres)
+    _b(code, 0x48)                              // mov rax, rcx
+    _b(code, 0x89)
+    _b(code, 0xC8)
+    let p2 = _jmp(code)
+    _addfix(ctx.fixes, p2, ldone, FK_LAB)
+    _setlab(labs, code, lfail)
+    _b(code, 0x48)                              // mov rax, 1
+    _b(code, 0xC7)
+    _b(code, 0xC0)
+    _w32(code, 1)
+    _setlab(labs, code, ldone)
+    _mov_rsp_rbp(code)
+    _pop_rbp(code)
+    _ret(code)
+}
+
 /// __eprint_str(rcx = str)：写 stderr + 换行（v2.33）。与 __print_str 同形，
 /// 只把 GetStdHandle 的实参从 -11（stdout）换成 -12（stderr）。
 fn _gen_eprint_str(ctx: Ctx) {
@@ -14701,6 +14859,22 @@ fn _lower_builtin(fc: FnCtx, nd: Node) -> int {
         return v
     }
     // ---- 文件 / 时钟 ----
+    // v4.99：cores() -> 可用 CPU 数。
+    //
+    // `parfor` 的块数原来是编译期写死 4，换到 8/16 核机器只用到 4 个核。
+    // 有了这个内建，块数就能跟机器走。
+    // ELF：sched_getaffinity 的置位数（反映 cgroup/taskset）。
+    // PE ：暂返回 4（GetActiveProcessorCount 要进 IAT，本轮只落 ELF 侧）。
+    if bn == "cores" {
+        let cr = _vnew(fc)
+        fc.vty.set(cr, TY_INT)
+        if fc.target == 1 {
+            _ir_emit(fc, OP_CALLRT, cr, 0, 0, RT_NCORES)
+        } else {
+            _ir_emit(fc, OP_CONST, cr, 0, 0, 4)
+        }
+        return cr
+    }
     // v3.46：thread_yield() -> 0（让出时间片）
     //
     // 与 `spin_hint` 的分工：spin_hint 是"再等一会儿"（ns 级、不切线程），
@@ -20124,6 +20298,7 @@ fn main() {
         _gen_i64_fmt_elf(ctx)
         _gen_cgt_elf(ctx)
         _gen_syscall_elf(ctx)
+        _gen_ncores_elf(ctx)                 // v4.99：可用 CPU 数
     } else {
         _gen_entry(ctx)
         _gen_print_i64(ctx)
