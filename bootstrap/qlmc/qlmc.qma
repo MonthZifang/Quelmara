@@ -3457,6 +3457,26 @@ const ELF_EHDR = 64              // ELF64 头长度
 const ELF_PHDR = 56              // 程序头长度
 const ELF_ENTRY_OFF = ELF_EHDR + ELF_PHDR   // 代码起点（= 0x78）
 const ELF_TEXT_RVA = ELF_ENTRY_OFF
+
+// ---- v4.101：Mach-O (x86-64) 后端常量 ----
+//
+// 这是目标④「macOS 后端」的第一块：**只做容器格式**（能产出结构合法的
+// Mach-O 可执行文件），运行库仍是 Linux syscall 版 —— 因为 macOS 的
+// syscall 约定不同（号带 0x2000000 前缀），要完整移植得另写一套运行库。
+//
+// 为什么先做容器：Mach-O 的难点在加载命令（LC_SEGMENT_64 / LC_MAIN /
+// LC_UNIXTHREAD），与 ELF 的 ehdr+phdr 结构完全不同。先把容器写对，
+// 用 `llvm-objdump` 验证结构，后面再接 macOS 运行库。
+const MACHO_BASE = 0x100000000        // macOS 默认 __TEXT 基址
+const MACHO_MAGIC = 0xFEEDFACF        // MH_MAGIC_64（小端）
+const MACHO_CPU_X86_64 = 0x01000007
+const MACHO_SUBTYPE_X86_64_ALL = 3
+const MACHO_MH_EXECUTE = 2
+const MACHO_CMDSIZE_HDR = 32          // mach_header_64 长度
+// 加载命令（第一版：__PAGEZERO + __TEXT/__DATA 合一 + LC_MAIN）
+const LC_SEGMENT_64 = 0x19
+const LC_MAIN = 0x80000028
+const MACHO_PAGEZERO_SIZE = 0x100000000
 // Linux syscall 号（x86-64）
 const SYS_WRITE = 1
 const SYS_EXIT = 60
@@ -19515,6 +19535,123 @@ fn resolve_fn(ctx: Ctx, arb: int, fi: int, base: int, rdata_rva: int,
 ///
 /// `code` 是机器码，`rdata` 是字符串/常量区，`bss_size` 是需要补零的字节数。
 /// 返回写入的总长度（给调用方校验用）。
+/// v4.101：**Mach-O (x86-64) 可执行文件写出**（目标④ macOS 后端第一块）。
+///
+/// ## 布局
+///
+/// ```
+/// 偏移 0                 mach_header_64 (32 字节)
+///                       LC_SEGMENT_64 __PAGEZERO  (72 字节)
+///                       LC_SEGMENT_64 __TEXT      (72 + nsects*80)
+///                       LC_MAIN                   (24 字节)
+/// 之后                   代码 + 只读数据
+/// ```
+///
+/// 为什么合并成 __TEXT 一个段：qlmc 的 ELF 后端也是单 PT_LOAD，
+/// 而 macOS 允许 `__TEXT` 段带 `VM_PROT_EXECUTE`。数据放同一个段里，
+/// 省掉 __DATA 段的页对齐计算（那是下一步做"数据与代码分离"时的事）。
+///
+/// `fileoff`/`filesize` 与 `vmaddr`/`vmsize` 都按页（0x1000）对齐，
+/// 这是 dyld 的硬要求 —— 不对齐会直接被内核拒绝。
+///
+/// ## 边界（诚实标注）
+///
+/// **运行库仍是 Linux syscall 版**。macOS 的 syscall 号带 0x2000000 前缀
+/// （write=0x2000004 / exit=0x2000001），与 Linux 完全不同，所以要真正
+/// 在 macOS 上跑起来，还得写一套 Mach-O 版运行库（`_gen_*_macho`）。
+/// 本轮先把**容器格式**做对：产物能被 `llvm-objdump --macho` 正确解析。
+fn build_macho(code: vec[int], rdata: vec[int], bss_size: int,
+               blob: vec[int]) -> int {
+    let text_len = len(code)
+    let rdata_len = len(rdata)
+    // 段内布局：头 + 加载命令，然后代码，然后只读数据
+    let ncmds = 3
+    let cmds_len = 72 + 72 + 24        // __PAGEZERO + __TEXT + LC_MAIN
+    let hdr_end = MACHO_CMDSIZE_HDR + cmds_len
+    // 代码紧跟加载命令（页内偏移，不必对齐；段整体按页对齐即可）
+    let text_off = hdr_end
+    let rdata_off = text_off + text_len
+    let file_end = rdata_off + rdata_len
+    // vmsize 要按页对齐
+    let mut vmsize = file_end
+    let page = 0x1000
+    let rem = vmsize % page
+    if rem != 0 {
+        vmsize = vmsize + (page - rem)
+    }
+    // ---- mach_header_64 ----
+    _w32(blob, MACHO_MAGIC)
+    _w32(blob, MACHO_CPU_X86_64)
+    _w32(blob, MACHO_SUBTYPE_X86_64_ALL)
+    _w32(blob, MACHO_MH_EXECUTE)
+    _w32(blob, ncmds)
+    _w32(blob, cmds_len)
+    _w32(blob, 0)                      // flags
+    _w32(blob, 0)                      // reserved
+    // ---- LC_SEGMENT_64 __PAGEZERO ----
+    _w32(blob, LC_SEGMENT_64)
+    _w32(blob, 72)                     // cmdsize
+    _write_segname(blob, "__PAGEZERO")
+    _w64(blob, 0)                      // vmaddr
+    _w64(blob, MACHO_PAGEZERO_SIZE)    // vmsize（4GB 不可访问区，防空指针）
+    _w64(blob, 0)                      // fileoff
+    _w64(blob, 0)                      // filesize
+    _w32(blob, 0)                      // maxprot
+    _w32(blob, 0)                      // initprot
+    _w32(blob, 0)                      // nsects
+    _w32(blob, 0)                      // flags
+    // ---- LC_SEGMENT_64 __TEXT ----
+    _w32(blob, LC_SEGMENT_64)
+    _w32(blob, 72)
+    _write_segname(blob, "__TEXT")
+    // **vmaddr = MACHO_BASE**，不是 MACHO_BASE + PAGEZERO_SIZE。
+    //
+    // 标准 macOS 布局：__PAGEZERO 占 [0, 4GB)（保证空指针访问必崩），
+    // __TEXT 从地址 0x100000000 开始。MACHO_BASE 本身就是 0x100000000，
+    // 再加一次 PAGEZERO 会算成 0x200000000 —— dyld 会拒绝加载。
+    // （v4.101 第一版就是这么写错的，`llvm-objdump` 里 vmaddr 显示 0x200000000。）
+    _w64(blob, MACHO_BASE)                         // vmaddr
+    _w64(blob, vmsize)                             // vmsize
+    _w64(blob, 0)                                  // fileoff
+    _w64(blob, file_end)                           // filesize
+    _w32(blob, 7)                                  // maxprot = RWX
+    _w32(blob, 5)                                  // initprot = R|X
+    _w32(blob, 0)                                  // nsects
+    _w32(blob, 0)                                  // flags
+    // ---- LC_MAIN ----
+    // entryoff 是**相对 __TEXT 段 fileoff 的偏移**（即文件内偏移）
+    _w32(blob, LC_MAIN)
+    _w32(blob, 24)                     // cmdsize
+    _w64(blob, text_off)               // entryoff
+    _w64(blob, 0)                      // stacksize（0 = 默认）
+    // ---- 代码 + 数据 ----
+    let mut i = 0
+    while i < text_len {
+        _b(blob, code.get(i))
+        i = i + 1
+    }
+    i = 0
+    while i < rdata_len {
+        _b(blob, rdata.get(i))
+        i = i + 1
+    }
+    return MACHO_BASE + MACHO_PAGEZERO_SIZE
+}
+
+/// 写 16 字节的段名（不足补零）。Mach-O 的 segname 字段是定长 16 字节。
+fn _write_segname(blob: vec[int], s: str) {
+    let n = len(s)
+    let mut i = 0
+    while i < 16 {
+        if i < n {
+            _b(blob, s[i])
+        } else {
+            _b(blob, 0)
+        }
+        i = i + 1
+    }
+}
+
 fn build_elf(code: vec[int], rdata: vec[int], bss_size: int,
              blob: vec[int]) -> int {
     let text_len = len(code)
@@ -20177,8 +20314,11 @@ fn main() {
                 tgt = 1
             } else if a[i + 1] == "pe" || a[i + 1] == "win" {
                 tgt = 0
+            } else if a[i + 1] == "macho" || a[i + 1] == "macos" ||
+                      a[i + 1] == "mac" {
+                tgt = 2
             } else {
-                eprint("qlmc: --target 只支持 pe / elf（得到 " + a[i + 1] + "）")
+                eprint("qlmc: --target 只支持 pe / elf / macho（得到 " + a[i + 1] + "）")
                 exit(2)
             }
         }
@@ -20547,6 +20687,8 @@ _gen_memcmp(ctx)
     let blob = vec[int].new(8192)
     if tgt == 1 {
         let _t = build_elf(code, rdata, BSS_SIZE, blob)
+    } else if tgt == 2 {
+        let _t2 = build_macho(code, rdata, BSS_SIZE, blob)
     } else {
         let pe_bss = build_pe(code, rdata, blob)
         if pe_bss != real_bss {
