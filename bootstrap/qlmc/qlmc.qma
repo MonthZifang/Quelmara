@@ -1446,6 +1446,129 @@ fn _clone_list(p: P, head: int) -> int {
     return first
 }
 
+/// v4.100：收集语句链里引用的名字 id。
+///
+/// 只用于**给 `parfor` 出更清楚的诊断**（见 `_parfor_check_captures`），
+/// 不参与代码生成，所以保守即可：认得的节点往下走，不认识就跳过。
+fn _collect_names(p: P, e: int, out: vec[int]) {
+    if e < 0 { return }
+    let nd = p.nodes.get(e)
+    if nd.op == E_VAR {
+        if _vec_has_i(out, nd.a) == 0 { out.push(nd.a) }
+        return
+    }
+    if nd.op == E_NUM || nd.op == E_STR { return }
+    if nd.op == E_BIN {
+        _collect_names(p, nd.b, out)
+        _collect_names(p, nd.c, out)
+        return
+    }
+    if nd.op == E_UN {
+        _collect_names(p, nd.b, out)
+        return
+    }
+    if nd.op == E_CALL {
+        _collect_names(p, nd.b, out)
+        _collect_names(p, nd.c, out)
+        return
+    }
+    if nd.op == E_FIELD || nd.op == E_INDEX || nd.op == E_SLICE || nd.op == E_METHOD {
+        _collect_names(p, nd.a, out)
+        _collect_names(p, nd.b, out)
+        _collect_names(p, nd.c, out)
+        return
+    }
+    if nd.op == E_VECNEW || nd.op == E_MAPNEW {
+        _collect_names(p, nd.b, out)
+        _collect_names(p, nd.c, out)
+        return
+    }
+    if nd.op == E_ENUMCTOR {
+        _collect_names(p, nd.c, out)
+        return
+    }
+}
+
+fn _collect_stmt_names(p: P, head: int, out: vec[int]) {
+    let mut cur = head
+    while cur >= 0 {
+        let nd = p.nodes.get(cur)
+        if nd.op == S_LET || nd.op == S_ASSIGN {
+            _collect_names(p, nd.b, out)
+        } else if nd.op == S_EXPR || nd.op == S_RETURN ||
+                  nd.op == S_PRINT || nd.op == S_EXIT || nd.op == S_DEFER {
+            _collect_names(p, nd.a, out)
+        } else if nd.op == S_IF || nd.op == S_WHILE {
+            _collect_names(p, nd.a, out)
+            _collect_stmt_names(p, nd.n, out)
+        } else if nd.op == S_FOR || nd.op == S_FOREACH || nd.op == S_PARFOR {
+            _collect_names(p, nd.b, out)
+            _collect_names(p, nd.c, out)
+            _collect_stmt_names(p, nd.n, out)
+        } else if nd.op == S_ASG_FIELD || nd.op == S_ASG_INDEX {
+            _collect_names(p, nd.a, out)
+            _collect_names(p, nd.b, out)
+            _collect_names(p, nd.c, out)
+        }
+        cur = nd.nx
+    }
+}
+
+fn _vec_has_i(v: vec[int], x: int) -> int {
+    let n = len(v)
+    let mut i = 0
+    while i < n {
+        if v.get(i) == x { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn _p_is_fn_name(p: P, nid: int) -> int {
+    let mut i = 0
+    while i < len(p.fns) {
+        if p.fns.get(i).name == nid { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+/// v4.100：`parfor` 循环体引用了外部变量就给出**可操作的诊断**。
+///
+/// 为什么需要专门的诊断：worker 是独立函数，看不到父作用域的局部变量。
+/// 原来这种情况会在降低期抛成"未定义变量 a" —— 用户完全看不出这是
+/// `parfor` 的限制，会以为是变量声明写错了。
+///
+/// 边界（诚实标注）：本轮**不实现自由变量捕获**。原因不是不想做，
+/// 而是两道架构限制：
+///   ① 解析期没有类型信息（`_ty_of_expr` 需要 FnCtx，只有降低期有），
+///      所以没法自动推断要捕获的变量的类型；
+///   ② 编译顺序按函数下标升序，而 worker 合成时下标比调用方小 ——
+///      worker 会**先**被编译，那时父作用域的变量表还没建起来。
+/// 要绕开这两条，得改编译流水线（延迟编译 + 类型回填），那是独立的一次
+/// 改造。所以本轮先把**诊断**做对，让用户立刻知道怎么改写。
+fn _parfor_check_captures(p: P, pos: vec[int], loopname: int, red: int, body: int) {
+    let mut fv = vec[int].new(8)
+    _collect_stmt_names(p, body, fv)
+    let mut q = 0
+    while q < len(fv) {
+        let nmv = fv.get(q)
+        let mut isfree = 1
+        if nmv == loopname { isfree = 0 }
+        if red >= 0 && nmv == red { isfree = 0 }
+        if _p_is_fn_name(p, nmv) == 1 { isfree = 0 }
+        if isfree == 1 {
+            _fail(p, pos, "parfor 的循环体不能引用外部变量 `"
+                  + p.names.get(nmv) + "`：并行 worker 是独立函数，"
+                  + "看不到外层的局部变量。改写方式：把该值先拷进循环体"
+                  + "能自己算出来的形式（例如用 `for` 串行），"
+                  + "或把整个计算包成一个顶层函数、用 `parfor` 之外的 "
+                  + "`spawn` 手动分块。")
+        }
+        q = q + 1
+    }
+}
+
 fn _node(p: P, op: int, a: int, b: int, c: int) -> int {
     // n 默认 -1：S_IF 用它存 else 链头，0 会被当成"有 else"并去发节点 0
     p.nodes.push(Node { op: op, a: a, b: b, c: c, n: -1, slot: 0,
@@ -2248,6 +2371,9 @@ fn _stmt(p: P, pos: vec[int]) -> int {
             red = _name_id(p, ra.s)
         }
         let body = _block(p, pos)
+        // v4.100：先给"引用了外部变量"一个明确诊断（而不是降低期的
+        // 模糊"未定义变量"）。
+        _parfor_check_captures(p, pos, _name_id(p, nm.s), red, body)
         // v4.92：**解析期合成 worker 函数**（这是并行的关键）。
         //
         // 为什么必须在这里做：`spawn` 只能调**函数**，而 qlmc 的函数表在
