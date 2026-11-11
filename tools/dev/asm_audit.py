@@ -134,6 +134,19 @@ def hot_loop(rows):
 
 
 def audit(seq):
+    """统计三类可优化模式。
+
+    v4.111：把 `mov rX,rY` 细分成**真冗余**与**必要的参数/返回值搬运**。
+    否则单独看总数会高估收益 —— `b9_json` 的 24 条 mov 里大半是
+    `mov rcx,<self>` / `mov rdx,<index>` 这种调用的实参准备，那是必需的。
+
+    判据：
+      · `necessary`：该 mov 后面**紧邻**一条 `call`，或它写入的是
+        rcx/rdx/r8/r9（x86-64 SysV 前四个实参寄存器）且下一两条内有 call
+      · `redundant`：`mov X,Y` 之后紧接 `mov Z,X`（同一值连搬两次，
+        可以合成 `mov Z,Y`）—— 这是最确定的浪费
+      · `other`：其余，可能仍有价值但需人工判断
+    """
     n = len(seq)
     spill = 0
     for i in range(n - 1):
@@ -141,8 +154,36 @@ def audit(seq):
         b = LOAD.search(seq[i + 1][1])
         if a and b and a.group(2) == b.group(3):
             spill += 1
-    movrr = sum(1 for _, t in seq if MOVRR.search(t))
-    return {"insn": n, "spill": spill, "movrr": movrr}
+    redundant = 0
+    necessary = 0
+    other = 0
+    ARGREGS = {"rcx", "rdx", "r8", "r9", "rdi", "rsi"}
+    for i, (_, t) in enumerate(seq):
+        m = MOVRR.search(t)
+        if not m:
+            continue
+        dst, src = m.group(1), m.group(2)
+        # 紧接下一条是 mov Z, dst ？
+        chain = 0
+        if i + 1 < n:
+            m2 = MOVRR.search(seq[i + 1][1])
+            if m2 and m2.group(2) == dst:
+                chain = 1
+        if chain == 1:
+            redundant += 1
+            continue
+        # 后面 2 条内出现 call，且 dst 是实参寄存器 -> 必要
+        near_call = 0
+        for k in range(i + 1, min(i + 3, n)):
+            if "call" in seq[k][1]:
+                near_call = 1
+                break
+        if near_call == 1 and dst in ARGREGS:
+            necessary += 1
+        else:
+            other += 1
+    return {"insn": n, "spill": spill, "movrr": redundant + necessary + other,
+            "redundant": redundant, "necessary": necessary, "other": other}
 
 
 def main():
@@ -178,13 +219,18 @@ def main():
             print(f"--- {b} 热循环 {a['insn']} 条 ---")
             for addr, t in seq:
                 print(f"  {addr:x}: {t}")
-    rows.sort(key=lambda kv: -(kv[1]["spill"] + kv[1]["movrr"]))
-    print(f"{'bench':22}{'循环指令':>9}{'溢出往返':>10}{'冗余mov':>9}{'浪费占比':>10}")
-    print("-" * 62)
+    rows.sort(key=lambda kv: -(kv[1]["spill"] * 2 + kv[1]["redundant"]))
+    print(f"{'bench':22}{'循环指令':>9}{'溢出往返':>10}{'真冗余mov':>10}"
+          f"{'必要搬参':>10}{'上限占比':>10}")
+    print("-" * 72)
     for b, a in rows:
-        waste = a["spill"] * 2 + a["movrr"]
+        waste = a["spill"] * 2 + a["redundant"]
         pct = 100.0 * waste / max(a["insn"], 1)
-        print(f"{b:22}{a['insn']:9}{a['spill']:10}{a['movrr']:9}{pct:9.0f}%")
+        print(f"{b:22}{a['insn']:9}{a['spill']:10}{a['redundant']:10}"
+              f"{a['necessary']:10}{pct:9.0f}%")
+    print()
+    print("说明：`上限占比` = (溢出往返*2 + 真冗余mov) / 循环指令数。")
+    print("      `必要搬参` 是调用实参准备，**不算浪费**（不计入上限）。")
     shutil.rmtree(td, ignore_errors=True)
     return 0
 
