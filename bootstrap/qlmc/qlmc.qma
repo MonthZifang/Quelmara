@@ -8502,11 +8502,28 @@ fn _opt_mod_ind(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
 ///     这些 vreg 的条目删掉。这是最保守的做法：宁可少消，不可消错。
 ///   · 复用方式是 `MOV dst, existing`（不删原指令），这样所有既有的
 ///     活跃区间/使用计数逻辑都不用改。
-fn _opt_cse(fc: FnCtx, ndef: vec[int]) {
+fn _opt_cse(fc: FnCtx, use: vec[int], ndef: vec[int]) {
     let ir = fc.ir
     // 表：每 4 格一条 (op, a, b, imm) → 结果 vreg
     let mut keys = vec[int].new(16)
     let mut vals = vec[int].new(4)
+    // v4.108：**值编号表**（value numbering）。
+    //
+    // 为什么要它：CSE 原来直接用 vreg 编号做键的一部分，于是"同一个表达式
+    // 但操作数是不同 vreg"就认不出来。更糟的是 vreg 编号的分配顺序取决于
+    // 前面 pass 产生了多少临时值 —— 加几行诊断代码就会改变编号，同样的
+    // 表达式在两次自举中命中不同的 CSE 决策，**产物因此不同**。
+    // 自举要求三代产物逐字节相同，这就是 v4.107 不动点不收敛的根因。
+    //
+    // 值编号的做法：给每个 vreg 记一个"值编号"，初始等于它自己；每当
+    // 发现 `MOV d, a`，就把 d 的值编号设成 a 的值编号（两者同值）。
+    // 表达式的键改用**操作数的值编号**，于是与 vreg 编号无关。
+    let mut vn = vec[int].new(len(fc.vloc))
+    let mut z = 0
+    while z < len(fc.vloc) {
+        vn.push(z)
+        z = z + 1
+    }
     let mut i = 0
     while i < len(ir) {
         let ins = ir.get(i)
@@ -8517,6 +8534,23 @@ fn _opt_cse(fc: FnCtx, ndef: vec[int]) {
             keys.clear()
             vals.clear()
         } else {
+            // v4.108：`MOV d, a` 让 d 与 a 同值 → d 的值编号跟随 a。
+            // 这是值编号的核心一步：之后的表达式用值编号做键，穿过多层
+            // MOV 也能认出同一表达式。
+            if ins.op == OP_MOV && ins.dst > 0 && ins.a > 0 &&
+               ins.dst < len(vn) && ins.a < len(vn) {
+                vn.set(ins.dst, vn.get(ins.a))
+            } else if ins.dst > 0 && ins.dst < len(vn) {
+                // 别的写指令：dst 变成"新值"，值编号回到它自己
+                vn.set(ins.dst, ins.dst)
+            }
+            // v4.107 验证过的保守措施：写任何 vpin!=0 的变量就清空整表。
+            // 因为表达式操作数可能是同一变量的**另一个 vreg**，逐项比对编号
+            // 抓不到这种失效。
+            if ins.dst > 0 && _opt_writes(ins.op) == 1 && fc.vpin.get(ins.dst) != 0 {
+                keys.clear()
+                vals.clear()
+            }
             // 这条指令写了某个 vreg → 所有用到它的表项失效
             if ins.dst > 0 && _opt_writes(ins.op) == 1 {
                 let mut k = 0
@@ -8557,11 +8591,18 @@ fn _opt_cse(fc: FnCtx, ndef: vec[int]) {
                ins.dst < len(ndef) && ndef.get(ins.dst) == 1 &&
                fc.vpin.get(ins.dst) == 0 {
                 // 查表
+                // **键用值编号**（v4.108）：`vn[a]`/`vn[b]` 而不是 `a`/`b`。
+                // 这样"同一个表达式、操作数是不同 vreg"也能认出来。
+                let va = vn.get(ins.a)
+                let vb = 0
+                if ins.b > 0 && ins.b < len(vn) {
+                    vb = vn.get(ins.b)
+                }
                 let mut hit = -1
                 let mut k = 0
                 while k * 4 + 3 < len(keys) {
-                    if keys.get(k * 4) == ins.op && keys.get(k * 4 + 1) == ins.a &&
-                       keys.get(k * 4 + 2) == ins.b && keys.get(k * 4 + 3) == ins.imm {
+                    if keys.get(k * 4) == ins.op && keys.get(k * 4 + 1) == va &&
+                       keys.get(k * 4 + 2) == vb && keys.get(k * 4 + 3) == ins.imm {
                         hit = vals.get(k)
                         k = len(vals)
                     } else {
@@ -8569,12 +8610,19 @@ fn _opt_cse(fc: FnCtx, ndef: vec[int]) {
                     }
                 }
                 if hit >= 0 {
-                    // 复用已有结果：就地改成 MOV
+                    // 复用已有结果：就地改成 MOV。
+                    // **同步维护 use[]**（v4.106）：这条指令原来读 a/b，现在只读 hit。
+                    if ins.a > 0 && ins.a < len(use) { use.set(ins.a, use.get(ins.a) - 1) }
+                    if ins.b > 0 && ins.b < len(use) { use.set(ins.b, use.get(ins.b) - 1) }
+                    if hit > 0 && hit < len(use) { use.set(hit, use.get(hit) + 1) }
+                    if ins.dst > 0 && ins.dst < len(vn) && hit < len(vn) {
+                        vn.set(ins.dst, vn.get(hit))
+                    }
                     ir.set(i, Ir { op: OP_MOV, dst: ins.dst, a: hit, b: 0, imm: 0 })
                 } else {
                     keys.push(ins.op)
-                    keys.push(ins.a)
-                    keys.push(ins.b)
+                    keys.push(va)
+                    keys.push(vb)
                     keys.push(ins.imm)
                     vals.push(ins.dst)
                 }
@@ -9067,6 +9115,8 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     // 根因尚未定位 —— 我排查过 keys/vals 压缩失配、`b` 槽非 vreg 两类，
     // 都修了但现象不变，说明对这套 IR 的某条语义理解还有偏差。
     // 按项目纪律：现象没解释清楚就不留在树上运行。见 docs/07-gaps.md。
+    _opt_cse(fc, use, ndef)
+    _tri("    opt: cse ir=", len(ir))
     _opt_copy(fc, ir, use, ndef)
     _tri("    opt: copy ir=", len(ir))
     // 融合要用到完整的 use[]，所以放在标记之后、DCE 之前
