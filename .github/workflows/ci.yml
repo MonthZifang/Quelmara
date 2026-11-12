@@ -38,6 +38,11 @@ jobs:
           python tools/dev/check_origin.py
           python tools/dev/check_docs.py
 
+      - name: 基准驱动与 PE 栈预留回归
+        run: |
+          python -m unittest discover -s tests -p test_speed_run.py -v
+          python tests/test_stage0_pe_stack.py
+
       - name: 文档生成门禁（/// 覆盖 + 03-stdlib 与源码一致）
         run: |
           python tools/stage0/qlm_cli.py doc std --missing
@@ -110,6 +115,11 @@ jobs:
           python tools/dev/check_names.py
           python tools/dev/check_origin.py
           python tools/dev/check_docs.py
+
+      - name: 基准驱动与 PE 栈预留回归
+        run: |
+          python -m unittest discover -s tests -p test_speed_run.py -v
+          python tests/test_stage0_pe_stack.py
 
       - name: 文档生成门禁（/// 覆盖 + 03-stdlib 与源码一致）
         run: |

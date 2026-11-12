@@ -1,0 +1,83 @@
+// 正幂二常量 MOD：优化路径与参数除数的 idiv 路径逐项对拍。
+// 参数函数不内联：irdump 中 generic 保持 MOD；mod2/4/19/31 为 DIVC b=7。
+module pow2_mod
+
+fn generic(x: int, d: int) -> int {
+    return x % d
+}
+
+fn mod2(x: int) -> int { return x % 2 }
+fn mod4(x: int) -> int { return x % 4 }
+fn mod19(x: int) -> int { return x % 524288 }
+fn mod31(x: int) -> int { return x % 2147483648 }
+
+fn constant_mod(x: int, which: int) -> int {
+    if which == 0 { return mod2(x) }
+    if which == 1 { return mod4(x) }
+    if which == 2 { return mod19(x) }
+    return mod31(x)
+}
+
+// 调用前后保留 x/d/r，防止只测孤立的返回寄存器。
+fn check(x: int, d: int, which: int) -> int {
+    let r = constant_mod(x, which)
+    let want = generic(x, d)
+    assert(r == want, "constant MOD versus parameter idiv")
+    assert(r > -d && r < d, "remainder magnitude")
+    if x < 0 { assert(r <= 0, "negative dividend remainder sign") }
+    if x >= 0 { assert(r >= 0, "positive dividend remainder sign") }
+    // 每项打印，不能因两边 assert 同时失败而被差分驱动误判为通过。
+    print(r)
+    return r
+}
+
+fn main() {
+    let ds = [2, 4, 524288, 2147483648]
+    let lo = -9223372036854775807 - 1
+    let hi = 9223372036854775807
+    let mut k = 0
+    while k < 4 {
+        let d = ds[k]
+        let xs = [lo, lo + 1, -d - 1, -d, -d + 1, -1, 0, 1, d - 1, d, d + 1, hi]
+        let out = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        let mut i = 0
+        while i < 12 {
+            out[i] = check(xs[i], d, k)
+            i = i + 1
+        }
+        i = 0
+        while i < 12 {
+            assert(out[i] == generic(xs[i], d), "array output across calls")
+            i = i + 1
+        }
+        assert(out[0] == 0, "INT64_MIN is divisible by every tested power")
+        assert(out[1] == -d + 1, "INT64_MIN plus one")
+        assert(out[2] == -1 && out[3] == 0 && out[4] == -d + 1, "negative divisor boundary")
+        assert(out[8] == d - 1 && out[9] == 0 && out[10] == 1, "positive divisor boundary")
+        assert(out[11] == d - 1, "INT64_MAX")
+        k = k + 1
+    }
+
+    // 确定性 31 位 LCG（乘法不溢出），拼成覆盖 62 位的正负输入。
+    // 不用 % 产生随机数，避免被测操作进入输入发生器；除数只从 ds 读取。
+    let mut seed = 13579
+    let mut n = 0
+    while n < 96 {
+        seed = (seed * 1103515245 + 12345) & 2147483647
+        let high = seed
+        seed = (seed * 1103515245 + 12345) & 2147483647
+        let x = (high << 31) | seed
+        k = 0
+        while k < 4 {
+            let d = ds[k]
+            let pair = [x, -x]
+            let out = [0, 0]
+            out[0] = check(pair[0], d, k)
+            out[1] = check(pair[1], d, k)
+            assert(out[0] == -out[1], "paired positive/negative remainders")
+            k = k + 1
+        }
+        n = n + 1
+    }
+    print("pow2-mod-ok")
+}

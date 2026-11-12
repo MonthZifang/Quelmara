@@ -2,8 +2,8 @@
 """run.py —— Quelmara / C / Go / Python 四语言同题基准驱动器。
 
 口径（很重要，别看错）：
-  · 计时用**挂钟时间，取 N 次里的最小值**。本机 VBS 噪声 ±50%，最小值是唯一
-    稳的统计量；单次数字没有意义。
+  · 严格使用程序报告的进程内纳秒，取 N 次最小值；不回退墙钟。
+    每轮必须成功退出、协议正确且校验和一致，才保留性能数字。
   · 每个基准都打印**校验和**，四个语言必须逐字节相同 —— 不同就判 FAIL，
     说明其中一份写错了（或语言语义有分歧），此时时间数字一概不看。
   · 峰值内存用 `GetProcessMemoryInfo` 轮询采样（Windows），只对编译器那节有意义。
@@ -23,6 +23,12 @@
 """
 import argparse
 import ctypes
+import hashlib
+import json
+import math
+import platform
+import re
+import threading
 import os
 import shutil
 import subprocess
@@ -236,43 +242,125 @@ def _peak_ws(handle):
     return 0
 
 
-def run_once(exe, args=None, sample_mem=False):
-    """跑一次，返回 (挂钟秒, 峰值字节, stdout)。"""
+DEFAULT_TIMEOUT = 120.0
+BUILD_COMMANDS = []
+
+
+class BenchmarkError(RuntimeError):
+    """A failed process/protocol is not a performance measurement."""
+
+
+def run_once(exe, args=None, sample_mem=False, timeout=DEFAULT_TIMEOUT):
+    """Return the legacy (wall seconds, peak bytes, stdout) tuple on success.
+
+    Raise BenchmarkError for nonzero exits/timeouts. Drain pipes concurrently
+    with memory sampling, so verbose children cannot deadlock the sampler.
+    """
     cmd = [exe] + (args or [])
-    if not sample_mem:
-        t0 = time.perf_counter()
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        dt = time.perf_counter() - t0
-        return dt, 0, r.stdout
+    t0 = time.perf_counter()
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          text=True)
-    peak = 0
-    # `p._handle` 是 Windows 专属；非 Windows 上 `--mem` 直接给 0（别假装有数）
-    while p.poll() is None:
-        if IS_WIN:
-            peak = max(peak, _peak_ws(int(p._handle)))
-        time.sleep(0.002)
-    out, _ = p.communicate()
-    return time.perf_counter() - t0, peak, out
+    peak = [0]
+    stop = threading.Event()
+
+    def sample():
+        while not stop.is_set():
+            peak[0] = max(peak[0], _peak_ws(int(p._handle)))
+            stop.wait(0.002)
+
+    sampler = None
+    if sample_mem and IS_WIN:
+        sampler = threading.Thread(target=sample, daemon=True)
+        sampler.start()
+    try:
+        try:
+            out, err = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            out, err = p.communicate()
+            raise BenchmarkError(f"timeout after {timeout}s: {cmd!r}; "
+                                 f"stdout={out!r}; stderr={err!r}")
+    finally:
+        stop.set()
+        if sampler is not None:
+            sampler.join()
+    if p.returncode != 0:
+        raise BenchmarkError(f"exit code {p.returncode}: {cmd!r}; "
+                             f"stdout={out!r}; stderr={err!r}")
+    return time.perf_counter() - t0, peak[0], out
 
 
 def parse_out(out):
-    """程序约定：若干行校验和 + 一行 `T` + 一行纳秒。返回 (校验和, 纳秒)。
-
-    **为什么要在进程内计时**：本机 VBS 开着，光进程创建就 ~450 ms，而大部分基准
-    的真实负载只有几毫秒到几十毫秒 —— 用挂钟量等于在量 CreateProcess。所以每个
-    程序自己用单调时钟圈住负载，只把负载时间打出来。
-    """
-    lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
-    if "T" not in lines:
-        return (out or "").strip(), None
+    """Strict checksum lines + T + positive integer nanoseconds; no fallback."""
+    lines = (out or "").splitlines()
+    if lines.count("T") != 1:
+        raise BenchmarkError("protocol: expected exactly one T marker")
     i = lines.index("T")
-    ck = "\n".join(lines[:i]).strip()
+    if i == 0 or any(not line.strip() for line in lines[:i]):
+        raise BenchmarkError("protocol: missing/empty checksum")
+    if len(lines) != i + 2 or not re.fullmatch(r"[0-9]+", lines[i + 1]):
+        raise BenchmarkError("protocol: expected one integer nanosecond line after T")
+    ns = int(lines[i + 1])
+    if ns <= 0:
+        raise BenchmarkError("protocol: nanoseconds must be positive")
+    return "\n".join(lines[:i]), ns
+
+
+def measure(cmd, reps, sample_mem=False, timeout=DEFAULT_TIMEOUT):
+    """Retain every attempted round; any bad round invalidates the cell."""
+    result = {"command": cmd, "rounds": [], "status": "ok"}
+    reference = None
+    for index in range(reps):
+        record = {"round": index + 1}
+        result["rounds"].append(record)
+        try:
+            dt, mem, out = run_once(cmd[0], cmd[1:], sample_mem=sample_mem,
+                                    timeout=timeout)
+            record.update(wall_ns=int(dt * 1e9), peak_bytes=mem, stdout=out)
+            ck, ns = parse_out(out)
+            record.update(checksum=ck, ns=ns)
+            if reference is not None and ck != reference:
+                raise BenchmarkError("checksum changed between rounds")
+            reference = ck
+            record["status"] = "ok"
+        except (BenchmarkError, OSError) as exc:
+            record.update(status="failed", error=str(exc))
+            result.update(status="failed", error=str(exc))
+    if result["status"] == "ok":
+        result.update(checksum=reference,
+                      best_ns=min(r["ns"] for r in result["rounds"]),
+                      peak_bytes=max(r["peak_bytes"] for r in result["rounds"]))
+    return result
+
+
+def _artifact_stamp(path):
     try:
-        ns = int(lines[i + 1].strip())
-    except (IndexError, ValueError):
-        ns = None
-    return ck, ns
+        st = os.stat(path)
+        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    except FileNotFoundError:
+        return None
+
+
+def _build_run(cmd, expected_output=None, **kwargs):
+    BUILD_COMMANDS.append(list(cmd))
+    try:
+        before = _artifact_stamp(expected_output) if expected_output else None
+        result = subprocess.run(cmd, timeout=DEFAULT_TIMEOUT, **kwargs)
+        if result.returncode == 0 and expected_output:
+            after = _artifact_stamp(expected_output)
+            if after is None or after == before or after[2] == 0:
+                return subprocess.CompletedProcess(
+                    cmd, 1, result.stdout or "",
+                    (result.stderr or "") +
+                    f"\nbuild produced no fresh nonempty artifact: {expected_output}")
+        return result
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return subprocess.CompletedProcess(cmd, 1, "", str(exc))
+
+
+def _note(notes, lang, message):
+    # Preserve all build failures, not just the first one for each language.
+    notes[lang] = notes.get(lang, "") + ("\n" if lang in notes else "") + message
 
 
 # ---------------------------------------------------------------- 工具链探测
@@ -340,7 +428,7 @@ def build_all(langs, only):
             # qlmc 是 PE 产物，Linux 上要用 wine 跑它（**只包编译器本身**，
             # 它编出来的 ELF 是原生的，直接 exec）。binfmt 的 MZ handler 会
             # 把 argv[0] 重复塞进去，所以不能用 `./qlmc.exe` 的裸执行。
-            wine = shutil.which("wine")
+            wine = os.environ.get("WINE") or shutil.which("wine") or shutil.which("wine64")
             runner = ([wine, q] if (ELF and wine) else [q])
             for b, _ in BENCHES:
                 if only and b not in only:
@@ -358,9 +446,9 @@ def build_all(langs, only):
                 # 显式 --no-bounds-check（NO_BOUNDS=True）时全部关。
                 if (NO_BOUNDS or b not in KEEP_BOUNDS_BENCH) and not KEEP_BOUNDS_FORCE:
                     cmd += ["--no-bounds-check"]
-                r = subprocess.run(cmd, capture_output=True, text=True)
+                r = _build_run(cmd, expected_output=exe, capture_output=True, text=True)
                 if r.returncode != 0:
-                    notes.setdefault("quelmara", f"{b} 编译失败: " +
+                    _note(notes, "quelmara", f"{b} 编译失败: " +
                                      (r.stdout + r.stderr).strip()[:200])
                     continue
                 if ELF:
@@ -387,11 +475,11 @@ def build_all(langs, only):
                 continue
             src = os.path.join(HERE, "quelmara", b + ".qma")
             exe = os.path.join(OUT, "qlm0_" + b + EXE)
-            r = subprocess.run([py, cli, "build", src, "--target", tgt,
-                                "-o", exe],
+            r = _build_run([py, cli, "build", src, "--target", tgt,
+                                "-o", exe], expected_output=exe,
                                capture_output=True, text=True)
             if r.returncode != 0:
-                notes.setdefault("quelmara0", f"{b} 编译失败: " +
+                _note(notes, "quelmara0", f"{b} 编译失败: " +
                                  (r.stdout + r.stderr).strip()[:200])
                 continue
             if not IS_WIN:
@@ -409,10 +497,10 @@ def build_all(langs, only):
                     continue
                 src = os.path.join(HERE, "c", b + ".c")
                 exe = os.path.join(OUT, "c_" + b + EXE)
-                r = subprocess.run(cc + ["-o", exe, src],
+                r = _build_run(cc + ["-o", exe, src], expected_output=exe,
                                    capture_output=True, text=True)
                 if r.returncode != 0:
-                    notes.setdefault("c", f"{b} 编译失败: " +
+                    _note(notes, "c", f"{b} 编译失败: " +
                                      (r.stdout + r.stderr).strip()[:200])
                     continue
                 built[("c", b)] = [exe]
@@ -428,11 +516,11 @@ def build_all(langs, only):
                 exe = os.path.join(OUT, "go_" + b + EXE)
                 if not os.path.exists(src):
                     continue
-                r = subprocess.run([go_exe(), "build", "-o", exe, src],
+                r = _build_run([go_exe(), "build", "-o", exe, src], expected_output=exe,
                                    capture_output=True, text=True,
                                    cwd=os.path.join(HERE, "go"))
                 if r.returncode != 0:
-                    notes.setdefault("go", f"{b} 编译失败: " +
+                    _note(notes, "go", f"{b} 编译失败: " +
                                      (r.stdout + r.stderr).strip()[:200])
                     continue
                 built[("go", b)] = [exe]
@@ -465,10 +553,10 @@ def build_all(langs, only):
                 continue
             exe = os.path.join(OUT, lang + "_" + b + EXE)
             cmd = mk_cmd(cc, src, exe)
-            r = subprocess.run(cmd, capture_output=True, text=True,
+            r = _build_run(cmd, expected_output=exe, capture_output=True, text=True,
                                cwd=os.path.join(HERE, lang) if need_dir else None)
             if r.returncode != 0:
-                notes.setdefault(lang, f"{b} 编译失败: " +
+                _note(notes, lang, f"{b} 编译失败: " +
                                  (r.stdout + r.stderr).strip()[:200])
                 continue
             built[(lang, b)] = [exe]
@@ -552,28 +640,72 @@ EXTRA_HINT = {
 
 
 def report_checksums(fails, rows):
-    """校验和门禁：四种实现必须打印**逐字节相同**的校验和。
+    """Never describe one implementation or incomplete coverage as a cross-check."""
+    for r in rows:
+        print(f"[{r['validation'].upper()}] {r['bench']}: "
+              f"{len(r['out'])} successful implementations")
+        if r["validation"] == "mismatch":
+            for lang, checksum in r["out"].items():
+                print(f"  {lang}: {checksum!r}")
+        for lang, cell in r["results"].items():
+            if cell["status"] != "ok":
+                print(f"  [{cell['status'].upper()}] {lang}: {cell.get('error', '')}")
+    verified = sum(r["validation"] == "cross_language_pass" for r in rows)
+    print(f"\n跨语言校验通过：{verified}/{len(rows)}；单实现仅验证各轮一致，不代表跨语言通过。")
+    return 1 if fails else 0
 
-    不一致说明其中一份写错了（或语言语义有分歧），此时时间数字一概不看。
-    """
-    if fails:
-        print("\n[FAIL] 这些基准的校验和在不同语言之间不一致：")
-        for b in fails:
-            r = next(x for x in rows if x["bench"] == b)
-            print(f"  {b}")
-            for l, o in r["out"].items():
-                print(f"    {l:<10} {o!r}")
-        return 1
-    n = len(rows[0]["out"]) if rows else 0
-    print(f"\n校验和：{len(rows)} 个基准 × {n} 个语言，全部一致。")
-    return 0
+
+def compiler_metadata():
+    """Record exact invocations and file hashes without extra compiler runs."""
+    paths = {shutil.which(cmd[0]) or os.path.abspath(cmd[0])
+             for cmd in BUILD_COMMANDS}
+    paths.update((qlmc_exe(), os.path.join(ROOT, "tools", "stage0", "qlm_cli.py")))
+    identities = []
+    for path in sorted(p for p in paths if p):
+        identity = {"path": path}
+        try:
+            with open(path, "rb") as source:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            identity["sha256"] = digest.hexdigest()
+        except OSError as exc:
+            identity["error"] = str(exc)
+        identities.append(identity)
+    return {"invocations": list(BUILD_COMMANDS), "identities": identities}
+
+
+def save_results(path, args, notes, rows, exit_code):
+    payload = {
+        "schema_version": 1, "timing": "in_process_ns_min",
+        "platform": {"system": platform.system(), "release": platform.release(),
+                     "machine": platform.machine(), "processor": platform.processor(),
+                     "python": sys.version},
+        "compilers": compiler_metadata(), "options": vars(args),
+        "build_options": {"heap_mb": HEAP_MB, "no_bounds": NO_BOUNDS,
+                          "keep_bounds_force": KEEP_BOUNDS_FORCE,
+                          "keep_bounds_benches": sorted(KEEP_BOUNDS_BENCH)},
+        "notes": notes, "benchmarks": rows, "exit_code": exit_code,
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as target:
+        json.dump(payload, target, ensure_ascii=False, indent=2)
+        target.write("\n")
+    print(f"JSON: {path}")
 
 
 def main():
+    global OUT
     ap = argparse.ArgumentParser()
     ap.add_argument("--reps", type=int, default=5)
+    ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
+                    help="每轮运行超时秒数（默认 120）")
+    ap.add_argument("--output-dir", default=OUT,
+                    help="构建输出目录；并行或不同检查配置必须使用独立目录")
+    ap.add_argument("--json", default=None,
+                    help="结果 JSON 路径（默认输出目录下 results.json）")
     ap.add_argument("--only", nargs="*", default=None)
-    ap.add_argument("--langs", nargs="*", default=LANGS)
+    ap.add_argument("--langs", nargs="+", choices=LANGS, default=LANGS)
     ap.add_argument("--markdown", action="store_true")
     ap.add_argument("--mem", action="store_true", help="同时采峰值内存（慢）")
     ap.add_argument("--no-bounds-check", action="store_true",
@@ -584,6 +716,18 @@ def main():
                     help="传给 qlmc 的堆上限（MB）。不填则读 Quelmara.toml "
                          "的 [memory] heap_limit_mb")
     args = ap.parse_args()
+    OUT = os.path.abspath(args.output_dir)
+    args.output_dir = OUT
+    if args.json is None:
+        args.json = os.path.join(OUT, "results.json")
+    if args.reps <= 0:
+        ap.error("--reps must be positive")
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        ap.error("--timeout must be finite and positive")
+    if args.only and set(args.only) - {b for b, _ in BENCHES}:
+        ap.error("--only contains unknown benchmark IDs")
+    args.langs = list(dict.fromkeys(args.langs))
+    BUILD_COMMANDS.clear()
     # v4.45：命令行 > Quelmara.toml > 不传（qlmc 用编译期默认）
     global HEAP_MB
     HEAP_MB = args.heap_mb if args.heap_mb else heap_mb_from_toml()
@@ -600,40 +744,51 @@ def main():
     for k, v in notes.items():
         print(f"[{k}] {v}")
 
-    if not built:
-        print("没有任何可跑的基准。")
-        return 1
-
-    langs = [l for l in LANGS if any(k[0] == l for k in built)]
+    # Retain every requested column/row, including entirely missing builds.
+    langs = args.langs
     rows = []
     fails = []
     for b, desc in BENCHES:
         if args.only and b not in args.only:
             continue
-        if not any((l, b) in built for l in langs):
-            continue
-        rec = {"bench": b, "desc": desc, "t": {}, "mem": {}, "out": {}}
-        for l in langs:
-            if (l, b) not in built:
+        rec = {"bench": b, "desc": desc, "t": {}, "mem": {}, "out": {},
+               "results": {}}
+        for lang in langs:
+            if (lang, b) not in built:
+                rec["results"][lang] = {
+                    "status": ("failed" if f"{b} 编译失败:" in notes.get(lang, "")
+                               else "missing"), "rounds": [],
+                    "error": notes.get(lang, "source/build unavailable or unsupported")}
                 continue
-            cmd = built[(l, b)]
-            best, bestmem, bestout, bestck = None, 0, None, None
-            for _ in range(args.reps):
-                dt, mem, out = run_once(cmd[0], cmd[1:], sample_mem=args.mem)
-                ck, ns = parse_out(out)
-                if ns is not None and (best is None or ns < best):
-                    best, bestck, bestout = ns, ck, out
-                bestmem = max(bestmem, mem)
-            if best is None:      # 没按协议输出，退回挂钟
-                best, bestck = int(dt * 1e9), (out or "").strip()
-            rec["t"][l] = best / 1e9
-            rec["mem"][l] = bestmem
-            rec["out"][l] = bestck or ""
-        # 校验和必须全部相同
-        vals = set(rec["out"].values())
-        if len(vals) > 1:
+            cell = measure(built[(lang, b)], args.reps, args.mem, args.timeout)
+            rec["results"][lang] = cell
+            if cell["status"] == "ok":
+                rec["t"][lang] = cell["best_ns"] / 1e9
+                rec["mem"][lang] = cell["peak_bytes"]
+                rec["out"][lang] = cell["checksum"]
+        mismatch = len(set(rec["out"].values())) > 1
+        failed = any(c["status"] == "failed" for c in rec["results"].values())
+        missing = any(c["status"] == "missing" for c in rec["results"].values())
+        if mismatch:
+            rec["validation"] = "mismatch"
+        elif failed:
+            rec["validation"] = "failed"
+        elif missing:
+            rec["validation"] = "incomplete"
+        elif len(rec["out"]) >= 2:
+            rec["validation"] = "cross_language_pass"
+        else:
+            rec["validation"] = "single_language_unverified"
+        if mismatch or failed:
             fails.append(b)
+            rec["t"].clear()  # A failure invalidates comparative timing.
         rows.append(rec)
+
+    exit_code = report_checksums(fails, rows)
+    if not any(r["out"] for r in rows):
+        print("没有任何有效的基准结果。")
+        exit_code = 1
+    save_results(args.json, args, notes, rows, exit_code)
 
     # ---- 输出 ----
     if args.markdown:
@@ -653,7 +808,7 @@ def main():
         # **校验和门禁在 markdown 模式下也必须走**（CI 用的就是 --markdown）。
         # 以前这里直接 return 0，于是"某个语言写错了"在 CI 上是静默的 ——
         # 而校验和一致是整张表的前提，不一致时时间数字一概不能看。
-        return report_checksums(fails, rows)
+        return exit_code
 
     print()
     w = 13
@@ -672,7 +827,7 @@ def main():
     print("-" * (w + 13 * len(langs) + 11))
     print(f"单位：毫秒（min of {args.reps}）。本机 VBS 噪声大，只做同表横向比较。")
 
-    return report_checksums(fails, rows)
+    return exit_code
 
 
 if __name__ == "__main__":

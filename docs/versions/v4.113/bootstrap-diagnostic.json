@@ -1,0 +1,24 @@
+{
+  "baseline_seed_sha256": "69dde447cf640899fb759cd34c55ce01d66e57878a97d6f6a584300e600d3a2d",
+  "stable_seed_chain": {
+    "result": "fixed_point_pass",
+    "latest_size": 749056
+  },
+  "stage0_modified_sorted": {
+    "result": "strict_fail",
+    "stage1_seconds": 860.8,
+    "stage2_size": 539648,
+    "equivalent_cases": 0,
+    "total_cases": 42
+  },
+  "stage0_original_HEAD": {
+    "stage0_seconds": 847.437,
+    "stage1_size": 5005824,
+    "small_compile_exit": 0,
+    "self_compile_exit": 1,
+    "self_compile_stdout": "",
+    "self_compile_stderr": "",
+    "self_compile_artifact": false
+  },
+  "note": "Existing full bootstrap defect remains; stable-seed fixed point is not proof of full stage0 bootstrap."
+}

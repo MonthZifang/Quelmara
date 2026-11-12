@@ -1,0 +1,1286 @@
+{
+  "schema_version": 1,
+  "timing": "in_process_ns_min",
+  "platform": {
+    "system": "Linux",
+    "release": "7.0.0-42-generic",
+    "machine": "x86_64",
+    "processor": "",
+    "python": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]"
+  },
+  "compilers": {
+    "invocations": [
+      [
+        "/usr/bin/wine",
+        "build/perf_session_4113/tail2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b3_recursion.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b3_recursion",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_session_4113/tail2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b22_knapsack.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b22_knapsack",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_session_4113/tail2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b28_matrix.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b28_matrix",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_session_4113/tail2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b35_branch.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b35_branch",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_session_4113/tail2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b58_rec_sum.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b58_rec_sum",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_session_4113/tail2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b67_bubble_opt.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b67_bubble_opt",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_session_4113/tail2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b69_hash_fib.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b69_hash_fib",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_session_4113/tail2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b77_rec_fib.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b77_rec_fib",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b3_recursion",
+        "/root/Quelmara/Quelmara/bench/speed/c/b3_recursion.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b22_knapsack",
+        "/root/Quelmara/Quelmara/bench/speed/c/b22_knapsack.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b28_matrix",
+        "/root/Quelmara/Quelmara/bench/speed/c/b28_matrix.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b35_branch",
+        "/root/Quelmara/Quelmara/bench/speed/c/b35_branch.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b58_rec_sum",
+        "/root/Quelmara/Quelmara/bench/speed/c/b58_rec_sum.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b67_bubble_opt",
+        "/root/Quelmara/Quelmara/bench/speed/c/b67_bubble_opt.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b69_hash_fib",
+        "/root/Quelmara/Quelmara/bench/speed/c/b69_hash_fib.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b77_rec_fib",
+        "/root/Quelmara/Quelmara/bench/speed/c/b77_rec_fib.c"
+      ]
+    ],
+    "identities": [
+      {
+        "path": "/root/Quelmara/Quelmara/tools/stage0/qlm_cli.py",
+        "sha256": "8c7e30de7e7b409261cc66df94501ce1d75437ec1107e6c562aaf3656c413c12"
+      },
+      {
+        "path": "/usr/bin/wine",
+        "sha256": "deb451ad41a6eacfd1f542c7e30924b59eea67dbb147652c65f2aaf1ffbbe3ab"
+      },
+      {
+        "path": "/usr/bin/zig",
+        "sha256": "18785a226eaea571844ccfaca700d485421bbcbf0e398da4fe0ce5e01e55eddb"
+      },
+      {
+        "path": "build/perf_session_4113/tail2.exe",
+        "sha256": "9c494022b8c2fe1ae97c3683173f6f9213c00e9c81896aaa1e3455b880ef6935"
+      }
+    ]
+  },
+  "options": {
+    "reps": 5,
+    "timeout": 120.0,
+    "output_dir": "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins",
+    "json": "build/perf_session_4113/tail_focus.json",
+    "only": [
+      "b58_rec_sum",
+      "b3_recursion",
+      "b77_rec_fib",
+      "b28_matrix",
+      "b22_knapsack",
+      "b35_branch",
+      "b67_bubble_opt",
+      "b69_hash_fib"
+    ],
+    "langs": [
+      "quelmara",
+      "c"
+    ],
+    "markdown": false,
+    "mem": false,
+    "no_bounds_check": false,
+    "bounds_check": false,
+    "heap_mb": null
+  },
+  "build_options": {
+    "heap_mb": 512,
+    "no_bounds": false,
+    "keep_bounds_force": false,
+    "keep_bounds_benches": [
+      "b70_lin_search"
+    ]
+  },
+  "notes": {},
+  "benchmarks": [
+    {
+      "bench": "b3_recursion",
+      "desc": "递归：朴素 fib(30)（约 270 万次调用）",
+      "t": {
+        "quelmara": 0.029130409,
+        "c": 0.014172073
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "832040",
+        "c": "832040"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b3_recursion"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 30576966,
+              "peak_bytes": 0,
+              "stdout": "832040\nT\n29212067\n",
+              "checksum": "832040",
+              "ns": 29212067,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 30598696,
+              "peak_bytes": 0,
+              "stdout": "832040\nT\n29237098\n",
+              "checksum": "832040",
+              "ns": 29237098,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 31803931,
+              "peak_bytes": 0,
+              "stdout": "832040\nT\n29229491\n",
+              "checksum": "832040",
+              "ns": 29229491,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 30437781,
+              "peak_bytes": 0,
+              "stdout": "832040\nT\n29130409\n",
+              "checksum": "832040",
+              "ns": 29130409,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 30685514,
+              "peak_bytes": 0,
+              "stdout": "832040\nT\n29376930\n",
+              "checksum": "832040",
+              "ns": 29376930,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "832040",
+          "best_ns": 29130409,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b3_recursion"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 16882287,
+              "peak_bytes": 0,
+              "stdout": "832040\nT\n14291720\n",
+              "checksum": "832040",
+              "ns": 14291720,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 17144529,
+              "peak_bytes": 0,
+              "stdout": "832040\nT\n14535721\n",
+              "checksum": "832040",
+              "ns": 14535721,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 16815186,
+              "peak_bytes": 0,
+              "stdout": "832040\nT\n14242858\n",
+              "checksum": "832040",
+              "ns": 14242858,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 16791966,
+              "peak_bytes": 0,
+              "stdout": "832040\nT\n14205000\n",
+              "checksum": "832040",
+              "ns": 14205000,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 16730469,
+              "peak_bytes": 0,
+              "stdout": "832040\nT\n14172073\n",
+              "checksum": "832040",
+              "ns": 14172073,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "832040",
+          "best_ns": 14172073,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b22_knapsack",
+      "desc": "DP：0/1 背包 800 件 × 800 容量",
+      "t": {
+        "quelmara": 0.006651367,
+        "c": 0.001763875
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "9750",
+        "c": "9750"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b22_knapsack"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 8115467,
+              "peak_bytes": 0,
+              "stdout": "9750\nT\n6696450\n",
+              "checksum": "9750",
+              "ns": 6696450,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 8117592,
+              "peak_bytes": 0,
+              "stdout": "9750\nT\n6690006\n",
+              "checksum": "9750",
+              "ns": 6690006,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 8150183,
+              "peak_bytes": 0,
+              "stdout": "9750\nT\n6652579\n",
+              "checksum": "9750",
+              "ns": 6652579,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 8067036,
+              "peak_bytes": 0,
+              "stdout": "9750\nT\n6651367\n",
+              "checksum": "9750",
+              "ns": 6651367,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 8110163,
+              "peak_bytes": 0,
+              "stdout": "9750\nT\n6708365\n",
+              "checksum": "9750",
+              "ns": 6708365,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "9750",
+          "best_ns": 6651367,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b22_knapsack"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 4459847,
+              "peak_bytes": 0,
+              "stdout": "9750\nT\n1765460\n",
+              "checksum": "9750",
+              "ns": 1765460,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 4468163,
+              "peak_bytes": 0,
+              "stdout": "9750\nT\n1784563\n",
+              "checksum": "9750",
+              "ns": 1784563,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 4457916,
+              "peak_bytes": 0,
+              "stdout": "9750\nT\n1763875\n",
+              "checksum": "9750",
+              "ns": 1763875,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 4486404,
+              "peak_bytes": 0,
+              "stdout": "9750\nT\n1777087\n",
+              "checksum": "9750",
+              "ns": 1777087,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 4440599,
+              "peak_bytes": 0,
+              "stdout": "9750\nT\n1778491\n",
+              "checksum": "9750",
+              "ns": 1778491,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "9750",
+          "best_ns": 1763875,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b28_matrix",
+      "desc": "数值：矩阵乘法 300×300（朴素三重循环）",
+      "t": {
+        "quelmara": 0.24335944,
+        "c": 0.045061893
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "960991321",
+        "c": "960991321"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b28_matrix"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 262353906,
+              "peak_bytes": 0,
+              "stdout": "960991321\nT\n249168084\n",
+              "checksum": "960991321",
+              "ns": 249168084,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 256687865,
+              "peak_bytes": 0,
+              "stdout": "960991321\nT\n243359440\n",
+              "checksum": "960991321",
+              "ns": 243359440,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 256674353,
+              "peak_bytes": 0,
+              "stdout": "960991321\nT\n243368980\n",
+              "checksum": "960991321",
+              "ns": 243368980,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 263023593,
+              "peak_bytes": 0,
+              "stdout": "960991321\nT\n249841108\n",
+              "checksum": "960991321",
+              "ns": 249841108,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 257379957,
+              "peak_bytes": 0,
+              "stdout": "960991321\nT\n244262834\n",
+              "checksum": "960991321",
+              "ns": 244262834,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "960991321",
+          "best_ns": 243359440,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b28_matrix"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 57072769,
+              "peak_bytes": 0,
+              "stdout": "960991321\nT\n49804537\n",
+              "checksum": "960991321",
+              "ns": 49804537,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 52141648,
+              "peak_bytes": 0,
+              "stdout": "960991321\nT\n45061893\n",
+              "checksum": "960991321",
+              "ns": 45061893,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 53446236,
+              "peak_bytes": 0,
+              "stdout": "960991321\nT\n46283362\n",
+              "checksum": "960991321",
+              "ns": 46283362,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 53350611,
+              "peak_bytes": 0,
+              "stdout": "960991321\nT\n46170649\n",
+              "checksum": "960991321",
+              "ns": 46170649,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 56842737,
+              "peak_bytes": 0,
+              "stdout": "960991321\nT\n49627218\n",
+              "checksum": "960991321",
+              "ns": 49627218,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "960991321",
+          "best_ns": 45061893,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b35_branch",
+      "desc": "微基准：分支预测 2000 万次",
+      "t": {
+        "quelmara": 0.088553346,
+        "c": 0.034459416
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "-10000000",
+        "c": "-10000000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b35_branch"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 89969183,
+              "peak_bytes": 0,
+              "stdout": "-10000000\nT\n88620699\n",
+              "checksum": "-10000000",
+              "ns": 88620699,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 89986882,
+              "peak_bytes": 0,
+              "stdout": "-10000000\nT\n88662674\n",
+              "checksum": "-10000000",
+              "ns": 88662674,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 89881610,
+              "peak_bytes": 0,
+              "stdout": "-10000000\nT\n88563725\n",
+              "checksum": "-10000000",
+              "ns": 88563725,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 89912268,
+              "peak_bytes": 0,
+              "stdout": "-10000000\nT\n88553346\n",
+              "checksum": "-10000000",
+              "ns": 88553346,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 89992330,
+              "peak_bytes": 0,
+              "stdout": "-10000000\nT\n88639695\n",
+              "checksum": "-10000000",
+              "ns": 88639695,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "-10000000",
+          "best_ns": 88553346,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b35_branch"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 37143520,
+              "peak_bytes": 0,
+              "stdout": "-10000000\nT\n34473299\n",
+              "checksum": "-10000000",
+              "ns": 34473299,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 37268352,
+              "peak_bytes": 0,
+              "stdout": "-10000000\nT\n34538829\n",
+              "checksum": "-10000000",
+              "ns": 34538829,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 37232436,
+              "peak_bytes": 0,
+              "stdout": "-10000000\nT\n34539501\n",
+              "checksum": "-10000000",
+              "ns": 34539501,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 37150431,
+              "peak_bytes": 0,
+              "stdout": "-10000000\nT\n34459416\n",
+              "checksum": "-10000000",
+              "ns": 34459416,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 37149100,
+              "peak_bytes": 0,
+              "stdout": "-10000000\nT\n34493566\n",
+              "checksum": "-10000000",
+              "ns": 34493566,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "-10000000",
+          "best_ns": 34459416,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b58_rec_sum",
+      "desc": "递归：递归求和 100 万",
+      "t": {
+        "quelmara": 0.002533077,
+        "c": 1.1543e-05
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "5000500000",
+        "c": "5000500000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b58_rec_sum"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 3874937,
+              "peak_bytes": 0,
+              "stdout": "5000500000\nT\n2533077\n",
+              "checksum": "5000500000",
+              "ns": 2533077,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 3860394,
+              "peak_bytes": 0,
+              "stdout": "5000500000\nT\n2551161\n",
+              "checksum": "5000500000",
+              "ns": 2551161,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 3899033,
+              "peak_bytes": 0,
+              "stdout": "5000500000\nT\n2544272\n",
+              "checksum": "5000500000",
+              "ns": 2544272,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 3837547,
+              "peak_bytes": 0,
+              "stdout": "5000500000\nT\n2566988\n",
+              "checksum": "5000500000",
+              "ns": 2566988,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 3873114,
+              "peak_bytes": 0,
+              "stdout": "5000500000\nT\n2573095\n",
+              "checksum": "5000500000",
+              "ns": 2573095,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "5000500000",
+          "best_ns": 2533077,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b58_rec_sum"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 2704348,
+              "peak_bytes": 0,
+              "stdout": "5000500000\nT\n12132\n",
+              "checksum": "5000500000",
+              "ns": 12132,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 2636586,
+              "peak_bytes": 0,
+              "stdout": "5000500000\nT\n11651\n",
+              "checksum": "5000500000",
+              "ns": 11651,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 2650601,
+              "peak_bytes": 0,
+              "stdout": "5000500000\nT\n11807\n",
+              "checksum": "5000500000",
+              "ns": 11807,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 2635661,
+              "peak_bytes": 0,
+              "stdout": "5000500000\nT\n11543\n",
+              "checksum": "5000500000",
+              "ns": 11543,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 2650901,
+              "peak_bytes": 0,
+              "stdout": "5000500000\nT\n12108\n",
+              "checksum": "5000500000",
+              "ns": 12108,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "5000500000",
+          "best_ns": 11543,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b67_bubble_opt",
+      "desc": "排序：冒泡排序 5000",
+      "t": {
+        "quelmara": 0.15558372,
+        "c": 0.075696566
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "5",
+        "c": "5"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b67_bubble_opt"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 157169844,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n155668510\n",
+              "checksum": "5",
+              "ns": 155668510,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 157246618,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n155635810\n",
+              "checksum": "5",
+              "ns": 155635810,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 157267989,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n155706740\n",
+              "checksum": "5",
+              "ns": 155706740,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 157098483,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n155583720\n",
+              "checksum": "5",
+              "ns": 155583720,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 157515050,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n155895242\n",
+              "checksum": "5",
+              "ns": 155895242,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "5",
+          "best_ns": 155583720,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b67_bubble_opt"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 78558805,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n75729877\n",
+              "checksum": "5",
+              "ns": 75729877,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 78593040,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n75785471\n",
+              "checksum": "5",
+              "ns": 75785471,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 78568477,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n75696566\n",
+              "checksum": "5",
+              "ns": 75696566,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 78675610,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n75840922\n",
+              "checksum": "5",
+              "ns": 75840922,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 78909170,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n76043656\n",
+              "checksum": "5",
+              "ns": 76043656,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "5",
+          "best_ns": 75696566,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b69_hash_fib",
+      "desc": "哈希：Fibonacci 散列 50 万次",
+      "t": {
+        "quelmara": 0.075057669,
+        "c": 0.018313318
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "500000",
+        "c": "500000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b69_hash_fib"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 88007576,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n75814030\n",
+              "checksum": "500000",
+              "ns": 75814030,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 88508539,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n76286385\n",
+              "checksum": "500000",
+              "ns": 76286385,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 88032848,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n75911204\n",
+              "checksum": "500000",
+              "ns": 75911204,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 87141791,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n75057669\n",
+              "checksum": "500000",
+              "ns": 75057669,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 88809165,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n76639510\n",
+              "checksum": "500000",
+              "ns": 76639510,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "500000",
+          "best_ns": 75057669,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b69_hash_fib"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 21876960,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n18313318\n",
+              "checksum": "500000",
+              "ns": 18313318,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 22048111,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n18592478\n",
+              "checksum": "500000",
+              "ns": 18592478,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 22116461,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n18639432\n",
+              "checksum": "500000",
+              "ns": 18639432,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 22149892,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n18649535\n",
+              "checksum": "500000",
+              "ns": 18649535,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 22027495,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n18499048\n",
+              "checksum": "500000",
+              "ns": 18499048,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "500000",
+          "best_ns": 18313318,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b77_rec_fib",
+      "desc": "递归：fib(25) 朴素递归",
+      "t": {
+        "quelmara": 0.002630071,
+        "c": 0.001282186
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "75025",
+        "c": "75025"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/qlm_b77_rec_fib"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 4025521,
+              "peak_bytes": 0,
+              "stdout": "75025\nT\n2650326\n",
+              "checksum": "75025",
+              "ns": 2650326,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 3995569,
+              "peak_bytes": 0,
+              "stdout": "75025\nT\n2650614\n",
+              "checksum": "75025",
+              "ns": 2650614,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 3925971,
+              "peak_bytes": 0,
+              "stdout": "75025\nT\n2630071\n",
+              "checksum": "75025",
+              "ns": 2630071,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 3931131,
+              "peak_bytes": 0,
+              "stdout": "75025\nT\n2635842\n",
+              "checksum": "75025",
+              "ns": 2635842,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 3923007,
+              "peak_bytes": 0,
+              "stdout": "75025\nT\n2653110\n",
+              "checksum": "75025",
+              "ns": 2653110,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "75025",
+          "best_ns": 2630071,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_session_4113/tail_bins/c_b77_rec_fib"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 3993613,
+              "peak_bytes": 0,
+              "stdout": "75025\nT\n1284502\n",
+              "checksum": "75025",
+              "ns": 1284502,
+              "status": "ok"
+            },
+            {
+              "round": 2,
+              "wall_ns": 3882076,
+              "peak_bytes": 0,
+              "stdout": "75025\nT\n1282583\n",
+              "checksum": "75025",
+              "ns": 1282583,
+              "status": "ok"
+            },
+            {
+              "round": 3,
+              "wall_ns": 3957615,
+              "peak_bytes": 0,
+              "stdout": "75025\nT\n1282186\n",
+              "checksum": "75025",
+              "ns": 1282186,
+              "status": "ok"
+            },
+            {
+              "round": 4,
+              "wall_ns": 3944872,
+              "peak_bytes": 0,
+              "stdout": "75025\nT\n1289698\n",
+              "checksum": "75025",
+              "ns": 1289698,
+              "status": "ok"
+            },
+            {
+              "round": 5,
+              "wall_ns": 3957110,
+              "peak_bytes": 0,
+              "stdout": "75025\nT\n1290310\n",
+              "checksum": "75025",
+              "ns": 1290310,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "75025",
+          "best_ns": 1282186,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    }
+  ],
+  "exit_code": 0
+}

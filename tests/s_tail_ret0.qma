@@ -1,0 +1,13 @@
+// qlmc-specific RET0 semantics; stage-0 has a pre-existing bare-return mismatch.
+fn tail_bare_zero(n: int) -> int {
+    if n <= 0 { return }
+    return 3 + tail_bare_zero(n - 1)
+}
+fn tail_implicit_zero(n: int) -> int {
+    if n > 0 { return 3 + tail_implicit_zero(n - 1) }
+}
+fn main() {
+    assert(tail_bare_zero(4) == 12, "bare RET0 returns accumulator")
+    assert(tail_implicit_zero(4) == 12, "implicit zero return")
+    print("tail-ret0-ok")
+}

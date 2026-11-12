@@ -1,0 +1,78 @@
+// Conservative temporary-end rebuilding: local arithmetic, branches, calls and vec aliases.
+module temp_end_rebuild
+
+fn four(a: int, b: int, c: int, d: int) -> int {
+    return a + b * 3 + c * 5 + d * 7
+}
+
+fn rec(n: int) -> int {
+    if n <= 1 { return n }
+    return rec(n - 1) + rec(n - 2)
+}
+
+// Nested temporaries die at ADD/SUB/MUL endpoints; parameters prevent folding.
+fn endpoints(a: int, b: int, c: int) -> int {
+    return ((a + b) * (b + c) - (a * c)) + (a - b) * (c + a)
+}
+
+// Repeated a+b exercises CSE's retained value, not just a dying left value.
+fn retained(a: int, b: int, c: int) -> int {
+    return (a + b) * c + (a + b)
+}
+
+// Identical left/right source is legal, including the multiply alias path.
+fn square(a: int, b: int) -> int {
+    return (a + b) * (a + b)
+}
+
+fn immediates(a: int, b: int) -> int {
+    return (((((a + b) + 9) - 4) & 255) | 16) ^ 7
+}
+
+fn immediate_mul(a: int, b: int) -> int {
+    return (a + b) * 7
+}
+
+// Constant folding/DCE leaves former operand vregs completely untouched.
+fn folded_pressure(a: int, b: int) -> int {
+    return (a + (2 * 3 + 4 * 5)) * (b + (6 * 7 - 8 * 2))
+}
+
+fn main() {
+    let a = vec[int].new(1)
+    let alias = a
+    let mut i = 0
+    while i < 12 {
+        a.push(i * i + 3)
+        i = i + 1
+    }
+    let mut sum = 0
+    i = 0
+    while i < 12 {
+        let x = alias.get(i)
+        let y = a.get(i)
+        a.set(i, (x + y) * 3 - x * 2)
+        sum = sum + alias.get(i)
+        i = i + 1
+    }
+    assert(sum == 2168, "vec aliases, growth, fused stores")
+    assert(four(2 + 3, 4 * 5, 6 + 7, 8 * 9) == 634, "argument barriers")
+    assert(rec(10) == 55, "recursive call live values")
+    let mut x = 0
+    if sum > 0 { x = 17 } else { x = 29 }
+    assert(x * 3 + 1 == 52, "multiple-definition join")
+    assert(endpoints(13, 5, 7) == 285, "dying left ADD SUB MUL")
+    assert(endpoints(-13, 5, -7) == 285, "negative endpoint arithmetic")
+    assert(retained(13, 5, 7) == 144, "left source still used later")
+    assert(square(13, 5) == 324, "identical left and right source")
+    assert(immediates(13, 5) == 16, "immediate arithmetic and bitwise endpoints")
+    assert(immediates(-13, -5) == 244, "negative immediate endpoints")
+    assert(immediate_mul(13, 5) == 126, "immediate multiply endpoint")
+    assert(immediate_mul(-13, -5) == -126, "negative immediate multiply")
+    assert(folded_pressure(3, 5) == 899, "NOP-only operands under pressure")
+    let side = vec[int].new(1)
+    side.push(11)
+    side.get(0)
+    assert(side.get(0) == 11, "unused load destination remains allocated")
+    print("temp-end-ok")
+}

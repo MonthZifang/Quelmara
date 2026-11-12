@@ -1,0 +1,22 @@
+=== fn rec_sum  ir=21  vregs=13  frame=32B ===
+  0  PARAM  dst=1(r3)  a=0  b=0  imm=0
+  1  CONST  dst=9(r12)  a=0  b=0  imm=0
+  2  LAB  dst=0(  -  )  a=0  b=0  imm=3
+  3  NOP  dst=0(  -  )  a=0  b=0  imm=0
+  4  JCMPI  dst=143(  -  )  a=1  b=0  imm=1
+  5  NOP  dst=0(  -  )  a=0  b=0  imm=0
+  6  NOP  dst=0(  -  )  a=0  b=0  imm=0
+  7  RET  dst=0(  -  )  a=9  b=0  imm=0
+  8  NOP  dst=0(  -  )  a=0  b=0  imm=0
+  9  LAB  dst=0(  -  )  a=0  b=0  imm=1
+  10  LAB  dst=0(  -  )  a=0  b=0  imm=2
+  11  NOP  dst=0(  -  )  a=0  b=0  imm=0
+  12  BINI  dst=5(r8)  a=1  b=4  imm=1
+  13  MOV  dst=10(r13)  a=5  b=0  imm=0
+  14  ADD  dst=9(r12)  a=9  b=1  imm=0
+  15  MOV  dst=1(r3)  a=10  b=0  imm=0
+  16  JMP  dst=0(  -  )  a=0  b=0  imm=3
+  17  NOP  dst=0(  -  )  a=0  b=0  imm=0
+  18  NOP  dst=0(  -  )  a=0  b=0  imm=0
+  19  RET  dst=0(  -  )  a=9  b=0  imm=0
+  20  LAB  dst=0(  -  )  a=0  b=0  imm=0

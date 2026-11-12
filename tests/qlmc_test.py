@@ -216,6 +216,12 @@ CASES = [
     # 一直显示"通过"。v3.92 修了 `parse_args`（现在 fail-fast），
     # 33 处这样的断言才第一次真正被验证。详见 docs/07-gaps.md §7.48。
     ("t85_narrowstore", "tests/t85_narrowstore.qma"),
+    # Optimizer liveness: aliases/growth, call barriers, recursive and join values.
+    ("temp_end_rebuild", "tests/s_temp_end_rebuild.qma"),
+    # Positive power-of-two constant MOD versus a parameter-divisor idiv oracle.
+    ("pow2_mod", "tests/s_pow2_mod.qma"),
+    # Pure self-tail/additive recursion and conservative fallback semantics.
+    ("tail_self", "tests/s_tail_self.qma"),
 ]
 
 npass = 0

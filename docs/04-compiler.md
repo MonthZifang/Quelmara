@@ -343,6 +343,31 @@ SHA     cpuid_sha  sha_rnds2  sha_msg1  sha_msg2  sha_nexte
 
 仅用于交叉验证与自举对拍，**不是产品链路**。不支持 `interface`/`impl`。
 
+### 6.5 qlmc 临时值活跃区间与端点复用（v4.113）
+
+`bootstrap/qlmc/qlmc.qma` 的 `_alloc` 在变量分配前调用 `_rebuild_temp_ends`：
+按最终 IR 的真实读写角色更新临时区间。只有同基本块、单定义、非 pinned、
+非聚合且非浮点的标量临时可把 start 后移到真实定义、把 end 收缩到末次读取；
+跨块、调用与未知指令保持保守。随后 `_temp_start_order` 用稳定桶排序恢复
+按 `(start,vreg)` 的分配顺序，避免把表达式求值前预建的结果 vreg 提前占寄存器。
+
+整数 ADD/SUB/MUL 及 BINI 的 ADD/SUB/AND/OR/XOR/MUL 白名单可通过
+`_reuse_left_endpoint` 复用左源末次读的寄存器；完全无读无写的临时不占池，
+但 LOAD/CALL 等指令的结果及隐式返回指针仍保留位置，
+但须验证源区间结束、发射器读后写顺序、右源别名与全部其他已分配区间。
+普通寄存器/栈槽复用仍要求严格不相交，不把所有 `<` 改成 `<=`。
+回归夹具是 `tests/s_temp_end_rebuild.qma`，已注册进 `tests/qlmc_test.py`。
+实测结果与边界见 `versions/v4.113/CHANGELOG.md`。
+
+### 6.6 qlmc 严格纯整数递归循环化（v4.113）
+
+`_tail_self` 位于函数降级之后、普通优化之前。仅单个 int 参数、int 返回的纯标量函数，
+全函数验证所有 self-call 均为直返或单次加法后直返才转换；任何不匹配均整函数回退。
+隐藏 pinned 累加器按模整数加法记录未完成贡献，下一参数先快照再提交，base返回保留贡献。
+裸/隐式零返回直接返回累加器，不把 RET.a=0 当成 vreg0。旧活跃区间在重建前快照，
+映射后按新指令延寿。defer、参数修改、内存、其它调用、除法/取模、浮点、聚合、窄型和
+多参数均不在此首版范围。回归为 `tests/s_tail_self.qma` 和 qlmc 专用的 `tests/s_tail_ret0.qma`。
+
 ## 7. 运行时
 
 | 组件 | 实现 | 位置 |

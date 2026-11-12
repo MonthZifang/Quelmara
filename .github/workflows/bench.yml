@@ -95,7 +95,7 @@ jobs:
         shell: pwsh
         run: |
           # Tee-Object 会把 python 的退出码吞掉，显式检查一次
-          python bench/speed/run.py --langs quelmara c cpp go --reps $env:REPS --markdown 2>&1 | Tee-Object -FilePath bench.md
+          python bench/speed/run.py --langs quelmara c cpp go --reps $env:REPS --markdown --json bench.json 2>&1 | Tee-Object -FilePath bench.md
           if ($LASTEXITCODE -ne 0) { Write-Error "run.py 失败（rc=$LASTEXITCODE）"; exit 1 }
 
       - name: 编译器轴（qlmc vs stage-0）
@@ -123,6 +123,7 @@ jobs:
           name: bench-windows
           path: |
             bench.md
+            bench.json
             compiler.md
           retention-days: 90
 
@@ -222,9 +223,9 @@ jobs:
             export WINE=$(command -v wine || command -v wine64 || echo "/usr/bin/wine64")
             echo "WINE=$WINE"
             "$WINE" --version
-            QLMC="$WINE build/qlmc.exe" python bench/speed/run.py --langs quelmara c cpp go rust zig nim fortran --reps "$REPS" --markdown 2>&1 | tee bench.md
+            QLMC="$GITHUB_WORKSPACE/build/qlmc.exe" python bench/speed/run.py --langs quelmara c cpp go rust zig nim fortran --reps "$REPS" --markdown --json bench.json 2>&1 | tee bench.md
           else
-            python bench/speed/run.py --langs quelmara c cpp go rust zig nim fortran --reps "$REPS" --markdown 2>&1 | tee bench.md
+            python bench/speed/run.py --langs quelmara c cpp go rust zig nim fortran --reps "$REPS" --markdown --json bench.json 2>&1 | tee bench.md
           fi
 
       - name: 写 job summary
@@ -232,7 +233,7 @@ jobs:
         run: |
           {
             echo "## 语言基准 · ${{ matrix.os }}（${{ matrix.arch }}）"
-            echo 'quelmara0 = stage-0（参考编译器）产物。qlmc 还没有 ELF 后端，所以本平台没有 quelmara 列。'
+            echo 'quelmara = qlmc 自举编译器产物（Linux 使用原生 ELF）；缺失或失败项以表格状态及 bench.json 为准。'
             echo '```'
             cat bench.md 2>/dev/null || echo "(没跑出来)"
             echo '```'
@@ -242,5 +243,7 @@ jobs:
         if: always()
         with:
           name: bench-${{ matrix.os }}
-          path: bench.md
+          path: |
+            bench.md
+            bench.json
           retention-days: 90

@@ -1,0 +1,18 @@
+{
+  "bootstrap/qlmc/qlmc.qma": {
+    "size": 811411,
+    "sha256": "d90d2443129661bbae0481233a9f46bb133e0d6bd5ead71e9ee6b58be0a0be12"
+  },
+  "build/perf_session_4113/tailret2.exe": {
+    "size": 763904,
+    "sha256": "2d79b646cebf43f3dba42be5e0fafbdc156991b944823338774fde6829c7c5ef"
+  },
+  "build/bootstrap/stage2.exe": {
+    "size": 763904,
+    "sha256": "2d79b646cebf43f3dba42be5e0fafbdc156991b944823338774fde6829c7c5ef"
+  },
+  "build/bootstrap/stage3.exe": {
+    "size": 763904,
+    "sha256": "2d79b646cebf43f3dba42be5e0fafbdc156991b944823338774fde6829c7c5ef"
+  }
+}

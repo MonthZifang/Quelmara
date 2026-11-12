@@ -7393,6 +7393,211 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
     exit(2)
 }
 
+// Whole-function, pure single-int self recursion only. Validate before mutating IR.
+// Walk statement chains rather than trusting the defer stack after lowering.
+fn _tail_body(fc: FnCtx, head: int) -> int {
+    let mut at = head
+    while at >= 0 {
+        let nd = fc.nodes.get(at)
+        if nd.op == S_IF {
+            if _tail_body(fc, nd.b) == 0 || _tail_body(fc, nd.n) == 0 { return 0 }
+        } else if nd.op == S_WHILE {
+            if _tail_body(fc, nd.b) == 0 { return 0 }
+        } else if nd.op != S_LET && nd.op != S_ASSIGN && nd.op != S_RETURN &&
+                  nd.op != S_EXPR && nd.op != S_BREAK && nd.op != S_CONTINUE {
+            return 0
+        }
+        at = nd.nx
+    }
+    return 1
+}
+
+fn _tail_scalar(op: int) -> int {
+    if op == OP_CONST || op == OP_MOV || op == OP_ADD || op == OP_SUB ||
+       op == OP_MUL || op == OP_NEG ||
+       op == OP_NOT || op == OP_NZ || op == OP_CMP || op == OP_AND ||
+       op == OP_OR || op == OP_XOR || op == OP_SHL || op == OP_SAR ||
+       op == OP_SHR || op == OP_BNOT { return 1 }
+    return 0
+}
+
+// Return the RET index, or -1. Intermediate scalar computations must be
+// independent of the recursive result and write only fresh temporaries.
+fn _tail_return(fc: FnCtx, at: int, use: vec[int], defs: vec[int]) -> int {
+    let ir = fc.ir
+    let call = ir.get(at)
+    let cv = call.dst
+    if cv <= 0 || use.get(cv) != 1 || defs.get(cv) != 1 { return -1 }
+    let mut j = at + 1
+    while j < len(ir) {
+        let w = ir.get(j)
+        if w.op == OP_RET {
+            if w.a == cv { return j }
+            return -1
+        }
+        if w.op == OP_ADD && (w.a == cv || w.b == cv) {
+            if w.a == cv && w.b == cv { return -1 }
+            if w.dst <= 0 || w.dst == cv || j + 1 >= len(ir) ||
+               use.get(w.dst) != 1 || defs.get(w.dst) != 1 { return -1 }
+            let ret = ir.get(j + 1)
+            if ret.op == OP_RET && ret.a == w.dst { return j + 1 }
+            return -1
+        }
+        if _tail_scalar(w.op) == 0 || w.a == cv || w.b == cv { return -1 }
+        if w.dst <= 0 || w.dst == cv || fc.vpin.get(w.dst) != 0 ||
+           defs.get(w.dst) != 1 { return -1 }
+        j = j + 1
+    }
+    return -1
+}
+
+fn _tail_plan(fc: FnCtx, fi: int, ends: vec[int], use: vec[int]) -> int {
+    let f = fc.fns.get(fi)
+    if f.np != 1 || f.ret_t != TY_INT || _param_type(fc, f, 0) != TY_INT { return 0 }
+    if len(fc.df) != 0 || len(fc.ir) < 2 || _tail_body(fc, f.body) == 0 { return 0 }
+    let first = fc.ir.get(0)
+    if first.op != OP_PARAM || first.imm != 0 { return 0 }
+    let defs = vec[int].new(len(fc.vloc))
+    let mut v = 0
+    while v < len(fc.vloc) {
+        use.push(0)
+        defs.push(0)
+        if fc.vty.get(v) != TY_INT && fc.vty.get(v) != TY_BOOL { return 0 }
+        v = v + 1
+    }
+    let mut i = 0
+    while i < len(fc.ir) {
+        let w = fc.ir.get(i)
+        ends.push(-1)
+        _opt_mark(w, use)
+        if _tail_scalar(w.op) == 0 && w.op != OP_PARAM && w.op != OP_ARG &&
+           w.op != OP_CALL && w.op != OP_RET && w.op != OP_LAB &&
+           w.op != OP_JMP && w.op != OP_JCMP && w.op != OP_JZ && w.op != OP_JNZ {
+            return 0
+        }
+        if w.op == OP_PARAM && i != 0 { return 0 }
+        if w.dst > 0 && _opt_writes(w.op) == 1 {
+            defs.set(w.dst, defs.get(w.dst) + 1)
+            if i > 0 && w.dst == first.dst { return 0 }
+        }
+        if w.op == OP_CALL && w.imm != fi { return 0 }
+        i = i + 1
+    }
+    let mut count = 0
+    i = 1
+    while i < len(fc.ir) {
+        let w = fc.ir.get(i)
+        if w.op == OP_CALL {
+            let arg = fc.ir.get(i - 1)
+            if arg.op != OP_ARG || arg.imm != 0 { return 0 }
+            let end = _tail_return(fc, i, use, defs)
+            if end < 0 { return 0 }
+            ends.set(i, end)
+            count = count + 1
+        }
+        if w.op == OP_ARG {
+            if i + 1 >= len(fc.ir) { return 0 }
+            let nx = fc.ir.get(i + 1)
+            if nx.op != OP_CALL || nx.imm != fi || w.imm != 0 { return 0 }
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// Rebuild exact instruction indices while labels retain their symbolic IDs.
+// Every old virtual interval is mapped, including removed CALL/ARG/RET slots.
+fn _tail_self(fc: FnCtx, fi: int) {
+    let ends = vec[int].new(16)
+    let use = vec[int].new(len(fc.vloc))
+    if _tail_plan(fc, fi, ends, use) == 0 { return }
+    let old = vec[Ir].new(len(fc.ir))
+    let index_map = vec[int].new(len(fc.ir) + 1)
+    let nv = len(fc.vloc)
+    let starts = vec[int].new(nv)
+    let lasts = vec[int].new(nv)
+    let mut i = 0
+    while i < nv {
+        starts.push(fc.vstart.get(i))
+        lasts.push(fc.vend.get(i))
+        i = i + 1
+    }
+    i = 0
+    while i < len(fc.ir) { old.push(fc.ir.get(i)) i = i + 1 }
+    let acc = _new_var(fc, -1, TY_INT)
+    let snap = _new_var(fc, -1, TY_INT)
+    let param = old.get(0).dst
+    fc.vpin.set(param, 1)
+    let entry = _newlab(fc.labs)
+    fc.ir.clear()
+    let mut pending = -1
+    let mut cv = 0
+    i = 0
+    while i < len(old) {
+        index_map.push(len(fc.ir))
+        let w = old.get(i)
+        if i == 0 {
+            fc.ir.push(w)
+            fc.vstart.set(acc, len(fc.ir))
+            _ir_emit(fc, OP_CONST, acc, 0, 0, 0)
+            _ir_emit(fc, OP_LAB, 0, 0, 0, entry)
+        } else if w.op == OP_ARG {
+            // Evaluate and snapshot next parameter before overwriting current one.
+            fc.vstart.set(snap, len(fc.ir))
+            _ir_emit(fc, OP_MOV, snap, w.a, 0, 0)
+        } else if w.op == OP_CALL {
+            pending = ends.get(i)
+            cv = w.dst
+        } else if pending >= 0 && w.op == OP_ADD && (w.a == cv || w.b == cv) {
+            let mut term = w.a
+            if term == cv { term = w.b }
+            _ir_emit(fc, OP_ADD, acc, acc, term, 0)
+        } else if pending == i {
+            _ir_emit(fc, OP_MOV, param, snap, 0, 0)
+            _ir_emit(fc, OP_JMP, 0, 0, 0, entry)
+            pending = -1
+        } else if w.op == OP_RET {
+            if w.a == 0 {
+                // Bare/implicit return denotes integer zero, not virtual register 0.
+                _ir_emit(fc, OP_RET, 0, acc, 0, 0)
+            } else {
+                let rv = _vnew(fc)
+                fc.vty.set(rv, TY_INT)
+                _ir_emit(fc, OP_ADD, rv, acc, w.a, 0)
+                _ir_emit(fc, OP_RET, 0, rv, 0, 0)
+            }
+        } else {
+            fc.ir.push(w)
+        }
+        i = i + 1
+    }
+    index_map.push(len(fc.ir))
+    let mut v = 1
+    while v < nv {
+        let st = starts.get(v)
+        let en = lasts.get(v)
+        if st >= 0 && st < len(index_map) { fc.vstart.set(v, index_map.get(st)) }
+        if en >= 0 && en < len(index_map) { fc.vend.set(v, index_map.get(en)) }
+        v = v + 1
+    }
+    // New instructions may use old values later than their mapped original end.
+    i = 0
+    while i < len(fc.ir) {
+        let w = fc.ir.get(i)
+        if w.a > 0 && fc.vend.get(w.a) < i { fc.vend.set(w.a, i) }
+        if w.b > 0 && fc.vend.get(w.b) < i { fc.vend.set(w.b, i) }
+        if w.dst > 0 && _opt_writes(w.op) == 1 && fc.vend.get(w.dst) < i {
+            fc.vend.set(w.dst, i)
+        }
+        i = i + 1
+    }
+    // Pinned loop state spans the transformed body; keep snapshots conservative.
+    fc.vstart.set(snap, 1)
+    fc.vend.set(snap, len(fc.ir) - 1)
+    fc.vend.set(param, len(fc.ir) - 1)
+    fc.vend.set(acc, len(fc.ir) - 1)
+}
+
 fn _lower_fn(fc: FnCtx, fi: int) {
     let f = fc.fns.get(fi)
     fc.cells.set(C_CFI, fi)
@@ -7512,6 +7717,7 @@ fn _lower_fn(fc: FnCtx, fi: int) {
         _ir_emit(fc, OP_RET, 0, z, 0, 0)
     }
     _ir_emit(fc, OP_LAB, 0, 0, 0, ep)
+    _tail_self(fc, fi)
 }
 
 // ---------------------------------------------------------------------------
@@ -9351,7 +9557,269 @@ fn _alloc_vars(fc: FnCtx, ucnt: vec[int], baked: vec[int]) {
     }
 }
 
+// Only known non-calling instructions share a rebuild block; new opcodes stop it.
+fn _end_local(fc: FnCtx, ins: Ir) -> int {
+    let op = ins.op
+    if op == OP_ADD {
+        if ins.dst > 0 && fc.vty.get(ins.dst) == TY_INT { return 1 }
+        return 0
+    }
+    if op == OP_NOP || op == OP_CONST || op == OP_MOV ||
+       op == OP_SUB || op == OP_MUL || op == OP_DIV || op == OP_MOD ||
+       op == OP_NEG || op == OP_NOT || op == OP_NZ || op == OP_CMP ||
+       op == OP_AND || op == OP_OR || op == OP_XOR || op == OP_SHL ||
+       op == OP_SAR || op == OP_SHR || op == OP_BNOT ||
+       op == OP_ADDRV || op == OP_ADDRF || op == OP_ADDRX || op == OP_ADDRXN ||
+       op == OP_LOAD || op == OP_LOAD8 || op == OP_STORE || op == OP_STORE8 ||
+       op == OP_BINI || op == OP_CMPI || op == OP_LOADD || op == OP_LOADX ||
+       op == OP_STORED || op == OP_STOREX || op == OP_LOAD8D ||
+       op == OP_LOAD8X || op == OP_LOAD8I || op == OP_STORE8D ||
+       op == OP_STORE8X || op == OP_STORE8I || op == OP_DIVC ||
+       op == OP_CSUBNS || op == OP_TRUNC {
+        return 1
+    }
+    return 0
+}
+
+fn _end_read(v: int, at: int, bb: int, last: vec[int], block: vec[int]) {
+    if v <= 0 || v >= len(last) { return }
+    last.set(v, at)
+    if block.get(v) == -1 {
+        block.set(v, bb)
+    } else if block.get(v) != bb {
+        block.set(v, -2)
+    }
+}
+
+// Only single-block scalar intervals shrink; all dead temporaries remain allocated.
+fn _rebuild_temp_ends(fc: FnCtx) {
+    let nv = len(fc.vloc)
+    let defs = vec[int].new(nv)
+    let pos = vec[int].new(nv)
+    let last = vec[int].new(nv)
+    let block = vec[int].new(nv)
+    let mut v = 0
+    while v < nv {
+        defs.push(0)
+        pos.push(-1)
+        last.push(-1)
+        block.push(-1)
+        v = v + 1
+    }
+    let mut bb = 0
+    let mut i = 0
+    while i < len(fc.ir) {
+        let ins = fc.ir.get(i)
+        let op = ins.op
+        let local = _end_local(fc, ins)
+        if local == 0 { bb = bb + 1 }
+        // Explicit-XMM opcodes encode physical slot/opcode numbers, not vregs.
+        let slots = op == OP_XMMRR || op == OP_XMMRI || op == OP_XMMSH
+        if !slots {
+            _end_read(ins.a, i, bb, last, block)
+            if op != OP_BINI && op != OP_CMPI && op != OP_DIVC &&
+               op != OP_JCMPI && op != OP_CSUBNS &&
+               op != OP_XMMLD && op != OP_XMMST {
+                _end_read(ins.b, i, bb, last, block)
+            }
+            if op == OP_MEMCPYN || op == OP_STORED || op == OP_STOREX ||
+               op == OP_STORE8D || op == OP_STORE8X || op == OP_STORE8I {
+                _end_read(ins.dst, i, bb, last, block)
+            } else if ins.dst > 0 && ins.dst < nv &&
+                      op != OP_XMMLD && op != OP_XMMST && op != OP_STORE8 &&
+                      _opt_writes(op) == 1 {
+                let d = ins.dst
+                defs.set(d, defs.get(d) + 1)
+                pos.set(d, i)
+                if block.get(d) == -1 {
+                    block.set(d, bb)
+                } else if block.get(d) != bb {
+                    block.set(d, -2)
+                }
+                // A use before (or in) the definition is not single-block SSA.
+                if local == 0 || last.get(d) >= 0 { block.set(d, -2) }
+            }
+        }
+        if local == 0 { bb = bb + 1 }
+        i = i + 1
+    }
+    v = 1
+    while v < nv {
+        let mut en = last.get(v)
+        if pos.get(v) > en { en = pos.get(v) }
+        if en > fc.vend.get(v) { fc.vend.set(v, en) }
+        if fc.vpin.get(v) == 0 && defs.get(v) == 1 && block.get(v) >= 0 &&
+           _ty_is_agg(fc.vty.get(v)) == 0 && fc.vty.get(v) != TY_F64 &&
+           pos.get(v) >= fc.vstart.get(v) {
+            fc.vstart.set(v, pos.get(v))
+            fc.vend.set(v, en)
+        }
+        v = v + 1
+    }
+}
+
+// Whitelisted binary/immediate operations read left before writing destination.
+// Reuse only that operand's last-read endpoint, never a general <= interval rule.
+fn _reuse_left_endpoint(fc: FnCtx, v: int, st: int, en: int) -> int {
+    if st < 0 || st >= len(fc.ir) || fc.vty.get(v) != TY_INT { return 0 }
+    let ins = fc.ir.get(st)
+    if ins.dst != v { return 0 }
+    if ins.op == OP_BINI {
+        // b is an opcode, not a right-hand vreg. All listed emitters read a
+        // before overwriting d; immediate imul also permits d == a directly.
+        if ins.b != OP_ADD && ins.b != OP_SUB && ins.b != OP_AND &&
+           ins.b != OP_OR && ins.b != OP_XOR && ins.b != OP_MUL { return 0 }
+    } else if ins.op != OP_ADD && ins.op != OP_SUB && ins.op != OP_MUL {
+        return 0
+    }
+    let a = ins.a
+    if a <= 0 || a >= len(fc.vloc) || a == v { return 0 }
+    if fc.vpin.get(a) != 0 || fc.vty.get(a) != TY_INT || fc.vend.get(a) != st ||
+       fc.vstart.get(a) >= st {
+        return 0
+    }
+    let loc = fc.vloc.get(a)
+    let mut r = 0
+    while r < 4 {
+        if loc == _tmp_reg(r) + 1 && fc.rend.get(r) == st {
+            // Different right values may not share the dying left location.
+            // a == b is safe: the emitter's alias path saves b in scratch RAX.
+            if ins.op != OP_BINI && ins.b > 0 && ins.b != a &&
+               fc.vloc.get(ins.b) == loc { return 0 }
+            // Inspect all assigned intervals as an extra owner/interference guard,
+            // including conservative intervals that were not eligible to shrink.
+            let mut w = 1
+            while w < len(fc.vloc) {
+                if w != a && w != v && fc.vloc.get(w) == loc {
+                    let mut we = fc.vend.get(w)
+                    let ws = fc.vstart.get(w)
+                    if we < ws { we = ws }
+                    if ws <= en && we >= st { return 0 }
+                }
+                w = w + 1
+            }
+            fc.vloc.set(v, loc)
+            fc.rend.set(r, en)
+            return 1
+        }
+        r = r + 1
+    }
+    return 0
+}
+
+// Final IR reads use the same operand-role rules as optimization. Definitions
+// also count: a side-effecting LOAD/CALL must still have a destination location.
+fn _temp_touched(fc: FnCtx) -> vec[int] {
+    let touched = vec[int].new(len(fc.vloc))
+    let mut i = 0
+    while i < len(fc.vloc) {
+        touched.push(0)
+        i = i + 1
+    }
+    i = 0
+    while i < len(fc.ir) {
+        let ins = fc.ir.get(i)
+        let op = ins.op
+        if op != OP_XMMRR && op != OP_XMMRI && op != OP_XMMSH {
+            if op == OP_XMMLD || op == OP_XMMST {
+                if ins.a > 0 && ins.a < len(touched) { touched.set(ins.a, 1) }
+            } else {
+                _opt_mark(ins, touched)
+                if ins.dst > 0 && ins.dst < len(touched) &&
+                   op != OP_STORE8 && _opt_writes(op) == 1 {
+                    touched.set(ins.dst, 1)
+                }
+            }
+        }
+        i = i + 1
+    }
+    // C_SRET is read implicitly by RETAGG/RETSRET. Other cells are counters,
+    // labels, types, frame slots or literal bits, except the fnum address cache.
+    let sv = fc.cells.get(C_SRET)
+    if sv > 0 && sv < len(touched) { touched.set(sv, 1) }
+    i = 0
+    while i < fc.cells.get(C_FNUM_NC) {
+        let cv = fc.cells.get(C_FNUM_CACHE0 + 2 * i + 1)
+        if cv > 0 && cv < len(touched) { touched.set(cv, 1) }
+        i = i + 1
+    }
+    return touched
+}
+
+// Stable (start, vreg) bucket order in O(IR + vregs), without FnCtx fields.
+fn _temp_start_order(fc: FnCtx) -> vec[int] {
+    let touched = _temp_touched(fc)
+    let n = len(fc.ir)
+    let nv = len(fc.vloc)
+    let head = vec[int].new(n + 1)
+    let next = vec[int].new(nv)
+    let order = vec[int].new(nv)
+    let mut i = 0
+    while i <= n {
+        head.push(0)
+        i = i + 1
+    }
+    i = 0
+    while i < nv {
+        next.push(0)
+        i = i + 1
+    }
+    // Reverse insertion makes each bucket ascend by vreg, independent of layout.
+    let mut v = nv - 1
+    while v > 0 {
+        if fc.vpin.get(v) == 0 && fc.vloc.get(v) == 0 && touched.get(v) > 0 {
+            let st = fc.vstart.get(v)
+            if st < 0 || st > n {
+                eprint("qlmc: invalid temporary interval start")
+                exit(2)
+            }
+            next.set(v, head.get(st))
+            head.set(st, v)
+        }
+        v = v - 1
+    }
+    i = 0
+    while i <= n {
+        v = head.get(i)
+        while v > 0 {
+            order.push(v)
+            v = next.get(v)
+        }
+        i = i + 1
+    }
+    return order
+}
+
+fn _build_loop_mask(ir: vec[Ir], lpm: vec[int]) {
+    let n = len(ir)
+    lpm.clear()
+    let mut i = 0
+    while i <= n { lpm.push(0) i = i + 1 }
+    i = 0
+    while i < n {
+        let ins = ir.get(i)
+        if ins.op == OP_JMP || ins.op == OP_JZ || ins.op == OP_JNZ ||
+           ins.op == OP_JCMP || ins.op == OP_JCMPI ||
+           ins.op == OP_JCMPVLEN || ins.op == OP_JCMPSTR {
+            let tgt = _lab_index(ir, ins.imm)
+            if tgt >= 0 && tgt < i {
+                lpm.set(tgt, lpm.get(tgt) + 1)
+                lpm.set(i + 1, lpm.get(i + 1) - 1)
+            }
+        }
+        i = i + 1
+    }
+    let mut depth = 0
+    i = 0
+    while i <= n {
+        depth = depth + lpm.get(i)
+        lpm.set(i, depth)
+        i = i + 1
+    }
+}
+
 fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int], csb: vec[int], lpm: vec[int]) {
+    _rebuild_temp_ends(fc)
     _alloc_vars(fc, ucnt, baked)
     // v2.55：给"被占用的 XMM 变量寄存器"分配保存槽。**必须在临时池之前** ——
     // 临时池的基址是当时的 `C_ST`，之后再 `_st_slot` 就会落在池子里，互相踩。
@@ -9426,34 +9894,7 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int], csb: vec[int], lpm: vec[in
     // **每轮两次内存往返**；改用空着的 callee-saved 寄存器只花每函数一次
     // push/pop，明显划算。反过来，**循环外**的跨调用临时值溢出只发生一次，
     // 换寄存器反而白搭一对 push/pop（实测 fib 慢 4.7%）—— 所以要区分。
-    lpm.clear()
-    i = 0
-    while i <= n {
-        lpm.push(0)
-        i = i + 1
-    }
-    i = 0
-    while i < n {
-        let ins = fc.ir.get(i)
-        if ins.op == OP_JMP || ins.op == OP_JZ || ins.op == OP_JNZ ||
-           ins.op == OP_JCMP || ins.op == OP_JCMPVLEN || ins.op == OP_JCMPSTR {
-            let tgt = ins.imm
-            if tgt >= 0 && tgt <= i {
-                lpm.set(tgt, lpm.get(tgt) + 1)
-                if i + 1 <= n {
-                    lpm.set(i + 1, lpm.get(i + 1) - 1)
-                }
-            }
-        }
-        i = i + 1
-    }
-    let mut acc0 = 0
-    i = 0
-    while i <= n {
-        acc0 = acc0 + lpm.get(i)
-        lpm.set(i, acc0)
-        i = i + 1
-    }
+    _build_loop_mask(fc.ir, lpm)
     // 每个寄存器的"占用到哪条指令为止"
     let rend = fc.rend
     i = 0
@@ -9500,8 +9941,10 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int], csb: vec[int], lpm: vec[in
         send.push(-1)
         i = i + 1
     }
-    let mut v = 1
-    while v < len(fc.vloc) {
+    let order = _temp_start_order(fc)
+    let mut oi = 0
+    while oi < len(order) {
+        let v = order.get(oi)
         if fc.vpin.get(v) == 0 && fc.vloc.get(v) == 0 {
             let st = fc.vstart.get(v)
             let mut en = fc.vend.get(v)
@@ -9570,8 +10013,9 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int], csb: vec[int], lpm: vec[in
                         }
                     }
                 } else {
+                    placed = _reuse_left_endpoint(fc, v, st, en)
                     let mut r = 0
-                    while r < 4 {
+                    while r < 4 && placed == 0 {
                         if rend.get(r) < st {
                             fc.vloc.set(v, _tmp_reg(r) + 1)
                             rend.set(r, en)
@@ -9601,7 +10045,7 @@ fn _alloc(fc: FnCtx, ucnt: vec[int], baked: vec[int], csb: vec[int], lpm: vec[in
                 exit(2)
             }
         }
-        v = v + 1
+        oi = oi + 1
     }
 }
 
@@ -9811,6 +10255,19 @@ fn _emit_divc(fc: FnCtx, code: vec[int], ins: Ir, i: int) {
         kk = kk + 1
     }
     if pw2 == d && d >= 2 {
+        if ins.b == OP_MOD {
+            // t = (x < 0 ? d-1 : 0); r = ((x+t)&(d-1))-t.
+            // Full signed int64 truncation, including MIN_INT; no positivity guess.
+            _to_reg(fc, RAX, ins.a)
+            _b(code, 0x48) _b(code, 0x99)               // cqo: rdx = sign
+            _b(code, 0x48) _b(code, 0xC1) _b(code, 0xEA)
+            _b(code, 64 - kk)                          // shr rdx,64-k
+            _b(code, 0x48) _b(code, 0x01) _b(code, 0xD0) // add rax,rdx
+            _b(code, 0x48) _b(code, 0x25) _w32(code, d - 1)
+            _b(code, 0x48) _b(code, 0x29) _b(code, 0xD0) // sub rax,rdx
+            _store_rax(fc, fc.vloc.get(ins.dst))
+            return
+        }
         _to_reg(fc, RCX, ins.a)                // rcx = x
         // mov rax, rcx
         _b(code, 0x48)

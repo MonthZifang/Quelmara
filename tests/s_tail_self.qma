@@ -1,0 +1,106 @@
+// Self-recursion transformation guards. Keep benchmark inputs unchanged.
+// Run with the stable compiler first, then compare an optimized compiler.
+struct TailPair {
+    a: int
+    b: int
+}
+fn tail_swap(n: int, a: int, b: int) -> int {
+    if n <= 0 { return a * 100 + b }
+    return tail_swap(n - 1, b, a)
+}
+fn tail_six(n: int, a: int, b: int, c: int, d: int, e: int) -> int {
+    if n <= 0 { return a * 10000 + b * 1000 + c * 100 + d * 10 + e }
+    return tail_six(n - 1, b, c, d, e, a)
+}
+fn tail_narrow(n: int, x: u8) -> int {
+    if n <= 0 { return x }
+    return tail_narrow(n - 1, x + 3)
+}
+fn tail_defer(n: int) -> int {
+    defer print(n)
+    if n <= 0 { return 17 }
+    return tail_defer(n - 1)
+}
+fn tail_agg(n: int, p: TailPair) -> TailPair {
+    if n <= 0 { return p }
+    return tail_agg(n - 1, TailPair{a: p.b, b: p.a})
+}
+fn tail_tick(v: vec[int]) -> int {
+    v.set(0, v.get(0) + 1)
+    return v.get(0)
+}
+fn tail_effect(n: int, v: vec[int]) -> int {
+    if n <= 0 { return 0 }
+    return tail_tick(v) * n + tail_effect(n - 1, v)
+}
+fn tail_sum(n: int) -> int {
+    if n <= 0 { return 0 }
+    return n + tail_sum(n - 1)
+}
+fn tail_overflow(n: int, x: int) -> int {
+    if n <= 0 { return 0 }
+    return x + tail_overflow(n - 1, x)
+}
+fn tail_direct(n: int) -> int {
+    if n <= 0 { return 71 }
+    return tail_direct(n - 1)
+}
+fn tail_add_right(n: int) -> int {
+    if n <= 0 { return 7 }
+    return tail_add_right(n - 1) + n * 3
+}
+fn tail_mixed(n: int) -> int {
+    if n <= 0 { return 11 }
+    if n == 2 { return tail_mixed(n - 1) }
+    return n + tail_mixed(n - 1)
+}
+// A non-tail self call anywhere rejects the entire function.
+fn tail_reject(n: int) -> int {
+    if n <= 1 { return 1 }
+    if n == 2 { return tail_reject(n - 1) }
+    return tail_reject(n - 1) * 2
+}
+// Modular addition must retain signed wraparound even after reassociation.
+fn tail_wrap(n: int) -> int {
+    if n <= 0 { return 5 }
+    return 9223372036854775807 + tail_wrap(n - 1)
+}
+fn tail_defer_assign(n: int) -> int {
+    let mut x = n
+    defer x = x + 3
+    if n <= 0 { return x }
+    return n + tail_defer_assign(n - 1)
+}
+fn tail_param_mut(n: int) -> int {
+    if n <= 0 { return 9 }
+    n = n - 1
+    return tail_param_mut(n)
+}
+fn main() {
+    print(tail_swap(1, 11, 22))
+    print(tail_swap(2, 11, 22))
+    print(tail_six(1, 1, 2, 3, 4, 5))
+    print(tail_narrow(4, 250))
+    print(tail_defer(2))
+    let p = tail_agg(1, TailPair{a: 7, b: 9})
+    print(p.a * 100 + p.b)
+    let v = vec[int].new(1)
+    v.push(0)
+    // Reference stage-0 evaluates binary operands in the opposite order.
+    // Check occurrence count here; qlmc baseline/candidate output comparison
+    // separately covers its right-to-left return-value semantics.
+    let effect_value = tail_effect(3, v)
+    assert(effect_value == 10 || effect_value == 14, "evaluation-order variants")
+    print(v.get(0))
+    print(tail_sum(-3))
+    print(tail_sum(100))
+    print(tail_overflow(2, 9223372036854775807))
+    assert(tail_direct(200) == 71, "direct self tail")
+    assert(tail_add_right(100) == 15157, "right additive recursive result")
+    assert(tail_mixed(5) == 24, "mixed direct/add tails and nonzero base")
+    assert(tail_reject(5) == 8, "whole-function fallback")
+    assert(tail_wrap(2) == 3, "additive wraparound")
+    assert(tail_defer_assign(5) == 15, "pure assignment defer fallback")
+    assert(tail_param_mut(5) == 9, "modified parameter fallback")
+    print("tail-self-ok")
+}

@@ -418,7 +418,10 @@ def build_pe(code, data, reloc_offsets, imports, api_fixups, dbg=None,
     struct.pack_into("<I", o, 60, headers_size)
     struct.pack_into("<H", o, 68, 3)                    # console
     struct.pack_into("<H", o, 70, 0x8160)               # HIGH_ENTROPY|DYNAMIC_BASE|NX|TS
-    struct.pack_into("<Q", o, 72, 0x100000)             # stack reserve 1MB
+    # Reference-codegen frames are larger than qlmc's. Recursive lowering of
+    # the compiler itself exceeds the Windows 1MB default (STACK_OVERFLOW).
+    # Reserve virtual address space only; commit remains demand-paged at 4KB.
+    struct.pack_into("<Q", o, 72, 0x1000000)            # stack reserve 16MB
     struct.pack_into("<Q", o, 80, 0x1000)               # stack commit 4KB
     struct.pack_into("<Q", o, 88, 0x100000)             # heap reserve
     struct.pack_into("<Q", o, 96, 0x1000)               # heap commit
