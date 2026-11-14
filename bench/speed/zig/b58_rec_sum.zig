@@ -2,7 +2,11 @@
 const std = @import("std");
 fn rec_sum(n: i64) i64 {
     if (n <= 0) return 0;
-    return n + rec_sum(n - 1);
+    // v4.115 fairness audit: per-level doNotOptimizeAway stops compile-time
+    // evaluation / closed-form replacement of the recursion.
+    const r = n + rec_sum(n - 1);
+    std.mem.doNotOptimizeAway(r);
+    return r;
 }
 pub fn main() !void {
     const t0 = std.time.nanoTimestamp();

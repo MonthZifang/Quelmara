@@ -13,9 +13,12 @@ program b36_call
   use b36_mod
   implicit none
   integer(kind=8) :: acc, i, t0, t1, rate
+  ! v4.115 fairness audit: volatile input stops whole-loop compile-time folding.
+  integer(kind=8), volatile :: n
+  n = 10000000_8
   acc = 0_8
   call system_clock(t0, rate)
-  do i = 0_8, 9999999_8
+  do i = 0_8, n - 1_8
     acc = add3(acc, i, 1_8)
   end do
   call system_clock(t1, rate)

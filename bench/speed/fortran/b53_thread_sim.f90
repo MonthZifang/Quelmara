@@ -15,7 +15,9 @@ end module b53_mod
 program b53_thread_sim
   use b53_mod
   implicit none
-  integer(kind=8) :: n, a, b, c, d, t0, t1, rate
+  integer(kind=8) :: a, b, c, d, t0, t1, rate
+  ! v4.115 fairness audit: volatile input stops whole-workload compile-time folding.
+  integer(kind=8), volatile :: n
   n = 10000000_8
   call system_clock(t0, rate)
   a = work(0_8, n / 4_8)

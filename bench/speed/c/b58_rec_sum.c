@@ -5,9 +5,13 @@
 #include <time.h>
 #include "bench.h"
 
+// v4.115 fairness audit: per-level empty-asm barrier stops compile-time
+// evaluation / closed-form replacement of the recursion (zero instructions).
 static int64_t rec_sum(int64_t n) {
     if (n <= 0) return 0;
-    return n + rec_sum(n - 1);
+    int64_t r = n + rec_sum(n - 1);
+    __asm__ volatile("" : "+r"(r) :: "memory");
+    return r;
 }
 int main(void) {
     T0();

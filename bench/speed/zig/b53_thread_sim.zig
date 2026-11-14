@@ -3,7 +3,12 @@ const std = @import("std");
 fn work(start: i64, end: i64) i64 {
     var s: i64 = 0;
     var i = start;
-    while (i < end) : (i += 1) s += i * 2 + 1;
+    // v4.115 fairness audit: per-iteration doNotOptimizeAway stops closed-form
+    // replacement of the sum (zero instructions, algorithm unchanged).
+    while (i < end) : (i += 1) {
+        s += i * 2 + 1;
+        std.mem.doNotOptimizeAway(s);
+    }
     return s;
 }
 pub fn main() !void {
