@@ -82,6 +82,29 @@ MAP=0x10000 / SLICE=0x20000 / FN=0x30000 / ARRAY=0x100000+(len<<8)+elem），
 **顺序**：先 `_pin_slot`（可寻址变量落栈槽，差分验证既有代码不变）→ 解析层（照抄上面）
 → 读/写/传址三落点 → `&int` 差分 → `pin_cross_grow`。**每步不动点 + 差分，禁一次性铺开。**
 
+#### 第 8 轮进度（工作区有未提交 &T 半成品，接续时先 `git diff` 看现状）
+
+**qlmc 侧 &T 已实现并验证**（`bootstrap/qlmc/qlmc.qma`，未提交）：解析层 + 读穿透
+（E_VAR）+ 写穿透（S_ASSIGN）+ 调用传址（E_CALL 实参循环，含"寄存器变量强制落帧槽"
+`fc.vloc.set(v,-(_st_slot(fc))-1)`）。**实测**：`&int` 自增/乘加、循环内 bump、双引用
+swap 全部正确；自举不动点 cand2==cand3（785408B）、既有夹具零回退。
+
+**stage-0 C 后端（`tools/stage0/qlm.py` Codegen）也已加 &T**（未提交、未测）：
+parse_type `&`→("ref",base)、ctype→`T*`、env_type→"ref:"、name 读 `*p`、assign 写
+`*p=`、call 传 `&x`。**但差分夹具走 `--target win` = 原生后端 `qlm_native.py`，不走
+C Codegen**——所以 C 后端这套对差分无用，真正要补的是 `qlm_native.py`。
+
+**`qlm_native.py` 待补（下一版主战场，13588 行，IR 发射模型）**：
+- 类型标记：仿 `_mark_vec/_mark_struct` 加 `fn.refv`（vreg→base）；`lower_fn`（~6498
+  的形参标记循环）给 ref 形参打标。
+- 读穿透：`eval` 的 `name`（~1612 `return env[e[1]]`）——ref 则 `fn.emit("load",d,v,("imm",0))`。
+- 写穿透：`assign`（~5605）——ref 目标 `fn.emit("store",cur,("imm",0),spec)`，不走 mov。
+- 传址：`lower_call`（~3041）用户函数实参处——ref 形参传实参变量地址；**取址需变量
+  落帧槽**（同 qlmc 的 `_pin_slot` 坑，原生后端变量也是寄存器/帧槽分配，先找它的
+  聚合按址传参机制复用）。
+- `type_words` 对 ("ref",_) 返回 1（现已默认 1，核对即可）。
+**验证**：`&int` 差分（stage-0 win vs qlmc）→ 既有 42/42 → 76/76 → 冷自举 → 提交 v4.120。
+
 ### 步骤 2：编译器层复用 9a 的 STORE+ADDRV 回传
 - 方向已验证（复现器从"挂起"变"跑完"），余错仅在 `ADDRV` 立即数（`-loc-1` 语义）
   与 DCE/降级的相交。
