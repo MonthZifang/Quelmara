@@ -168,8 +168,29 @@ get/set——内联布局对它是纯收益。但布局改动是**全局**的，
 该稳定槽，而非直接把变量绑到会被内联重编号的结果临时值），addrslot/force_mem 都指向
 这个稳定 vreg。或者：内联重编号时同步更新 force_mem 集合与 addrslot 源（需确认
 `_inline_one`/substitution 对 caller 侧 addrslot 源的重编号覆盖）。
-**先让 `&vec` 最小复现在 stage-0 跑通（差分对齐 qlmc），再谈内联布局。这是 v4.120
-引入的潜在 bug（现有测试只用 &int 故 CI 绿），内联布局的前置必修项。**
+**✅ 已在 v4.121 修复**：最终没走 `_pin_slot`，而是更小的根治——`opt_copy_prop` 把
+**被取址 vreg（addrslot 源）排除出别名键**，定义 MOV 保留、变量始终是被写过的稳定帧槽。
+`&vec` 跨调用 push+grow 差分已对齐 qlmc，s_ref 夹具含该用例。**前置已清。**
+
+## 1.5 第 12 轮：内联布局的逐点变换清单（&T/&vec 就绪后勘定）
+
+**布局**：现行句柄→头 `[data_ptr@0, len@8, cap@16]`→独立数据块；目标内联
+`[len@0, cap@8, data@16…]` 一块。`vec.get(i)` 从「load [h+0] 再 load [data+i*stride]」
+降为「load [h+16+i*stride]」单条。
+
+**逐点**（qlmc 侧，行号为 v4.121 快照）：
+- `_lower_vecnew`(~15501)：单块 `RT_ALLOC(16+cap*stride)`，写 len@0/cap@8，不再二次 alloc。
+- 下标取址(~6025)：`data=_vec_field(h,0)` 改为 `h+16` 直接当基址（省一次 load）。
+- `push`(~19165)：len@[h+0]、cap@[h+8]、data@h+16；grow 后重读。
+- `_vec_grow_body`(~15445)：整块重分配 `16+ncp*stride`，memcpy 旧 data→新 data，
+  **新块地址经引用 STORE+ADDRV 回写调用方句柄槽**（9a 方向，&T 已就绪）。
+- `len` 方法(~19162/6262)：[h+8]→[h+0]。
+- `OP_JCMPVLEN`(~4215)：长度偏移 +8→+0（发射层同步）。
+- `_vec_field` 缓存(~15340)：off 语义随之改。
+- **vec 传参改按引用**（句柄槽地址），否则 grow 回写无法到达值语义别名——这是 9 次
+  失败的死结，&T 就绪后可解；基准里 vec 均局部变量、原地改，语义与 C 传指针一致。
+
+**门槛不变**：先 `pin_cross_grow`（改 &vec 传参）跑通，再逐点差分 + 不动点，禁一次性铺开。
 
 ## 3. 三条编译器内部事实（地图，来自 9 次复盘）
 - `_pin` **不保证**栈槽：`_new_var` 在 `n < N_VARREG` 时仍分配寄存器。
