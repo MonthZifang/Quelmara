@@ -1,0 +1,6140 @@
+{
+  "schema_version": 1,
+  "timing": "in_process_ns_min",
+  "platform": {
+    "system": "Linux",
+    "release": "7.0.0-42-generic",
+    "machine": "x86_64",
+    "processor": "",
+    "python": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]"
+  },
+  "compilers": {
+    "invocations": [
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b1_int.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b1_int",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b2_float.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b2_float",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b3_recursion.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b3_recursion",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b4_array.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b4_array",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b5_string.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b5_string",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b6_hash.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b6_hash",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b7_sort.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b7_sort",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b8_threads1.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b8_threads1",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b8_threads4.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b8_threads4",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b9_json.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b9_json",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b10_ackermann.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b10_ackermann",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b11_nqueens.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b11_nqueens",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b12_gcd.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b12_gcd",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b13_collatz.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b13_collatz",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b15_loopsum.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b15_loopsum",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b17_bubble.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b17_bubble",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b22_knapsack.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b22_knapsack",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b27_sieve.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b27_sieve",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b28_matrix.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b28_matrix",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b31_memcpy.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b31_memcpy",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b32_io_write.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b32_io_write",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b33_startup.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b33_startup",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b34_bitops.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b34_bitops",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b35_branch.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b35_branch",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b36_call.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b36_call",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b37_swap.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b37_swap",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b38_prime.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b38_prime",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b39_hash_open.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b39_hash_open",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b40_binary_search.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b40_binary_search",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b42_matrix_transpose.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b42_matrix_transpose",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b43_gcd_lcm.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b43_gcd_lcm",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b44_stack_sim.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b44_stack_sim",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b45_accumulate.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b45_accumulate",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b46_strcat.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b46_strcat",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b47_bitcount.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b47_bitcount",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b48_sum_matrix.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b48_sum_matrix",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b49_floyd.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b49_floyd",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b50_permute.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b50_permute",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b52_io_scan.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b52_io_scan",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b53_thread_sim.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b53_thread_sim",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b54_merge_sort.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b54_merge_sort",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b55_hash_chain.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b55_hash_chain",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b56_sieve_opt.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b56_sieve_opt",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b57_pow_mod.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b57_pow_mod",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b58_rec_sum.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b58_rec_sum",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b59_mat_vec.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b59_mat_vec",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b60_murmur.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b60_murmur",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b61_cache_scan.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b61_cache_scan",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b62_pred_branch.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b62_pred_branch",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b65_random_walk.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b65_random_walk",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b66_integrate.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b66_integrate",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b67_bubble_opt.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b67_bubble_opt",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b68_bit_matrix.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b68_bit_matrix",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b69_hash_fib.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b69_hash_fib",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b70_lin_search.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b70_lin_search",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b71_sum_squares.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b71_sum_squares",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b72_sort_insert.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b72_sort_insert",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b73_graph_bfs.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b73_graph_bfs",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b74_accum_poly.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b74_accum_poly",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b75_fib_matrix.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b75_fib_matrix",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b76_io_line.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b76_io_line",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b77_rec_fib.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b77_rec_fib",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b78_sum_digits.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b78_sum_digits",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b79_binary_tree.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b79_binary_tree",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b81_bit_reverse.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b81_bit_reverse",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b82_array_fill.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b82_array_fill",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b83_lcg_random.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b83_lcg_random",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b84_pair_swap.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b84_pair_swap",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b85_count_ones.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b85_count_ones",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b86_matrix_diag.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b86_matrix_diag",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b87_memcopy_big.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b87_memcopy_big",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b14_fibiter.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b14_fibiter",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b16_leibniz.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b16_leibniz",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b18_insertion.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b18_insertion",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b23_lcs.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b23_lcs",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/wine",
+        "build/perf_4114/jump2.exe",
+        "build",
+        "/root/Quelmara/Quelmara/bench/speed/quelmara/b26_maxsub.qma",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b26_maxsub",
+        "--target",
+        "elf",
+        "--heap-mb",
+        "512",
+        "--no-bounds-check"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b1_int",
+        "/root/Quelmara/Quelmara/bench/speed/c/b1_int.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b2_float",
+        "/root/Quelmara/Quelmara/bench/speed/c/b2_float.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b3_recursion",
+        "/root/Quelmara/Quelmara/bench/speed/c/b3_recursion.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b4_array",
+        "/root/Quelmara/Quelmara/bench/speed/c/b4_array.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b5_string",
+        "/root/Quelmara/Quelmara/bench/speed/c/b5_string.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b6_hash",
+        "/root/Quelmara/Quelmara/bench/speed/c/b6_hash.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b7_sort",
+        "/root/Quelmara/Quelmara/bench/speed/c/b7_sort.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b8_threads1",
+        "/root/Quelmara/Quelmara/bench/speed/c/b8_threads1.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b8_threads4",
+        "/root/Quelmara/Quelmara/bench/speed/c/b8_threads4.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b9_json",
+        "/root/Quelmara/Quelmara/bench/speed/c/b9_json.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b10_ackermann",
+        "/root/Quelmara/Quelmara/bench/speed/c/b10_ackermann.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b11_nqueens",
+        "/root/Quelmara/Quelmara/bench/speed/c/b11_nqueens.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b12_gcd",
+        "/root/Quelmara/Quelmara/bench/speed/c/b12_gcd.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b13_collatz",
+        "/root/Quelmara/Quelmara/bench/speed/c/b13_collatz.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b15_loopsum",
+        "/root/Quelmara/Quelmara/bench/speed/c/b15_loopsum.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b17_bubble",
+        "/root/Quelmara/Quelmara/bench/speed/c/b17_bubble.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b22_knapsack",
+        "/root/Quelmara/Quelmara/bench/speed/c/b22_knapsack.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b27_sieve",
+        "/root/Quelmara/Quelmara/bench/speed/c/b27_sieve.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b28_matrix",
+        "/root/Quelmara/Quelmara/bench/speed/c/b28_matrix.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b31_memcpy",
+        "/root/Quelmara/Quelmara/bench/speed/c/b31_memcpy.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b32_io_write",
+        "/root/Quelmara/Quelmara/bench/speed/c/b32_io_write.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b33_startup",
+        "/root/Quelmara/Quelmara/bench/speed/c/b33_startup.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b34_bitops",
+        "/root/Quelmara/Quelmara/bench/speed/c/b34_bitops.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b35_branch",
+        "/root/Quelmara/Quelmara/bench/speed/c/b35_branch.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b36_call",
+        "/root/Quelmara/Quelmara/bench/speed/c/b36_call.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b37_swap",
+        "/root/Quelmara/Quelmara/bench/speed/c/b37_swap.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b38_prime",
+        "/root/Quelmara/Quelmara/bench/speed/c/b38_prime.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b39_hash_open",
+        "/root/Quelmara/Quelmara/bench/speed/c/b39_hash_open.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b40_binary_search",
+        "/root/Quelmara/Quelmara/bench/speed/c/b40_binary_search.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b42_matrix_transpose",
+        "/root/Quelmara/Quelmara/bench/speed/c/b42_matrix_transpose.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b43_gcd_lcm",
+        "/root/Quelmara/Quelmara/bench/speed/c/b43_gcd_lcm.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b44_stack_sim",
+        "/root/Quelmara/Quelmara/bench/speed/c/b44_stack_sim.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b45_accumulate",
+        "/root/Quelmara/Quelmara/bench/speed/c/b45_accumulate.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b46_strcat",
+        "/root/Quelmara/Quelmara/bench/speed/c/b46_strcat.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b47_bitcount",
+        "/root/Quelmara/Quelmara/bench/speed/c/b47_bitcount.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b48_sum_matrix",
+        "/root/Quelmara/Quelmara/bench/speed/c/b48_sum_matrix.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b49_floyd",
+        "/root/Quelmara/Quelmara/bench/speed/c/b49_floyd.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b50_permute",
+        "/root/Quelmara/Quelmara/bench/speed/c/b50_permute.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b52_io_scan",
+        "/root/Quelmara/Quelmara/bench/speed/c/b52_io_scan.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b53_thread_sim",
+        "/root/Quelmara/Quelmara/bench/speed/c/b53_thread_sim.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b54_merge_sort",
+        "/root/Quelmara/Quelmara/bench/speed/c/b54_merge_sort.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b55_hash_chain",
+        "/root/Quelmara/Quelmara/bench/speed/c/b55_hash_chain.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b56_sieve_opt",
+        "/root/Quelmara/Quelmara/bench/speed/c/b56_sieve_opt.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b57_pow_mod",
+        "/root/Quelmara/Quelmara/bench/speed/c/b57_pow_mod.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b58_rec_sum",
+        "/root/Quelmara/Quelmara/bench/speed/c/b58_rec_sum.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b59_mat_vec",
+        "/root/Quelmara/Quelmara/bench/speed/c/b59_mat_vec.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b60_murmur",
+        "/root/Quelmara/Quelmara/bench/speed/c/b60_murmur.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b61_cache_scan",
+        "/root/Quelmara/Quelmara/bench/speed/c/b61_cache_scan.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b62_pred_branch",
+        "/root/Quelmara/Quelmara/bench/speed/c/b62_pred_branch.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b65_random_walk",
+        "/root/Quelmara/Quelmara/bench/speed/c/b65_random_walk.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b66_integrate",
+        "/root/Quelmara/Quelmara/bench/speed/c/b66_integrate.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b67_bubble_opt",
+        "/root/Quelmara/Quelmara/bench/speed/c/b67_bubble_opt.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b68_bit_matrix",
+        "/root/Quelmara/Quelmara/bench/speed/c/b68_bit_matrix.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b69_hash_fib",
+        "/root/Quelmara/Quelmara/bench/speed/c/b69_hash_fib.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b70_lin_search",
+        "/root/Quelmara/Quelmara/bench/speed/c/b70_lin_search.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b71_sum_squares",
+        "/root/Quelmara/Quelmara/bench/speed/c/b71_sum_squares.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b72_sort_insert",
+        "/root/Quelmara/Quelmara/bench/speed/c/b72_sort_insert.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b73_graph_bfs",
+        "/root/Quelmara/Quelmara/bench/speed/c/b73_graph_bfs.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b74_accum_poly",
+        "/root/Quelmara/Quelmara/bench/speed/c/b74_accum_poly.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b75_fib_matrix",
+        "/root/Quelmara/Quelmara/bench/speed/c/b75_fib_matrix.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b76_io_line",
+        "/root/Quelmara/Quelmara/bench/speed/c/b76_io_line.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b77_rec_fib",
+        "/root/Quelmara/Quelmara/bench/speed/c/b77_rec_fib.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b78_sum_digits",
+        "/root/Quelmara/Quelmara/bench/speed/c/b78_sum_digits.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b79_binary_tree",
+        "/root/Quelmara/Quelmara/bench/speed/c/b79_binary_tree.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b81_bit_reverse",
+        "/root/Quelmara/Quelmara/bench/speed/c/b81_bit_reverse.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b82_array_fill",
+        "/root/Quelmara/Quelmara/bench/speed/c/b82_array_fill.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b83_lcg_random",
+        "/root/Quelmara/Quelmara/bench/speed/c/b83_lcg_random.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b84_pair_swap",
+        "/root/Quelmara/Quelmara/bench/speed/c/b84_pair_swap.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b85_count_ones",
+        "/root/Quelmara/Quelmara/bench/speed/c/b85_count_ones.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b86_matrix_diag",
+        "/root/Quelmara/Quelmara/bench/speed/c/b86_matrix_diag.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b87_memcopy_big",
+        "/root/Quelmara/Quelmara/bench/speed/c/b87_memcopy_big.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b14_fibiter",
+        "/root/Quelmara/Quelmara/bench/speed/c/b14_fibiter.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b16_leibniz",
+        "/root/Quelmara/Quelmara/bench/speed/c/b16_leibniz.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b18_insertion",
+        "/root/Quelmara/Quelmara/bench/speed/c/b18_insertion.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b23_lcs",
+        "/root/Quelmara/Quelmara/bench/speed/c/b23_lcs.c"
+      ],
+      [
+        "/usr/bin/zig",
+        "cc",
+        "-O2",
+        "-o",
+        "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b26_maxsub",
+        "/root/Quelmara/Quelmara/bench/speed/c/b26_maxsub.c"
+      ]
+    ],
+    "identities": [
+      {
+        "path": "/root/Quelmara/Quelmara/tools/stage0/qlm_cli.py",
+        "sha256": "c326ddabe727ada9fbf9f024b0ce423a94873124369c176e501796699221d47f"
+      },
+      {
+        "path": "/usr/bin/wine",
+        "sha256": "deb451ad41a6eacfd1f542c7e30924b59eea67dbb147652c65f2aaf1ffbbe3ab"
+      },
+      {
+        "path": "/usr/bin/zig",
+        "sha256": "18785a226eaea571844ccfaca700d485421bbcbf0e398da4fe0ce5e01e55eddb"
+      },
+      {
+        "path": "build/perf_4114/jump2.exe",
+        "sha256": "c1ebf4f3b102d2e72c2c7a433c630eacbf654f0dba0362b9c596d74ed5c43f18"
+      }
+    ]
+  },
+  "options": {
+    "reps": 1,
+    "timeout": 120.0,
+    "output_dir": "/root/Quelmara/Quelmara/build/perf_4114/full_bins",
+    "json": "build/perf_4114/full.json",
+    "only": null,
+    "langs": [
+      "quelmara",
+      "c"
+    ],
+    "markdown": false,
+    "mem": false,
+    "no_bounds_check": false,
+    "bounds_check": false,
+    "heap_mb": null
+  },
+  "build_options": {
+    "heap_mb": 512,
+    "no_bounds": false,
+    "keep_bounds_force": false,
+    "keep_bounds_benches": [
+      "b70_lin_search"
+    ]
+  },
+  "notes": {},
+  "benchmarks": [
+    {
+      "bench": "b1_int",
+      "desc": "整数运算：2000 万次 (i*7)%13 累加",
+      "t": {
+        "quelmara": 0.061382309,
+        "c": 0.090123786
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "119999988",
+        "c": "119999988"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b1_int"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 63159037,
+              "peak_bytes": 0,
+              "stdout": "119999988\nT\n61382309\n",
+              "checksum": "119999988",
+              "ns": 61382309,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "119999988",
+          "best_ns": 61382309,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b1_int"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 92748274,
+              "peak_bytes": 0,
+              "stdout": "119999988\nT\n90123786\n",
+              "checksum": "119999988",
+              "ns": 90123786,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "119999988",
+          "best_ns": 90123786,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b2_float",
+      "desc": "浮点运算：调和级数前 500 万项",
+      "t": {
+        "quelmara": 0.08096664,
+        "c": 0.09137308
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "16.002164",
+        "c": "16.002164"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b2_float"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 82830341,
+              "peak_bytes": 0,
+              "stdout": "16.002164\nT\n80966640\n",
+              "checksum": "16.002164",
+              "ns": 80966640,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "16.002164",
+          "best_ns": 80966640,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b2_float"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 94040373,
+              "peak_bytes": 0,
+              "stdout": "16.002164\nT\n91373080\n",
+              "checksum": "16.002164",
+              "ns": 91373080,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "16.002164",
+          "best_ns": 91373080,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b3_recursion",
+      "desc": "递归：朴素 fib(30)（约 270 万次调用）",
+      "t": {
+        "quelmara": 0.029146548,
+        "c": 0.014220574
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "832040",
+        "c": "832040"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b3_recursion"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 30792396,
+              "peak_bytes": 0,
+              "stdout": "832040\nT\n29146548\n",
+              "checksum": "832040",
+              "ns": 29146548,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "832040",
+          "best_ns": 29146548,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b3_recursion"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 16791702,
+              "peak_bytes": 0,
+              "stdout": "832040\nT\n14220574\n",
+              "checksum": "832040",
+              "ns": 14220574,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "832040",
+          "best_ns": 14220574,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b4_array",
+      "desc": "数组：200 万元素写入 + 顺序 + 跨步遍历",
+      "t": {
+        "quelmara": 0.04905595,
+        "c": 0.037291919
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "5999999000000\n857144428570",
+        "c": "5999999000000\n857144428570"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b4_array"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 53175128,
+              "peak_bytes": 0,
+              "stdout": "5999999000000\n857144428570\nT\n49055950\n",
+              "checksum": "5999999000000\n857144428570",
+              "ns": 49055950,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "5999999000000\n857144428570",
+          "best_ns": 49055950,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b4_array"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 39860911,
+              "peak_bytes": 0,
+              "stdout": "5999999000000\n857144428570\nT\n37291919\n",
+              "checksum": "5999999000000\n857144428570",
+              "ns": 37291919,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "5999999000000\n857144428570",
+          "best_ns": 37291919,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b5_string",
+      "desc": "字符串：20 万次 int→str→int",
+      "t": {
+        "quelmara": 0.168566804,
+        "c": 0.158662226
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "125002638890",
+        "c": "125002638890"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b5_string"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 174273978,
+              "peak_bytes": 0,
+              "stdout": "125002638890\nT\n168566804\n",
+              "checksum": "125002638890",
+              "ns": 168566804,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "125002638890",
+          "best_ns": 168566804,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b5_string"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 161332205,
+              "peak_bytes": 0,
+              "stdout": "125002638890\nT\n158662226\n",
+              "checksum": "125002638890",
+              "ns": 158662226,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "125002638890",
+          "best_ns": 158662226,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b6_hash",
+      "desc": "哈希表：10 万插入 + 10 万查找（手写开放寻址）",
+      "t": {
+        "quelmara": 0.099997873,
+        "c": 0.078400325
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "270001500000",
+        "c": "270001500000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b6_hash"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 104369883,
+              "peak_bytes": 0,
+              "stdout": "270001500000\nT\n99997873\n",
+              "checksum": "270001500000",
+              "ns": 99997873,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "270001500000",
+          "best_ns": 99997873,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b6_hash"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 81060105,
+              "peak_bytes": 0,
+              "stdout": "270001500000\nT\n78400325\n",
+              "checksum": "270001500000",
+              "ns": 78400325,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "270001500000",
+          "best_ns": 78400325,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b7_sort",
+      "desc": "排序：20 万伪随机 int 快排（手写）",
+      "t": {
+        "quelmara": 0.037492505,
+        "c": 0.029231673
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "29237\n2147465837\n100022936",
+        "c": "29237\n2147465837\n100022936"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b7_sort"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 47691159,
+              "peak_bytes": 0,
+              "stdout": "29237\n2147465837\n100022936\nT\n37492505\n",
+              "checksum": "29237\n2147465837\n100022936",
+              "ns": 37492505,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "29237\n2147465837\n100022936",
+          "best_ns": 37492505,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b7_sort"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 33086078,
+              "peak_bytes": 0,
+              "stdout": "29237\n2147465837\n100022936\nT\n29231673\n",
+              "checksum": "29237\n2147465837\n100022936",
+              "ns": 29231673,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "29237\n2147465837\n100022936",
+          "best_ns": 29231673,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b8_threads1",
+      "desc": "并发：单线程 4000 万次整数运算",
+      "t": {
+        "quelmara": 0.663803168,
+        "c": 0.660787669
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "959999992",
+        "c": "959999992"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b8_threads1"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 665608441,
+              "peak_bytes": 0,
+              "stdout": "959999992\nT\n663803168\n",
+              "checksum": "959999992",
+              "ns": 663803168,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "959999992",
+          "best_ns": 663803168,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b8_threads1"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 663449443,
+              "peak_bytes": 0,
+              "stdout": "959999992\nT\n660787669\n",
+              "checksum": "959999992",
+              "ns": 660787669,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "959999992",
+          "best_ns": 660787669,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b8_threads4",
+      "desc": "并发：4 线程各 1000 万次（总量相同）",
+      "t": {
+        "quelmara": 0.167970734,
+        "c": 0.166888846
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "959999976",
+        "c": "959999976"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b8_threads4"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 169800187,
+              "peak_bytes": 0,
+              "stdout": "959999976\nT\n167970734\n",
+              "checksum": "959999976",
+              "ns": 167970734,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "959999976",
+          "best_ns": 167970734,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b8_threads4"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 169558142,
+              "peak_bytes": 0,
+              "stdout": "959999976\nT\n166888846\n",
+              "checksum": "959999976",
+              "ns": 166888846,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "959999976",
+          "best_ns": 166888846,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b9_json",
+      "desc": "JSON：2590 字节文档解析 2000 遍（手写递归下降）",
+      "t": {
+        "quelmara": 0.091940171,
+        "c": 0.033217044
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "4010000",
+        "c": "4010000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b9_json"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 93751925,
+              "peak_bytes": 0,
+              "stdout": "4010000\nT\n91940171\n",
+              "checksum": "4010000",
+              "ns": 91940171,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "4010000",
+          "best_ns": 91940171,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b9_json"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 35900212,
+              "peak_bytes": 0,
+              "stdout": "4010000\nT\n33217044\n",
+              "checksum": "4010000",
+              "ns": 33217044,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "4010000",
+          "best_ns": 33217044,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b10_ackermann",
+      "desc": "递归：Ackermann(2,8) 深层非原始递归",
+      "t": {
+        "quelmara": 5.483e-06,
+        "c": 0.000101349
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "19",
+        "c": "19"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b10_ackermann"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 1571006,
+              "peak_bytes": 0,
+              "stdout": "19\nT\n5483\n",
+              "checksum": "19",
+              "ns": 5483,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "19",
+          "best_ns": 5483,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b10_ackermann"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 2578758,
+              "peak_bytes": 0,
+              "stdout": "19\nT\n101349\n",
+              "checksum": "19",
+              "ns": 101349,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "19",
+          "best_ns": 101349,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b11_nqueens",
+      "desc": "回溯：8 皇后 × 2000 轮（数组标记）",
+      "t": {
+        "quelmara": 1.970622976,
+        "c": 1.142348626
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "184000",
+        "c": "184000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b11_nqueens"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 1972334820,
+              "peak_bytes": 0,
+              "stdout": "184000\nT\n1970622976\n",
+              "checksum": "184000",
+              "ns": 1970622976,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "184000",
+          "best_ns": 1970622976,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b11_nqueens"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 1145040734,
+              "peak_bytes": 0,
+              "stdout": "184000\nT\n1142348626\n",
+              "checksum": "184000",
+              "ns": 1142348626,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "184000",
+          "best_ns": 1142348626,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b12_gcd",
+      "desc": "整数：3000 万次辗转相除",
+      "t": {
+        "quelmara": 11.139712864,
+        "c": 10.685030559
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "35700000",
+        "c": "35700000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b12_gcd"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 11141453711,
+              "peak_bytes": 0,
+              "stdout": "35700000\nT\n11139712864\n",
+              "checksum": "35700000",
+              "ns": 11139712864,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "35700000",
+          "best_ns": 11139712864,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b12_gcd"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 10687807623,
+              "peak_bytes": 0,
+              "stdout": "35700000\nT\n10685030559\n",
+              "checksum": "35700000",
+              "ns": 10685030559,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "35700000",
+          "best_ns": 10685030559,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b13_collatz",
+      "desc": "分支预测 + 整数除法：Collatz 1..30 万",
+      "t": {
+        "quelmara": 0.345242728,
+        "c": 0.114887716
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "4420230631",
+        "c": "4420230631"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b13_collatz"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 347132637,
+              "peak_bytes": 0,
+              "stdout": "4420230631\nT\n345242728\n",
+              "checksum": "4420230631",
+              "ns": 345242728,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "4420230631",
+          "best_ns": 345242728,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b13_collatz"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 117527936,
+              "peak_bytes": 0,
+              "stdout": "4420230631\nT\n114887716\n",
+              "checksum": "4420230631",
+              "ns": 114887716,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "4420230631",
+          "best_ns": 114887716,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b15_loopsum",
+      "desc": "最朴素循环累加 2 亿次（循环开销基线）",
+      "t": {
+        "quelmara": 0.951018905,
+        "c": 0.585292447
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "102300000512",
+        "c": "102300000512"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b15_loopsum"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 952762753,
+              "peak_bytes": 0,
+              "stdout": "102300000512\nT\n951018905\n",
+              "checksum": "102300000512",
+              "ns": 951018905,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "102300000512",
+          "best_ns": 951018905,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b15_loopsum"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 588000273,
+              "peak_bytes": 0,
+              "stdout": "102300000512\nT\n585292447\n",
+              "checksum": "102300000512",
+              "ns": 585292447,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "102300000512",
+          "best_ns": 585292447,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b17_bubble",
+      "desc": "排序：冒泡 8 万（最坏分支 + 交换开销）",
+      "t": {
+        "quelmara": 29.026544963,
+        "c": 14.531948483
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "180251988",
+        "c": "180251988"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b17_bubble"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 29032373633,
+              "peak_bytes": 0,
+              "stdout": "180251988\nT\n29026544963\n",
+              "checksum": "180251988",
+              "ns": 29026544963,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "180251988",
+          "best_ns": 29026544963,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b17_bubble"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 14538707786,
+              "peak_bytes": 0,
+              "stdout": "180251988\nT\n14531948483\n",
+              "checksum": "180251988",
+              "ns": 14531948483,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "180251988",
+          "best_ns": 14531948483,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b22_knapsack",
+      "desc": "DP：0/1 背包 800 件 × 800 容量",
+      "t": {
+        "quelmara": 0.007340219,
+        "c": 0.001778971
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "9750",
+        "c": "9750"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b22_knapsack"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 10842638,
+              "peak_bytes": 0,
+              "stdout": "9750\nT\n7340219\n",
+              "checksum": "9750",
+              "ns": 7340219,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "9750",
+          "best_ns": 7340219,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b22_knapsack"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 4622934,
+              "peak_bytes": 0,
+              "stdout": "9750\nT\n1778971\n",
+              "checksum": "9750",
+              "ns": 1778971,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "9750",
+          "best_ns": 1778971,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b27_sieve",
+      "desc": "筛法：埃氏筛 5000 万（布尔数组）",
+      "t": {
+        "quelmara": 0.861222769,
+        "c": 0.214472764
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "664579",
+        "c": "664579"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b27_sieve"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 880175188,
+              "peak_bytes": 0,
+              "stdout": "664579\nT\n861222769\n",
+              "checksum": "664579",
+              "ns": 861222769,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "664579",
+          "best_ns": 861222769,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b27_sieve"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 219499728,
+              "peak_bytes": 0,
+              "stdout": "664579\nT\n214472764\n",
+              "checksum": "664579",
+              "ns": 214472764,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "664579",
+          "best_ns": 214472764,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b28_matrix",
+      "desc": "数值：矩阵乘法 300×300（朴素三重循环）",
+      "t": {
+        "quelmara": 0.24459552,
+        "c": 0.044656628
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "960991321",
+        "c": "960991321"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b28_matrix"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 258501618,
+              "peak_bytes": 0,
+              "stdout": "960991321\nT\n244595520\n",
+              "checksum": "960991321",
+              "ns": 244595520,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "960991321",
+          "best_ns": 244595520,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b28_matrix"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 52220664,
+              "peak_bytes": 0,
+              "stdout": "960991321\nT\n44656628\n",
+              "checksum": "960991321",
+              "ns": 44656628,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "960991321",
+          "best_ns": 44656628,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b31_memcpy",
+      "desc": "IO：大块内存拷贝 100MB",
+      "t": {
+        "quelmara": 2.557868773,
+        "c": 0.20193538
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "12499999",
+        "c": "12499999"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b31_memcpy"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 3285176411,
+              "peak_bytes": 0,
+              "stdout": "12499999\nT\n2557868773\n",
+              "checksum": "12499999",
+              "ns": 2557868773,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "12499999",
+          "best_ns": 2557868773,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b31_memcpy"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 420037544,
+              "peak_bytes": 0,
+              "stdout": "12499999\nT\n201935380\n",
+              "checksum": "12499999",
+              "ns": 201935380,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "12499999",
+          "best_ns": 201935380,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b32_io_write",
+      "desc": "IO：顺序写 100 万个整数到内存",
+      "t": {
+        "quelmara": 0.019723755,
+        "c": 0.014792057
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "1999999",
+        "c": "1999999"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b32_io_write"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 33760231,
+              "peak_bytes": 0,
+              "stdout": "1999999\nT\n19723755\n",
+              "checksum": "1999999",
+              "ns": 19723755,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1999999",
+          "best_ns": 19723755,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b32_io_write"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 19146632,
+              "peak_bytes": 0,
+              "stdout": "1999999\nT\n14792057\n",
+              "checksum": "1999999",
+              "ns": 14792057,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1999999",
+          "best_ns": 14792057,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b33_startup",
+      "desc": "启动：函数调用 + 初始化开销",
+      "t": {
+        "quelmara": 7.752e-06,
+        "c": 1.1555e-05
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "1998000",
+        "c": "1998000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b33_startup"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 1717364,
+              "peak_bytes": 0,
+              "stdout": "1998000\nT\n7752\n",
+              "checksum": "1998000",
+              "ns": 7752,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1998000",
+          "best_ns": 7752,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b33_startup"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 2883046,
+              "peak_bytes": 0,
+              "stdout": "1998000\nT\n11555\n",
+              "checksum": "1998000",
+              "ns": 11555,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1998000",
+          "best_ns": 11555,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b34_bitops",
+      "desc": "微基准：位运算 2000 万次",
+      "t": {
+        "quelmara": 0.101272295,
+        "c": 0.106223756
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "6425820379740928",
+        "c": "6425820379740928"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b34_bitops"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 102990943,
+              "peak_bytes": 0,
+              "stdout": "6425820379740928\nT\n101272295\n",
+              "checksum": "6425820379740928",
+              "ns": 101272295,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "6425820379740928",
+          "best_ns": 101272295,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b34_bitops"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 109375787,
+              "peak_bytes": 0,
+              "stdout": "6425820379740928\nT\n106223756\n",
+              "checksum": "6425820379740928",
+              "ns": 106223756,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "6425820379740928",
+          "best_ns": 106223756,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b35_branch",
+      "desc": "微基准：分支预测 2000 万次",
+      "t": {
+        "quelmara": 0.090278005,
+        "c": 0.03493736
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "-10000000",
+        "c": "-10000000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b35_branch"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 96944682,
+              "peak_bytes": 0,
+              "stdout": "-10000000\nT\n90278005\n",
+              "checksum": "-10000000",
+              "ns": 90278005,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "-10000000",
+          "best_ns": 90278005,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b35_branch"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 37963683,
+              "peak_bytes": 0,
+              "stdout": "-10000000\nT\n34937360\n",
+              "checksum": "-10000000",
+              "ns": 34937360,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "-10000000",
+          "best_ns": 34937360,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b36_call",
+      "desc": "微基准：函数调用 1000 万次",
+      "t": {
+        "quelmara": 0.106404735,
+        "c": 1.1304e-05
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "50000005000000",
+        "c": "50000005000000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b36_call"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 108112679,
+              "peak_bytes": 0,
+              "stdout": "50000005000000\nT\n106404735\n",
+              "checksum": "50000005000000",
+              "ns": 106404735,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "50000005000000",
+          "best_ns": 106404735,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b36_call"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 2981479,
+              "peak_bytes": 0,
+              "stdout": "50000005000000\nT\n11304\n",
+              "checksum": "50000005000000",
+              "ns": 11304,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "50000005000000",
+          "best_ns": 11304,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b37_swap",
+      "desc": "算法：100 万次交换排序",
+      "t": {
+        "quelmara": 0.007652521,
+        "c": 0.00235265
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "2264",
+        "c": "2264"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b37_swap"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 9601527,
+              "peak_bytes": 0,
+              "stdout": "2264\nT\n7652521\n",
+              "checksum": "2264",
+              "ns": 7652521,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "2264",
+          "best_ns": 7652521,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b37_swap"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 5449662,
+              "peak_bytes": 0,
+              "stdout": "2264\nT\n2352650\n",
+              "checksum": "2264",
+              "ns": 2352650,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "2264",
+          "best_ns": 2352650,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b38_prime",
+      "desc": "算法：试除法判定 10 万个素数",
+      "t": {
+        "quelmara": 0.042338021,
+        "c": 0.017474386
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "9592",
+        "c": "9592"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b38_prime"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 43973488,
+              "peak_bytes": 0,
+              "stdout": "9592\nT\n42338021\n",
+              "checksum": "9592",
+              "ns": 42338021,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "9592",
+          "best_ns": 42338021,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b38_prime"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 20410338,
+              "peak_bytes": 0,
+              "stdout": "9592\nT\n17474386\n",
+              "checksum": "9592",
+              "ns": 17474386,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "9592",
+          "best_ns": 17474386,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b39_hash_open",
+      "desc": "哈希表：开放寻址 50 万插入+查找",
+      "t": {
+        "quelmara": 0.101293319,
+        "c": 0.04237726
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "500000",
+        "c": "500000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b39_hash_open"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 149496897,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n101293319\n",
+              "checksum": "500000",
+              "ns": 101293319,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "500000",
+          "best_ns": 101293319,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b39_hash_open"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 52918406,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n42377260\n",
+              "checksum": "500000",
+              "ns": 42377260,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "500000",
+          "best_ns": 42377260,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b40_binary_search",
+      "desc": "搜索：二分查找 100 万次",
+      "t": {
+        "quelmara": 0.205566448,
+        "c": 0.144153636
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "1000000",
+        "c": "1000000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b40_binary_search"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 227297311,
+              "peak_bytes": 0,
+              "stdout": "1000000\nT\n205566448\n",
+              "checksum": "1000000",
+              "ns": 205566448,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1000000",
+          "best_ns": 205566448,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b40_binary_search"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 169640281,
+              "peak_bytes": 0,
+              "stdout": "1000000\nT\n144153636\n",
+              "checksum": "1000000",
+              "ns": 144153636,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1000000",
+          "best_ns": 144153636,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b42_matrix_transpose",
+      "desc": "数值：矩阵转置 500x500",
+      "t": {
+        "quelmara": 0.008009571,
+        "c": 0.007020128
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "249999",
+        "c": "249999"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b42_matrix_transpose"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 25156354,
+              "peak_bytes": 0,
+              "stdout": "249999\nT\n8009571\n",
+              "checksum": "249999",
+              "ns": 8009571,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "249999",
+          "best_ns": 8009571,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b42_matrix_transpose"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 14221438,
+              "peak_bytes": 0,
+              "stdout": "249999\nT\n7020128\n",
+              "checksum": "249999",
+              "ns": 7020128,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "249999",
+          "best_ns": 7020128,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b43_gcd_lcm",
+      "desc": "数论：GCD/LCM 100 万次",
+      "t": {
+        "quelmara": 0.342718855,
+        "c": 0.190249706
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "2980000",
+        "c": "2980000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b43_gcd_lcm"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 344340692,
+              "peak_bytes": 0,
+              "stdout": "2980000\nT\n342718855\n",
+              "checksum": "2980000",
+              "ns": 342718855,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "2980000",
+          "best_ns": 342718855,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b43_gcd_lcm"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 203771877,
+              "peak_bytes": 0,
+              "stdout": "2980000\nT\n190249706\n",
+              "checksum": "2980000",
+              "ns": 190249706,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "2980000",
+          "best_ns": 190249706,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b44_stack_sim",
+      "desc": "数据结构：栈模拟 100 万次",
+      "t": {
+        "quelmara": 0.044013603,
+        "c": 0.017363821
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "1000000",
+        "c": "1000000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b44_stack_sim"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 55922865,
+              "peak_bytes": 0,
+              "stdout": "1000000\nT\n44013603\n",
+              "checksum": "1000000",
+              "ns": 44013603,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1000000",
+          "best_ns": 44013603,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b44_stack_sim"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 21792853,
+              "peak_bytes": 0,
+              "stdout": "1000000\nT\n17363821\n",
+              "checksum": "1000000",
+              "ns": 17363821,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1000000",
+          "best_ns": 17363821,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b45_accumulate",
+      "desc": "数值：多项式求值 100 万次",
+      "t": {
+        "quelmara": 0.049653569,
+        "c": 0.024560284
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "-953077915",
+        "c": "-953077915"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b45_accumulate"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 51375782,
+              "peak_bytes": 0,
+              "stdout": "-953077915\nT\n49653569\n",
+              "checksum": "-953077915",
+              "ns": 49653569,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "-953077915",
+          "best_ns": 49653569,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b45_accumulate"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 27475838,
+              "peak_bytes": 0,
+              "stdout": "-953077915\nT\n24560284\n",
+              "checksum": "-953077915",
+              "ns": 24560284,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "-953077915",
+          "best_ns": 24560284,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b46_strcat",
+      "desc": "字符串：10 万次字符串拼接",
+      "t": {
+        "quelmara": 0.044399536,
+        "c": 0.036104542
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "1700000",
+        "c": "1700000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b46_strcat"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 47477840,
+              "peak_bytes": 0,
+              "stdout": "1700000\nT\n44399536\n",
+              "checksum": "1700000",
+              "ns": 44399536,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1700000",
+          "best_ns": 44399536,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b46_strcat"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 39072437,
+              "peak_bytes": 0,
+              "stdout": "1700000\nT\n36104542\n",
+              "checksum": "1700000",
+              "ns": 36104542,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1700000",
+          "best_ns": 36104542,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b47_bitcount",
+      "desc": "微基准：位计数 1000 万次",
+      "t": {
+        "quelmara": 0.59139009,
+        "c": 0.543617178
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "114434624",
+        "c": "114434624"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b47_bitcount"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 593112723,
+              "peak_bytes": 0,
+              "stdout": "114434624\nT\n591390090\n",
+              "checksum": "114434624",
+              "ns": 591390090,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "114434624",
+          "best_ns": 591390090,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b47_bitcount"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 558353893,
+              "peak_bytes": 0,
+              "stdout": "114434624\nT\n543617178\n",
+              "checksum": "114434624",
+              "ns": 543617178,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "114434624",
+          "best_ns": 543617178,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b48_sum_matrix",
+      "desc": "数值：矩阵行求和 500x500",
+      "t": {
+        "quelmara": 0.001165874,
+        "c": 0.000498574
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "31249875000",
+        "c": "31249875000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b48_sum_matrix"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 13469972,
+              "peak_bytes": 0,
+              "stdout": "31249875000\nT\n1165874\n",
+              "checksum": "31249875000",
+              "ns": 1165874,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "31249875000",
+          "best_ns": 1165874,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b48_sum_matrix"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 7360316,
+              "peak_bytes": 0,
+              "stdout": "31249875000\nT\n498574\n",
+              "checksum": "31249875000",
+              "ns": 498574,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "31249875000",
+          "best_ns": 498574,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b49_floyd",
+      "desc": "图算法：Floyd-Warshall 100 节点",
+      "t": {
+        "quelmara": 0.008732645,
+        "c": 0.002680517
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "173",
+        "c": "173"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b49_floyd"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 10666327,
+              "peak_bytes": 0,
+              "stdout": "173\nT\n8732645\n",
+              "checksum": "173",
+              "ns": 8732645,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "173",
+          "best_ns": 8732645,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b49_floyd"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 5689091,
+              "peak_bytes": 0,
+              "stdout": "173\nT\n2680517\n",
+              "checksum": "173",
+              "ns": 2680517,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "173",
+          "best_ns": 2680517,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b50_permute",
+      "desc": "算法：全排列 10! 求和",
+      "t": {
+        "quelmara": 0.504044018,
+        "c": 0.218147547
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "1813671303276",
+        "c": "1813671303276"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b50_permute"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 505705165,
+              "peak_bytes": 0,
+              "stdout": "1813671303276\nT\n504044018\n",
+              "checksum": "1813671303276",
+              "ns": 504044018,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1813671303276",
+          "best_ns": 504044018,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b50_permute"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 228749340,
+              "peak_bytes": 0,
+              "stdout": "1813671303276\nT\n218147547\n",
+              "checksum": "1813671303276",
+              "ns": 218147547,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1813671303276",
+          "best_ns": 218147547,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b52_io_scan",
+      "desc": "IO：顺序扫描 100 万个整数",
+      "t": {
+        "quelmara": 0.005087309,
+        "c": 0.001744088
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "1499999500000",
+        "c": "1499999500000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b52_io_scan"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 33496203,
+              "peak_bytes": 0,
+              "stdout": "1499999500000\nT\n5087309\n",
+              "checksum": "1499999500000",
+              "ns": 5087309,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1499999500000",
+          "best_ns": 5087309,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b52_io_scan"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 20149538,
+              "peak_bytes": 0,
+              "stdout": "1499999500000\nT\n1744088\n",
+              "checksum": "1499999500000",
+              "ns": 1744088,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1499999500000",
+          "best_ns": 1744088,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b53_thread_sim",
+      "desc": "并发：模拟 4 路并行累加",
+      "t": {
+        "quelmara": 0.02705309,
+        "c": 1.1316e-05
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "100000000000000",
+        "c": "100000000000000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b53_thread_sim"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 28738763,
+              "peak_bytes": 0,
+              "stdout": "100000000000000\nT\n27053090\n",
+              "checksum": "100000000000000",
+              "ns": 27053090,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "100000000000000",
+          "best_ns": 27053090,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b53_thread_sim"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 3012678,
+              "peak_bytes": 0,
+              "stdout": "100000000000000\nT\n11316\n",
+              "checksum": "100000000000000",
+              "ns": 11316,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "100000000000000",
+          "best_ns": 11316,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b54_merge_sort",
+      "desc": "排序：归并排序 10 万",
+      "t": {
+        "quelmara": 0.124011885,
+        "c": 0.017439875
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "37",
+        "c": "37"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b54_merge_sort"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 135591948,
+              "peak_bytes": 0,
+              "stdout": "37\nT\n124011885\n",
+              "checksum": "37",
+              "ns": 124011885,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "37",
+          "best_ns": 124011885,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b54_merge_sort"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 30656715,
+              "peak_bytes": 0,
+              "stdout": "37\nT\n17439875\n",
+              "checksum": "37",
+              "ns": 17439875,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "37",
+          "best_ns": 17439875,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b55_hash_chain",
+      "desc": "哈希表：链地址法 20 万插入",
+      "t": {
+        "quelmara": 0.022863258,
+        "c": 0.009152789
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "200000",
+        "c": "200000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b55_hash_chain"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 29887705,
+              "peak_bytes": 0,
+              "stdout": "200000\nT\n22863258\n",
+              "checksum": "200000",
+              "ns": 22863258,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "200000",
+          "best_ns": 22863258,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b55_hash_chain"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 12793948,
+              "peak_bytes": 0,
+              "stdout": "200000\nT\n9152789\n",
+              "checksum": "200000",
+              "ns": 9152789,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "200000",
+          "best_ns": 9152789,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b56_sieve_opt",
+      "desc": "筛法：线性筛 200 万",
+      "t": {
+        "quelmara": 0.080579004,
+        "c": 0.073347274
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "148933",
+        "c": "148933"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b56_sieve_opt"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 124493611,
+              "peak_bytes": 0,
+              "stdout": "148933\nT\n80579004\n",
+              "checksum": "148933",
+              "ns": 80579004,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "148933",
+          "best_ns": 80579004,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b56_sieve_opt"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 116094376,
+              "peak_bytes": 0,
+              "stdout": "148933\nT\n73347274\n",
+              "checksum": "148933",
+              "ns": 73347274,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "148933",
+          "best_ns": 73347274,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b57_pow_mod",
+      "desc": "数论：快速幂取模 100 万次",
+      "t": {
+        "quelmara": 1.12967171,
+        "c": 0.279355681
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "288251",
+        "c": "288251"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b57_pow_mod"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 1131573605,
+              "peak_bytes": 0,
+              "stdout": "288251\nT\n1129671710\n",
+              "checksum": "288251",
+              "ns": 1129671710,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "288251",
+          "best_ns": 1129671710,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b57_pow_mod"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 290023617,
+              "peak_bytes": 0,
+              "stdout": "288251\nT\n279355681\n",
+              "checksum": "288251",
+              "ns": 279355681,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "288251",
+          "best_ns": 279355681,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b58_rec_sum",
+      "desc": "递归：递归求和 100 万",
+      "t": {
+        "quelmara": 0.002538309,
+        "c": 1.1663e-05
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "5000500000",
+        "c": "5000500000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b58_rec_sum"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 12326118,
+              "peak_bytes": 0,
+              "stdout": "5000500000\nT\n2538309\n",
+              "checksum": "5000500000",
+              "ns": 2538309,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "5000500000",
+          "best_ns": 2538309,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b58_rec_sum"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 2856431,
+              "peak_bytes": 0,
+              "stdout": "5000500000\nT\n11663\n",
+              "checksum": "5000500000",
+              "ns": 11663,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "5000500000",
+          "best_ns": 11663,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b59_mat_vec",
+      "desc": "数值：矩阵向量乘 500x500",
+      "t": {
+        "quelmara": 0.002163296,
+        "c": 0.000535448
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "613625000",
+        "c": "613625000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b59_mat_vec"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 11750434,
+              "peak_bytes": 0,
+              "stdout": "613625000\nT\n2163296\n",
+              "checksum": "613625000",
+              "ns": 2163296,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "613625000",
+          "best_ns": 2163296,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b59_mat_vec"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 8182280,
+              "peak_bytes": 0,
+              "stdout": "613625000\nT\n535448\n",
+              "checksum": "613625000",
+              "ns": 535448,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "613625000",
+          "best_ns": 535448,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b60_murmur",
+      "desc": "微基准：MurmurHash 100 万次",
+      "t": {
+        "quelmara": 0.021872412,
+        "c": 0.005728654
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "1862168077173513743",
+        "c": "1862168077173513743"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b60_murmur"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 23433302,
+              "peak_bytes": 0,
+              "stdout": "1862168077173513743\nT\n21872412\n",
+              "checksum": "1862168077173513743",
+              "ns": 21872412,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1862168077173513743",
+          "best_ns": 21872412,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b60_murmur"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 8802015,
+              "peak_bytes": 0,
+              "stdout": "1862168077173513743\nT\n5728654\n",
+              "checksum": "1862168077173513743",
+              "ns": 5728654,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1862168077173513743",
+          "best_ns": 5728654,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b61_cache_scan",
+      "desc": "微基准：缓存扫描 1000 万次",
+      "t": {
+        "quelmara": 0.044327671,
+        "c": 0.016352191
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "4999995000000",
+        "c": "4999995000000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b61_cache_scan"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 68057830,
+              "peak_bytes": 0,
+              "stdout": "4999995000000\nT\n44327671\n",
+              "checksum": "4999995000000",
+              "ns": 44327671,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "4999995000000",
+          "best_ns": 44327671,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b61_cache_scan"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 34530763,
+              "peak_bytes": 0,
+              "stdout": "4999995000000\nT\n16352191\n",
+              "checksum": "4999995000000",
+              "ns": 16352191,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "4999995000000",
+          "best_ns": 16352191,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b62_pred_branch",
+      "desc": "微基准：不可预测分支 500 万次",
+      "t": {
+        "quelmara": 0.057569458,
+        "c": 0.023031182
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "-1000000",
+        "c": "-1000000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b62_pred_branch"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 128493331,
+              "peak_bytes": 0,
+              "stdout": "-1000000\nT\n57569458\n",
+              "checksum": "-1000000",
+              "ns": 57569458,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "-1000000",
+          "best_ns": 57569458,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b62_pred_branch"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 65463364,
+              "peak_bytes": 0,
+              "stdout": "-1000000\nT\n23031182\n",
+              "checksum": "-1000000",
+              "ns": 23031182,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "-1000000",
+          "best_ns": 23031182,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b65_random_walk",
+      "desc": "模拟：随机游走 200 万步",
+      "t": {
+        "quelmara": 0.027054074,
+        "c": 0.018043613
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "0",
+        "c": "0"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b65_random_walk"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 28747067,
+              "peak_bytes": 0,
+              "stdout": "0\nT\n27054074\n",
+              "checksum": "0",
+              "ns": 27054074,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "0",
+          "best_ns": 27054074,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b65_random_walk"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 21028141,
+              "peak_bytes": 0,
+              "stdout": "0\nT\n18043613\n",
+              "checksum": "0",
+              "ns": 18043613,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "0",
+          "best_ns": 18043613,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b66_integrate",
+      "desc": "数值：数值积分 100 万步",
+      "t": {
+        "quelmara": 0.027851595,
+        "c": 0.013582049
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "999992",
+        "c": "999992"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b66_integrate"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 29457302,
+              "peak_bytes": 0,
+              "stdout": "999992\nT\n27851595\n",
+              "checksum": "999992",
+              "ns": 27851595,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "999992",
+          "best_ns": 27851595,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b66_integrate"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 16493870,
+              "peak_bytes": 0,
+              "stdout": "999992\nT\n13582049\n",
+              "checksum": "999992",
+              "ns": 13582049,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "999992",
+          "best_ns": 13582049,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b67_bubble_opt",
+      "desc": "排序：冒泡排序 5000",
+      "t": {
+        "quelmara": 0.156620331,
+        "c": 0.076575154
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "5",
+        "c": "5"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b67_bubble_opt"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 158407473,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n156620331\n",
+              "checksum": "5",
+              "ns": 156620331,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "5",
+          "best_ns": 156620331,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b67_bubble_opt"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 87022368,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n76575154\n",
+              "checksum": "5",
+              "ns": 76575154,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "5",
+          "best_ns": 76575154,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b68_bit_matrix",
+      "desc": "数值：位矩阵旋转 256x256",
+      "t": {
+        "quelmara": 0.002302107,
+        "c": 0.001296286
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "1",
+        "c": "1"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b68_bit_matrix"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 6196185,
+              "peak_bytes": 0,
+              "stdout": "1\nT\n2302107\n",
+              "checksum": "1",
+              "ns": 2302107,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1",
+          "best_ns": 2302107,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b68_bit_matrix"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 5397272,
+              "peak_bytes": 0,
+              "stdout": "1\nT\n1296286\n",
+              "checksum": "1",
+              "ns": 1296286,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1",
+          "best_ns": 1296286,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b69_hash_fib",
+      "desc": "哈希：Fibonacci 散列 50 万次",
+      "t": {
+        "quelmara": 0.078244185,
+        "c": 0.018705622
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "500000",
+        "c": "500000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b69_hash_fib"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 91161958,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n78244185\n",
+              "checksum": "500000",
+              "ns": 78244185,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "500000",
+          "best_ns": 78244185,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b69_hash_fib"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 22613929,
+              "peak_bytes": 0,
+              "stdout": "500000\nT\n18705622\n",
+              "checksum": "500000",
+              "ns": 18705622,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "500000",
+          "best_ns": 18705622,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b70_lin_search",
+      "desc": "搜索：线性搜索 100 万次",
+      "t": {
+        "quelmara": 3.333162977,
+        "c": 1.177303794
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "332667",
+        "c": "332667"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b70_lin_search"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 3334812484,
+              "peak_bytes": 0,
+              "stdout": "332667\nT\n3333162977\n",
+              "checksum": "332667",
+              "ns": 3333162977,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "332667",
+          "best_ns": 3333162977,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b70_lin_search"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 1190954768,
+              "peak_bytes": 0,
+              "stdout": "332667\nT\n1177303794\n",
+              "checksum": "332667",
+              "ns": 1177303794,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "332667",
+          "best_ns": 1177303794,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b71_sum_squares",
+      "desc": "数值：平方和 100 万",
+      "t": {
+        "quelmara": 0.001882384,
+        "c": 1.164e-05
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "999998",
+        "c": "999998"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b71_sum_squares"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 11937307,
+              "peak_bytes": 0,
+              "stdout": "999998\nT\n1882384\n",
+              "checksum": "999998",
+              "ns": 1882384,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "999998",
+          "best_ns": 1882384,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b71_sum_squares"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 3039821,
+              "peak_bytes": 0,
+              "stdout": "999998\nT\n11640\n",
+              "checksum": "999998",
+              "ns": 11640,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "999998",
+          "best_ns": 11640,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b72_sort_insert",
+      "desc": "排序：插入排序 1 万",
+      "t": {
+        "quelmara": 0.117372265,
+        "c": 0.054187803
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "5",
+        "c": "5"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b72_sort_insert"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 119440248,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n117372265\n",
+              "checksum": "5",
+              "ns": 117372265,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "5",
+          "best_ns": 117372265,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b72_sort_insert"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 65896407,
+              "peak_bytes": 0,
+              "stdout": "5\nT\n54187803\n",
+              "checksum": "5",
+              "ns": 54187803,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "5",
+          "best_ns": 54187803,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b73_graph_bfs",
+      "desc": "图算法：BFS 1000 节点",
+      "t": {
+        "quelmara": 0.000128649,
+        "c": 0.000208182
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "13",
+        "c": "13"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b73_graph_bfs"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 35336564,
+              "peak_bytes": 0,
+              "stdout": "13\nT\n128649\n",
+              "checksum": "13",
+              "ns": 128649,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "13",
+          "best_ns": 128649,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b73_graph_bfs"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 12584326,
+              "peak_bytes": 0,
+              "stdout": "13\nT\n208182\n",
+              "checksum": "13",
+              "ns": 208182,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "13",
+          "best_ns": 208182,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b74_accum_poly",
+      "desc": "数值：多项式累加 500 万",
+      "t": {
+        "quelmara": 0.168003685,
+        "c": 0.05839861
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "740012",
+        "c": "740012"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b74_accum_poly"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 169653552,
+              "peak_bytes": 0,
+              "stdout": "740012\nT\n168003685\n",
+              "checksum": "740012",
+              "ns": 168003685,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "740012",
+          "best_ns": 168003685,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b74_accum_poly"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 66639028,
+              "peak_bytes": 0,
+              "stdout": "740012\nT\n58398610\n",
+              "checksum": "740012",
+              "ns": 58398610,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "740012",
+          "best_ns": 58398610,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b75_fib_matrix",
+      "desc": "数值：矩阵快速幂 fib 1000",
+      "t": {
+        "quelmara": 3.767e-06,
+        "c": 1.2239e-05
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "491479",
+        "c": "491479"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b75_fib_matrix"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 1574173,
+              "peak_bytes": 0,
+              "stdout": "491479\nT\n3767\n",
+              "checksum": "491479",
+              "ns": 3767,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "491479",
+          "best_ns": 3767,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b75_fib_matrix"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 2919741,
+              "peak_bytes": 0,
+              "stdout": "491479\nT\n12239\n",
+              "checksum": "491479",
+              "ns": 12239,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "491479",
+          "best_ns": 12239,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b76_io_line",
+      "desc": "IO：逐行扫描 100 万行",
+      "t": {
+        "quelmara": 0.013183433,
+        "c": 0.006042025
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "49500000",
+        "c": "49500000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b76_io_line"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 35580900,
+              "peak_bytes": 0,
+              "stdout": "49500000\nT\n13183433\n",
+              "checksum": "49500000",
+              "ns": 13183433,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "49500000",
+          "best_ns": 13183433,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b76_io_line"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 24445986,
+              "peak_bytes": 0,
+              "stdout": "49500000\nT\n6042025\n",
+              "checksum": "49500000",
+              "ns": 6042025,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "49500000",
+          "best_ns": 6042025,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b77_rec_fib",
+      "desc": "递归：fib(25) 朴素递归",
+      "t": {
+        "quelmara": 0.002654154,
+        "c": 0.001312929
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "75025",
+        "c": "75025"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b77_rec_fib"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 4232454,
+              "peak_bytes": 0,
+              "stdout": "75025\nT\n2654154\n",
+              "checksum": "75025",
+              "ns": 2654154,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "75025",
+          "best_ns": 2654154,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b77_rec_fib"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 4247646,
+              "peak_bytes": 0,
+              "stdout": "75025\nT\n1312929\n",
+              "checksum": "75025",
+              "ns": 1312929,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "75025",
+          "best_ns": 1312929,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b78_sum_digits",
+      "desc": "数值：数位求和 100 万",
+      "t": {
+        "quelmara": 0.101668211,
+        "c": 0.043869524
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "27000000",
+        "c": "27000000"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b78_sum_digits"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 103390207,
+              "peak_bytes": 0,
+              "stdout": "27000000\nT\n101668211\n",
+              "checksum": "27000000",
+              "ns": 101668211,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "27000000",
+          "best_ns": 101668211,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b78_sum_digits"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 46903405,
+              "peak_bytes": 0,
+              "stdout": "27000000\nT\n43869524\n",
+              "checksum": "27000000",
+              "ns": 43869524,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "27000000",
+          "best_ns": 43869524,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b79_binary_tree",
+      "desc": "数据结构：BST 插入 5 万",
+      "t": {
+        "quelmara": 3.914747677,
+        "c": 1.818208089
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "1",
+        "c": "1"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b79_binary_tree"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 3916553131,
+              "peak_bytes": 0,
+              "stdout": "1\nT\n3914747677\n",
+              "checksum": "1",
+              "ns": 3914747677,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1",
+          "best_ns": 3914747677,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b79_binary_tree"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 1833517079,
+              "peak_bytes": 0,
+              "stdout": "1\nT\n1818208089\n",
+              "checksum": "1",
+              "ns": 1818208089,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1",
+          "best_ns": 1818208089,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b81_bit_reverse",
+      "desc": "微基准：位反转 100 万次",
+      "t": {
+        "quelmara": 0.10932486,
+        "c": 0.04206155
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "0",
+        "c": "0"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b81_bit_reverse"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 121351599,
+              "peak_bytes": 0,
+              "stdout": "0\nT\n109324860\n",
+              "checksum": "0",
+              "ns": 109324860,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "0",
+          "best_ns": 109324860,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b81_bit_reverse"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 55433113,
+              "peak_bytes": 0,
+              "stdout": "0\nT\n42061550\n",
+              "checksum": "0",
+              "ns": 42061550,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "0",
+          "best_ns": 42061550,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b82_array_fill",
+      "desc": "微基准：数组填充 500 万",
+      "t": {
+        "quelmara": 0.099321189,
+        "c": 0.072066324
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "9999999",
+        "c": "9999999"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b82_array_fill"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 109025912,
+              "peak_bytes": 0,
+              "stdout": "9999999\nT\n99321189\n",
+              "checksum": "9999999",
+              "ns": 99321189,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "9999999",
+          "best_ns": 99321189,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b82_array_fill"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 83688890,
+              "peak_bytes": 0,
+              "stdout": "9999999\nT\n72066324\n",
+              "checksum": "9999999",
+              "ns": 72066324,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "9999999",
+          "best_ns": 72066324,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b83_lcg_random",
+      "desc": "微基准：LCG 随机数 1000 万",
+      "t": {
+        "quelmara": 0.128004166,
+        "c": 0.033784638
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "495011892",
+        "c": "495011892"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b83_lcg_random"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 129768305,
+              "peak_bytes": 0,
+              "stdout": "495011892\nT\n128004166\n",
+              "checksum": "495011892",
+              "ns": 128004166,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "495011892",
+          "best_ns": 128004166,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b83_lcg_random"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 39906952,
+              "peak_bytes": 0,
+              "stdout": "495011892\nT\n33784638\n",
+              "checksum": "495011892",
+              "ns": 33784638,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "495011892",
+          "best_ns": 33784638,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b84_pair_swap",
+      "desc": "数据结构：键值对交换 100 万",
+      "t": {
+        "quelmara": 0.011883584,
+        "c": 0.005348205
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "0",
+        "c": "0"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b84_pair_swap"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 59957723,
+              "peak_bytes": 0,
+              "stdout": "0\nT\n11883584\n",
+              "checksum": "0",
+              "ns": 11883584,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "0",
+          "best_ns": 11883584,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b84_pair_swap"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 41781765,
+              "peak_bytes": 0,
+              "stdout": "0\nT\n5348205\n",
+              "checksum": "0",
+              "ns": 5348205,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "0",
+          "best_ns": 5348205,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b85_count_ones",
+      "desc": "微基准：popcount 500 万",
+      "t": {
+        "quelmara": 0.28692045,
+        "c": 0.262906724
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "54717312",
+        "c": "54717312"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b85_count_ones"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 288653257,
+              "peak_bytes": 0,
+              "stdout": "54717312\nT\n286920450\n",
+              "checksum": "54717312",
+              "ns": 286920450,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "54717312",
+          "best_ns": 286920450,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b85_count_ones"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 274319935,
+              "peak_bytes": 0,
+              "stdout": "54717312\nT\n262906724\n",
+              "checksum": "54717312",
+              "ns": 262906724,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "54717312",
+          "best_ns": 262906724,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b86_matrix_diag",
+      "desc": "数值：矩阵对角线求和 1000x1000",
+      "t": {
+        "quelmara": 5.5091e-05,
+        "c": 5.1766e-05
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "49500",
+        "c": "49500"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b86_matrix_diag"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 40759432,
+              "peak_bytes": 0,
+              "stdout": "49500\nT\n55091\n",
+              "checksum": "49500",
+              "ns": 55091,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "49500",
+          "best_ns": 55091,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b86_matrix_diag"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 21458831,
+              "peak_bytes": 0,
+              "stdout": "49500\nT\n51766\n",
+              "checksum": "49500",
+              "ns": 51766,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "49500",
+          "best_ns": 51766,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b87_memcopy_big",
+      "desc": "内存：mem_copy 大块 100MB（三级拷贝直连）",
+      "t": {
+        "quelmara": 0.216555579,
+        "c": 0.218455494
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "131249996",
+        "c": "131249996"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b87_memcopy_big"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 442453143,
+              "peak_bytes": 0,
+              "stdout": "131249996\nT\n216555579\n",
+              "checksum": "131249996",
+              "ns": 216555579,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "131249996",
+          "best_ns": 216555579,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b87_memcopy_big"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 445965884,
+              "peak_bytes": 0,
+              "stdout": "131249996\nT\n218455494\n",
+              "checksum": "131249996",
+              "ns": 218455494,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "131249996",
+          "best_ns": 218455494,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b14_fibiter",
+      "desc": "迭代 fib(5000 万)：纯循环 vs 递归对照",
+      "t": {
+        "quelmara": 0.612042138,
+        "c": 0.455235381
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "364822946",
+        "c": "364822946"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b14_fibiter"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 622938702,
+              "peak_bytes": 0,
+              "stdout": "364822946\nT\n612042138\n",
+              "checksum": "364822946",
+              "ns": 612042138,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "364822946",
+          "best_ns": 612042138,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b14_fibiter"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 469164747,
+              "peak_bytes": 0,
+              "stdout": "364822946\nT\n455235381\n",
+              "checksum": "364822946",
+              "ns": 455235381,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "364822946",
+          "best_ns": 455235381,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b16_leibniz",
+      "desc": "浮点：Leibniz 级数 π，2000 万项",
+      "t": {
+        "quelmara": 0.454985656,
+        "c": 0.404737133
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "3.141593",
+        "c": "3.141593"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b16_leibniz"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 464793326,
+              "peak_bytes": 0,
+              "stdout": "3.141593\nT\n454985656\n",
+              "checksum": "3.141593",
+              "ns": 454985656,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "3.141593",
+          "best_ns": 454985656,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b16_leibniz"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 408002429,
+              "peak_bytes": 0,
+              "stdout": "3.141593\nT\n404737133\n",
+              "checksum": "3.141593",
+              "ns": 404737133,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "3.141593",
+          "best_ns": 404737133,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b18_insertion",
+      "desc": "排序：插入排序 8 万（最坏情况移动）",
+      "t": {
+        "quelmara": 8.426586596,
+        "c": 3.75972468
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "180251988",
+        "c": "180251988"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b18_insertion"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 8443248366,
+              "peak_bytes": 0,
+              "stdout": "180251988\nT\n8426586596\n",
+              "checksum": "180251988",
+              "ns": 8426586596,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "180251988",
+          "best_ns": 8426586596,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b18_insertion"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 3765447573,
+              "peak_bytes": 0,
+              "stdout": "180251988\nT\n3759724680\n",
+              "checksum": "180251988",
+              "ns": 3759724680,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "180251988",
+          "best_ns": 3759724680,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b23_lcs",
+      "desc": "DP：最长公共子序列 1500×1500（滚动数组）",
+      "t": {
+        "quelmara": 0.044986055,
+        "c": 0.011742648
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "1498",
+        "c": "1498"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b23_lcs"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 48078146,
+              "peak_bytes": 0,
+              "stdout": "1498\nT\n44986055\n",
+              "checksum": "1498",
+              "ns": 44986055,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1498",
+          "best_ns": 44986055,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b23_lcs"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 15170981,
+              "peak_bytes": 0,
+              "stdout": "1498\nT\n11742648\n",
+              "checksum": "1498",
+              "ns": 11742648,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "1498",
+          "best_ns": 11742648,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    },
+    {
+      "bench": "b26_maxsub",
+      "desc": "DP：Kadane 最大子数组 2000 万",
+      "t": {
+        "quelmara": 0.405140466,
+        "c": 0.146488023
+      },
+      "mem": {
+        "quelmara": 0,
+        "c": 0
+      },
+      "out": {
+        "quelmara": "218550",
+        "c": "218550"
+      },
+      "results": {
+        "quelmara": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/qlm_b26_maxsub"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 407414457,
+              "peak_bytes": 0,
+              "stdout": "218550\nT\n405140466\n",
+              "checksum": "218550",
+              "ns": 405140466,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "218550",
+          "best_ns": 405140466,
+          "peak_bytes": 0
+        },
+        "c": {
+          "command": [
+            "/root/Quelmara/Quelmara/build/perf_4114/full_bins/c_b26_maxsub"
+          ],
+          "rounds": [
+            {
+              "round": 1,
+              "wall_ns": 151994084,
+              "peak_bytes": 0,
+              "stdout": "218550\nT\n146488023\n",
+              "checksum": "218550",
+              "ns": 146488023,
+              "status": "ok"
+            }
+          ],
+          "status": "ok",
+          "checksum": "218550",
+          "best_ns": 146488023,
+          "peak_bytes": 0
+        }
+      },
+      "validation": "cross_language_pass"
+    }
+  ],
+  "exit_code": 0
+}

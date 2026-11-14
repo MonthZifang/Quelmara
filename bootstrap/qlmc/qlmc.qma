@@ -9194,6 +9194,33 @@ fn _opt_flag_loop(fc: FnCtx, use: vec[int], ndef: vec[int]) {
 ///   `cok`/`cval`：常量表，cok[v]=1 表示临时值 v 在所有执行路径上都等于 cval[v]
 ///   `use`：每个 vreg 被读几次（给 DCE 用）
 ///   `out`：`_fold_*` 的出参（长度恒为 2）
+// Labels and NOPs emit no bytes. Remove only jumps whose target is reached
+// through those transparent instructions; preserve every observable operation.
+fn _opt_empty_jumps(ir: vec[Ir]) {
+    let mut i = 0
+    while i < len(ir) {
+        let ins = ir.get(i)
+        if ins.op == OP_JMP {
+            let mut j = i + 1
+            let mut hit = 0
+            let mut go = 1
+            while go == 1 && j < len(ir) {
+                let nx = ir.get(j)
+                if nx.op == OP_LAB {
+                    if nx.imm == ins.imm { hit = 1 }
+                } else if nx.op != OP_NOP {
+                    go = 0
+                }
+                j = j + 1
+            }
+            if hit == 1 {
+                ir.set(i, Ir { op: OP_NOP, dst: 0, a: 0, b: 0, imm: 0 })
+            }
+        }
+        i = i + 1
+    }
+}
+
 fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
          ndef: vec[int], out: vec[int]) {
     let ir = fc.ir
@@ -9330,31 +9357,7 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     _tri("    opt: fuse ir=", len(ir))
     _opt_dce(fc, use)
     _tri("    opt: dce ir=", len(ir))
-    // ---- 空跳：`jmp L` 后面（跳过连续的 LAB）就是 L 本身 → 删掉 ----
-    i = 0
-    while i < n {
-        let ins = ir.get(i)
-        if ins.op == OP_JMP {
-            let mut j = i + 1
-            let mut hit = 0
-            let mut go = 1
-            while go == 1 && j < n {
-                let nx = ir.get(j)
-                if nx.op == OP_LAB {
-                    if nx.imm == ins.imm {
-                        hit = 1
-                    }
-                    j = j + 1
-                } else {
-                    go = 0
-                }
-            }
-            if hit == 1 {
-                ir.set(i, Ir { op: OP_NOP, dst: 0, a: 0, b: 0, imm: 0 })
-            }
-        }
-        i = i + 1
-    }
+    _opt_empty_jumps(ir)
     // ---- v2.81 归纳削减：`(i*C) % D` → 递增计数器 + 条件回绕 ----
     // 它会插入新指令、改使用关系，所以放在最后，之后重算 use/ndef 再跑一次 DCE
     // （不然被替换掉的 `t = i*C` 会留在循环里当死代码）。
@@ -9389,6 +9392,8 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     // 再跑一次拷贝传播：归纳削减插的是 `r = v`，让 `add acc, r` 直接用 `v`
     _opt_copy(fc, ir, use, ndef)
     _opt_dce(fc, use)
+    // Late propagation/DCE can expose additional transparent gaps.
+    _opt_empty_jumps(ir)
 }
 
 // ---------------------------------------------------------------------------
