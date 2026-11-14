@@ -302,6 +302,11 @@ const TY_VEC = 0x8000        // 0x8000+elem：vec 句柄是标量（8 字节）
 const TY_MAP = 0x10000       // 0x10000+(K<<8)+V：map 句柄也是标量
 const TY_SLICE = 0x20000     // 0x20000+elem：切片 = (ptr, len) 两字聚合
 const TY_FN = 0x30000        // 闭包 = {code, env} 两字聚合（本版 env 恒为 0）
+// v4.120：引用类型 &T（vec 内联布局前置，见 handoff/VEC-INLINE-PLAN.md）。
+// 编码 = TY_REF + ti，ti 是引用类型表下标（stt[RTYPES_BASE+1+ti] 存 base 类型码）。
+// ti < RTYPES_MAX(2048) → 永远落在 [0x40000,0x40800)，不撞 TY_ARRAY 等区间。
+// 引用本身是 8 字节标量指针（_ty_is_agg=false）。
+const TY_REF = 0x40000
 const TY_ARRAY = 0x100000
 // v2.31：8 → 24（qlmc 自己的 FnCtx 有 22 个字段）
 // v2.82：24 → 32 —— 解释器 `qlm_interp.qma` 的 `St` 有 26 个字段，撞到了上限。
@@ -345,7 +350,10 @@ const VTYPES_MAX = 2048
 // **+1 是给"已用条数"那一格**（`stt[VTYPES_BASE]` 存 n，元素从
 // `VTYPES_BASE+1` 起）。少这个 +1 会让最后一条写到 `TBL_SIZE` 之外 ——
 // 越界一格，静默踩坏相邻数据。
-const TBL_SIZE = VTYPES_BASE + 1 + VTYPES_MAX
+// v4.120：引用类型表紧跟 vec 类型表之后（同样 +1 存条数）。
+const RTYPES_BASE = VTYPES_BASE + 1 + VTYPES_MAX
+const RTYPES_MAX = 2048
+const TBL_SIZE = RTYPES_BASE + 1 + RTYPES_MAX
 
 // v3.73：泛型模板数上限（std/gen 有 9 个；SW_GT_BASE + 12*3 = 42 < STATIC_SLOTS=64）
 const GT_MAX = 12
@@ -991,6 +999,34 @@ fn _vtypes_elem(stt: vec[int], ty: int) -> int {
     return stt.get(VTYPES_BASE + 1 + ti)
 }
 
+// v4.120：引用类型表（&T），与 vec 类型表同构。stt[RTYPES_BASE] 存条数，
+// stt[RTYPES_BASE+1+ti] 存 base 类型码。TY_REF+ti 永不撞区间（ti<2048）。
+fn _rtypes_add(stt: vec[int], base: int) -> int {
+    let n = stt.get(RTYPES_BASE)
+    let mut i = 0
+    while i < n {
+        if stt.get(RTYPES_BASE + 1 + i) == base {
+            return i
+        }
+        i = i + 1
+    }
+    if n >= RTYPES_MAX - 1 {
+        eprint("qlmc: 引用类型表溢出（" + (RTYPES_MAX - 1).to_str() + " 条）")
+        exit(2)
+    }
+    stt.set(RTYPES_BASE + 1 + n, base)
+    stt.set(RTYPES_BASE, n + 1)
+    return n
+}
+
+fn _rtypes_base(stt: vec[int], ty: int) -> int {
+    let ti = ty - TY_REF
+    if ti < 0 || ti >= stt.get(RTYPES_BASE) {
+        return 0 - 1
+    }
+    return stt.get(RTYPES_BASE + 1 + ti)
+}
+
 /// `vec[str]` 的元素下标 —— **parse 期预登记，lowering 期只读**。
 ///
 /// 为什么单独抽出来：`args()` 内建返回 `vec[str]`，而它可能在源码里
@@ -1133,6 +1169,13 @@ fn _en_ptype(p: P, ei: int, vi: int) -> int {
 /// 类型：`int|bool|str|StructName|[N]T`
 fn _type(p: P, pos: vec[int]) -> int {
     let t = _cur(p, pos)
+    // v4.120：&T 引用类型。base 登记进引用类型表，返回 TY_REF+ti（不撞区间）。
+    if t.k == T_PUNCT && t.n == P_AMP {
+        _adv(pos)
+        let base = _type(p, pos)
+        let ti = _rtypes_add(p.stt, base)
+        return TY_REF + ti
+    }
     if t.k == T_PUNCT && t.n == P_LBRACK {
         _adv(pos)
         if _is_p(p, pos, P_RBRACK) {
@@ -4896,6 +4939,10 @@ fn _ty_is_agg(ty: int) -> bool {
     if ty >= TY_MAP && ty < TY_SLICE {
         return false
     }
+    // v4.120：引用 &T 是 8 字节标量指针，不是聚合。
+    if ty >= TY_REF && ty < TY_REF + RTYPES_MAX {
+        return false
+    }
     return true
 }
 
@@ -4974,6 +5021,11 @@ fn _ent_ptype(fc: FnCtx, ei: int, vi: int) -> int {
 fn _ty_size(fc: FnCtx, ty: int) -> int {
     if ty >= TY_ARRAY {
         return ((ty - TY_ARRAY) >> 8) * 8
+    }
+    // v4.120：引用是 8 字节指针。**必须在 SLICE/ARRAY 分支前判**——
+    // TY_REF=0x40000 落在 [TY_SLICE,TY_ARRAY) 内，否则会被当成 16 字节。
+    if ty >= TY_REF && ty < TY_REF + RTYPES_MAX {
+        return 8
     }
     if ty >= TY_SLICE && ty < TY_ARRAY {
         return 16                       // (ptr, len)
@@ -6111,6 +6163,14 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         }
         let v = _var_id(fc, nd.a)
         let ty = fc.vty.get(v)
+        // v4.120：引用变量读 = 解引用。v 里住的是地址，LOAD [v] 取回 base 值。
+        if ty >= TY_REF && ty < TY_REF + RTYPES_MAX {
+            let base = _rtypes_base(fc.stt, ty)
+            let d = _vnew(fc)
+            fc.vty.set(d, base)
+            _ir_emit(fc, OP_LOADD, d, v, 0, 0)
+            return d
+        }
         if _ty_is_agg(ty) {
             // 聚合变量的"值"是它区域的地址
             let d = _vnew(fc)
@@ -6330,7 +6390,29 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         let vals = vec[int].new(4)
         let mut ai = 0
         while ai < len(av) {
-            vals.push(_lower_expr(fc, av.get(ai)))
+            let pty = _param_type(fc, fc.fns.get(fi), ai)
+            if pty >= TY_REF && pty < TY_REF + RTYPES_MAX {
+                // v4.120：引用形参 → 传实参变量的**地址**。实参必须是变量；
+                // 先把该变量强制落帧槽（在寄存器里就没有稳定地址可取），
+                // 再 ADDRV。IR 按 vreg 符号化、发射期才解析 vloc，故此处改
+                // vloc 对该变量的所有读写一致生效；ADDRV 会把槽标 baked，
+                // _alloc_vars 不会再把它换回寄存器。
+                let argnd = fc.nodes.get(av.get(ai))
+                if argnd.op != E_VAR {
+                    eprint("qlmc: 引用形参的实参必须是变量（第 " + (ai + 1).to_str() + " 个）")
+                    exit(2)
+                }
+                let v = _var_id(fc, argnd.a)
+                if fc.vloc.get(v) > 0 {
+                    fc.vloc.set(v, -(_st_slot(fc)) - 1)
+                }
+                let addr = _vnew(fc)
+                fc.vty.set(addr, TY_INT)
+                _ir_emit(fc, OP_ADDRV, addr, 0, 0, -fc.vloc.get(v) - 1)
+                vals.push(addr)
+            } else {
+                vals.push(_lower_expr(fc, av.get(ai)))
+            }
             ai = ai + 1
         }
         // v4.117：内联小纯叶子函数（判据见 _inline_candidate）。仅非聚合返回
@@ -7216,6 +7298,14 @@ fn _lower_stmt(fc: FnCtx, id: int, ep: int) {
     }
     if nd.op == S_ASSIGN {
         let d = _var_id(fc, nd.a)
+        // v4.120：引用变量写 = 穿透地址存回。d 里是地址，STORE [d]=rhs，
+        // 不走 _lower_into（那会写 d 本身=改地址，而非改被指向的值）。
+        let dty = fc.vty.get(d)
+        if dty >= TY_REF && dty < TY_REF + RTYPES_MAX {
+            let tmp = _lower_expr(fc, nd.b)
+            _ir_emit(fc, OP_STORE, 0, d, tmp, 8)
+            return
+        }
         _lower_into(fc, nd.b, d)
         return
     }

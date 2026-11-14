@@ -235,6 +235,9 @@ CASES = [
     # pow_mod shape, break/continue, name-collision skip, param-assign/defer/
     # multi-return/call fallbacks.
     ("inline_gen", "tests/s_inline_gen.qma"),
+    # &T reference semantics (v4.120): pass-address, read/write through,
+    # inc/addmul/loop-bump/two-ref-swap. stage-0 vs qlmc must match.
+    ("ref", "tests/s_ref.qma"),
 ]
 
 npass = 0

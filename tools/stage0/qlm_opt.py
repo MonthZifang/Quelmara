@@ -50,7 +50,7 @@ COMMUTATIVE = ("add", "mul", "and", "or", "xor")
 # 绝不陷入的纯运算:可被投机执行(LICM 安全集)
 NON_TRAPPING = ("add", "sub", "mul", "and", "or", "xor", "shl", "shr", "sar", "umulhi")
 PURE = {"mov", "bin", "neg", "not", "cmpset", "load", "load8", "load32", "movaddr", "frameaddr",
-        "fbin", "fneg", "fcmpset", "fcvt", "cssub"} | set(SIMD_OPS)
+        "addrslot", "fbin", "fneg", "fcmpset", "fcvt", "cssub"} | set(SIMD_OPS)
 
 
 
@@ -264,6 +264,9 @@ def vreg_mentions(ins):
         return [ins[1]], []
     if op == "frameaddr":
         return [ins[1]], []
+    if op == "addrslot":
+        # v4.120：dst = &src 帧槽（&T 传址）。dst 定义，src 读。
+        return [ins[1]], ints([ins[2]])
     if op == "syscall":
         return ints([ins[1]]), ints(ins[3])
     if op == "winapi":

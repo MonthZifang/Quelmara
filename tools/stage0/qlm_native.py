@@ -743,6 +743,11 @@ class Fn:
         self.closig = {}
         # v2.03：本函数里被内联进来的 callee（增量失效要顺着这张表传播）
         self.inlined_from = set()
+        # v4.120：&T 引用。refv: vreg -> base 类型元组（该 vreg 住的是地址，
+        # 读写要解引用/穿透）。force_mem: 被取址的变量 vreg，分配器必须落帧槽
+        # （寄存器没有稳定地址可取）——与 qlmc 的 _pin_slot 同一坑。
+        self.refv = {}
+        self.force_mem = set()
     def new_v(self):
         self.nv += 1
         return self.nv - 1
@@ -1624,7 +1629,20 @@ class Lower:
                 if e[1] in self.fns_ast:
                     return ("fnaddr", e[1])
                 raise SyntaxError(f"未定义变量 {e[1]}")
-            return env[e[1]]
+            v = env[e[1]]
+            if isinstance(v, int) and v in fn.refv:
+                # v4.120：引用变量读 = 解引用 load [v]，结果按 base 类型打标。
+                d = fn.new_v()
+                fn.emit("load", d, v, ("imm", 0))
+                bt = fn.refv[v]
+                if bt == ("named", "str"):
+                    fn.strv.add(d)
+                elif bt[0] == "vec":
+                    self._mark_vec(fn, d, self._vec_tag_of(bt[1]))
+                elif self._ty_float_w(bt):
+                    self._mark_float(fn, d, self._ty_float_w(bt))
+                return d
+            return v
         if k == "lambda":
             return self.lower_lambda(e, fn, env)
         if k == "call":
@@ -4384,8 +4402,25 @@ class Lower:
                 fn.emit("callr", d, callee, args)
                 return d
             raise SyntaxError(f"未定义函数 {name}")
-        args = [self.eval(a, fn, env) for a in e[2]]
         params = self.fns_ast[name]["params"]
+        args = []
+        for i, a in enumerate(e[2]):
+            if i < len(params) and params[i][1][0] == "ref":
+                # v4.120：&T 引用形参 → 传实参变量地址。实参须是变量；先强制
+                # 落帧槽（force_mem）再 addrslot 取址。实参本身是引用则直传指针。
+                if a[0] != "name":
+                    raise SyntaxError(f"函数 {name} 第 {i + 1} 个引用形参的实参必须是变量")
+                v = env[a[1]]
+                if isinstance(v, int) and v in fn.refv:
+                    args.append(v)
+                else:
+                    fn.force_mem.add(v)
+                    addr = fn.new_v()
+                    fn.emit("addrslot", addr, v)
+                    args.append(addr)
+                fn.no_inline = True   # 取址的调用方不内联（force_mem 不传播）
+            else:
+                args.append(self.eval(a, fn, env))
         # v3.31：标量实参类型比对（收 §7.14）。放在 eval 之后是因为
         # 前面那些专项校验（数组长度 / 接口 / 闭包）要先用 eval 的结果。
         # 只看 AST 表达式，不看 vreg —— 静态可判的才拦。
@@ -5606,6 +5641,13 @@ class Lower:
             if s[1] not in env:
                 raise SyntaxError(f"未定义变量 {s[1]}")
             cur = env[s[1]]
+            if isinstance(cur, int) and cur in fn.refv:
+                # v4.120：引用变量写 = 穿透 store [cur]=rhs（改被指向的值）。
+                if s[2] != "=":
+                    raise SyntaxError("引用变量暂只支持 = 赋值")
+                spec = self.eval(s[3], fn, env)
+                fn.emit("store", cur, ("imm", 0), spec)
+                return
             n = self._arr_of(fn, cur)
             if n is not None:
                 if s[2] != "=":
@@ -6512,6 +6554,11 @@ class Lower:
             elif ty[0] == "rc":
                 self._mark_rc(fn, params[i], ty[1][1])
                 self._mark_struct(fn, params[i], ty[1][1])
+            elif ty[0] == "ref":
+                # v4.120：&T 引用形参——vreg 住的是地址，读解引用/写穿透。
+                # 禁内联：引用语义依赖独立栈帧与 force_mem，避免内联传播复杂化。
+                fn.refv[params[i]] = ty[1]
+                fn.no_inline = True
             elif ty[0] == "vec":
                 self._mark_vec(fn, params[i], self._vec_tag_of(ty[1]))
             elif ty[0] == "array":
@@ -11113,6 +11160,9 @@ def _map_ins(ins, f):
         return ("movaddr", V(ins[1]), ins[2])
     if op == "frameaddr":
         return ("frameaddr", V(ins[1]), ins[2])
+    if op == "addrslot":
+        # v4.120：dst = &force_mem 变量 vreg 的帧槽（&T 传址用）。
+        return ("addrslot", V(ins[1]), S(ins[2]))
     if op == "syscall":
         return ("syscall", V(ins[1]) if ins[1] is not None else None, ins[2], L(ins[3]))
     if op == "winapi":
@@ -11567,9 +11617,16 @@ def allocate(fn, pool=POOL, callee_saved=CALLEE_SAVED, f64=()):
     used_callee = set()
 
     order = sorted([v for v in range(n) if last[v] >= 0], key=lambda v: first[v])
+    force_mem = getattr(fn, "force_mem", set())
     for v in order:
         if v in f64:
             continue                     # f64 走 XMM 文件，见下面第二遍扫描
+        if v in force_mem:
+            # v4.120：被取址的变量必须住帧槽（寄存器没有稳定地址）。直接落槽，
+            # 不参与寄存器竞争；addrslot 发射期按 alloc[v] 的偏移 lea [rbp-off]。
+            alloc[v] = ("m", 8 * (nslots + 1))
+            nslots += 1
+            continue
         # 释放已结束区间
         active = [(e, w, r) for (e, w, r) in active if e >= first[v]]
         free = list(pool)
@@ -12743,6 +12800,15 @@ class Codegen:
             target = val if kind == "r" else SCRATCH
             disp = -8 * (self.nslots + self.frame_words) + 8 * ins[2]
             self.enc.lea(target, RBP, disp)
+            if kind == "m":
+                self.enc.mov_mr(RBP, 4, 0, -val, SCRATCH)
+        elif op == "addrslot":
+            # v4.120：dst = &force_mem 变量 src 的帧槽（&T 传址）。src 必为 "m"
+            # （分配器对 force_mem 直接落槽），地址 = [rbp - offset]。
+            _sk, sval = self.alloc[ins[2]]
+            kind, val = self.alloc[ins[1]]
+            target = val if kind == "r" else SCRATCH
+            self.enc.lea(target, RBP, -sval)
             if kind == "m":
                 self.enc.mov_mr(RBP, 4, 0, -val, SCRATCH)
         elif op == "xchg":

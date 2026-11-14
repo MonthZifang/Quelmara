@@ -1,0 +1,43 @@
+// s_ref —— &T 引用语义差分夹具（v4.120）
+// 引用形参 = 传地址，被调读写穿透到调用方变量。stage-0 与 qlmc 必须逐字节一致。
+fn inc(x: &int) {
+    x = x + 1
+}
+fn addmul(x: &int, k: int) {
+    x = x * k + 1
+}
+fn bump(x: &int, n: int) {
+    let mut i = 0
+    while i < n { x = x + 1  i = i + 1 }
+}
+fn swap2(a: &int, b: &int) {
+    let t = a
+    a = b
+    b = t
+}
+fn main() {
+    let mut a = 5
+    inc(a)
+    print(a)
+    inc(a)
+    print(a)
+    addmul(a, 3)
+    print(a)
+    let mut b = 100
+    inc(b)
+    print(b)
+    print(a)
+
+    let mut s = 0
+    bump(s, 10)
+    print(s)
+    let mut x = 3
+    let mut y = 8
+    swap2(x, y)
+    print(x)
+    print(y)
+    let mut i = 0
+    let mut acc = 0
+    while i < 5 { bump(acc, i)  i = i + 1 }
+    print(acc)
+}

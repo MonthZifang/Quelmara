@@ -1635,6 +1635,10 @@ class Parser:
 
     # ---- 类型 ----
     def parse_type(self):
+        if self.at("SYM", "&"):
+            # v4.120：&T 引用类型（C 交叉验证映射为 T* 指针）。
+            self.next()
+            return ("ref", self.parse_type())
         if self.at("SYM", "["):
             self.next()
             if self.at("SYM", "]"):
@@ -6503,6 +6507,9 @@ class Codegen:
 
     # ---- 工具 ----
     def ctype(self, t):
+        if t[0] == "ref":
+            # v4.120：&T → T*（引用即指针，读写作 *p / *p=v，调用传 &x）。
+            return self.ctype(t[1]) + " *"
         if t[0] == "array":
             # C99 只做交叉验证，数组的按值传参/返回（隐藏出参）只在自研后端实现。
             raise SyntaxError(
@@ -6607,7 +6614,11 @@ class Codegen:
             # 自研后端一直是对的（它发 `fnaddr`），所以这是 C 后端独有的缺口。
             if e[1] in self.infer.fns:
                 return self.cfn(e[1]), "int64_t"
-            return e[1], env.get(e[1], "int64_t")
+            vt = env.get(e[1], "int64_t")
+            if vt.startswith("ref:"):
+                # v4.120：引用变量读 = 解引用 *p，类型回到 base。
+                return f"(*{e[1]})", vt[4:]
+            return e[1], vt
         if k == "path":
             p = e[1]
             if p[0] in env:
@@ -6776,6 +6787,13 @@ class Codegen:
             fdef = self.infer.fns.get(name)
             parts = []
             for i, a in enumerate(e[2]):
+                if fdef and i < len(fdef["params"]) and fdef["params"][i][1][0] == "ref":
+                    # v4.120：引用形参 → 传实参变量地址 &x；实参本身是引用则直接传指针。
+                    if a[0] != "name":
+                        raise SyntaxError(f"line {getattr(a, 'line', '?')}: 引用形参的实参必须是变量")
+                    avt = str(env.get(a[1], ""))
+                    parts.append(a[1] if avt.startswith("ref:") else f"&{a[1]}")
+                    continue
                 acode, atype = self.gen_expr(a, env)
                 if fdef and i < len(fdef["params"]):
                     pt = fdef["params"][i][1]
@@ -7212,6 +7230,9 @@ class Codegen:
     def env_type(self, t):
         """作用域里记录的类型标记：结构体 'struct:Name'、枚举 'enum:Name'、
         切片 'slice:<elem>'、map 'map:<k>:<v>'，其余用 C 类型串"""
+        if t[0] == "ref":
+            # v4.120：引用变量记 'ref:<base 标记>'，读/写据此解引用/穿透。
+            return "ref:" + self.env_type(t[1])
         if t[0] == "chan":
             return "int64_t"
         if t[0] == "map":
@@ -7398,6 +7419,10 @@ class Codegen:
             return f"{pad}{decl} {s[2]} = {code};"
         if k == "assign":
             atype = str(env.get(s[1], ""))
+            if atype.startswith("ref:"):
+                # v4.120：引用变量写 = 穿透 *p = rhs（改被指向的值，非改指针）。
+                code, t = self.gen_expr(s[3], env)
+                return f"{pad}*{s[1]} {s[2]} {code};"
             if is_arr_env(atype):
                 n = arr_env_parts(atype)[1]
                 if s[2] != "=":
