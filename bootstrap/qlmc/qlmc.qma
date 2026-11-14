@@ -5300,6 +5300,171 @@ fn _inline_candidate(fc: FnCtx, fi: int) -> int {
     return _inline_pure_expr(fc, b.a, f)
 }
 
+// ---------------------------------------------------------------------------
+// v4.118：**通用内联第二批**（含局部变量 / 循环 / 分支，末尾单 return 的叶子函数）
+// ---------------------------------------------------------------------------
+//
+// 目标：b57_pow_mod 的 `pow_mod(base,exp,mod)`——含 while + 局部 result/b/e +
+// 末尾单 return。内联后实参常量 mod=1000003 传播进 `% mod`，既有 DIVC 把 idiv
+// 变魔数乘。第一批（v4.117）只内联单返回纯表达式，覆盖不了它。
+//
+// 判据（AST 层可证、不依赖 vreg 编号 → 不动点安全）：
+//   · 返回 int、形参 ≤4 全 int；形参名/局部名与调用方活跃变量**零碰撞**
+//     （`_try_var` 命中即跳过——局部会并进调用方 vmap，碰撞会遮蔽调用方变量）。
+//   · 体内**无调用**（E_CALL/E_SPAWN/E_METHOD/E_CLOSURE/容器 new 一律拒）→ 叶子。
+//   · 语句仅 S_LET/S_ASSIGN/S_EXPR/S_IF/S_WHILE/S_BREAK/S_CONTINUE；
+//     **无 S_DEFER、无 S_FOR/S_FOREACH、无中途 S_RETURN**；末条必为带值 S_RETURN。
+//   · 表达式仅 E_NUM/E_VAR/E_BIN/E_UN（纯算术/比较/位/逻辑）。
+//   · **不赋值给形参**（内联后形参绑到调用方实参 vreg，赋值会改调用方值）。
+//   · S_ASSIGN 目标必须是已声明局部；语句数 ≤40、局部数 ≤8（帧压闸，坑表 #1）。
+//
+// 机制：bind 栈绑形参→实参；逐条 `_lower_stmt` 前缀语句（循环/分支自带标签与
+// loop 上下文，标签经 _newlab 全新）；最后单独 lower 末尾 return 表达式作为调用值。
+// 不改 S_RETURN 关键路径（避开其 defer/pin/聚合语义），无 defer 候选才进来。
+
+/// 纯表达式树（E_NUM/E_VAR/E_BIN/E_UN），不限形参（通用版含局部）。
+fn _inline_expr_ok(fc: FnCtx, e: int) -> int {
+    if e < 0 {
+        return 0
+    }
+    let nd = fc.nodes.get(e)
+    if nd.op == E_NUM || nd.op == E_VAR {
+        return 1
+    }
+    if nd.op == E_BIN {
+        if _inline_expr_ok(fc, nd.b) == 1 {
+            return _inline_expr_ok(fc, nd.c)
+        }
+        return 0
+    }
+    if nd.op == E_UN {
+        return _inline_expr_ok(fc, nd.b)
+    }
+    return 0
+}
+
+fn _inline_is_param(fc: FnCtx, f: Fn, name: int) -> int {
+    let mut k = 0
+    while k < f.np {
+        if _param_name(fc, f, k) == name {
+            return 1
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+/// 走 [head, stop) 语句链（stop=-1 走到底），递归 if/while 子块。
+/// cnt[0]=语句数 cnt[1]=局部数；locals 收集已声明局部名。安全返回 1。
+fn _inline_gen_walk(fc: FnCtx, f: Fn, head: int, stop: int,
+                    cnt: vec[int], locals: vec[int]) -> int {
+    let mut cur = head
+    while cur >= 0 && cur != stop {
+        let nd = fc.nodes.get(cur)
+        cnt.set(0, cnt.get(0) + 1)
+        if cnt.get(0) > 40 {
+            return 0
+        }
+        if nd.op == S_LET {
+            if _try_var(fc, nd.a) != -1 {
+                return 0
+            }
+            locals.push(nd.a)
+            cnt.set(1, cnt.get(1) + 1)
+            if cnt.get(1) > 8 {
+                return 0
+            }
+            if _inline_expr_ok(fc, nd.b) == 0 {
+                return 0
+            }
+        } else if nd.op == S_ASSIGN {
+            if _inline_is_param(fc, f, nd.a) == 1 {
+                return 0
+            }
+            if _vec_has_i(locals, nd.a) == 0 {
+                return 0
+            }
+            if _inline_expr_ok(fc, nd.b) == 0 {
+                return 0
+            }
+        } else if nd.op == S_EXPR {
+            if _inline_expr_ok(fc, nd.a) == 0 {
+                return 0
+            }
+        } else if nd.op == S_IF {
+            if _inline_expr_ok(fc, nd.a) == 0 {
+                return 0
+            }
+            if _inline_gen_walk(fc, f, nd.b, -1, cnt, locals) == 0 {
+                return 0
+            }
+            if _inline_gen_walk(fc, f, nd.n, -1, cnt, locals) == 0 {
+                return 0
+            }
+        } else if nd.op == S_WHILE {
+            if _inline_expr_ok(fc, nd.a) == 0 {
+                return 0
+            }
+            if _inline_gen_walk(fc, f, nd.b, -1, cnt, locals) == 0 {
+                return 0
+            }
+        } else if nd.op == S_BREAK || nd.op == S_CONTINUE {
+            // 循环内跳转，降级时走 loop 上下文，安全
+        } else {
+            return 0
+        }
+        cur = nd.nx
+    }
+    return 1
+}
+
+/// fi 是否可通用内联（判据见上）。
+fn _inline_candidate_gen(fc: FnCtx, fi: int) -> int {
+    if fi < 0 || fi >= len(fc.fns) {
+        return 0
+    }
+    let f = fc.fns.get(fi)
+    if f.body < 0 {
+        return 0
+    }
+    if f.ret_t != TY_INT {
+        return 0
+    }
+    if f.np > 4 {
+        return 0
+    }
+    let mut k = 0
+    while k < f.np {
+        if _param_type(fc, f, k) != TY_INT {
+            return 0
+        }
+        if _try_var(fc, _param_name(fc, f, k)) != -1 {
+            return 0
+        }
+        k = k + 1
+    }
+    // 末条语句必须是带值 S_RETURN
+    let mut last = f.body
+    while fc.nodes.get(last).nx >= 0 {
+        last = fc.nodes.get(last).nx
+    }
+    let ln = fc.nodes.get(last)
+    if ln.op != S_RETURN || ln.a < 0 {
+        return 0
+    }
+    if _inline_expr_ok(fc, ln.a) == 0 {
+        return 0
+    }
+    let mut cnt = vec[int].new(2)
+    cnt.push(0)
+    cnt.push(0)
+    let mut locals = vec[int].new(8)
+    if _inline_gen_walk(fc, f, f.body, last, cnt, locals) == 0 {
+        return 0
+    }
+    return 1
+}
+
 /// 摆实参：寄存器部分走 OP_ARG，超出 nreg 的走栈（v2.29）。
 /// `argbase` = 1 表示聚合返回占了第 0 个实参寄存器（sret）。
 /// 返回为栈实参预留的字节数（0 = 没开栈），调用方在 call 之后要用
@@ -6179,6 +6344,45 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
                 bk = bk + 1
             }
             let r = _lower_expr(fc, ret_expr)
+            while bk > 0 {
+                _bind_pop(fc)
+                bk = bk - 1
+            }
+            return r
+        }
+        // v4.119：通用内联（含局部/循环/分支，末尾单 return 叶子）。
+        if sret == 0 && _inline_candidate_gen(fc, fi) == 1 {
+            let inf = fc.fns.get(fi)
+            let mut bk = 0
+            while bk < inf.np {
+                _bind_push(fc, _param_name(fc, inf, bk), vals.get(bk))
+                bk = bk + 1
+            }
+            // 末条（S_RETURN）之前的语句逐条降级；循环/分支自带新标签
+            let mut last = inf.body
+            while fc.nodes.get(last).nx >= 0 {
+                last = fc.nodes.get(last).nx
+            }
+            let mut cur = inf.body
+            while cur != last {
+                _lower_stmt(fc, cur, fc.cells.get(C_EP))
+                cur = fc.nodes.get(cur).nx
+            }
+            let r = _lower_expr(fc, fc.nodes.get(last).a)
+            // 实参活跃区间延到内联体末尾：形参可能在循环里反复读，而临时实参
+            // 的 vend 不跨回边，会被分配器在循环内复用寄存器（b53 的 end 被
+            // 循环体 i*2 冲掉，loop 只跑一轮）。**不能 pin**——pin 会把常量实参
+            // 变变量，丢掉常量传播（b57 的 %mod 退回 idiv）。延 vend 既保正确
+            // 又保常量性；_rebuild_temp_ends 只延不缩，此值保留。
+            let endpos = len(fc.ir)
+            let mut ek = 0
+            while ek < inf.np {
+                let av = vals.get(ek)
+                if av > 0 && av < len(fc.vend) && fc.vend.get(av) < endpos {
+                    fc.vend.set(av, endpos)
+                }
+                ek = ek + 1
+            }
             while bk > 0 {
                 _bind_pop(fc)
                 bk = bk - 1

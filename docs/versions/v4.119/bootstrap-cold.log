@@ -1,0 +1,8 @@
+[0] stage-1（stage-0 编 qlmc）：PASS  868.2s
+[1] stage-2（qlmc 编自己）：PASS  4.4s  782336 字节
+[2] stage-2 与 stage-1 产物一致：42/42 组  PASS
+[2.5] stage-2 错误路径干净退 2：PASS（rc=2）
+[3] 不动点 stage-2 == stage-3（-j1）：PASS  5.5s
+--------------------------------------------------------
+PASS：stage-2 可用且与 stage-1 逐字节等价
+BOOTSTRAP_EXIT=0

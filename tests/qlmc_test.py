@@ -231,6 +231,10 @@ CASES = [
     # thread_start arg passing: block offset must match RT_SPAWN trampoline
     # (+32, not +24); per-thread distinct slots keep it deterministic.
     ("thread_arg", "tests/s_thread_arg.qma"),
+    # General inlining (locals/loops/branches, trailing single return, leaf):
+    # pow_mod shape, break/continue, name-collision skip, param-assign/defer/
+    # multi-return/call fallbacks.
+    ("inline_gen", "tests/s_inline_gen.qma"),
 ]
 
 npass = 0

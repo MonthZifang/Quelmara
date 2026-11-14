@@ -1,0 +1,107 @@
+// s_inline_gen —— v4.118 通用内联（含局部/循环/分支）的差分夹具
+// stage-0（不内联）与 qlmc（内联）输出必须逐字节一致。
+
+// 可内联：while + 局部 + 末尾单 return（pow_mod 形状）
+fn powmod(base: int, exp: int, mod: int) -> int {
+    let mut res = 1
+    let mut b = base % mod
+    let mut e = exp
+    while e > 0 {
+        if e % 2 == 1 { res = (res * b) % mod }
+        b = (b * b) % mod
+        e = e / 2
+    }
+    return res
+}
+// 可内联：for 形状用 while 模拟 + break/continue
+fn sumodd(n: int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n {
+        i = i + 1
+        if i % 2 == 0 { continue }
+        if i > 9 { break }
+        s = s + i
+    }
+    return s
+}
+// 可内联：if/else 分支
+fn absdiff(a: int, b: int) -> int {
+    let mut d = 0
+    if a > b { d = a - b } else { d = b - a }
+    return d
+}
+// 回归（b53 形状）：形参是**计算值**且在循环里反复读。实参若不 pin，
+// 其活跃区间不跨回边，会被循环体临时值复用寄存器冲掉（end 变 i*2，loop 只跑一轮）。
+fn sumrange(lo: int, hi: int) -> int {
+    let mut acc2 = 0
+    let mut j2 = lo
+    while j2 < hi { acc2 = acc2 + j2 * 2 + 1  j2 = j2 + 1 }
+    return acc2
+}
+// 不该内联：赋值给形参（内联会改调用方实参）
+fn paramassign(x: int) -> int {
+    x = x + 1
+    return x
+}
+// 不该内联：含调用
+fn helper(x: int) -> int { return x + 1 }
+fn hascall(x: int) -> int {
+    let mut y = helper(x)
+    return y * 2
+}
+// 不该内联：中途 return（多 return）
+fn earlyret(x: int) -> int {
+    if x > 0 { return 1 }
+    return 0
+}
+// 不该内联：含 defer
+fn withdefer(x: int) -> int {
+    defer print(999)
+    return x + 1
+}
+
+fn main() {
+    // powmod(2,10,1000)=1024%1000=24
+    print(powmod(2, 10, 1000))
+    // powmod(3,5,7)=243%7=5
+    print(powmod(3, 5, 7))
+    // sumodd(20): 奇数 1,3,5,7,9 (>9 break) → 25
+    print(sumodd(20))
+    // absdiff
+    print(absdiff(3, 9))
+    print(absdiff(9, 3))
+
+    // 调用方与 powmod 局部同名（res/b/e）→ 碰撞跳过内联，仍正确
+    let res = 100
+    let b = 200
+    let e = 300
+    print(powmod(2, 10, 1000))
+    print(res) print(b) print(e)
+
+    // 调用方与形参同名（base/exp/mod）→ 碰撞跳过，仍正确
+    let base = 5
+    let exp = 3
+    let mod = 13
+    print(powmod(base, exp, mod))
+    print(base) print(exp) print(mod)
+
+    // 不该内联的函数仍正确
+    print(paramassign(5))
+    print(hascall(5))
+    print(earlyret(3))
+    print(earlyret(-3))
+    print(withdefer(5))
+
+    // 循环里反复内联 powmod：sum powmod(i,3,1000) i=1..4 = 1+8+27+64=100
+    let mut s = 0
+    let mut i = 1
+    while i <= 4 { s = s + powmod(i, 3, 1000)  i = i + 1 }
+    print(s)
+
+    // 回归 b53：计算值实参 + 循环内读形参，四段拼满 nn → nn*nn=1000000
+    let nn = 1000
+    let sr = sumrange(0, nn / 4) + sumrange(nn / 4, nn / 2) +
+             sumrange(nn / 2, 3 * nn / 4) + sumrange(3 * nn / 4, nn)
+    print(sr)
+}
