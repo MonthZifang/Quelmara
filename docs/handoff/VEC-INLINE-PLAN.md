@@ -58,6 +58,30 @@ MAP=0x10000 / SLICE=0x20000 / FN=0x30000 / ARRAY=0x100000+(len<<8)+elem），
 **验证**：先 `&int` 小例（`fn inc(x:&int){x=x+1}` 调用后实参 +1）stage-0/qlmc 差分；
 再 `pin_cross_grow` 复现器；每步自举不动点。**禁止一次性把降级全铺开**。
 
+#### 第 7 轮动手勘察的确切落点（解析层已试制验证过，降级未做完即回退）
+
+**解析层已验证可行**（试制后自举不动点 + 既有夹具全过，随后按"不留半成品"纪律回退）：
+`TY_REF=0x40000` + `RTYPES_BASE=VTYPES_BASE+1+VTYPES_MAX`、`TBL_SIZE` 顺延、
+`_rtypes_add/_rtypes_base` 照抄 vec、`_type` 开头加 `P_AMP` 分支、`_ty_is_agg` 加
+引用=标量、`_ty_size` 在 SLICE/ARRAY 分支**前**加引用=8。stt 用 `TBL_SIZE` 开（~21561）
+自动扩容。**这套照抄即可，别再重新设计。**
+
+**降级的三个落点 + 一个前置机制**（这是没做完的部分，下一版从这里接）：
+1. **读穿透**：`_lower_expr` 的 `E_VAR` 分支（~6164，`let ty=fc.vty.get(v)` 后）——
+   引用类型则 `_rtypes_base` 取 base，`OP_LOADD d, v, 0, 0` 解引用返回。
+2. **写穿透**：`_lower_stmt` 的 `S_ASSIGN`（~7269）——目标为引用则
+   `tmp=_lower_expr(rhs)` 后 `OP_STORE 0, d, tmp, 8`，不走 `_lower_into`。
+3. **调用传址**：`_lower_expr` 的 `E_CALL` 实参循环（~6385 `vals.push(_lower_expr(...))`）——
+   该形参是引用则对**变量实参**取址 `OP_ADDRV addr,0,0,-vloc-1` 传入；非变量实参先 fail-fast。
+4. **前置机制 `_pin_slot`（关键，先做）**：取址要求实参变量**住在内存**。`_pin` 不保证
+   栈槽（`_new_var` 在 `n<N_VARREG` 时仍给寄存器）。需给 FnCtx 加"可寻址"标记，
+   `_alloc_vars` 对标记变量**强制帧槽**（跳过 callee-saved），否则 `ADDRV` 拿到寄存器
+   编号当地址 = 静默错编。**这是 &T 的第一个独立可验证子步**（先让"被取址变量落栈槽"
+   对既有代码零影响，再接 1/2/3）。
+
+**顺序**：先 `_pin_slot`（可寻址变量落栈槽，差分验证既有代码不变）→ 解析层（照抄上面）
+→ 读/写/传址三落点 → `&int` 差分 → `pin_cross_grow`。**每步不动点 + 差分，禁一次性铺开。**
+
 ### 步骤 2：编译器层复用 9a 的 STORE+ADDRV 回传
 - 方向已验证（复现器从"挂起"变"跑完"），余错仅在 `ADDRV` 立即数（`-loc-1` 语义）
   与 DCE/降级的相交。
