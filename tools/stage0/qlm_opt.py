@@ -2408,11 +2408,20 @@ def opt_copy_prop(fn):
         defs, _ = vreg_mentions(ins)
         for d in defs:
             def_count[d] = def_count.get(d, 0) + 1
+    # v4.120：**被取址的 vreg（addrslot 源）禁止复制传播**。addrslot 取的是它的
+    # 地址，定义它的 MOV 必须保留、它必须是一个被写过的稳定槽。若把它别名塌缩掉，
+    # 定义 MOV 被删 → 槽从未被写 → &槽 读到垃圾 → 段错误（&vec 跨调用 push 实测）。
+    addr_taken = set()
+    for ins in fn.instrs:
+        if ins[0] == "addrslot" and isinstance(ins[2], int):
+            addr_taken.add(ins[2])
     alias = {}
     for ins in fn.instrs:
         if ins[0] == "mov" and isinstance(ins[2], int) and ins[1] != ins[2]:
             # ⚠ 源 vreg 也必须只定义一次：否则 mov 之后源被重写，
             # 把后续 use 替换成源 vreg 会读到新值（尾零修剪 p0 被吞的教训）。
+            if ins[1] in addr_taken:
+                continue
             if def_count.get(ins[1], 0) == 1 and def_count.get(ins[2], 0) == 1:
                 alias[ins[1]] = ins[2]
     for v in list(alias):

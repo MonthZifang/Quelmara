@@ -15,6 +15,10 @@ fn swap2(a: &int, b: &int) {
     a = b
     b = t
 }
+fn vfill(v: &vec[int], n: int) {
+    let mut i = 0
+    while i < n { v.push(i * 2)  i = i + 1 }
+}
 fn main() {
     let mut a = 5
     inc(a)
@@ -40,4 +44,11 @@ fn main() {
     let mut acc = 0
     while i < 5 { bump(acc, i)  i = i + 1 }
     print(acc)
+
+    // &vec 引用：跨调用 push + grow，调用方经原句柄读（v4.121 修复取址塌缩）
+    let vv = vec[int].new(4)
+    vfill(vv, 20)
+    print(vv.get(0))
+    print(vv.get(19))
+    print(vv.get(10))
 }

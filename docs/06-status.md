@@ -4957,6 +4957,19 @@ b57 跌出最大比值榜（榜首 b28_matrix 5.4×，属 vec 双重访存，需
 **全套 qlmc_test PASS=126 FAIL=0**（含 selfhost 42、-j1==-j4 并行确定性）；自举不动点
 cand2==cand3（785408B）。全量 76 与冷自举见 `versions/v4.120/CHANGELOG.md`，不代表 CI 数据。
 
+### v4.121 本地验证更新（修复 &vec 取址被复制传播塌缩——&T 配套正确性修复）
+
+修复 v4.120 `&vec[T]` 在 stage-0 原生后端的段错误：`opt_copy_prop` 把被取址变量别名
+塌缩、删掉定义 MOV，致 `addrslot` 取到从未写过的槽。修法：**被取址 vreg（addrslot 源）
+禁止复制传播**，定义 MOV 保留、变量始终是被写过的稳定帧槽。s_ref 夹具追加 `&vec` 跨调用
+push+grow 用例。**正确性修复，不改既有基准跑分**（改动只在 stage-0 优化器，qlmc 源码未变，
+b28/b68 等基准产物与 v4.120 逐字节相同）。
+
+验证：s_ref 差分（含 &vec）stage-0/qlmc 逐字节一致；**全套 qlmc_test PASS=126 FAIL=0**；
+四件套对拍 lexdiff 388/0、parsediff 292/0、irdiff 127/0、emitdiff 10/0；冷缓存严格自举 PASS
+（864.6s、42/42、不动点）。此修复是 vec 内联布局的前置——`&vec` 正确后才能用引用传播 grow
+新块地址。详见 `versions/v4.121/CHANGELOG.md`，不代表 CI 数据。
+
 
 > 口径（v4.65 起）：`bench/speed/` 里每个规范基准（C 为参照）在 11 种语言下各有一份
 > 同源实现，统一打印 `结果行…T<换行>纳秒`；校验和 = `T` 之前的内容。所有语言必须与 C
