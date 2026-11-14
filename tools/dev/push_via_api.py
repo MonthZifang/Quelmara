@@ -22,12 +22,8 @@ import urllib.error
 import urllib.request
 
 # 仓库名。**优先从 origin 的 URL 推导**，这样仓库改名后不用再改脚本；
-# 推导不出来才退回这个常量。
-#
-# 注：`MonthZifang/Rosoto` 是改名前的老名，GitHub 会 302 到 `Quelmara` ——
-# 两者是**同一个仓库**（实测 API 返回同一 master），所以旧名仍然能推，
-# 但新代码一律走 origin 推导，避免"脚本里写死旧名"这种隐患。
-REPO_FALLBACK = "MonthZifang/Rosoto"  # legacy-ok：改名前的仓库名，302 到 Quelmara
+# 推导不出来才退回这个常量（与当前仓库名一致）。
+REPO_FALLBACK = "MonthZifang/Quelmara"
 API = "https://api.github.com"
 
 

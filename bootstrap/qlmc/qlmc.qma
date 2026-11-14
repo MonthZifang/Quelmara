@@ -17721,8 +17721,12 @@ fn _sext32(fc: FnCtx, v: int) -> int {
 /// [+0]  返回值槽（线程写、join 读）
 /// [+8]  目标函数地址
 /// [+16] 实参个数 = 1
-/// [+24] 第 0 个实参
+/// [+24] （保留；ELF spawn 用作 done 标志）
+/// [+32] 第 0 个实参
 /// ```
+///
+/// **实参从 +32 开始**（蹦床 `mov rcx,[rbx+32]` 读第 0 个）。v4.118 前这里
+/// 误写成 +24、文档也错，导致线程恒收到 arg=0，见 `_bi_thread_start`。
 ///
 /// `RT_SPAWN` 已经处理好 Win64 的栈对齐、影子空间、非易失寄存器保存，
 /// 所以这里不重复实现线程入口 —— 只负责摆好块、调 `CreateThread`。
@@ -17763,10 +17767,12 @@ fn _bi_thread_start(fc: FnCtx, fv: int, av: int) -> int {
     fc.vty.set(a2, TY_INT)
     _ir_emit(fc, OP_ADDRF, a2, bp, 0, 16)
     _ir_emit(fc, OP_STORE, 0, a2, one, 8)
-    // [+24] 第 0 个实参
+    // [+32] 第 0 个实参。**必须与 spawn 的块布局一致**：RT_SPAWN 蹦床从
+    // [bp+32] 读第 0 个实参（mov rcx,[rbx+32]）。v4.118 前误写 [+24]，
+    // 蹦床读到未初始化的 [bp+32]=0，线程函数恒收到 arg=0（t197 的 bits=0）。
     let a3 = _vnew(fc)
     fc.vty.set(a3, TY_INT)
-    _ir_emit(fc, OP_ADDRF, a3, bp, 0, 24)
+    _ir_emit(fc, OP_ADDRF, a3, bp, 0, 32)
     _ir_emit(fc, OP_STORE, 0, a3, av, 8)
     // CreateThread(0, 0, &__spawn_entry, blk, 0, 0)：后两个实参走栈
     let entry = _vnew(fc)

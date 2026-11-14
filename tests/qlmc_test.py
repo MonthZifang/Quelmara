@@ -228,6 +228,9 @@ CASES = [
     # Conservative inlining of single-return pure-expression leaf functions:
     # param substitution, name-collision safety, non-inlineable fallbacks.
     ("inline", "tests/s_inline.qma"),
+    # thread_start arg passing: block offset must match RT_SPAWN trampoline
+    # (+32, not +24); per-thread distinct slots keep it deterministic.
+    ("thread_arg", "tests/s_thread_arg.qma"),
 ]
 
 npass = 0

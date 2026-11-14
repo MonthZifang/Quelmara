@@ -1,0 +1,43 @@
+// s_thread_arg —— v4.118 thread_start 实参传递修复的差分夹具
+// 根因：_bi_thread_start 把实参写到块 [+24]，而 RT_SPAWN 蹦床从 [+32] 读，
+// 线程函数恒收到 arg=0。修复：实参写 [+32]（与 spawn 块布局一致）。
+//
+// 用**各自独立的 static_word** 接收每个线程的 arg，避免共享字读-改-写竞态，
+// 使本夹具确定性（stage-0 与 qlmc 都必须逐字节一致）。
+import std.core
+
+fn w1(a: int) -> int { mem_store64(static_word(51), 0, a)  return 0 }
+fn w2(a: int) -> int { mem_store64(static_word(52), 0, a)  return 0 }
+fn w3(a: int) -> int { mem_store64(static_word(53), 0, a)  return 0 }
+fn w4(a: int) -> int { mem_store64(static_word(54), 0, a)  return 0 }
+
+fn main() {
+    mem_store64(static_word(51), 0, -1)
+    mem_store64(static_word(52), 0, -1)
+    mem_store64(static_word(53), 0, -1)
+    mem_store64(static_word(54), 0, -1)
+
+    let h1 = thread_start(w1, 111)
+    let h2 = thread_start(w2, 222)
+    let h3 = thread_start(w3, 333)
+    let h4 = thread_start(w4, 444)
+    assert(h1 != 0, "h1")
+    assert(h2 != 0, "h2")
+    assert(h3 != 0, "h3")
+    assert(h4 != 0, "h4")
+
+    // 轮询到四个槽都写入（各自独立，无竞态）
+    let mut i = 0
+    while i < 200000 && (mem_load64(static_word(51), 0) == -1 ||
+                         mem_load64(static_word(52), 0) == -1 ||
+                         mem_load64(static_word(53), 0) == -1 ||
+                         mem_load64(static_word(54), 0) == -1) {
+        thread_yield()
+        i = i + 1
+    }
+    print("a1=" + mem_load64(static_word(51), 0).to_str())
+    print("a2=" + mem_load64(static_word(52), 0).to_str())
+    print("a3=" + mem_load64(static_word(53), 0).to_str())
+    print("a4=" + mem_load64(static_word(54), 0).to_str())
+    print("thread-arg-ok")
+}
