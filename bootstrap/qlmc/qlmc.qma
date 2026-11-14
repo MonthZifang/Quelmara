@@ -5203,6 +5203,103 @@ fn _call_args(fc: FnCtx, nd: Node) -> vec[int] {
     return av
 }
 
+// ---------------------------------------------------------------------------
+// v4.117：**保守函数内联**（第一批：单返回纯表达式叶子函数）
+// ---------------------------------------------------------------------------
+//
+// 目标：b36_call 的 `add3(a,b,c){return a+b+c}` 这类小叶子函数，C 直接内联，
+// qlmc 却每次发完整 CALL（3×ARG + shadow space + 序言/尾声），差 10×。
+//
+// 判据（全部 AST 层可证，**不依赖 vreg 编号** → 自举不动点安全）：
+//   · 有函数体（非 @ffi）、返回 TY_INT、形参 ≤4 且全为 TY_INT（不含窄整数/聚合）。
+//   · 函数体恰为**一条 S_RETURN**（nx==-1），返回一个表达式。
+//   · 该表达式是纯树：只含 E_NUM / E_VAR / E_BIN / E_UN，且每个 E_VAR 都必须是
+//     本函数的形参（不碰全局/调用方变量，杜绝名字解析歧义）。
+//   · 表达式节点数 ≤25（帧压闸，坑表 #1）。
+// 因为表达式无调用，天然叶子、无递归、无环；内联不引入控制流拼接。
+//
+// 机制：调用点把实参 vreg 经 `_bind_push` 绑到形参名（`_try_var`/`_var_id`
+// 先查 bind 栈），直接 `_lower_expr` 返回表达式，结果即调用值；不发 OP_CALL。
+// 绑定的压/弹严格配对，lower 完即弹，不污染调用方作用域。
+
+/// 返回表达式是否纯树，且 E_VAR 全为 f 的形参。
+fn _inline_pure_expr(fc: FnCtx, nid: int, f: Fn) -> int {
+    if nid < 0 {
+        return 0
+    }
+    let nd = fc.nodes.get(nid)
+    if nd.op == E_NUM {
+        return 1
+    }
+    if nd.op == E_VAR {
+        let mut k = 0
+        while k < f.np {
+            if _param_name(fc, f, k) == nd.a {
+                return 1
+            }
+            k = k + 1
+        }
+        return 0
+    }
+    if nd.op == E_BIN {
+        if _inline_pure_expr(fc, nd.b, f) == 1 {
+            return _inline_pure_expr(fc, nd.c, f)
+        }
+        return 0
+    }
+    if nd.op == E_UN {
+        return _inline_pure_expr(fc, nd.b, f)
+    }
+    return 0
+}
+
+/// 表达式节点数（含根），用于帧压闸。
+fn _inline_expr_size(fc: FnCtx, nid: int) -> int {
+    if nid < 0 {
+        return 0
+    }
+    let nd = fc.nodes.get(nid)
+    if nd.op == E_BIN {
+        return 1 + _inline_expr_size(fc, nd.b) + _inline_expr_size(fc, nd.c)
+    }
+    if nd.op == E_UN {
+        return 1 + _inline_expr_size(fc, nd.b)
+    }
+    return 1
+}
+
+/// fi 是否可内联（判据见上）。
+fn _inline_candidate(fc: FnCtx, fi: int) -> int {
+    if fi < 0 || fi >= len(fc.fns) {
+        return 0
+    }
+    let f = fc.fns.get(fi)
+    if f.body < 0 {
+        return 0
+    }
+    if f.ret_t != TY_INT {
+        return 0
+    }
+    if f.np > 4 {
+        return 0
+    }
+    let mut k = 0
+    while k < f.np {
+        if _param_type(fc, f, k) != TY_INT {
+            return 0
+        }
+        k = k + 1
+    }
+    let b = fc.nodes.get(f.body)
+    if b.op != S_RETURN || b.nx != -1 || b.a < 0 {
+        return 0
+    }
+    if _inline_expr_size(fc, b.a) > 25 {
+        return 0
+    }
+    return _inline_pure_expr(fc, b.a, f)
+}
+
 /// 摆实参：寄存器部分走 OP_ARG，超出 nreg 的走栈（v2.29）。
 /// `argbase` = 1 表示聚合返回占了第 0 个实参寄存器（sret）。
 /// 返回为栈实参预留的字节数（0 = 没开栈），调用方在 call 之后要用
@@ -6070,6 +6167,23 @@ fn _lower_expr(fc: FnCtx, nid: int) -> int {
         while ai < len(av) {
             vals.push(_lower_expr(fc, av.get(ai)))
             ai = ai + 1
+        }
+        // v4.117：内联小纯叶子函数（判据见 _inline_candidate）。仅非聚合返回
+        // （sret==0）；实参 vreg 绑到形参名后直接 lower 返回表达式，不发 OP_CALL。
+        if sret == 0 && _inline_candidate(fc, fi) == 1 {
+            let inf = fc.fns.get(fi)
+            let ret_expr = fc.nodes.get(inf.body).a
+            let mut bk = 0
+            while bk < inf.np {
+                _bind_push(fc, _param_name(fc, inf, bk), vals.get(bk))
+                bk = bk + 1
+            }
+            let r = _lower_expr(fc, ret_expr)
+            while bk > 0 {
+                _bind_pop(fc)
+                bk = bk - 1
+            }
+            return r
         }
         let stk = _emit_call_args(fc, vals, argbase)
         if sret != 0 {

@@ -1,0 +1,74 @@
+// s_inline —— v4.117 保守函数内联的差分夹具
+// stage-0（不内联）与 qlmc（内联）输出必须逐字节一致。
+// 覆盖：基本内联 / 多形参 / 无形参常量 / 单形参恒等 / 各类纯运算符 /
+//       调用方与形参同名（bind 栈不得污染）/ 不该内联的函数仍正确。
+
+fn add3(a: int, b: int, c: int) -> int { return a + b + c }
+fn mulsub(x: int, y: int) -> int { return x * y - x }
+fn answer() -> int { return 42 }
+fn ident(x: int) -> int { return x }
+fn bitmix(a: int, b: int) -> int { return (a & b) | (a ^ b) }
+fn cmpneg(a: int, b: int) -> int { return -(a + b) }
+fn shiftl(a: int) -> int { return a << 3 }
+fn divmod(a: int) -> int { return a / 7 + a % 7 }
+
+// 不该内联：含调用（非纯表达式）
+fn helper(x: int) -> int { return x + 1 }
+fn hascall(x: int) -> int { return helper(x) * 2 }
+// 不该内联：含循环
+fn loopy(n: int) -> int {
+    let mut s = 0
+    let mut i = 0
+    while i < n { s = s + i  i = i + 1 }
+    return s
+}
+// 不该内联：多语句
+fn multistmt(x: int) -> int {
+    let y = x + 1
+    return y * 2
+}
+
+fn main() {
+    // 基本内联：add3(1,2,3)=6
+    print(add3(1, 2, 3))
+    // 变量实参：add3(10,20,30)=60
+    let p = 10
+    let q = 20
+    let r = 30
+    print(add3(p, q, r))
+    // 多形参表达式：mulsub(5,3)=15-5=10
+    print(mulsub(5, 3))
+    // 无形参常量：42
+    print(answer())
+    // 单形参恒等：99
+    print(ident(99))
+    // 位运算：bitmix(12,10)=(12&10)|(12^10)=8|6=14
+    print(bitmix(12, 10))
+    // 一元负号：cmpneg(3,4)=-(7)=-7
+    print(cmpneg(3, 4))
+    // 移位：shiftl(5)=40
+    print(shiftl(5))
+    // 除法取模：divmod(50)=50/7+50%7=7+1=8
+    print(divmod(50))
+
+    // 调用方与形参同名：caller 也有 a/b/c，内联 add3 不得污染
+    let a = 100
+    let b = 200
+    let c = 300
+    print(add3(a, b, c))
+    print(a) print(b) print(c)
+
+    // 嵌套内联实参：add3(add3(1,1,1), 2, 3)=3+2+3=8
+    print(add3(add3(1, 1, 1), 2, 3))
+
+    // 循环里反复内联调用：sum add3(i,i,i) i=0..4 = 0+3+6+9+12=30
+    let mut s = 0
+    let mut i = 0
+    while i < 5 { s = s + add3(i, i, i)  i = i + 1 }
+    print(s)
+
+    // 不该内联的函数仍正确
+    print(hascall(5))
+    print(loopy(5))
+    print(multistmt(5))
+}

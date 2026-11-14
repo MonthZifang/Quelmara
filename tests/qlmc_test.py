@@ -225,6 +225,9 @@ CASES = [
     # vec header-pointer load hoisting: growth/alias/call barriers, zero-trip
     # loops, pre-loop growth, and continue multi-backedge body coverage.
     ("load_hoist", "tests/s_load_hoist.qma"),
+    # Conservative inlining of single-return pure-expression leaf functions:
+    # param substitution, name-collision safety, non-inlineable fallbacks.
+    ("inline", "tests/s_inline.qma"),
 ]
 
 npass = 0
