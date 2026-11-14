@@ -152,6 +152,25 @@ get/set——内联布局对它是纯收益。但布局改动是**全局**的，
 （`pin_cross_grow` 改引用传参）验证 grow 回传，再铺开到 get/set/push/len 全量。
 **仍按步骤 4 门槛：每步 pin_cross_grow + 差分 + 不动点，禁一次性铺开。**
 
+#### ⚠ 第 10 轮发现的先行 bug：stage-0 原生后端 `&vec` 段错误（内联布局前必须先修）
+
+`&int` 全链路正确（v4.120 已验证），但 **`&vec[int]` 在 stage-0 原生后端段错误**
+（qlmc 侧正确：`fill(v:&vec[int]) push` 后调用方读到 0/38/20）。最小复现：
+`fn fill(v:&vec[int],n:int){while i<n{v.push(i*2)…}}` + `vec.new(4)`，n=3 即崩（无需 grow）。
+**已定位根因（debug 实证）**：addrslot 本身发射正确（源 vreg 确在帧槽 `('m',24)`），
+但 **`vec.new` 被内联进 main 时把结果 vreg 重编号**——addrslot 取址用的是降级期的
+`v1`，而内联后真正的句柄落在 `v50`（调用后的 `a.get` 用 v50）。即 **addrslot 源 vreg
+与 force_mem 集合在内联重编号后失效**，取到的是旧 vreg 的槽（垃圾）→ 段错误。
+`&int` 不崩是因为 int 实参多为常量/简单变量，未触发"结果 vreg 被内联重编号"。
+
+**修法 = `_pin_slot` 前置 pass（步骤 2 的那块，必须先做）**：在降级前/降级期识别
+"将被取址的变量"，让它成为**独立稳定的帧槽变量**（`let a = vec.new(…)` 的结果 MOV 进
+该稳定槽，而非直接把变量绑到会被内联重编号的结果临时值），addrslot/force_mem 都指向
+这个稳定 vreg。或者：内联重编号时同步更新 force_mem 集合与 addrslot 源（需确认
+`_inline_one`/substitution 对 caller 侧 addrslot 源的重编号覆盖）。
+**先让 `&vec` 最小复现在 stage-0 跑通（差分对齐 qlmc），再谈内联布局。这是 v4.120
+引入的潜在 bug（现有测试只用 &int 故 CI 绿），内联布局的前置必修项。**
+
 ## 3. 三条编译器内部事实（地图，来自 9 次复盘）
 - `_pin` **不保证**栈槽：`_new_var` 在 `n < N_VARREG` 时仍分配寄存器。
 - `ADDRV` 立即数语义 = `-loc-1`。
