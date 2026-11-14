@@ -16,6 +16,7 @@
 | `tools/stage0/qlm_opt.py` | `addrslot` 登记 `vreg_mentions`/`PURE` |
 | `tools/stage0/qlm.py` | C 交叉验证后端：`&T`→`T*`，读 `*p`/写 `*p=`/调用传 `&x` |
 | `tests/s_ref.qma` + `tests/qlmc_test.py` | 引用差分夹具（inc/addmul/循环 bump/双引用 swap）并注册 |
+| `bootstrap/parser/qlm_parse.qma` + `tools/dev/astdecl.py` | 声明级 parser 与 oracle 认 `&T`（渲染 `&base`）——首推 CI 的 parsediff 对拍曾因此红，补齐后通过 |
 
 ## 关键机制与坑
 
@@ -35,6 +36,7 @@
 |---|---|
 | 引用差分夹具 s_ref | stage-0(win) / qlmc(win) 逐字节一致（6 7 22 101 22 10 8 3 10） |
 | 全套 qlmc_test | **PASS=126 FAIL=0**（含 selfhost 42、并行确定性 -j1==-j4、新 ref 夹具） |
+| 自举对拍四件套 | lexdiff 388/0、parsediff 292/0、irdiff 127/0（s_ref 在 A64 跳过，同其他 x86-only 特性）、emitdiff 10/0 |
 | 种子引导不动点 | cand2==cand3，785408 字节，SHA256 一致 |
 | 全量 76 项 ×3 轮 | **76/76 与 C 校验一致**；b68/b28/b57 等基准产物与 v4.119 **逐字节相同**（语言特性不改既有代码）——几何平均读数 1.649 vs 1.637 纯属测量噪声 |
 | 源码级冷缓存严格自举 | **PASS**（`QLM_NO_CACHE=1`）：stage-0 编 stage-1 861.9s；stage-2 785408 字节；42/42 组逐字节一致；错误路径干净退 2；stage-2==stage-3 不动点成立 |

@@ -52,6 +52,8 @@ def render_type(t):
         return "rc[" + render_type(t[1]) + "]"
     if k == "chan":
         return "chan[" + render_type(t[1]) + "]"
+    if k == "ref":
+        return "&" + render_type(t[1])
     return "?"
 
 

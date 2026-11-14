@@ -157,6 +157,11 @@ fn skip_block(src: str, n: int, k: map[str]int) {
 fn parse_type(src: str, n: int, k: map[str]int) -> str {
     skip_ws(src, n, k)
     let i = cur_get(k)
+    // v4.120：&T 引用类型，声明级渲染 "&" + base（与 astdecl.render_type 对齐）。
+    if i < n && src[i] == 38 {
+        cur_set(k, i + 1)
+        return "&" + parse_type(src, n, k)
+    }
     if i < n && src[i] == 91 {
         cur_set(k, i + 1)
         skip_ws(src, n, k)
