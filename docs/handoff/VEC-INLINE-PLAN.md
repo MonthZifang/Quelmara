@@ -32,6 +32,32 @@ qlmc 是**值语义 + 标量不可寻址**。vec 内联后，`grow` 换块必须
 - 这同时解锁"多层别名每层间接 + 穿透"——正是 grow 句柄传播的本质需求。
 - 风险：语言特性改动，需保证 `bootstrap/qlmc` 自举不破（见步骤 4 验证门槛）。
 
+#### 步骤 1 的具体编码方案（第 6 轮勘察定稿，务必照此避坑）
+
+**类型码不能直接打包 base**：现有码是紧凑区间（STRUCT=0x1000 / VEC=0x8000 /
+MAP=0x10000 / SLICE=0x20000 / FN=0x30000 / ARRAY=0x100000+(len<<8)+elem），
+`TY_REF + base` 在 base 本身是 vec/array 时会进位撞区间（同 v3.65 之前的
+`vec[vec[str]]` 事故）。**照抄 vec 的类型表方案**：
+- 新增 `TY_REF = 0x40000`（落在 FN=0x30000 与 ARRAY=0x100000 之间的空档），
+  编码 `TY_REF + ti`，`ti < RTYPES_MAX(=2048)` → 永远在 [0x40000,0x40800)，不撞区间。
+- 新增引用类型表 `stt[RTYPES_BASE..]`（仿 `VTYPES_BASE`，`_rtypes_add/_rtypes_elem`
+  照抄 `_vtypes_add/_vtypes_elem`），`TBL_SIZE` 相应加大。
+- `_type`（qlmc.qma ~1134）开头加 `&` 分支：`_adv` 后 `_type` 解析 base，
+  `_rtypes_add` 登记，返回 `TY_REF+ti`。
+
+**必须同步改的判定点**（漏一个就静默错分类）：
+- `_ty_is_agg`：引用是 8 字节标量指针 → 加 `if ty>=TY_REF && ty<TY_REF+RTYPES_MAX return false`。
+- `_ty_size`：引用返回 8，**必须在 `>=TY_SLICE && <TY_ARRAY` 那条之前判**
+  （否则 0x40000 落进 [SLICE,ARRAY) 被当成 16 字节）。
+- 全文 `>= TY_x && < TY_y` 区间判断（~15 处，grep 可列）逐一核对 TY_REF 不被误吞。
+
+**降级**：`&T` 形参 = 传地址（调用方 `ADDRV`/取址，被调方形参拿到地址）；
+被调内对 `&T` 变量的读 = `LOAD [addr]`、写 = `STORE [addr]`（穿透）。
+第一批只做 `&int`/`&vec[T]` 形参 + 读写穿透，返回引用/多层别名留后。
+
+**验证**：先 `&int` 小例（`fn inc(x:&int){x=x+1}` 调用后实参 +1）stage-0/qlmc 差分；
+再 `pin_cross_grow` 复现器；每步自举不动点。**禁止一次性把降级全铺开**。
+
 ### 步骤 2：编译器层复用 9a 的 STORE+ADDRV 回传
 - 方向已验证（复现器从"挂起"变"跑完"），余错仅在 `ADDRV` 立即数（`-loc-1` 语义）
   与 DCE/降级的相交。
