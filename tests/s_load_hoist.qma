@@ -1,0 +1,127 @@
+// s_load_hoist —— v4.116 vec 头指针装载循环外提的差分夹具
+// 覆盖：同块多次 get / set 失效 / push 扩容失效 / 别名 push / struct 字段 /
+//       循环内 get+set 混合 / 跨调用失效 / 0 次循环 / 循环前扩容 /
+//       continue 多回边（外提不得截断循环体）。stage-0 与 qlmc 输出必须逐字节一致。
+struct P { x: int, y: int }
+
+fn sum3(v: vec[int]) -> int {
+    // 同一块内三次 get：头指针只应装载一次（正确性不受影响）
+    return v.get(0) + v.get(1) + v.get(2)
+}
+
+fn main() {
+    // [1] 基本复用：60
+    let v = vec[int].new(8)
+    v.push(10) v.push(20) v.push(30)
+    print(sum3(v))
+
+    // [2] set 失效：1 99
+    let a = vec[int].new(8)
+    a.push(1) a.push(2)
+    let x = a.get(0)
+    a.set(0, 99)
+    let y = a.get(0)
+    print(x) print(y)
+
+    // [3] push 扩容失效：1 1 5
+    let g = vec[int].new(2)
+    g.push(1) g.push(2)
+    let ga = g.get(0)
+    g.push(3)
+    let gb = g.get(0)
+    g.push(4) g.push(5)
+    let gc = g.get(4)
+    print(ga) print(gb) print(gc)
+
+    // [4] 别名 push（共享头块）：7 8
+    let w = vec[int].new(2)
+    w.push(7) w.push(8)
+    let alias = w
+    let wa = w.get(0)
+    alias.push(9)
+    let wb = w.get(1)
+    print(wa) print(wb)
+
+    // [5] struct 字段复用：10
+    let p = P { x: 3, y: 4 }
+    print(p.x + p.y + p.x)
+
+    // [6] 循环内 get+set 混合：360
+    let m = vec[int].new(16)
+    let n = vec[int].new(16)
+    let mut i = 0
+    while i < 16 { m.push(i) n.push(i * 2) i = i + 1 }
+    let mut s = 0
+    i = 0
+    while i < 16 {
+        m.set(i, m.get(i) + n.get(i))
+        s = s + m.get(i)
+        i = i + 1
+    }
+    print(s)
+
+    // [7] 跨调用失效：21 22
+    let c = vec[int].new(4)
+    c.push(21)
+    let ca = c.get(0)
+    print(ca)
+    c.push(1)
+    let cb = c.get(0) + c.get(1)
+    print(cb)
+
+    // [8] 嵌套循环矩阵形状（b28 微缩）：135
+    let q = vec[int].new(9)
+    let r = vec[int].new(9)
+    let t = vec[int].new(9)
+    i = 0
+    while i < 9 { q.push(i + 1) r.push(1) t.push(0) i = i + 1 }
+    let mut rr = 0
+    while rr < 3 {
+        let mut k = 0
+        while k < 3 {
+            let qv = q.get(rr * 3 + k)
+            let mut j = 0
+            while j < 3 {
+                t.set(rr * 3 + j, t.get(rr * 3 + j) + qv * r.get(k * 3 + j))
+                j = j + 1
+            }
+            k = k + 1
+        }
+        rr = rr + 1
+    }
+    let mut ts = 0
+    i = 0
+    while i < 9 { ts = ts + t.get(i) i = i + 1 }
+    print(ts)
+
+    // [9] 0 次循环：外提的装载不得改变行为（v 已初始化，预头读安全）：42
+    let z = vec[int].new(4)
+    z.push(42)
+    let mut zi = 0
+    while zi < 0 { print(z.get(0)) zi = zi + 1 }
+    print(z.get(0))
+
+    // [10] 循环前扩容：外提必须看到扩容后的数据块：3 99
+    let h = vec[int].new(1)
+    h.push(3)
+    h.push(99)
+    let mut hi = 0
+    let mut hs = 0
+    while hi < 2 { hs = hs + h.get(hi) hi = hi + 1 }
+    print(h.get(0)) print(hs)
+
+    // [11] continue 多回边：循环体被 continue 截成两段，外提判据必须
+    //      覆盖整个循环（含 continue 之后的调用/写），不得只看第一段。
+    //      偶数跳过、奇数累加：1+3+5+7+9 = 25
+    let cv = vec[int].new(10)
+    let mut ci = 0
+    while ci < 10 { cv.push(ci) ci = ci + 1 }
+    let mut cs = 0
+    ci = 0
+    while ci < 10 {
+        if cv.get(ci) % 2 == 0 { ci = ci + 1  continue }
+        cs = cs + cv.get(ci)
+        ci = ci + 1
+    }
+    print(cs)
+}

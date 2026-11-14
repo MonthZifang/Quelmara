@@ -222,6 +222,9 @@ CASES = [
     ("pow2_mod", "tests/s_pow2_mod.qma"),
     # Pure self-tail/additive recursion and conservative fallback semantics.
     ("tail_self", "tests/s_tail_self.qma"),
+    # vec header-pointer load hoisting: growth/alias/call barriers, zero-trip
+    # loops, pre-loop growth, and continue multi-backedge body coverage.
+    ("load_hoist", "tests/s_load_hoist.qma"),
 ]
 
 npass = 0

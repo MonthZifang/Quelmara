@@ -9009,6 +9009,314 @@ fn _licm_in_outer_loop(ir: vec[Ir], defpos: int, h: int) -> int {
     return 0
 }
 
+/// v4.116：**vec 头指针装载的循环外提**。
+///
+/// 形状：`vec.get/set` 降级出 `LOADD data,[h+0]`，h 是 vec 句柄。循环里
+/// 没有 push/调用时 `[h+0]` 逐轮不变，却每轮重装一次（b28 内层循环每轮
+/// 2 条、b70 每轮 1 条）。把它提到循环头之前，循环内只剩元素访存 ——
+/// 与 C 的"基址读一次"对齐。这是块内融合（_opt_fuse）覆盖不到的部分：
+/// 融合消的是**同一表达式内**的重复装载，跨迭代的外提需要循环判据。
+///
+/// 安全判据（每条都可证明，宁缺毋滥）：
+///   ① 结果 dst 是单定义临时值（ndef==1、vpin==0、非聚合非 f64）。
+///   ② 基址 h 是 pinned 变量（存储位置跨迭代稳定）、单定义，且定义点
+///      **无条件可达**：形参（帧入口必达），或不在任何循环里、也不被任何
+///      条件/无条件跳转跳过。这保证外提后的装载在预头执行时 h 一定是已
+///      初始化的合法句柄 —— 不会把"循环 0 次就不读"变成"预头必读"的投机访存。
+///   ③ 循环体内没有调用族（CALL*/ARG/STKARG，以及内部发调用的 COPY/
+///      MEMCPYN/ZERON/RETAGG —— 与 _alloc 的 cp[] 屏障清单一致）：被调方
+///      可能通过共享头块的别名 push 改 [h+0]，且调用会清 caller-saved，
+///      外提值若住临时寄存器会被清掉。
+///   ④ 循环体内的内存写不落在 h 的**别名集**上：别名集 = h 经 MOV/ADDRF
+///      传播的闭包（头块地址及其字段地址）。元素地址经 LOADD(data) 派生，
+///      不在别名集里 —— 所以元素 store 放行，头块 store（push/grow/clear/
+///      pop/字段写）一律拒绝。
+///   ⑤ 体内指令全部在白名单内（纯寄存器运算/读/控制流），未知操作码拒绝。
+///
+/// 外提机制：预头插 `LOADD nv,[h+disp]`，原位改 `MOV dst,nv`。nv 的
+/// vend **必须钉到回边**（每轮都要读，区间不跨回边就会被分配器在循环内
+/// 复用寄存器 —— 首版实测段错误）；_rebuild_temp_ends 只延不缩，兜底安全。
+/// 不依赖 use/ndef 的即时维护（pass 后统一重算）。
+///
+/// **每次重扫只外提一条**（首版教训）：在 h 插指令会移动其后所有下标，
+/// 批量处理时后续循环的 (h,e) 全部过期，内层循环会扫错区间、改错指令
+/// （实测 stage-2 栈溢出）。一条一重扫，判据看到的下标永远精确。
+/// 从最内层循环开始（回边按 IR 序收集，内层 JMP 在前），内层提完外层
+/// 仍有机会；budget 封顶。
+fn _opt_load_hoist(fc: FnCtx, ndef: vec[int]) {
+    let mut budget = 64
+    // 每个循环头至多外提一条：外提值整段占用一个临时寄存器，提多了
+    // 把循环自己的临时值挤去溢出（实测 b28/b18/b22 慢 2.4 倍）。
+    let mut done_heads = vec[int].new(8)
+    while budget > 0 {
+        if _load_hoist_one(fc, ndef, done_heads) == 0 {
+            return
+        }
+        budget = budget - 1
+    }
+}
+
+/// 重扫一遍 IR，至多外提一条装载。返回 1 = 提了。
+/// 区间偏移不用手工维护：_ir_insert 已对全体 vreg 的 vstart/vend 做后移。
+///
+/// **同一循环头必须合并所有回边**（首版教训）：`continue` 会发第二条
+/// JMP 到头，逐回边当独立循环会把体截断 —— 截断范围外的调用漏检，
+/// 外提值寄存器被清、vend 也盖不到真正的回边（实测 stage-2 栈溢出）。
+/// 取 heads 首次出现序、e 取该头所有回边的最大值。
+fn _load_hoist_one(fc: FnCtx, ndef: vec[int], done_heads: vec[int]) -> int {
+    let ir = fc.ir
+    let mut hs = vec[int].new(8)
+    let mut es = vec[int].new(8)
+    let mut i = 0
+    while i < len(ir) {
+        let ins = ir.get(i)
+        if _is_backedge(ins.op) == 1 {
+            let hh = _lab_index(ir, ins.imm)
+            if hh >= 0 && hh < i {
+                let mut j = 0
+                let mut hit = -1
+                while j < len(hs) {
+                    if hs.get(j) == hh {
+                        hit = j
+                        j = len(hs)
+                    } else {
+                        j = j + 1
+                    }
+                }
+                if hit >= 0 {
+                    if es.get(hit) < i {
+                        es.set(hit, i)
+                    }
+                } else {
+                    hs.push(hh)
+                    es.push(i)
+                }
+            }
+        }
+        i = i + 1
+    }
+    let mut li = 0
+    while li < len(hs) {
+        let h = hs.get(li)
+        let e = es.get(li)
+        li = li + 1
+        if h < 0 || h >= e || e > len(ir) {
+            continue
+        }
+        // ③ 调用族一票否决。**必须与 _alloc 的 cp[] 屏障清单完全一致**：
+        // COPY/MEMCPYN/ZERON/RETAGG 内部发 __memcpy/__memset 调用，会清
+        // caller-saved —— 首版漏了它们，vec[Ir] 的聚合 COPY 把外提指针
+        // 所在寄存器清掉，stage-2 编 vec 循环即栈溢出（坑表 #20 同类）。
+        let mut callish = 0
+        let mut m = h
+        while m <= e && m < len(ir) {
+            let x = ir.get(m)
+            if x.op == OP_CALL || x.op == OP_CALLRT || x.op == OP_CALLIAT ||
+               x.op == OP_CALLR || x.op == OP_CALLV || x.op == OP_ARG ||
+               x.op == OP_STKARG || x.op == OP_COPY || x.op == OP_MEMCPYN ||
+               x.op == OP_ZERON || x.op == OP_RETAGG {
+                callish = 1
+            }
+            m = m + 1
+        }
+        if callish == 1 {
+            continue
+        }
+        // 已提过的头不再提（每头至多一条，见 _opt_load_hoist）
+        let mut dh = 0
+        let mut already = 0
+        while dh < len(done_heads) {
+            if done_heads.get(dh) == h {
+                already = 1
+            }
+            dh = dh + 1
+        }
+        if already == 1 {
+            continue
+        }
+        // **寄存器压力闸**：临时池只有 4 个（R8-R11）。外提值整段占 1 个，
+        // 循环体自身定义的临时值种类数 D 必须 ≤3，否则挤出溢出，
+        // 省一条装载换每轮多次栈往返，净亏（实测 b28 帧 312→328B、慢 2.4x）。
+        // D 是"不同 dst 个数"，高估同时活跃数 —— 保守方向，宁可不提。
+        let mut seen = vec[int].new(len(fc.vloc))
+        let mut z2 = 0
+        while z2 < len(fc.vloc) {
+            seen.push(0)
+            z2 = z2 + 1
+        }
+        let mut dcnt = 0
+        let mut m2 = h
+        while m2 <= e && m2 < len(ir) {
+            let x = ir.get(m2)
+            if x.dst > 0 && x.dst < len(seen) && fc.vpin.get(x.dst) == 0 &&
+               _opt_writes(x.op) == 1 && seen.get(x.dst) == 0 {
+                seen.set(x.dst, 1)
+                dcnt = dcnt + 1
+            }
+            m2 = m2 + 1
+        }
+        if dcnt > 3 {
+            continue
+        }
+        let mut k = e - 1
+        while k > h {
+            let w = ir.get(k)
+            if w.op == OP_LOADD && w.dst > 0 && w.a > 0 &&
+               w.dst < len(ndef) && ndef.get(w.dst) == 1 &&
+               fc.vpin.get(w.dst) == 0 &&
+               fc.vpin.get(w.a) != 0 &&
+               _ty_is_agg(fc.vty.get(w.dst)) == 0 &&
+               fc.vty.get(w.dst) != TY_F64 &&
+               _loadhoist_base_ok(fc, ir, w.a, h, ndef) == 1 &&
+               _loadhoist_mem_safe(fc, ir, w.a, h, e) == 1 {
+                let nv = _vnew(fc)
+                fc.vty.set(nv, fc.vty.get(w.dst))
+                fc.vpin.set(nv, 0)
+                _tri("  HOIST base", w.a)
+                _tri("  HOIST disp", w.imm)
+                _ir_insert(fc, h, OP_LOADD, nv, w.a, 0, w.imm)
+                fc.vstart.set(nv, h)
+                // 插入使回边后移一位：nv 每轮在 MOV 处被读，活跃区间
+                // 必须盖到回边，否则寄存器在循环内被复用（首版段错误）。
+                fc.vend.set(nv, e + 1)
+                ir.set(k + 1, Ir { op: OP_MOV, dst: w.dst, a: nv, b: 0, imm: 0 })
+                if w.a < len(fc.vstart) && fc.vstart.get(w.a) > h {
+                    fc.vstart.set(w.a, h)
+                }
+                done_heads.push(h)
+                return 1
+            }
+            k = k - 1
+        }
+    }
+    return 0
+}
+
+/// 基址单定义且定义点无条件可达（判据②）。
+fn _loadhoist_base_ok(fc: FnCtx, ir: vec[Ir], v: int, h: int,
+                      ndef: vec[int]) -> int {
+    if v <= 0 || v >= len(ndef) || ndef.get(v) != 1 {
+        return 0
+    }
+    let mut d = -1
+    let mut m = 0
+    while m < h {
+        let x = ir.get(m)
+        if x.dst == v && _opt_writes(x.op) == 1 {
+            d = m
+        }
+        m = m + 1
+    }
+    if d < 0 {
+        return 0
+    }
+    let x = ir.get(d)
+    if x.op == OP_PARAM || x.op == OP_PARAMSTK {
+        return 1
+    }
+    // 定义点在任何循环里 → 那个循环可能 0 次，h 可能未初始化
+    let mut p = 0
+    while p < len(ir) {
+        let ins = ir.get(p)
+        if _is_backedge(ins.op) == 1 {
+            let h2 = _lab_index(ir, ins.imm)
+            if h2 >= 0 && h2 < d && d <= p {
+                return 0
+            }
+        }
+        p = p + 1
+    }
+    // 定义点被跳转跳过（条件或无条件）→ 存在 h 未初始化的路径
+    p = 0
+    while p < d {
+        let ins = ir.get(p)
+        if ins.op == OP_JZ || ins.op == OP_JNZ || ins.op == OP_JMP ||
+           ins.op == OP_JCMP || ins.op == OP_JCMPI ||
+           ins.op == OP_JCMPVLEN || ins.op == OP_JCMPSTR {
+            let q = _lab_index(ir, ins.imm)
+            if q > d {
+                return 0
+            }
+        }
+        p = p + 1
+    }
+    return 1
+}
+
+/// 循环体内存安全（判据④⑤）：白名单外的指令拒绝；内存写的地址
+/// 不得落在基址的 MOV/ADDRF 别名闭包里。
+fn _loadhoist_mem_safe(fc: FnCtx, ir: vec[Ir], base: int, h: int, e: int) -> int {
+    let nv = len(fc.vloc)
+    let mut al = vec[int].new(nv)
+    let mut z = 0
+    while z < nv {
+        al.push(0)
+        z = z + 1
+    }
+    if base >= nv {
+        return 0
+    }
+    al.set(base, 1)
+    let mut changed = 1
+    while changed == 1 {
+        changed = 0
+        let mut m = 0
+        while m < len(ir) {
+            let x = ir.get(m)
+            if (x.op == OP_MOV || x.op == OP_ADDRF) &&
+               x.dst > 0 && x.a > 0 && x.dst < nv && x.a < nv {
+                if al.get(x.a) == 1 && al.get(x.dst) == 0 {
+                    al.set(x.dst, 1)
+                    changed = 1
+                }
+            }
+            m = m + 1
+        }
+    }
+    let mut m = h
+    while m <= e && m < len(ir) {
+        let x = ir.get(m)
+        let op = x.op
+        let mut addr = -1
+        if op == OP_STORE || op == OP_STORE8 || op == OP_STORED ||
+           op == OP_STOREX || op == OP_STORE8D || op == OP_STORE8X ||
+           op == OP_STORE8I || op == OP_COPY || op == OP_ZERO || op == OP_ZERON {
+            addr = x.a
+        } else if op == OP_MEMCPYN {
+            addr = x.dst
+        } else if _loadhoist_pure(op) == 0 {
+            return 0
+        }
+        if addr > 0 && addr < nv && al.get(addr) == 1 {
+            return 0
+        }
+        m = m + 1
+    }
+    return 1
+}
+
+/// 循环体内允许出现的非写指令（读/纯运算/控制流）。f64 槽写、调用、
+/// 未知操作码都不在内 —— 保守拒绝。
+fn _loadhoist_pure(op: int) -> int {
+    if op == OP_CONST || op == OP_MOV || op == OP_ADD || op == OP_SUB ||
+       op == OP_MUL || op == OP_DIV || op == OP_MOD || op == OP_NEG ||
+       op == OP_NOT || op == OP_NZ || op == OP_CMP { return 1 }
+    if op == OP_AND || op == OP_OR || op == OP_XOR || op == OP_SHL ||
+       op == OP_SAR || op == OP_SHR || op == OP_BNOT { return 1 }
+    if op == OP_BINI || op == OP_CMPI || op == OP_DIVC || op == OP_TRUNC ||
+       op == OP_CSUBNS { return 1 }
+    if op == OP_LEA || op == OP_LEN || op == OP_PARAM || op == OP_PARAMSTK { return 1 }
+    if op == OP_ADDRV || op == OP_ADDRF || op == OP_ADDRX || op == OP_ADDRXN { return 1 }
+    if op == OP_LOAD || op == OP_LOAD8 || op == OP_LOADD || op == OP_LOADX ||
+       op == OP_LOAD8D || op == OP_LOAD8X || op == OP_LOAD8I { return 1 }
+    if op == OP_RTADDR || op == OP_LEAFN || op == OP_BSSADDR || op == OP_FCMP ||
+       op == OP_FTOI { return 1 }
+    if op == OP_LAB || op == OP_JMP || op == OP_JZ || op == OP_JNZ ||
+       op == OP_JCMP || op == OP_JCMPI || op == OP_JCMPVLEN ||
+       op == OP_JCMPSTR || op == OP_NOP || op == OP_RET || op == OP_RETSRET { return 1 }
+    return 0
+}
+
 fn _opt_flag_loop(fc: FnCtx, use: vec[int], ndef: vec[int]) {
     let ir = fc.ir
     let mut n = len(ir)
@@ -9358,17 +9666,25 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     _opt_dce(fc, use)
     _tri("    opt: dce ir=", len(ir))
     _opt_empty_jumps(ir)
+    _tri("    opt: ej1 ir=", len(ir))
     // ---- v2.81 归纳削减：`(i*C) % D` → 递增计数器 + 条件回绕 ----
     // 它会插入新指令、改使用关系，所以放在最后，之后重算 use/ndef 再跑一次 DCE
     // （不然被替换掉的 `t = i*C` 会留在循环里当死代码）。
     _opt_mod_ind(fc, cok, cval, use, ndef)
+    _tri("    opt: modind ir=", len(ir))
     // ---- v3.88 标志位循环：`go = 0` 直接跳出，别绕回循环头再比一次 ----
     // 放在归纳削减之后：它只改 JMP 目标、不插入指令，所以不需要重算长度；
     // 但它**读了 use/ndef 之外的全函数结构**，放在 DCE 之前让死代码一起收掉。
     _opt_flag_loop(fc, use, ndef)
+    _tri("    opt: flagloop ir=", len(ir))
     // v4.93：循环不变量外提。放在最后（它插入指令、改活跃区间，
     // 之后不再有依赖 IR 下标的 pass）。
     _opt_licm(fc, ndef)
+    _tri("    opt: licm ir=", len(ir))
+    // v4.116：vec 头指针装载外提（判据见 _opt_load_hoist）。同样插指令、
+    // 改活跃区间，紧跟 LICM，之后统一重算 use/ndef。
+    _opt_load_hoist(fc, ndef)
+    _tri("    opt: loadhoist ir=", len(ir))
     // **`use` 和 `ndef` 都要先清零再重算**（v3.89）。以前只清了 `use`，
     // `_opt_ndef` 是**累加**语义，于是第二次调用后每个 vreg 的定义次数都翻倍 ——
     // `_opt_copy` 的 `ndef.get(d) == 1` 条件就永远不成立，归纳削减插的
