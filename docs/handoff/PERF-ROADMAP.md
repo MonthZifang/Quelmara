@@ -355,6 +355,25 @@ qlmc 只有窄式 `_opt_mod_ind`（`(i*C)%D` 归纳削减，b1 形态），没�
 b69 还需 fib_hash 内联 + cap 常量传播（cap=524288=2^19）才能把 `%cap` 变 `%2^19`。
 **先做安全子集（常量/and/简单归纳变量），再啃循环携带**，别一步到位。
 
+### 第 32 轮实施状态（WIP，已回退，补丁存 `build/unsigned_mod_4122_wip.patch`）
+
+已写完整实现并回退（未落地）：`_nn_propagate`（单定义非负+上界不动点）→
+`_nn_loop`（循环携带 v=expr%D 归纳）→ `_nn_bound`（递归求界，节点预算 512 兜底）→
+把 OP_DIVC 的 b 槽换成 `SUB_MODU/SUB_DIVU`（操作码不变，DCE/分配器无需改）→
+`_emit_divc` 无符号 2 的幂快路径（MOD 单条 and、DIV 单条 shr）。差分夹具
+`tests/s_unsigned_mod.qma` 已加（8 值含负数/负 LCG，v4.121 与 stage-0 均通过，真值已独立核算）。
+
+**踩坑（重启必读）**：
+1. `ndef` 在 `_opt` 开头按当时 `len(fc.vloc)` 定长，优化中途 vreg 会增长 →
+   新 pass 里 `ndef.get(d)` 必须加 `d < len(ndef)` 守卫（已修）。
+2. **未解决的 vec OOB**：stage-0 编出的新 qlmc 编 fib 即 `vec index out of bounds`，
+   且在 `_opt_divc_unsigned` 入口 eprint **之前**就崩（fib 无循环，`_nn_loop` 不会跑）。
+   所有 nn/ub/cv/ir 访问均已加守卫仍崩 —— 怀疑点：stage-0 对新构造的代码生成、
+   或分配/初始化段某处。**下一步先用最小 pass（只分配+立即 return）二分定位**。
+3. **自举 build 不可靠**：用旧 `build/qlmc.exe`(v4.121) 自举编新 qlmc.qma 会 hang/错编，
+   调试新代码**必须用 stage-0**（`qlm_cli.py build … --target win`，约 14min）构建再测。
+4. 性能：`_nn_bound` 双操作数递归在 DAG 上指数膨胀，已加节点预算；循环区域加 `<512` 闸。
+
 ## 下一步优先级（结构性，按收益/可行性）
 
 1. **无符号取模 / 非负范围分析**（b83/b69/b13/b74 计算密集片）：上文第 31 轮新根因。

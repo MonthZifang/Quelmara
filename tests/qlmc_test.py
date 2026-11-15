@@ -238,6 +238,10 @@ CASES = [
     # &T reference semantics (v4.120): pass-address, read/write through,
     # inc/addmul/loop-bump/two-ref-swap. stage-0 vs qlmc must match.
     ("ref", "tests/s_ref.qma"),
+    # v4.122 non-negative range analysis → unsigned const div/mod. Negative
+    # cases pin truncating-signed semantics so the unsigned fast path can't
+    # misapply to negative operands; LCG loop-carried seed (b83 shape).
+    ("unsigned_mod", "tests/s_unsigned_mod.qma"),
 ]
 
 npass = 0

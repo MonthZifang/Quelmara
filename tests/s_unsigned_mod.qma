@@ -1,0 +1,72 @@
+// s_unsigned_mod —— v4.122 非负范围分析 → 无符号常数 div/mod 的差分夹具。
+// 关键：负数用例钉死「截断有符号语义」，证明无符号快路径没有误用到负操作数。
+fn main() {
+    // 1) 非负 % 2^k（应走无符号 and）
+    let mut s = 0
+    let mut i = 0
+    while i < 1000 {
+        s = s + (i * 7 + 3) % 64
+        i = i + 1
+    }
+    print(s)
+    // 2) 非负 / 2^k（应走无符号 shr）
+    let mut d = 0
+    i = 0
+    while i < 1000 {
+        d = d + (i * 13 + 5) / 32
+        i = i + 1
+    }
+    print(d)
+    // 3) 负数 % 2^k（必须保持有符号！i 从 -500 到 499）
+    let mut n = 0
+    i = -500
+    while i < 500 {
+        n = n + i % 64
+        i = i + 1
+    }
+    print(n)
+    // 4) 负数 / 2^k（必须保持有符号向零截断）
+    let mut nd = 0
+    i = -500
+    while i < 500 {
+        nd = nd + i / 32
+        i = i + 1
+    }
+    print(nd)
+    // 5) LCG 循环携带非负（b83 形态）：% 2^31 走无符号，seed%100 操作数非负
+    let mut seed = 12345
+    let mut acc = 0
+    i = 0
+    while i < 100000 {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        acc = acc + seed % 100
+        i = i + 1
+    }
+    print(acc)
+    // 6) and 掩码环形下标（对任意 x 健全）
+    let mut r = 0
+    i = 0
+    while i < 1000 {
+        r = r + ((i * 31) & 63) % 8
+        i = i + 1
+    }
+    print(r)
+    // 7) 负数 LCG 变体：seed 可能为负（初值负、无 %2^31 约束），不得误判非负
+    let mut t = -7
+    let mut u = 0
+    i = 0
+    while i < 1000 {
+        t = (t * 3 + 1) % 16
+        u = u + t % 4
+        i = i + 1
+    }
+    print(u)
+    // 8) 混合符号除法链
+    let mut m = 0
+    i = -200
+    while i < 200 {
+        m = m + (i * i) % 128 - (i / 8)
+        i = i + 1
+    }
+    print(m)
+}
