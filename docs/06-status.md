@@ -5008,7 +5008,9 @@ b65_random_walk −23.5%、b26_maxsub −9.8%；逐项对 v4.121 中位变化 **
 验证：新夹具 `s_nonneg_sound`（16 断言）三后端 + qlmc 逐字节一致；
 `s_unsigned_mod` / `s_unsigned_scope` stage-0 与 qlmc 一致；**全量 76 基准
 stage-0 vs C 校验和 76/76 一致**（修复前 b45/b74 错）；`run_native_tests.sh`
-**PASS=128 FAIL=0**（修复前 126/2）；`qlmc_test` **PASS=133 FAIL=0**。
+**PASS=128 FAIL=0**（修复前 126/2）；`qlmc_test` **PASS=134 FAIL=0**；
+`bootstrap_test --strict` 不动点成立（stage-2 **806912B**、42/42 组逐字节一致、
+stage-2==stage-3、错误路径干净退 2）。
 删除 `qlmc_test.py` 里把 stage-0 bug 固化成期望值的 `EXPECTED_OUTPUTS` 逃生口。
 
 性能（stage-0 native，min of 5）：循环归纳后 LCG 三项 **零回退**

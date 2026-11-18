@@ -66,7 +66,7 @@ int64 回绕下不成立。`s = 0; while i < 50 { s = s*3 + 1 }` 会绕成负数
 | `tests/s_unsigned_scope.qma`（v4.122 既有夹具） | stage-0 / qlmc 均为 `-3 0 0 3` |
 | 全量 76 基准 stage-0 vs C 校验和 | **76/76 一致**（修复前 b45、b74 两项错） |
 | `python tests/run_native_tests.sh` | **PASS=128 FAIL=0**（修复前 126/2） |
-| `python tests/qlmc_test.py` | **PASS=133 FAIL=0**（含新增 nonneg_sound） |
+| `python tests/qlmc_test.py` | **PASS=134 FAIL=0**（含新增 nonneg_sound） |
 
 ### 1.3 删除测试逃生口
 
