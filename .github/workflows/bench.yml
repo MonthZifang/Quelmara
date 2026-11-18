@@ -91,9 +91,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "run.py 失败（rc=$LASTEXITCODE）"; exit 1 }
 
       - name: 编译器轴（qlmc vs stage-0）
-        continue-on-error: true
+        # v4.123：去掉 continue-on-error。原来那个标记配合 compiler.py 的
+        # "恒 return 0" 等于**没有门禁** —— 编译器编不出东西也照样绿。
+        # 现在 compiler.py 只在真有编译失败时退非零（不判快慢），
+        # 这条 step 才真正能红。
         shell: pwsh
-        run: python bench/speed/compiler.py --reps 3 2>&1 | Tee-Object -FilePath compiler.md
+        run: |
+          python bench/speed/compiler.py --reps 3 2>&1 | Tee-Object -FilePath compiler.md
+          if ($LASTEXITCODE -ne 0) { Write-Error "compiler.py 失败（rc=$LASTEXITCODE）"; exit 1 }
 
       - name: 写 job summary
         if: always()

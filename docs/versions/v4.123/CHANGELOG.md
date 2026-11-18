@@ -161,3 +161,13 @@ ubuntu-latest（GCC 15）上红。
   不支持 `now_ns`**（`now_ns` 只在自研后端实现）。所以 `--target c` 编不出
   任何基准产物——这是既有缺口，与 `bench/speed/c/` 下的手写 C 版本无关
   （矩阵里的 C 列用后者）。本版未改。
+
+## 6. P2 补记：两个门禁的"假绿/假红"（第 7 条）
+
+| 门禁 | 修复前的真实状态 | 修法 |
+|---|---|---|
+| `tools/dev/qlmc_coverage.py` | **不是缺失，是超时**。实测 **70/70 PASS**，但全量耗时 **17 分 58 秒**；`run_win_tests.py` 里 `timeout=900` 每次把它掐死 → 本地看起来"永远跑不完"。 | 超时放宽到 **2400 s**（实测 2.2 倍），`TimeoutExpired` 单独判 **SKIP** 而不是让整轮回归崩掉；覆盖率已到 70/70，`BASELINE` **69 → 70** 同步上调。 |
+| `bench/speed/compiler.py` | **不是没跑，是永远不会红**。`main()` 恒 `return 0`，配合 bench.yml 的 `continue-on-error: true`，编译器编不出东西也照样绿。 | `main()` 在 stage-0 / qlmc 真有编译失败时 `return 1`（**只判成败、不判快慢**，性能归 perf job 的 bench_gate）；bench.yml 去掉 `continue-on-error`，并显式检查 `$LASTEXITCODE`。 |
+
+> 教训：这两条都不是"忘了接线"，而是**接了个永远为真的条件**——
+> 一条永不失败的门禁比没有门禁更糟，因为它消耗了"门禁是绿的"这个信任。

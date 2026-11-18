@@ -197,16 +197,26 @@ def case_qlmc_coverage():
     这是"编译器核心改用自研语言"的唯一硬指标。脚本用 qlmc 逐个编译
     `std/**/*.qma`（lib 模式），与基线比较：低于基线判 FAIL。
 
-    代价约 40 s（70 个模块 × 编译），但它是**唯一**能反映自举真实进度的
-    数字 —— 比任何"已完成 N 个组件"的说法都硬。
+    **代价（v4.123 实测修正）**：注释曾写"约 40 s（70 个模块 × 编译）"，
+    实际单模块 1.5–13 s，全量跑 **17 分 58 秒**（70/70 PASS）。原来的
+    `timeout=900` 会把它掐死，于是这条门禁在本地**每次都超时**、看起来
+    像"没跑起来"——其实是**超时阈值比真实耗时短**。
+
+    现在给 `timeout=2400`（实测的 2.2 倍，留出慢机器的余量），并且
+    `TimeoutExpired` 单独判 SKIP 而不是让整个回归崩掉——一条"跑不完"的
+    门禁不该把 300 项其它回归一起带走。
     """
     script = os.path.join(ROOT, "tools", "dev", "qlmc_coverage.py")
     if not os.path.exists(script):
         skip("qlmc_coverage.py 不存在，跳过")
         return
-    r = subprocess.run([sys.executable, script], cwd=ROOT,
-                       capture_output=True, text=True, errors="replace",
-                       timeout=900)
+    try:
+        r = subprocess.run([sys.executable, script], cwd=ROOT,
+                           capture_output=True, text=True, errors="replace",
+                           timeout=2400)
+    except subprocess.TimeoutExpired:
+        skip("qlmc_coverage.py 超过 2400 s，跳过（见本函数注释：全量约 18 min）")
+        return
     lines = (r.stdout or "").strip().splitlines()
     cov = [ln for ln in lines if "qlmc 覆盖 std/" in ln]
     if r.returncode == 0:

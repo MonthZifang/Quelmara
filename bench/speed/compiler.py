@@ -183,9 +183,20 @@ def main():
     print("峰值工作集。stage-0 是 Python 进程，含解释器本身。")
 
     bad = [r for r in rows if not r["s0_ok"]]
+    bad_q = [r for r in rows if r.get("qlmc") is not None and not r.get("qlmc_ok")]
     if bad:
         print("\n[注意] stage-0 有编译失败的用例：" +
               ", ".join(r["desc"] for r in bad))
+    if bad_q:
+        print("\n[注意] qlmc 有编译失败的用例：" +
+              ", ".join(r["desc"] for r in bad_q))
+    # v4.123：以前这里恒 `return 0`，于是 bench.yml 里那个
+    # `continue-on-error: true` 掩盖的是一个**根本不会报错**的门禁 ——
+    # 编译器编不出东西也照样绿。现在真有失败就退 1。
+    # 它**只判成败、不判快慢**：性能由 perf job 的 bench_gate 负责，
+    # 换机器/换负载都正常，不该因为"慢了一点"在这里翻红。
+    if bad or bad_q:
+        return 1
     return 0
 
 
