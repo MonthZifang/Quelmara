@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func fib(n int64) int64 {
@@ -14,9 +13,9 @@ func fib(n int64) int64 {
 }
 
 func main() {
-	t0 := time.Now()
+	t0 := benchNow()
 	r := fib(30)
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(r)
 	fmt.Println("T")
 	fmt.Println(el)

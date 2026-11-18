@@ -118,6 +118,24 @@ const K_DEFER = 22
 const K_SPAWN = 23
 const K_PARFOR = 24     // v4.91：并行区间循环（统一核心的编译器内建）
 const K_REDUCE = 26      // v4.92：parfor ... reduce 的归约子句
+// v4.123：**保留字**（`docs/02-language.md` §2.1 的 32 个关键字里，S12 子集
+// 尚未实现语法的那些）。以前它们不在 `_kw_id` 里 → 被当普通标识符，于是
+// 同一个程序 stage-0 报"期望 NAME"、qlmc 却编得过（实测 b57_pow_mod 的
+// `let mut result = 1`）。语言只有一套关键字表：子集缺语法 ≠ 这些词能当
+// 变量名。统一登记成保留字，让两侧都拒绝，诊断才有意义。
+//
+// **注意**：`vec` / `map` **不在此列**。它们在 qlmc 里是**上下文关键字**
+// （`T_NAME` + 紧跟标点时才当类型构造，见 `_parse_type`），这样 `vec` 仍能
+// 当普通标识符用——与 stage-0 的行为一致，登记成硬关键字反而会破坏它。
+const K_RESULT = 27
+const K_OPTION = 28
+const K_SELECT = 29
+const K_CHAN = 30
+const K_ARENA = 31
+const K_RC = 32
+const K_IMPL = 33
+const K_INTERFACE = 34
+const K_TEST = 35
 
 // 标点 id（多字符的按"最长匹配"先行）
 const P_LPAREN = 1
@@ -430,6 +448,17 @@ fn _kw_id(w: str) -> int {
     if w == "spawn" { return K_SPAWN }
     if w == "parfor" { return K_PARFOR }
     if w == "reduce" { return K_REDUCE }
+    // v4.123：子集尚未实现、但**保留**的关键字。让它们进关键字表，
+    // 声明位置会以"期望 NAME"拒绝——与 stage-0 同一套词法口径。
+    if w == "result" { return K_RESULT }
+    if w == "option" { return K_OPTION }
+    if w == "select" { return K_SELECT }
+    if w == "chan" { return K_CHAN }
+    if w == "arena" { return K_ARENA }
+    if w == "rc" { return K_RC }
+    if w == "impl" { return K_IMPL }
+    if w == "interface" { return K_INTERFACE }
+    if w == "test" { return K_TEST }
     return 0
 }
 
@@ -4204,6 +4233,13 @@ const OP_FTOI = 69     // dst = (int)[a]          a 是 f64 槽地址，向零�
 // **除数限制 2..2^31-1**（再大 `2^s*r64` 会溢出 int64，那种情况退回 idiv）。
 // 算法：无符号魔数 + 显式符号分离（见 _gen_divc 的注释，可证明正确）。
 const OP_DIVC = 70     // dst = a <div|mod> imm
+// v4.122：OP_DIVC 的 b 槽子操作码的**无符号变体**。被除数经非负范围分析
+// （_opt_divc_unsigned）证明 >= 0 时，把 b 从 OP_DIV/OP_MOD 换成这两个标记，
+// _emit_divc 走无符号快路径（2 的幂 → and/shr；其余 → 乘高魔数，无符号修正链）。
+// 操作码仍是 OP_DIVC，DCE/使用计数/分配器无需改动；mod_ind 的 `b==OP_MOD`
+// 匹配不会命中它们（归纳削减在本 pass 之前已跑完）。
+const SUB_DIVU = 106
+const SUB_MODU = 107
 // v2.49：字符串下标 `s[p]` 的地址计算（`OP_ADD str,int`）与字节访存融合。
 // SIB 的 scale 用 0（×1）。以前是 `mov r9,str; add r9,p; mov rax,r9; movzx r10,[rax]`
 // 四条，现在一条 `movzx r10, [str + p]`。
@@ -5046,6 +5082,12 @@ fn _ty_size(fc: FnCtx, ty: int) -> int {
 
 fn _ty_elem(ty: int) -> int {
     return (ty - TY_ARRAY) & 0xFF
+}
+
+/// 定长数组的长度（类型码里编码成 `TY_ARRAY + (n << 8) + elem`）。
+/// v4.123：`_arr_check` 要用它做越界检查的上界。
+fn _ty_arr_len(ty: int) -> int {
+    return (ty - TY_ARRAY) >> 8
 }
 
 fn _st_units(fc: FnCtx, n: int) -> int {
@@ -6052,11 +6094,44 @@ fn _addr_index(fc: FnCtx, base_nid: int, ix_nid: int) -> int {
         exit(2)
     }
     let ix = _lower_expr(fc, ix_nid)
+    // v4.123：定长数组补越界检查。此前 vec（_vec_check）/ slice（_slice_check）/
+    // str 三条路都有 checks，唯独 `[N]T` 直接 ADDRX —— `Quelmara.toml` 的
+    // `bounds_check = true` 对定长数组是**空承诺**（实测 arr[5] / arr[-2]
+    // 静默读到相邻内存）。长度是编译期常量，藏在类型码里：`_ty_arr_len`。
+    _arr_check(fc, ix, _ty_arr_len(bty))
     let d = _vnew(fc)
     fc.vty.set(d, TY_INT)
     _ir_emit(fc, OP_ADDRX, d, base, ix, 8)
     fc.cells.set(C_ADDRTY, _ty_elem(bty))
     return d
+}
+
+/// 定长数组 `[N]T` 的越界检查（v4.123）。
+///
+/// 形状与 `_slice_check` 一致，但长度是**编译期常量**而不是从内存读，
+/// 所以热路径仍然只有一条 `cmp i, N; jb ok` —— 与"少一次加载"的代价
+/// 相比，fail-fast 更值。`bounds_check = false` 时整段省掉（同 `_vec_check`）。
+fn _arr_check(fc: FnCtx, i: int, n: int) {
+    if _no_bounds() == 1 {
+        return
+    }
+    if n <= 0 {
+        return
+    }
+    let lfail = _newlab(fc.labs)
+    let lok = _newlab(fc.labs)
+    // `OP_JCMP` 的两个操作数都得是 **vreg**（它不会自己物化立即数 ——
+    // 直接把 int 当 vreg 传进去会读到无关槽位，实测合法下标也被拦）。
+    // 长度先 CONST 进一个临时值再比较，热路径仍只有 cmp+jcc 两条。
+    let nv = _vnew(fc)
+    fc.vty.set(nv, TY_INT)
+    _ir_emit(fc, OP_CONST, nv, 0, 0, n)
+    // 条件反过来写：`jb lok` 直接跳过死路（与 _slice_check 同一手法）
+    _ir_emit(fc, OP_JCMP, 0x82, i, nv, lok)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lfail)
+    let one = _map_const(fc, 1)
+    _ir_emit(fc, OP_EXIT, 0, one, 0, 0)
+    _ir_emit(fc, OP_LAB, 0, 0, 0, lok)
 }
 
 fn _lower_expr(fc: FnCtx, nid: int) -> int {
@@ -10118,6 +10193,15 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     _opt_dce(fc, use)
     // Late propagation/DCE can expose additional transparent gaps.
     _opt_empty_jumps(ir)
+    // v4.122：非负范围分析 → 无符号常数 div/mod（2 的幂快路径）。放在所有 IR
+    // 变换之后，先重算 ndef 保证单定义判定准确。只改 OP_DIVC 的 b 槽子操作码。
+    i = 0
+    while i < len(ndef) {
+        ndef.set(i, 0)
+        i = i + 1
+    }
+    _opt_ndef(ir, ndef)
+    _opt_divc_unsigned(fc, ndef)
 }
 
 // ---------------------------------------------------------------------------
@@ -10387,12 +10471,22 @@ fn _rebuild_temp_ends(fc: FnCtx) {
     }
 }
 
-// Whitelisted binary/immediate operations read left before writing destination.
-// Reuse only that operand's last-read endpoint, never a general <= interval rule.
+// Only explicitly audited emitters may reuse a last-read operand location.
+// Binary operations overwrite the left operand after reading it; an x86 load
+// computes its complete effective address before writing the result register.
+// This also permits LOADX's dying index, avoiding a spill when its base is live.
 fn _reuse_left_endpoint(fc: FnCtx, v: int, st: int, en: int) -> int {
     if st < 0 || st >= len(fc.ir) || fc.vty.get(v) != TY_INT { return 0 }
     let ins = fc.ir.get(st)
     if ins.dst != v { return 0 }
+    if ins.op == OP_LOADD || ins.op == OP_LOAD8D ||
+       ins.op == OP_LOADX || ins.op == OP_LOAD8X || ins.op == OP_LOAD8I {
+        if _reuse_dying_operand(fc, v, st, en, ins.a) == 1 { return 1 }
+        if ins.op == OP_LOADX || ins.op == OP_LOAD8X || ins.op == OP_LOAD8I {
+            return _reuse_dying_operand(fc, v, st, en, ins.b)
+        }
+        return 0
+    }
     if ins.op == OP_BINI {
         // b is an opcode, not a right-hand vreg. All listed emitters read a
         // before overwriting d; immediate imul also permits d == a directly.
@@ -10401,10 +10495,43 @@ fn _reuse_left_endpoint(fc: FnCtx, v: int, st: int, en: int) -> int {
     } else if ins.op != OP_ADD && ins.op != OP_SUB && ins.op != OP_MUL {
         return 0
     }
-    let a = ins.a
+    return _reuse_dying_operand(fc, v, st, en, ins.a)
+}
+
+fn _reuse_lifetime_safe(fc: FnCtx, a: int, st: int) -> int {
+    let ir = fc.ir
+    let mut defpos = -1
+    let mut defs = 0
+    let mut i = 0
+    while i < len(ir) {
+        let w = ir.get(i)
+        if w.dst == a && _opt_writes(w.op) == 1 {
+            defs = defs + 1
+            defpos = i
+        }
+        i = i + 1
+    }
+    if defs != 1 || defpos < 0 || defpos >= st { return 0 }
+    i = 0
+    while i < len(ir) {
+        let w = ir.get(i)
+        if _nn_jump(w.op) == 1 {
+            let t = _lab_index(ir, w.imm)
+            if t > defpos && t <= st {
+                if t > i && i < defpos { return 0 }
+                if t <= i { return 0 }
+            }
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn _reuse_dying_operand(fc: FnCtx, v: int, st: int, en: int, a: int) -> int {
+    let ins = fc.ir.get(st)
     if a <= 0 || a >= len(fc.vloc) || a == v { return 0 }
     if fc.vpin.get(a) != 0 || fc.vty.get(a) != TY_INT || fc.vend.get(a) != st ||
-       fc.vstart.get(a) >= st {
+       fc.vstart.get(a) >= st || _reuse_lifetime_safe(fc, a, st) == 0 {
         return 0
     }
     let loc = fc.vloc.get(a)
@@ -10969,6 +11096,395 @@ fn _reg_busy_at(fc: FnCtx, r: int, i: int) -> int {
 ///   `q64 = 2*q63 + (2*r63)/d`、`r64 = -(q64*d)`
 ///   `m = (q64<<s) + ((r64<<s) + d - 1)/d`
 /// 全程允许回绕（我们要的就是模 2^64 的值）。
+// ---------------------------------------------------------------------------
+// v4.122：非负范围分析 → 无符号常数 div/mod。
+// C 基准多用 uint64_t，gcc 对 `%2^k` 发单条 and、对 `%const` 发无符号魔数乘；
+// qlmc 的 int 有符号，_emit_divc 一直走全符号修正链（b83 热循环 ~30 条 vs C ~10）。
+// 这里保守证明被除数 >= 0，把 OP_DIVC 的 b 槽换成 SUB_DIVU/SUB_MODU，发射器走快路径。
+// **soundness**：截断有符号 x%D 仅在 x>=0 时非负 —— 绝不把任意 x 的 x%D 记非负。
+// 循环携带变量（b83 seed）用「初值非负 + 更新保非负」的归纳论证，且全程带上界防溢出。
+
+// 循环 [h,e] 内 x 的唯一写入定义下标；无 / 多定义返回 -1。
+fn _loop_def1(ir: vec[Ir], h: int, e: int, x: int) -> int {
+    let mut k = h
+    let mut at = -1
+    let mut cnt = 0
+    while k <= e {
+        let w = ir.get(k)
+        if w.dst == x && _opt_writes(w.op) == 1 {
+            cnt = cnt + 1
+            at = k
+        }
+        k = k + 1
+    }
+    if cnt == 1 { return at }
+    return -1
+}
+
+// safe[v] = 唯一定义下标 + 1。只接受无地址逃逸、循环外的单定义临时值。
+// 所有回边覆盖的定义，以及能被前向跳转绕过的定义，都被排除。
+fn _nn_safe(fc: FnCtx, ndef: vec[int], safe: vec[int]) {
+    let ir = fc.ir
+    let nv = len(fc.vloc)
+    let n = len(ir)
+    let loops = vec[int].new(n + 1)
+    let skips = vec[int].new(n + 1)
+    let blocked = vec[int].new(n)
+    let mut i = 0
+    while i < nv { safe.push(0)  i = i + 1 }
+    i = 0
+    while i <= n {
+        loops.push(0)
+        skips.push(0)
+        if i < n { blocked.push(0) }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        let w = ir.get(i)
+        if _opt_writes(w.op) == 1 && w.dst > 0 && w.dst < nv &&
+           w.dst < len(ndef) && ndef.get(w.dst) == 1 &&
+           fc.vpin.get(w.dst) == 0 && fc.vty.get(w.dst) == TY_INT {
+            safe.set(w.dst, i + 1)
+        }
+        if _nn_jump(w.op) == 1 {
+            let t = _lab_index(ir, w.imm)
+            if t >= 0 && t < i {
+                loops.set(t + 1, loops.get(t + 1) + 1)
+                loops.set(i + 1, loops.get(i + 1) - 1)
+            } else if t > i {
+                // Forward edge skips the open interval (i,t).
+                skips.set(i + 1, skips.get(i + 1) + 1)
+                skips.set(t, skips.get(t) - 1)
+            }
+        }
+        i = i + 1
+    }
+    let mut nl = 0
+    let mut ns = 0
+    i = 0
+    while i < n {
+        nl = nl + loops.get(i)
+        ns = ns + skips.get(i)
+        if nl > 0 || ns > 0 { blocked.set(i, 1) }
+        i = i + 1
+    }
+    i = 1
+    while i < nv {
+        let def = safe.get(i) - 1
+        if def >= 0 && blocked.get(def) != 0 { safe.set(i, 0) }
+        if def >= 0 && fc.vloc.get(i) < 0 {
+            let slot = 0 - fc.vloc.get(i) - 1
+            let mut k = 0
+            while k < n {
+                let w = ir.get(k)
+                if w.op == OP_ADDRV && w.imm == slot { safe.set(i, 0) }
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn _nn_escaped(fc: FnCtx, v: int) -> int {
+    let loc = fc.vloc.get(v)
+    if loc >= 0 { return 0 }
+    let mut i = 0
+    while i < len(fc.ir) {
+        let w = fc.ir.get(i)
+        if w.op == OP_ADDRV && w.imm == (0 - loc - 1) { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn _nn_jump(op: int) -> int {
+    if op == OP_JMP || op == OP_JZ || op == OP_JNZ || op == OP_JCMP ||
+       op == OP_JCMPI || op == OP_JCMPVLEN || op == OP_JCMPSTR { return 1 }
+    return 0
+}
+
+// 在循环 [h,e] 内、假设 0 <= v <= vb 的前提下，求 x 的可证上界；证不出返回 -1。
+// 只认保非负的运算；乘法/加法带上界防 int64 溢出。depth 防环。
+// budget[0] 是本次候选证明的**节点预算**：add/mul 双操作数递归在 DAG 上会指数
+// 膨胀（无记忆化），用硬预算兜底，证不出就保守返回 -1。每候选重置一次。
+fn _nn_bound(ir: vec[Ir], h: int, e: int, v: int, vb: int, x: int,
+             cv: vec[int], safe: vec[int], depth: int, budget: vec[int]) -> int {
+    if depth > 12 { return -1 }
+    budget.set(0, budget.get(0) - 1)
+    if budget.get(0) < 0 { return -1 }
+    let LIM = 4611686018427387904
+    if x == v { return vb }
+    if x <= 0 || x >= len(cv) || safe.get(x) == 0 { return -1 }
+    // Never trust a linear CONST table across CFG edges. Resolve only a unique
+    // in-loop definition strictly before this use; the accepted loop has no internal branch.
+    let dx = safe.get(x) - 1
+    if dx <= h || dx >= e { return -1 }
+    let d = ir.get(dx)
+    let op = d.op
+    if op == OP_CONST {
+        if d.imm >= 0 && d.imm < LIM { return d.imm }
+        return -1
+    }
+    if op == OP_MOV {
+        return _nn_bound(ir, h, dx, v, vb, d.a, cv, safe, depth + 1, budget)
+    }
+    if op == OP_BINI {
+        let a = d.a
+        let sub = d.b
+        let k = d.imm
+        if sub == OP_AND {
+            if k >= 0 && k < LIM { return k }
+            return -1
+        }
+        if sub == OP_SAR || sub == OP_SHR {
+            let ba = _nn_bound(ir, h, dx, v, vb, a, cv, safe, depth + 1, budget)
+            if ba < 0 { return -1 }
+            let sh = k & 63
+            return ba >> sh
+        }
+        if sub == OP_ADD || sub == OP_MUL {
+            if k < 0 { return -1 }
+            let ba = _nn_bound(ir, h, dx, v, vb, a, cv, safe, depth + 1, budget)
+            if ba < 0 { return -1 }
+            if sub == OP_ADD {
+                if ba + k < LIM { return ba + k }
+                return -1
+            }
+            if ba == 0 || k == 0 { return 0 }
+            if ba <= LIM / k { return ba * k }
+            return -1
+        }
+        return -1
+    }
+    if op == OP_ADD || op == OP_MUL {
+        let ba = _nn_bound(ir, h, dx, v, vb, d.a, cv, safe, depth + 1, budget)
+        let bb = _nn_bound(ir, h, dx, v, vb, d.b, cv, safe, depth + 1, budget)
+        if ba < 0 || bb < 0 { return -1 }
+        if op == OP_ADD {
+            if ba + bb < LIM { return ba + bb }
+            return -1
+        }
+        if ba == 0 || bb == 0 { return 0 }
+        if ba <= LIM / bb { return ba * bb }
+        return -1
+    }
+    if op == OP_AND {
+        let SENT = 0 - 9223372036854775807 - 1
+        let mut ca = SENT
+        let mut cb = SENT
+        if d.a > 0 && d.a < len(cv) { ca = cv.get(d.a) }
+        if d.b > 0 && d.b < len(cv) { cb = cv.get(d.b) }
+        if cb != SENT && cb >= 0 && cb < LIM { return cb }
+        if ca != SENT && ca >= 0 && ca < LIM { return ca }
+        return -1
+    }
+    if op == OP_DIVC {
+        // x % D / x / D：被除数非负 → 结果非负；MOD 上界 D-1
+        if d.imm <= 0 { return -1 }
+        let ba = _nn_bound(ir, h, dx, v, vb, d.a, cv, safe, depth + 1, budget)
+        if ba < 0 { return -1 }
+        if d.b == OP_MOD || d.b == SUB_MODU { return d.imm - 1 }
+        return ba
+    }
+    if op == OP_SAR || op == OP_SHR {
+        let ba = _nn_bound(ir, h, dx, v, vb, d.a, cv, safe, depth + 1, budget)
+        if ba < 0 { return -1 }
+        return ba
+    }
+    return -1
+}
+
+// 简单单入口循环；内部只有跳出区域的条件边，唯一回边是 e->h。
+// 不分析调用/内存写/内部分支，保证递归使用的单定义临时值支配其使用。
+fn _nn_loop_shape(ir: vec[Ir], h: int, e: int) -> int {
+    let mut k = h + 1
+    while k < e {
+        let w = ir.get(k)
+        if w.op == OP_LAB { return 0 }
+        if _nn_jump(w.op) == 1 {
+            let t = _lab_index(ir, w.imm)
+            if w.op == OP_JMP || t <= e { return 0 }
+        } else if w.op != OP_NOP && w.op != OP_CONST && w.op != OP_MOV &&
+                  w.op != OP_ADD && w.op != OP_SUB && w.op != OP_MUL &&
+                  w.op != OP_AND && w.op != OP_OR && w.op != OP_XOR &&
+                  w.op != OP_SHL && w.op != OP_SHR && w.op != OP_SAR &&
+                  w.op != OP_BINI && w.op != OP_DIVC && w.op != OP_CMP &&
+                  w.op != OP_CMPI && w.op != OP_NEG && w.op != OP_NOT &&
+                  w.op != OP_NZ && w.op != OP_BNOT && w.op != OP_TRUNC {
+            return 0
+        }
+        k = k + 1
+    }
+    // 区域不允许额外入口（包括另一个回边）。
+    k = 0
+    while k < len(ir) {
+        let w = ir.get(k)
+        if k != e && _nn_jump(w.op) == 1 && w.imm == ir.get(h).imm { return 0 }
+        k = k + 1
+    }
+    return 1
+}
+
+// Loop induction is deliberately disabled. A loop-local fact is not a function-wide
+// fact unless the optimizer proves dominance and every write/escape; the linear IR
+// analysis below does not build that proof.
+
+fn _nn_propagate(fc: FnCtx, ndef: vec[int], nn: vec[int], ub: vec[int],
+                 cv: vec[int], safe: vec[int]) {
+    let ir = fc.ir
+    let nv = len(fc.vloc)
+    let SENT = 0 - 9223372036854775807 - 1
+    let LIM = 4611686018427387904
+    let mut i = 0
+    // Safe definitions are unique, precede every dependency, and cannot be skipped
+    // by a forward edge or re-executed by a back edge. One forward pass is sufficient.
+    while i < len(ir) {
+        let ins = ir.get(i)
+        let d = ins.dst
+        let mut dpos = 0
+        if d > 0 && d < nv { dpos = safe.get(d) }
+        if dpos == i + 1 && d < len(ndef) && ndef.get(d) == 1 {
+            let op = ins.op
+            if op == OP_CONST {
+                cv.set(d, ins.imm)
+                if ins.imm >= 0 && ins.imm < LIM {
+                    nn.set(d, 1)
+                    ub.set(d, ins.imm)
+                }
+            } else if op == OP_MOV {
+                let a = ins.a
+                if a > 0 && a < nv && safe.get(a) > 0 && safe.get(a) < dpos {
+                    if nn.get(a) == 1 { nn.set(d, 1) }
+                    if ub.get(a) >= 0 { ub.set(d, ub.get(a)) }
+                    if cv.get(a) != SENT { cv.set(d, cv.get(a)) }
+                }
+            } else if op == OP_AND {
+                let mut m = -1
+                if ins.a > 0 && ins.a < nv && safe.get(ins.a) > 0 &&
+                   safe.get(ins.a) < dpos && cv.get(ins.a) >= 0 {
+                    m = cv.get(ins.a)
+                }
+                if ins.b > 0 && ins.b < nv && safe.get(ins.b) > 0 &&
+                   safe.get(ins.b) < dpos && cv.get(ins.b) >= 0 &&
+                   (m < 0 || cv.get(ins.b) < m) { m = cv.get(ins.b) }
+                if m >= 0 && m < LIM {
+                    nn.set(d, 1)
+                    ub.set(d, m)
+                }
+            } else if op == OP_ADD || op == OP_MUL {
+                let a = ins.a
+                let b = ins.b
+                if a > 0 && a < nv && b > 0 && b < nv &&
+                   safe.get(a) > 0 && safe.get(a) < dpos &&
+                   safe.get(b) > 0 && safe.get(b) < dpos &&
+                   nn.get(a) == 1 && nn.get(b) == 1 {
+                    let ua = ub.get(a)
+                    let ubv = ub.get(b)
+                    let mut r = -1
+                    if ua >= 0 && ubv >= 0 {
+                        if op == OP_ADD {
+                            if ua < LIM && ubv < LIM - ua { r = ua + ubv }
+                        } else if ua == 0 || ubv == 0 {
+                            r = 0
+                        } else if ua < LIM && ubv <= (LIM - 1) / ua {
+                            r = ua * ubv
+                        }
+                    }
+                    if r >= 0 { nn.set(d, 1)  ub.set(d, r) }
+                }
+            } else if op == OP_SAR || op == OP_SHR {
+                let a = ins.a
+                if a > 0 && a < nv && safe.get(a) > 0 && safe.get(a) < dpos && nn.get(a) == 1 {
+                    nn.set(d, 1)
+                    if ub.get(a) >= 0 { ub.set(d, ub.get(a) >> (ins.imm & 63)) }
+                }
+            } else if op == OP_MOD || op == OP_DIV {
+                let a = ins.a
+                let b = ins.b
+                if a > 0 && a < nv && b > 0 && b < nv &&
+                   safe.get(a) > 0 && safe.get(a) < dpos &&
+                   safe.get(b) > 0 && safe.get(b) < dpos &&
+                   nn.get(a) == 1 && cv.get(b) > 0 {
+                    nn.set(d, 1)
+                    if op == OP_MOD { ub.set(d, cv.get(b) - 1) }
+                    else if ub.get(a) >= 0 { ub.set(d, ub.get(a) / cv.get(b)) }
+                }
+            } else if op == OP_BINI {
+                let a = ins.a
+                let sub = ins.b
+                let k = ins.imm
+                if a > 0 && a < nv && safe.get(a) > 0 && safe.get(a) < dpos {
+                    if sub == OP_AND && k >= 0 && k < LIM {
+                        nn.set(d, 1)
+                        ub.set(d, k)
+                    } else if (sub == OP_ADD || sub == OP_MUL) && nn.get(a) == 1 && ub.get(a) >= 0 && k >= 0 {
+                        let ua = ub.get(a)
+                        let mut r = -1
+                        if sub == OP_ADD {
+                            if k < LIM && ua < LIM - k { r = ua + k }
+                        } else if ua == 0 || k == 0 {
+                            r = 0
+                        } else if k < LIM && ua <= (LIM - 1) / k {
+                            r = ua * k
+                        }
+                        if r >= 0 { nn.set(d, 1)  ub.set(d, r) }
+                    } else if (sub == OP_SAR || sub == OP_SHR) && nn.get(a) == 1 {
+                        nn.set(d, 1)
+                        if ub.get(a) >= 0 { ub.set(d, ub.get(a) >> (k & 63)) }
+                    }
+                }
+            } else if op == OP_DIVC {
+                let a = ins.a
+                if a > 0 && a < nv && safe.get(a) > 0 && safe.get(a) < dpos &&
+                   nn.get(a) == 1 && ins.imm > 0 {
+                    nn.set(d, 1)
+                    if ins.b == OP_MOD { ub.set(d, ins.imm - 1) }
+                    else if ub.get(a) >= 0 { ub.set(d, ub.get(a) / ins.imm) }
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn _opt_divc_unsigned(fc: FnCtx, ndef: vec[int]) {
+    let ir = fc.ir
+    let nv = len(fc.vloc)
+    if nv == 0 { return }
+    // **vec.new(n) 只给容量、长度是 0**（同 _opt 的 cok/cval 用 push 填充）——
+    // 必须 push 出 nv 个元素，直接 .set 会越界（v4.122 首版 OOB 根因）。
+    let nn = vec[int].new(nv)
+    let ub = vec[int].new(nv)
+    let cv = vec[int].new(nv)
+    let safe = vec[int].new(nv)
+    let SENT = 0 - 9223372036854775807 - 1
+    let mut i = 0
+    while i < nv {
+        nn.push(0)
+        ub.push(-1)
+        cv.push(SENT)
+        i = i + 1
+    }
+    _nn_safe(fc, ndef, safe)
+    _nn_propagate(fc, ndef, nn, ub, cv, safe)
+    // ---- 标记无符号 DIVC（仅 2 的幂快路径先落地；非幂无符号魔数后续版）----
+    i = 0
+    while i < len(ir) {
+        let ins = ir.get(i)
+        if ins.op == OP_DIVC && ins.a > 0 && ins.a < nv &&
+           safe.get(ins.a) > 0 && safe.get(ins.a) < i + 1 && nn.get(ins.a) == 1 &&
+           ins.imm >= 2 && (ins.imm & (ins.imm - 1)) == 0 {
+            if ins.b == OP_MOD {
+                ir.set(i, Ir { op: OP_DIVC, dst: ins.dst, a: ins.a, b: SUB_MODU, imm: ins.imm })
+            } else if ins.b == OP_DIV {
+                ir.set(i, Ir { op: OP_DIVC, dst: ins.dst, a: ins.a, b: SUB_DIVU, imm: ins.imm })
+            }
+        }
+        i = i + 1
+    }
+}
+
 fn _emit_divc(fc: FnCtx, code: vec[int], ins: Ir, i: int) {
     let d = ins.imm
     // v4.64：**d 是 2 的幂 → 位操作序列**（DIV 6 条 / MOD 9 条，魔数 ~15）。
@@ -10984,6 +11500,20 @@ fn _emit_divc(fc: FnCtx, code: vec[int], ins: Ir, i: int) {
         kk = kk + 1
     }
     if pw2 == d && d >= 2 {
+        // v4.122 无符号快路径：被除数经 _opt_divc_unsigned 证明 >= 0。
+        // MOD → 单条 and rax,d-1；DIV → 单条 shr rax,kk。省去全部符号修正。
+        if ins.b == SUB_MODU {
+            _to_reg(fc, RAX, ins.a)
+            _b(code, 0x48) _b(code, 0x25) _w32(code, d - 1)   // and rax, d-1
+            _store_rax(fc, fc.vloc.get(ins.dst))
+            return
+        }
+        if ins.b == SUB_DIVU {
+            _to_reg(fc, RAX, ins.a)
+            _b(code, 0x48) _b(code, 0xC1) _b(code, 0xE8) _b(code, kk)   // shr rax, kk
+            _store_rax(fc, fc.vloc.get(ins.dst))
+            return
+        }
         if ins.b == OP_MOD {
             // t = (x < 0 ? d-1 : 0); r = ((x+t)&(d-1))-t.
             // Full signed int64 truncation, including MIN_INT; no positivity guess.

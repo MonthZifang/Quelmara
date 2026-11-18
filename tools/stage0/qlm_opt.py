@@ -1775,9 +1775,15 @@ def analyze_ranges(fn):
                     if mx < limit:
                         ranges[p[2]] = max(ranges.get(p[2], -1), mx)
             elif op == "bin" and p[1] in ("and", "mod"):
-                # x & M（M >= 0）恒在 [0, M]；x % D（D > 0）恒在 [0, D-1]。
-                # 这是环形下标 i & 63 / 取模散列最常见的形态，此前不建模，
-                # 导致越界检查整窗保留（实测 64.7% 开销，见性能报告 §4.3）。
+                # x & M（M >= 0）恒在 [0, M]——对**任意** x 都成立（非负掩码
+                # 会清掉符号位），这条不用额外前提。
+                # x % D（D > 0）**只**在 x >= 0 时才落在 [0, D-1]：C99 的取模
+                # 是截断语义，余数与被除数同号，`-7 % 4 == -3`。
+                # v4.123 soundness 修复：此前这里对任意 x 都记 [0, D-1]，
+                # 于是 `x % D` 被 opt_const_div 换成**无符号魔数乘**、
+                # 被 opt_bounds_elim 当成"下标一定在界内"而删掉越界检查——
+                # 负被除数时会静默算出垃圾值 / 越界读。现在要求被除数已证非负
+                # （`ranges` 只收上界，`nn` 收预置非负集，两者都表示 >= 0）。
                 a, b = p[3], p[4]
                 if p[1] == "and":
                     if _is_imm(b) and 0 <= b[1] < limit:
@@ -1785,10 +1791,13 @@ def analyze_ranges(fn):
                     elif _is_imm(a) and 0 <= a[1] < limit:
                         ranges[p[2]] = max(ranges.get(p[2], -1), a[1])
                 else:
-                    if _is_imm(b) and 0 < b[1] < limit:
-                        ranges[p[2]] = max(ranges.get(p[2], -1), b[1] - 1)
-                    elif _is_imm(a) and 0 < a[1] < limit:
-                        ranges[p[2]] = max(ranges.get(p[2], -1), a[1] - 1)
+                    nonneg_dividend = (isinstance(a, int)
+                                       and (a in ranges or a in nn))
+                    if nonneg_dividend:
+                        if _is_imm(b) and 0 < b[1] < limit:
+                            ranges[p[2]] = max(ranges.get(p[2], -1), b[1] - 1)
+                        elif _is_imm(a) and 0 < a[1] < limit:
+                            ranges[p[2]] = max(ranges.get(p[2], -1), a[1] - 1)
             elif op == "bin" and p[1] in ("add", "mul", "shl", "umulhi"):
                 a, b = p[3], p[4]
                 mx = None

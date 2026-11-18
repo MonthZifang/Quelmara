@@ -3,13 +3,12 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
 	n := int64(20000000)
 	seed := uint64(42)
-	t0 := time.Now()
+	t0 := benchNow()
 	var best, cur int64
 	for i := int64(0); i < n; i++ {
 		seed = (seed*1103515245 + 12345) % 2147483648
@@ -18,7 +17,7 @@ func main() {
 		if cur < 0 { cur = 0 }
 		if cur > best { best = cur }
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(best)
 	fmt.Println("T")
 	fmt.Println(el)

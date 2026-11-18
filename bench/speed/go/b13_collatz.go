@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func clen(n int64) int64 {
@@ -15,13 +14,13 @@ func clen(n int64) int64 {
 	return c
 }
 func main() {
-	t0 := time.Now()
+	t0 := benchNow()
 	var best, bn int64
 	for i := int64(1); i <= 300000; i++ {
 		c := clen(i)
 		if c > best { best = c; bn = i }
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(best*10000000 + bn)
 	fmt.Println("T")
 	fmt.Println(el)

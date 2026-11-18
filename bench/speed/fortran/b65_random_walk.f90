@@ -20,6 +20,6 @@ program b65_random_walk
   end do
   call system_clock(t1, rate)
   print '(I0)', x * 1000000_8 + y
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b65_random_walk

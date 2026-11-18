@@ -3,14 +3,13 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
 	keys := make([]int64, 50000)
 	var n int64 = 0
 	var seed uint64 = 42
-	t0 := time.Now()
+	t0 := benchNow()
 	for i := int64(0); i < 50000; i++ {
 		seed = (seed*1103515245 + 12345) % 2147483648
 		key := int64(seed % 100000)
@@ -27,7 +26,7 @@ func main() {
 		keys[pos] = key
 		n++
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(keys[0])
 	fmt.Println("T")
 	fmt.Println(el)

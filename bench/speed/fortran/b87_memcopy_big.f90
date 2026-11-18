@@ -12,6 +12,6 @@ program b87_memcopy_big
   call system_clock(t1, rate)
   chk = dst(1) + dst(6250001) + dst(n)
   print '(I0)', chk
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b87_memcopy_big

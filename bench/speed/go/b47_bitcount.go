@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func popcount(x int64) int64 {
@@ -17,11 +16,11 @@ func popcount(x int64) int64 {
 
 func main() {
 	var acc int64 = 0
-	t0 := time.Now()
+	t0 := benchNow()
 	for i := int64(0); i < 10000000; i++ {
 		acc += popcount(i)
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(acc)
 	fmt.Println("T")
 	fmt.Println(el)

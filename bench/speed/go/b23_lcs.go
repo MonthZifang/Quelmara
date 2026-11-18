@@ -3,14 +3,13 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
 	n := int64(1500)
 	prev := make([]int64, n+1)
 	cur := make([]int64, n+1)
-	t0 := time.Now()
+	t0 := benchNow()
 	for r := int64(1); r <= n; r++ {
 		for c := int64(1); c <= n; c++ {
 			av := (r*7 + 3) % 4
@@ -25,7 +24,7 @@ func main() {
 		}
 		for c := int64(0); c <= n; c++ { prev[c] = cur[c] }
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(prev[n])
 	fmt.Println("T")
 	fmt.Println(el)

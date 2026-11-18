@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
@@ -26,7 +25,7 @@ func main() {
 		w := int64(seed%100 + 1)
 		dist[u*n+v] = w
 	}
-	t0 := time.Now()
+	t0 := benchNow()
 	for a := int64(0); a < n; a++ {
 		for b := int64(0); b < n; b++ {
 			for c := int64(0); c < n; c++ {
@@ -38,7 +37,7 @@ func main() {
 			}
 		}
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(dist[1])
 	fmt.Println("T")
 	fmt.Println(el)

@@ -17,7 +17,7 @@ program b60_murmur
   end do
   call system_clock(t1, rate)
   print '(I0)', h
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 contains
   integer(kind=8) function ashr(x, s)

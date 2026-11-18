@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func ack(m, n int64) int64 {
@@ -12,9 +11,9 @@ func ack(m, n int64) int64 {
 	return ack(m-1, ack(m, n-1))
 }
 func main() {
-	t0 := time.Now()
+	t0 := benchNow()
 	r := ack(2, 8)
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(r)
 	fmt.Println("T")
 	fmt.Println(el)

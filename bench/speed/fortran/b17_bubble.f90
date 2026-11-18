@@ -23,6 +23,6 @@ program b17_bubble
     chk = mod(chk + a(i) * i, 1000000007_8)
   end do
   print '(I0)', chk
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b17_bubble

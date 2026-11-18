@@ -3,16 +3,15 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
 	var acc int64 = 0
-	t0 := time.Now()
+	t0 := benchNow()
 	for i := int64(0); i < 20000000; i++ {
 		acc += ((i ^ (i << 3)) & 0xFFFF) + ((i >> 2) | (i << 5))
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(acc)
 	fmt.Println("T")
 	fmt.Println(el)

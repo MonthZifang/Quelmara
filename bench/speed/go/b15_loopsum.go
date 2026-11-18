@@ -5,19 +5,18 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
 	n := int64(200000000)
-	t0 := time.Now()
+	t0 := benchNow()
 	var s int64
 	x := int64(1)
 	for i := int64(0); i < n; i++ {
 		x = (x*31 + i) | 1
 		s += x & 1023
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(s)
 	fmt.Println("T")
 	fmt.Println(el)

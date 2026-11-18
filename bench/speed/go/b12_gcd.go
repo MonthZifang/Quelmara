@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func gcd(a, b int64) int64 {
@@ -12,10 +11,10 @@ func gcd(a, b int64) int64 {
 }
 func main() {
 	n := int64(30000000)
-	t0 := time.Now()
+	t0 := benchNow()
 	var s int64
 	for i := int64(1); i <= n; i++ { s += gcd(i, 1000000-i) }
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(s)
 	fmt.Println("T")
 	fmt.Println(el)

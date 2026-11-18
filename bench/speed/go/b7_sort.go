@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func qsort(a []int64, lo, hi int64) {
@@ -31,9 +30,9 @@ func main() {
 		x = (x*1103515245 + 12345) & 2147483647
 		v[i] = x
 	}
-	t0 := time.Now()
+	t0 := benchNow()
 	qsort(v, 0, n-1)
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	var s int64 = 0
 	for i := int64(0); i < n; i++ {
 		s += v[i] % 1000

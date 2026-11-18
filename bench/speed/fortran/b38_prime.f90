@@ -37,6 +37,6 @@ program b38_prime
   end do
   call system_clock(t1, rate)
   print '(I0)', cnt
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b38_prime

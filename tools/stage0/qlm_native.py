@@ -1386,7 +1386,11 @@ class Lower:
         fn.emit("jmp", l_arms[-1])          # 穷尽性已证：落到最后一臂（含通配）
         d = fn.new_v() if as_expr else None
         res_agg, res_base = None, None
+        # v4.123 soundness：各臂独立从同一快照出发，汇合取交集。
+        nn_base = self._nnv_snapshot(fn)
+        nn_arms = []
         for (idx, names, body), L in zip(plain, l_arms):
+            self._nnv_restore(fn, nn_base)
             fn.emit("label", L)
             env2 = dict(env)
             if idx is not None:
@@ -1460,7 +1464,9 @@ class Lower:
                             self._mark_float(fn, d, wf)
             else:
                 self.block(body[1], fn, env2)
+            nn_arms.append(self._nnv_snapshot(fn))
             fn.emit("jmp", l_end)
+        self._nnv_join(fn, nn_base, *nn_arms)
         fn.emit("label", l_end)
         if res_agg is not None:
             # 合并点统一取结果地址（支配所有臂）
@@ -2471,12 +2477,31 @@ class Lower:
             fn.emit("mov", d, a)
             return d
         # 非负值域传播（v1.3 通用值域分析最小版：只标确凿模式）
+        #
+        # v4.123 soundness：`+` / `*` 的"两个非负 ⇒ 结果非负"**在 int64
+        # 回绕下不成立**。`s = 0; while i < 50 { s = s*3 + 1 }` 会绕成负数，
+        # 若继续沿这条链标非负，`s % 1000003` 就走无符号快路径算出正数
+        # （实测 212086，C 是 -138601）。所以这里只有**上界可证且不溢出**
+        # （< 2^62，给后续 +1 / ×3 留余量）时才继续标非负，上界一起带上。
+        LIMIT = 1 << 62
         if op == "+" and self._is_nonneg(fn, a) and self._is_nonneg(fn, b):
-            self._mark_nonneg(fn, d)
+            ua, ub_ = self._nn_ub(fn, a), self._nn_ub(fn, b)
+            if ua is not None and ub_ is not None and ua + ub_ < LIMIT:
+                self._mark_nonneg(fn, d, ua + ub_)
         if op == "*" and self._is_nonneg(fn, a) and self._is_nonneg(fn, b):
-            self._mark_nonneg(fn, d)
-        if op == "mod" and isinstance(b, tuple) and b[0] == "imm" and b[1] > 0:
-            self._mark_nonneg(fn, d)                       # 模非负
+            ua, ub_ = self._nn_ub(fn, a), self._nn_ub(fn, b)
+            if ua is not None and ub_ is not None and (
+                    ua == 0 or ub_ == 0 or ua * ub_ < LIMIT):
+                self._mark_nonneg(fn, d, ua * ub_)
+        # v4.123 **soundness 修复**：`x % D`（D > 0）**不**恒非负。
+        # C99 的除/取模是**截断**语义（向零取整），余数**与被除数同号**：
+        # `-7 % 4 == -3`。此前这里无条件标非负，于是 `x % 4` 的下游 `x / D`
+        # 会走"非负快路径"（`sar` / 单条 `and`），负被除数直接算出垃圾
+        # （实测 `-9 / 4` → -3074457345618258606，`-9 % 4` → -9223372036854775808）。
+        # 只有被除数**已证非负**时余数才非负 —— 这条前提由 `_is_nonneg` 给出。
+        if (op == "mod" and isinstance(b, tuple) and b[0] == "imm" and b[1] > 0
+                and self._is_nonneg(fn, a)):
+            self._mark_nonneg(fn, d, b[1] - 1)             # 模非负（仅非负被除数）
         if op not in ("add", "sub", "mul", "div", "mod", "and", "or", "xor", "shl", "shr", "sar"):
             opmap = {"+": "add", "-": "sub", "*": "mul", "/": "div", "%": "mod",
                      "&": "and", "|": "or", "^": "xor",
@@ -5615,7 +5640,9 @@ class Lower:
             if is_bool:
                 self._mark_bool(fn, d)
             if self._is_nonneg(fn, spec):
-                self._mark_nonneg(fn, d)
+                # v4.123：上界跟着一起继承，否则 `let m = x % 4; m + 1`
+                # 会因为"没有上界"而不敢继续标非负，白丢精度。
+                self._mark_nonneg(fn, d, self._nn_ub(fn, spec))
             else:
                 self._unmark_nonneg(fn, d)
             if self._is_chan(fn, spec):
@@ -5699,7 +5726,7 @@ class Lower:
                     if self._is_str(fn, spec):
                         self._mark_str(fn, cur)
                     if self._is_nonneg(fn, spec):
-                        self._mark_nonneg(fn, cur)
+                        self._mark_nonneg(fn, cur, self._nn_ub(fn, spec))
                     else:
                         self._unmark_nonneg(fn, cur)
                 else:
@@ -5715,10 +5742,14 @@ class Lower:
                         fn.emit("trunc", cur, cur, nb[0], nb[1])
                     if self._is_str(fn, tmp):
                         self._mark_str(fn, cur)
-                    if binop == "+=" and self._is_nonneg(fn, tmp) and self._is_nonneg(fn, cur):
-                        self._mark_nonneg(fn, cur)
-                    elif binop == "%=":
-                        self._mark_nonneg(fn, cur)
+                    # v4.123 **soundness 修复**：复合赋值一律"跟着 tmp 走"。
+                    # 此前 `%=` 无条件把 cur 标非负（截断余数同号于被除数，
+                    # 负值取模的结果**是负数**），`+=` 则要求 cur 本身已非负。
+                    # 现在 `tmp` 的非负性由 `arith` 按真实语义给出，cur 继承它
+                    # 就够——比原来既更严谨也不丢精度（`+=` 的额外前提已被
+                    # `arith` 内置：`+` 只在两个操作数都非负时才标 tmp）。
+                    if self._is_nonneg(fn, tmp):
+                        self._mark_nonneg(fn, cur, self._nn_ub(fn, tmp))
                     else:
                         self._unmark_nonneg(fn, cur)
             else:
@@ -5730,12 +5761,21 @@ class Lower:
         if k == "if":
             l_body, l_else, l_end = fn.label("ibody"), fn.label("ielse"), fn.label("iend")
             self.branch(s[1], fn, env, l_body, l_else)
+            # v4.123 soundness：两条分支各自从同一个快照出发，汇合取交集。
+            # 没有 else 分支时，那条"什么都不做"的路径继承快照（= 未证明）。
+            base = self._nnv_snapshot(fn)
             fn.emit("label", l_body)
             self.block(s[2], fn, dict(env))
+            then_nn = self._nnv_snapshot(fn)
             fn.emit("jmp", l_end)
             fn.emit("label", l_else)
             if s[3]:
+                self._nnv_restore(fn, base)
                 self.block(s[3], fn, dict(env))
+                else_nn = self._nnv_snapshot(fn)
+            else:
+                else_nn = base
+            self._nnv_join(fn, base, then_nn, else_nn)
             fn.emit("label", l_end)
             return
         if k == "while":
@@ -5745,7 +5785,14 @@ class Lower:
             fn.emit("label", l_body)
             self.loop_stack.append((l_top, l_end, len(self.defer_stack),
                                     len(self.iface_scope)))   # continue -> 重新判据
+            # v4.123 soundness：循环体可能一次都不执行，体内新证的非负事实
+            # 在循环之后不可用；体内被重新定义的（循环携带）变量，出口值
+            # 与入口上界无关，事实也要一并丢掉。
+            base = self._nnv_snapshot(fn)
+            self._nnv_enter_loop(fn, env, s[2])
+            body_at = len(fn.instrs)
             self.block(s[2], fn, dict(env))
+            self._nnv_loop_exit(fn, base, body_at)
             self.loop_stack.pop()
             fn.emit("jmp", l_top)
             fn.emit("label", l_end)
@@ -6157,7 +6204,13 @@ class Lower:
         inner[var] = item
         self.loop_stack.append((l_skip, l_end, len(self.defer_stack),
                                 len(self.iface_scope)))
+        # v4.123 soundness：foreach 体可能零次执行，体内事实不外泄；
+        # 体内被写过的（循环携带）变量也不保留入口上界。
+        base = self._nnv_snapshot(fn)
+        self._nnv_enter_loop(fn, env, body)
+        body_at = len(fn.instrs)
         self.block(body, fn, inner)
+        self._nnv_loop_exit(fn, base, body_at)
         self.loop_stack.pop()
         fn.emit("label", l_skip)
         fn.emit("bin", "add", idx, idx, ("imm", 1))
@@ -6295,7 +6348,13 @@ class Lower:
         env2[var] = i
         self.loop_stack.append((l_cont, l_end, len(self.defer_stack),
                                 len(self.iface_scope)))      # continue -> 自增步
+        # v4.123 soundness：for 体可能零次执行，体内事实不外泄；
+        # 体内被写过的（循环携带）变量也不保留入口上界。
+        base = self._nnv_snapshot(fn)
+        self._nnv_enter_loop(fn, env, body)
+        body_at = len(fn.instrs)
         self.block(body, fn, env2)
+        self._nnv_loop_exit(fn, base, body_at)
         self.loop_stack.pop()
         fn.emit("label", l_cont)
         fn.emit("bin", "add", i, i, ("imm", 1))
@@ -6322,7 +6381,11 @@ class Lower:
             env2[var] = i
             self.loop_stack.append((l_cont, l_end, len(self.defer_stack),
                                 len(self.iface_scope)))
+            base = self._nnv_snapshot(fn)
+            self._nnv_enter_loop(fn, env, body)
+            body_at = len(fn.instrs)
             self.block(body, fn, env2)
+            self._nnv_loop_exit(fn, base, body_at)
             self.loop_stack.pop()
             fn.emit("label", l_cont)
             fn.emit("bin", "add", i, i, ("imm", 1))
@@ -6374,7 +6437,12 @@ class Lower:
             env2[r] = accs[r]
         self.loop_stack.append((l_cont, l_end, len(self.defer_stack),
                                 len(self.iface_scope)))
+        # v4.123 soundness：worker 体可能零次执行；w 是独立 Fn，同样回滚。
+        base = self._nnv_snapshot(w)
+        self._nnv_enter_loop(w, env, body)
+        body_at = len(w.instrs)
         self.block(body, w, env2)
+        self._nnv_loop_exit(w, base, body_at)
         self.loop_stack.pop()
         w.emit("label", l_cont)
         w.emit("bin", "add", i, i, ("imm", 1))
@@ -10844,25 +10912,245 @@ class Lower:
         return None
 
     # ---- 非负值域跟踪（v1.3 通用值域分析最小版：只标确凿模式）----
+    #
+    # v4.123 **soundness 修复**（四处根因一起收）：
+    #
+    # ① `fn.nnv` 是**函数级集合**，而 `if`/`while`/`for`/`match` 降级都走
+    #    `dict(env)` 克隆环境 —— env 是值的快照，`nnv` 却共享。于是分支里
+    #    写的 `x = 0` 会把**另一条路径**上的同一个 vreg 也标成非负。
+    #    修法：快照 + 汇合取**交集**（`_nnv_snapshot` / `_nnv_join`），循环体
+    #    一律回滚（可能零次迭代，体内事实不能外泄）。
+    # ② `x % D`（D > 0）**不**恒非负 —— C99 截断语义下余数与被除数同号。
+    # ③ `+=` / `*=` / `%=` 复合赋值沿用旧标记，同样不健全。
+    # ④ `+` / `*` 的"两个非负相加/相乘仍非负"**在 int64 回绕下不成立**：
+    #    `0` 反复 `s = s * 3 + 1` 50 次会绕成负数。所以非负事实必须**同时
+    #    带上界**（`fn.nnub`），加法/乘法的结果上界可证且 < 2^62 才继续
+    #    标非负；无上界的一律不标。
     @staticmethod
     def _is_nonneg(fn, x):
         if isinstance(x, tuple) and x and x[0] == "imm":
             return x[1] >= 0
-        return isinstance(x, int) and x in getattr(fn, "nnv", set())
+        return isinstance(x, int) and (
+            x in getattr(fn, "nnv", set())
+            or x in getattr(fn, "nnub", {}))
 
     @staticmethod
-    def _mark_nonneg(fn, v):
-        if isinstance(v, int):
-            if not hasattr(fn, "nnv"):
-                fn.nnv = set()
-            fn.nnv.add(v)
+    def _nn_ub(fn, x):
+        """已证上界（>= 0），证不出返回 None。立即数直接给值。"""
+        if isinstance(x, tuple) and x and x[0] == "imm":
+            return x[1] if 0 <= x[1] < (1 << 62) else None
+        if isinstance(x, int):
+            return getattr(fn, "nnub", {}).get(x)
+        return None
+
+    @staticmethod
+    def _mark_nonneg(fn, v, ub=None):
+        """标 `v >= 0`；给了 `ub` 就同时记上界（`v <= ub`）。
+
+        只有**带上界**的事实才能参与 `+`/`*` 的继续推导——没有上界就无法
+        排除 int64 回绕，继续标非负会算错（见上面 ④）。
+        """
+        if not isinstance(v, int):
+            return v
+        if not hasattr(fn, "nnv"):
+            fn.nnv = set()
+        fn.nnv.add(v)
+        if ub is not None and 0 <= ub < (1 << 62):
+            if not hasattr(fn, "nnub"):
+                fn.nnub = {}
+            fn.nnub[v] = ub
         return v
 
     @staticmethod
     def _unmark_nonneg(fn, v):
-        if isinstance(v, int) and hasattr(fn, "nnv"):
-            fn.nnv.discard(v)
+        if isinstance(v, int):
+            if hasattr(fn, "nnv"):
+                fn.nnv.discard(v)
+            if hasattr(fn, "nnub"):
+                fn.nnub.pop(v, None)
         return v
+
+    @staticmethod
+    def _nnv_snapshot(fn):
+        """进入分支/循环体前的非负事实快照（非负集 + 上界表，独立副本）。"""
+        return (set(getattr(fn, "nnv", set())),
+                dict(getattr(fn, "nnub", {})))
+
+    @staticmethod
+    def _nnv_restore(fn, snap):
+        """回滚到快照：循环体（可能零次执行）出来的事实一律不可信。"""
+        nn_set, nn_ub = snap
+        fn.nnv = set(nn_set)
+        fn.nnub = dict(nn_ub)
+
+    @staticmethod
+    def _nnv_loop_exit(fn, snap, body_start):
+        """循环出口的非负事实：快照 **减去** 循环体内被重新定义过的 vreg。
+
+        只回滚到快照是不够的：循环携带变量（`s = s*3 + 1`）在体内被重新
+        赋值，出口值是**若干次迭代后**的结果，与进入时的上界毫无关系。
+        实测 `s` 进循环时 `<=0`，50 次迭代后回绕成 -6199084387870510620，
+        若沿用入口上界就会把 `s % 1000003` 判成非负路径（得 212086，
+        C 是 -138601）。所以体内被写过的一律丢掉事实。
+        """
+        nn_set, nn_ub = snap
+        defined = set()
+        for ins in fn.instrs[body_start:]:
+            for d in vreg_mentions(ins)[0]:
+                if isinstance(d, int):
+                    defined.add(d)
+        fn.nnv = {v for v in nn_set if v not in defined}
+        fn.nnub = {v: u for v, u in nn_ub.items() if v not in defined}
+
+    def _nnv_loop_induction(self, fn, env, body, name):
+        """循环归纳：对单个变量 `v = (v * C + K) % D` 证 `0 <= v <= D-1`。
+
+        这类循环携带变量**恒非负**，可以在体内放心用。这是 `b83_lcg_random`
+        / `b26_maxsub` / `b65_random_walk` 的热路径——一律"体内被赋值就作废"
+        会让它们回退 20%+，属于把正确性做成性能事故。
+
+        **归纳必须连同初始值一起证**（第一版漏了这条，实测 s_unsigned_mod
+        第 7 项从 496 变 500）：C99 的 `%` 是截断语义，余数**与被除数同号**。
+        若 `v` 进循环时是负数，`(v*C+K) % D` 依然是**负数**，根本不会落进
+        `[0, D-1]`。所以前提是：
+
+          ① 进入循环时 `v >= 0`（由 `env` + `_is_nonneg` 现场证明）；
+          ② 体内对 `v` 的赋值**恰好一次**，形如 `v = (v * C + K) % D`；
+          ③ `C`、`K`、`D` 都是非负整数常量，`D >= 2`，`C > 0`；
+          ④ `(D-1) * C + K < 2^62`——归纳步不溢出的不动点条件。
+
+        四条全满足才返回上界 `D-1`，否则返回 None 交给保守路径。
+        """
+        # 前提 ①：入口必须已证非负。缺了它就是上面那个 496→500 的 bug。
+        cur = env.get(name)
+        if cur is None or not self._is_nonneg(fn, cur):
+            return None
+
+        form = None
+        count = 0
+        stack = list(body)
+        while stack:
+            st = stack.pop()
+            if not isinstance(st, tuple):
+                continue
+            if st[0] == "assign":
+                if st[1] == name:
+                    count += 1
+                    form = st
+            elif st[0] == "let":
+                if st[2] == name:
+                    count += 1      # 体内重新 let 同名（遮蔽）：无法归纳
+            for part in st[1:]:
+                if isinstance(part, list):
+                    stack.extend(part)
+        if count != 1 or form is None or form[2] != "=":
+            return None
+
+        def is_imm(e):
+            return isinstance(e, tuple) and e and e[0] == "num"
+
+        def name_of(e):
+            return e[1] if isinstance(e, tuple) and e and e[0] == "name" else None
+
+        rhs = form[3]
+        if not (isinstance(rhs, tuple) and rhs[0] == "binop" and rhs[1] == "%"):
+            return None
+        div = rhs[3]
+        if not is_imm(div):
+            return None
+        D = div[1]
+        # D 只要 > 1 就合法：真正的闸是下面的不动点条件（(D-1)*C+K < 2^62）。
+        # 早先这里额外写了个 `D < 2^31`，把 LCG 最常用的 `% 2147483648`
+        # 自己挡掉了——b83/b26/b65 因此全部退回保守路径（实测回退 20%+）。
+        if D < 2:
+            return None
+        inner = rhs[2]
+        if not (isinstance(inner, tuple) and inner[0] == "binop" and inner[1] == "+"):
+            return None
+        mul, add = inner[2], inner[3]
+        if not is_imm(add):
+            return None
+        K = add[1]
+        if not (isinstance(mul, tuple) and mul[0] == "binop" and mul[1] == "*"):
+            return None
+        lhs, cst = mul[2], mul[3]
+        if name_of(lhs) != name or not is_imm(cst):
+            return None
+        C = cst[1]
+        if C <= 0 or K < 0:
+            return None
+        if (D - 1) * C + K >= (1 << 62):
+            return None
+        return D - 1
+
+    def _nnv_enter_loop(self, fn, env, body):
+        """进入循环体前，把"循环携带变量"的事实改成**归纳证出的**那一条。
+
+        循环体只编译一次、运行期执行 N 次，所以拿进入前的事实（`seed =
+        12345`）给体内的 `seed * C + K` 求上界只在第一次迭代成立。实测两种
+        后果都出现过：
+          · LCG 类（`seed=(seed*C+K)%D`）：其实**恒非负**，若一律作废会
+            让 b83/b26/b65 回退 20%+ —— 用 `_nnv_loop_induction` 自己重证。
+          · 真会绕成负数的（`s = s*3 + 1` 50 次）：必须作废，否则
+            `s % 1000003` 会走无符号快路径。
+        两条路径都只处理"体内被赋值的名字"，纯读的不变量照旧保留事实。
+        """
+        try:
+            _decl, assigned, _ref = set(), set(), set()
+            walk_stmts(body, _decl, assigned, _ref)
+        except Exception:
+            # walk_stmts 认不出的语句形状：宁可全部作废也不冒险
+            fn.nnv = set()
+            fn.nnub = {}
+            return
+
+        for name in assigned:
+            v = env.get(name)
+            if not isinstance(v, int):
+                continue
+            ub = self._nnv_loop_induction(fn, env, body, name)
+            if ub is not None:
+                # 归纳成立：把入口那份不可信的事实换成归纳结论
+                self._mark_nonneg(fn, v, ub)
+            else:
+                self._unmark_nonneg(fn, v)
+
+    @staticmethod
+    def _nnv_join(fn, snap, *branches):
+        """分支汇合：`snap ∪ (各分支结果 ∩)`。
+
+        进入前的公共事实保留；只有**所有**分支都证明非负的 vreg 才继续
+        算非负，上界取各分支的**最大**值（保守）。缺任何一个分支（`if` 无
+        else）时该分支视为未证明——所以调用方必须把"未走的分支"传成 `snap`。
+        """
+        nn_set, nn_ub = snap
+        if not branches:
+            fn.nnv = set(nn_set)
+            fn.nnub = dict(nn_ub)
+            return
+        inter = set(branches[0][0])
+        for b in branches[1:]:
+            inter &= set(b[0])
+        ub = {}
+        for v in inter:
+            lo, hi = -1, -1
+            for b in branches:
+                u = b[1].get(v)
+                if u is None:
+                    hi = None
+                    break
+                hi = u if hi < 0 else max(hi, u)
+            if hi is not None and hi >= 0:
+                ub[v] = hi
+        fn.nnv = set(nn_set) | inter
+        merged = dict(nn_ub)
+        for b in branches:
+            for v, u in b[1].items():
+                if v in ub:
+                    merged[v] = ub[v]
+                else:
+                    merged.pop(v, None)
+        fn.nnub = merged
 
     # ---- 字符串值跟踪（非 SSA：在 Fn 上记一个集合）----
     @staticmethod

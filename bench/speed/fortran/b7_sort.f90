@@ -42,6 +42,6 @@ program b7_sort
   print '(I0)', v(1)
   print '(I0)', v(n)
   print '(I0)', s
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b7_sort

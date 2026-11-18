@@ -7,7 +7,10 @@
 
 int64_t init(void) {
     int64_t s = 0;
-    for (int64_t i = 0; i < 1000; i++) s += i;
+    for (int64_t i = 0; i < 1000; i++) {
+        s += i;
+        __asm__ volatile("" : "+r"(s) :: "memory");
+    }
     return s;
 }
 int main(void) {

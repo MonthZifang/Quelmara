@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
@@ -17,7 +16,7 @@ func main() {
 	for j := int64(0); j < n; j++ {
 		vec[j] = (j*13 + 1) % 100
 	}
-	t0 := time.Now()
+	t0 := benchNow()
 	var total int64 = 0
 	for r := int64(0); r < n; r++ {
 		var s int64 = 0
@@ -26,7 +25,7 @@ func main() {
 		}
 		total += s
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(total)
 	fmt.Println("T")
 	fmt.Println(el)

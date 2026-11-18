@@ -16,6 +16,7 @@ class Main {
         qsort_i64(i + 1, hi);
     }
     public static void main(String[] args) {
+        long t0 = System.nanoTime();
         long n = 200000;
         v = new long[(int) n];
         long x = 12345;
@@ -26,7 +27,6 @@ class Main {
         qsort_i64(0, n - 1);
         long s = 0;
         for (long i = 0; i < n; i++) s += v[(int) i] % 1000;
-        long t0 = System.nanoTime();
         long el = System.nanoTime() - t0;
         System.out.println(v[0]);
         System.out.println(v[(int) (n - 1)]);

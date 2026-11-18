@@ -27,7 +27,7 @@ program b12_gcd
     s = s + gcd(i, 1000000_8 - i)
   end do
   call system_clock(t1, rate)
-  print *, s
-  print *, 'T'
-  print *, (t1 - t0) * 1000000000_8 / rate
+  print '(I0)', s
+  print '(A)', 'T'
+  print '(I0)', ((t1 - t0) / rate) * 1000000000_8 + mod(t1 - t0, rate) * 1000000000_8 / rate
 end program b12_gcd

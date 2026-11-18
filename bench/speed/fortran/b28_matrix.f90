@@ -30,7 +30,7 @@ program b28_matrix
       chk = mod(chk + c(i,j), 1000000007_8)
     end do
   end do
-  print *, chk
-  print *, 'T'
-  print *, (t1 - t0) * 1000000000_8 / rate
+  print '(I0)', chk
+  print '(A)', 'T'
+  print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b28_matrix

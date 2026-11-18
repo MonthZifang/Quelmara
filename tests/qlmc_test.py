@@ -17,6 +17,7 @@
   python tests/qlmc_test.py            # 全部用例
   python tests/qlmc_test.py --time     # 额外报 qlmc 的进程内编译耗时
 """
+import argparse
 import os
 import shutil
 import struct
@@ -41,6 +42,12 @@ CLI = os.path.join(ROOT, "tools", "stage0", "qlm_cli.py")
 QLMC = os.path.join(ROOT, "build", "qlmc.exe")
 SRC_QLMC = os.path.join(ROOT, "bootstrap", "qlmc", "qlmc.qma")
 BUILD = os.path.join(ROOT, "build")
+
+# v4.123：这里曾经有一个 EXPECTED_OUTPUTS 逃生口，用来把 `unsigned_scope`
+# 的期望值钉成手写的 C 语义——因为 stage-0 当时在那种控制流形状上算错。
+# 那是**拿测试绕过被测 bug**：只要被测编译器一直错，测试就一直绿。
+# stage-0 的非负传播 soundness 已在 v4.123 修好（见 `docs/04-compiler.md`
+# 「非负值域跟踪的 soundness」），逃生口随之删除：两个编译器必须逐字节一致。
 
 CASES = [
     ("fib", "examples/fib.qma"),
@@ -242,6 +249,15 @@ CASES = [
     # cases pin truncating-signed semantics so the unsigned fast path can't
     # misapply to negative operands; LCG loop-carried seed (b83 shape).
     ("unsigned_mod", "tests/s_unsigned_mod.qma"),
+    # Loop-local nonnegative facts must not change signed operations outside
+    # the loop or on paths that bypass initialization.
+    ("unsigned_scope", "tests/s_unsigned_scope.qma"),
+    # v4.123 soundness 回归：非负事实的四条泄漏路径（条件赋值 / 循环体 /
+    # 负余数 / int64 回绕）必须与 C99 截断语义逐字节一致。
+    ("nonneg_sound", "tests/s_nonneg_sound.qma"),
+    # Fused scalar loads may reuse dying base/index registers, including
+    # retained addresses, byte reads, aliases, growth and nested-loop values.
+    ("load_endpoints", "tests/s_load_endpoints.qma"),
 ]
 
 npass = 0
@@ -280,13 +296,25 @@ def pe_info(path):
 
 
 def main():
-    show_time = "--time" in sys.argv
-    print("== 构建 qlmc（用 stage-0 编自己写的编译器） ==")
-    try:
-        build_with([PY, CLI, "build", SRC_QLMC, "--target", "win", "-o", QLMC], QLMC)
-    except RuntimeError as ex:
-        bad(f"qlmc 自身构建失败：{ex}")
-        return 1
+    global QLMC
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--time", action="store_true")
+    ap.add_argument("--qlmc", help="使用指定的已构建编译器，跳过自身构建")
+    args = ap.parse_args()
+    show_time = args.time
+    if args.qlmc:
+        QLMC = os.path.abspath(args.qlmc)
+        if not os.path.isfile(QLMC):
+            bad(f"编译器不存在：{QLMC}")
+            return 1
+        print(f"== 使用已构建 qlmc：{QLMC} ==")
+    else:
+        print("== 构建 qlmc（用 stage-0 编自己写的编译器） ==")
+        try:
+            build_with([PY, CLI, "build", SRC_QLMC, "--target", "win", "-o", QLMC], QLMC)
+        except RuntimeError as ex:
+            bad(f"qlmc 自身构建失败：{ex}")
+            return 1
     info = pe_info(QLMC)
     ok(f"qlmc.exe 是合法 PE（{info['size']} 字节）") if info else bad("qlmc.exe 不是 PE")
 
@@ -338,6 +366,7 @@ def main():
                 pass
         a = subprocess.run(_exe_runner(out0), capture_output=True)
         b = subprocess.run(_exe_runner(out1), capture_output=True)
+        # v4.123：不再有"手写期望值"的逃生口——两个编译器必须逐字节一致。
         if a.stdout == b.stdout and a.returncode == b.returncode:
             ok(f"{name}: 与 stage-0 输出逐字节相同（{len(a.stdout)} 字节, rc={a.returncode}）")
         else:

@@ -6150,7 +6150,7 @@ static uint64_t qlm_map_hash_str(const char *s) {
     return h;
 }
 
-static uint64_t qlm_map_hash(const QlmMap *m, int64_t k) {
+static uint64_t qlm_map_hash(const QlmMap *m, intptr_t k) {
     return m->ktag ? qlm_map_hash_str((const char *)(intptr_t)k)
                    : qlm_map_hash_word(k);
 }
@@ -6160,7 +6160,7 @@ static bool qlm_map_key_eq(const QlmMap *m, int64_t a, int64_t b) {
                    : (a == b);
 }
 
-static int64_t qlm_map_find(QlmMap *m, int64_t k) {
+static int64_t qlm_map_find(QlmMap *m, intptr_t k) {
     int64_t mask = m->cap - 1;
     int64_t i = (int64_t)(qlm_map_hash(m, k) & (uint64_t)mask);
     for (;;) {
@@ -6207,7 +6207,10 @@ static int64_t qlm_map_open(int64_t cap, int64_t ktag, int64_t esz) {
     return (int64_t)(intptr_t)m;
 }
 
-static int64_t qlm_map_set(int64_t h, int64_t k, int64_t v) {
+/* v4.123：键参数用 intptr_t —— str 键是 char*，GCC 14+ 把 int64_t 形参
+   收指针当成 -Wint-conversion 错误（C 后端 map[K]V 的 str 键因此编不过）。
+   运行期本来就靠 (intptr_t) 转换，改形参类型不改变任何行为。 */
+static int64_t qlm_map_set(int64_t h, intptr_t k, int64_t v) {
     QlmMap *m = (QlmMap *)(intptr_t)h;
     int64_t mask = m->cap - 1;
     int64_t i = (int64_t)(qlm_map_hash(m, k) & (uint64_t)mask), first = -1;
@@ -6231,7 +6234,7 @@ static int64_t qlm_map_set(int64_t h, int64_t k, int64_t v) {
     }
 }
 
-static int64_t qlm_map_get(int64_t h, int64_t k) {
+static int64_t qlm_map_get(int64_t h, intptr_t k) {
     QlmMap *m = (QlmMap *)(intptr_t)h;
     int64_t i = qlm_map_find(m, k);
     if (i < 0) {
@@ -6245,7 +6248,7 @@ static int64_t qlm_map_get(int64_t h, int64_t k) {
 
 /* 聚合值插入/覆盖写（v1.41）：值写按 esz 字 memcpy 进 vt[i*esz]。
    探测结构与 qlm_map_set 完全一致；只在聚合值 map 上生成调用。 */
-static int64_t qlm_map_set_n(int64_t h, int64_t k, const void *src) {
+static int64_t qlm_map_set_n(int64_t h, intptr_t k, const void *src) {
     QlmMap *m = (QlmMap *)(intptr_t)h;
     int64_t mask = m->cap - 1;
     int64_t i = (int64_t)(qlm_map_hash(m, k) & (uint64_t)mask), first = -1;
@@ -6283,12 +6286,12 @@ static void *qlm_map_get_n(int64_t h, int64_t k, void *dst) {
     return dst;
 }
 
-static bool qlm_map_has(int64_t h, int64_t k) {
+static bool qlm_map_has(int64_t h, intptr_t k) {
     QlmMap *m = (QlmMap *)(intptr_t)h;
     return qlm_map_find(m, k) >= 0;
 }
 
-static int64_t qlm_map_del(int64_t h, int64_t k) {
+static int64_t qlm_map_del(int64_t h, intptr_t k) {
     QlmMap *m = (QlmMap *)(intptr_t)h;
     int64_t i = qlm_map_find(m, k);
     if (i >= 0) {
@@ -7279,6 +7282,12 @@ class Codegen:
         def key_arg(a):
             kcode, ktype = self.gen_expr(a, env)
             self.check_map_arg("键", kv, ktype)
+            # v4.123：str 键是 `const char *`，而 map 运行时的键形参是整数类
+            # 类型。C99 允许隐式互转但 GCC 14+ 把 -Wint-conversion 升成 error
+            # （整条 C 后端 map[K]V 的 str 键路径因此编不过）。显式转换既
+            # 消除诊断，也把"指针存进 int64 键槽"这个既有语义写明白。
+            if ktype == "const char *":
+                return f"(intptr_t)({kcode})"
             return kcode
 
         if m == "set":
@@ -7291,6 +7300,11 @@ class Codegen:
                 return (f"({{ {vv} _vt = {vcode}; "
                         f"qlm_map_set_n({ocode}, {kcode}, (const void *)&_vt); "
                         f"(int64_t)0; }})", "int64_t")
+            # v4.123：str 值同样是 `const char *` 存进整数槽（get 侧早已
+            # 显式双向转换，set 侧漏了 → GCC 14+ 直接编不过）。
+            if vtype == "const char *":
+                return (f"qlm_map_set({ocode}, {kcode}, "
+                        f"(int64_t)(intptr_t)({vcode}))", "int64_t")
             return f"qlm_map_set({ocode}, {kcode}, {vcode})", "int64_t"
         if m == "get":
             if len(args) != 1:

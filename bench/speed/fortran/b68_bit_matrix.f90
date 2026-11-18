@@ -15,6 +15,6 @@ program b68_bit_matrix
   end do
   call system_clock(t1, rate)
   print '(I0)', b(1)
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b68_bit_matrix

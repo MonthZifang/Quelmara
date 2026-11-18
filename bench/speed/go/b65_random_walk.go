@@ -3,13 +3,12 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
 	var x, y int64 = 0, 0
 	var seed uint64 = 12345
-	t0 := time.Now()
+	t0 := benchNow()
 	for i := int64(0); i < 2000000; i++ {
 		seed = (seed*1103515245 + 12345) % 2147483648
 		d := int64(seed % 4)
@@ -23,7 +22,7 @@ func main() {
 			y--
 		}
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(x*1000000 + y)
 	fmt.Println("T")
 	fmt.Println(el)

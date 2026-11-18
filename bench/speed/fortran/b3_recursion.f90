@@ -20,6 +20,6 @@ program b3_recursion
   call system_clock(t0, rate)
   print '(I0)', fib(30_8)
   call system_clock(t1, rate)
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b3_recursion

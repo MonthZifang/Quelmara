@@ -15,6 +15,6 @@ program b42_matrix_transpose
   end do
   call system_clock(t1, rate)
   print '(I0)', b(sz)
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b42_matrix_transpose

@@ -46,6 +46,6 @@ program b54_merge_sort
   call msort(a, 0_8, n, tmp)
   call system_clock(t1, rate)
   print '(I0)', a(1)
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b54_merge_sort

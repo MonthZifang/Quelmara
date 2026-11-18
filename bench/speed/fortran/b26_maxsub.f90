@@ -15,6 +15,6 @@ program b26_maxsub
   end do
   call system_clock(t1, rate)
   print '(I0)', best
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b26_maxsub

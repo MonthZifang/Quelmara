@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func bsearchImpl(a []int64, n, target int64) int64 {
@@ -28,14 +27,14 @@ func main() {
 	for i := int64(0); i < n; i++ {
 		a[i] = i * 2
 	}
-	t0 := time.Now()
+	t0 := benchNow()
 	var found int64 = 0
 	for j := int64(0); j < 1000000; j++ {
 		if bsearchImpl(a, n, j*2) >= 0 {
 			found++
 		}
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(found)
 	fmt.Println("T")
 	fmt.Println(el)

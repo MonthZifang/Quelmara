@@ -161,6 +161,19 @@ class MainTests(unittest.TestCase):
         self.assertEqual(payload["benchmarks"][0]["validation"], "incomplete")
         self.assertIn("MISSING", output)
 
+    def test_require_complete_fails_for_missing_implementation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "result.json"
+            with mock.patch.object(sys, "argv", ["run.py", "--langs", "c", "python",
+                    "--require-complete", "--json", str(path)]), \
+                 mock.patch.object(run, "BENCHES", [("b1_int", "test")]), \
+                 mock.patch.object(run, "build_all", return_value=({("python", "b1_int"): ["fake"]}, {})), \
+                 mock.patch.object(run, "run_once", return_value=(1, 0, "a\nT\n2\n")), \
+                 mock.patch.object(run, "compiler_metadata", return_value={}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run.main(), 1)
+            self.assertEqual(json.loads(path.read_text())["benchmarks"][0]["validation"], "incomplete")
+
     def test_compile_failure_is_not_an_optional_missing_toolchain(self):
         code, payload, _ = self.invoke(["c"], {}, {"c": "b1_int 编译失败: bad"})
         self.assertEqual(code, 1)
@@ -181,6 +194,38 @@ class MainTests(unittest.TestCase):
             self.assertEqual(build.call_args.args[0][:2], ["/fake/wine", str(compiler)])
             self.assertIn(("quelmara", "b1_int"), built)
             self.assertEqual(notes, {})
+
+    def test_go_build_includes_platform_clock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for is_win, helper in ((True, "bench_clock_windows.go"),
+                                   (False, "bench_clock_other.go")):
+                with self.subTest(is_win=is_win), \
+                     mock.patch.object(run, "IS_WIN", is_win), \
+                     mock.patch.object(run, "OUT", directory), \
+                     mock.patch.object(run, "go_exe", return_value="go"), \
+                     mock.patch.object(run, "BENCHES", [("b1_int", "test")]), \
+                     mock.patch.object(run, "_build_run", return_value=
+                                       subprocess.CompletedProcess([], 0, "", "")) as build:
+                    built, _ = run.build_all(["go"], None)
+                    self.assertIn(("go", "b1_int"), built)
+                    self.assertEqual(Path(build.call_args.args[0][-1]).name, helper)
+
+    def test_cpp_zig_uses_cxx_driver(self):
+        with mock.patch.dict(run.os.environ, {"CXX": "zig"}):
+            _, find, command, _ = run.EXTRA_LANGS["cpp"]
+            self.assertEqual(command(find(), "input.cpp", "output")[:3],
+                             ["zig", "c++", "-O2"])
+
+    def test_macos_qlmc_is_reported_as_unsupported(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(run, "OUT", directory), \
+             mock.patch.object(run.sys, "platform", "darwin"), \
+             mock.patch.object(run, "qlmc_exe", return_value="/fake/qlmc.exe"), \
+             mock.patch.object(run, "_build_run") as build:
+            built, notes = run.build_all(["quelmara"], None)
+        self.assertEqual(built, {})
+        self.assertIn("Mach-O", notes["quelmara"])
+        build.assert_not_called()
 
     def test_build_launch_and_timeout_errors_are_reportable(self):
         for error in (OSError("missing compiler"), subprocess.TimeoutExpired(["fake"], 1)):

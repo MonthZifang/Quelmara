@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
@@ -14,14 +13,14 @@ func main() {
 		keys[i] = i
 		vals[i] = i * 2
 	}
-	t0 := time.Now()
+	t0 := benchNow()
 	for j := int64(0); j < n; j++ {
 		k := keys[j]
 		v := vals[j]
 		keys[j] = v
 		vals[j] = k
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(keys[0] + vals[0])
 	fmt.Println("T")
 	fmt.Println(el)

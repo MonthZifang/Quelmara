@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func work(n int64) int64 {
@@ -15,9 +14,9 @@ func work(n int64) int64 {
 }
 
 func main() {
-	t0 := time.Now()
+	t0 := benchNow()
 	r := work(160000000)
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(r)
 	fmt.Println("T")
 	fmt.Println(el)

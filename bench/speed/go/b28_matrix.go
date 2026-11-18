@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
@@ -18,14 +17,14 @@ func main() {
 		seed = (seed*1103515245 + 12345) % 2147483648
 		b[i] = int64(seed % 100)
 	}
-	t0 := time.Now()
+	t0 := benchNow()
 	for r := int64(0); r < n; r++ {
 		for k := int64(0); k < n; k++ {
 			av := a[r*n+k]
 			for j := int64(0); j < n; j++ { c[r*n+j] += av * b[k*n+j] }
 		}
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	var chk int64
 	for i := int64(0); i < n*n; i++ { chk = (chk + c[i]) % 1000000007 }
 	fmt.Println(chk)

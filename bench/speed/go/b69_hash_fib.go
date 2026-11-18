@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func fibHash(key, cap int64) int64 {
@@ -13,14 +12,14 @@ func fibHash(key, cap int64) int64 {
 func main() {
 	cap := int64(524288)
 	tab := make([]int64, cap)
-	t0 := time.Now()
+	t0 := benchNow()
 	var cnt int64 = 0
 	for j := int64(0); j < 500000; j++ {
 		h := fibHash(j, cap)
 		tab[h]++
 		cnt++
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(cnt)
 	fmt.Println("T")
 	fmt.Println(el)

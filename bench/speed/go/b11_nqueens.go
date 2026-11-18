@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func solve(col []int64, n, r int64) int64 {
@@ -24,10 +23,10 @@ func solve(col []int64, n, r int64) int64 {
 func main() {
 	n := int64(8)
 	col := make([]int64, n)
-	t0 := time.Now()
+	t0 := benchNow()
 	var total int64
 	for rep := 0; rep < 2000; rep++ { total += solve(col, n, 0) }
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(total)
 	fmt.Println("T")
 	fmt.Println(el)

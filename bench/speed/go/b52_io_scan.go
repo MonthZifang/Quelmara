@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
@@ -12,12 +11,12 @@ func main() {
 	for i := int64(0); i < n; i++ {
 		buf[i] = i*3 + 1
 	}
-	t0 := time.Now()
+	t0 := benchNow()
 	var sum int64 = 0
 	for j := int64(0); j < n; j++ {
 		sum += buf[j]
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(sum)
 	fmt.Println("T")
 	fmt.Println(el)

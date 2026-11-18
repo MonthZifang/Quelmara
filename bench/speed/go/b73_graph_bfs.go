@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
@@ -17,7 +16,7 @@ func main() {
 		v := int64(seed % uint64(n))
 		adj[u*n+v] = 1
 	}
-	t0 := time.Now()
+	t0 := benchNow()
 	visited := make([]int64, n)
 	queue := make([]int64, n)
 	front, back := int64(0), int64(0)
@@ -37,7 +36,7 @@ func main() {
 			}
 		}
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(cnt)
 	fmt.Println("T")
 	fmt.Println(el)

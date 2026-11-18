@@ -2,13 +2,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
-#include <ctime>
+#include <chrono>
 #include <cstring>
 
 static int64_t now_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 int main(void) {

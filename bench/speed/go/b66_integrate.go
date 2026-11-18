@@ -3,18 +3,17 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func f(x int64) int64 { return (x*x + 3*x + 5) % 1000003 }
 
 func main() {
 	var acc int64 = 0
-	t0 := time.Now()
+	t0 := benchNow()
 	for i := int64(0); i < 1000000; i++ {
 		acc = (acc + f(i)) % 1000003
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(acc)
 	fmt.Println("T")
 	fmt.Println(el)

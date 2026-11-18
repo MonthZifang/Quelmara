@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func bitrev(x int64) int64 {
@@ -18,11 +17,11 @@ func bitrev(x int64) int64 {
 
 func main() {
 	var acc int64 = 0
-	t0 := time.Now()
+	t0 := benchNow()
 	for j := int64(0); j < 1000000; j++ {
 		acc ^= bitrev(j)
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(acc)
 	fmt.Println("T")
 	fmt.Println(el)

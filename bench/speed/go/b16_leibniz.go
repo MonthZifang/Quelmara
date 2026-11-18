@@ -3,19 +3,18 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
 	n := int64(20000000)
-	t0 := time.Now()
+	t0 := benchNow()
 	s := 0.0
 	for i := int64(0); i < n; i++ {
 		d := float64(2*i + 1)
 		if i%2 == 0 { s += 1.0 / d } else { s -= 1.0 / d }
 	}
 	pi := s * 4.0
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Printf("%.6f\n", pi)
 	fmt.Println("T")
 	fmt.Println(el)

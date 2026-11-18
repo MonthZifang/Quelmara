@@ -35,9 +35,8 @@ import subprocess
 import sys
 import time
 
-# v2.54：跨平台。Windows 上跑四语言全量（qlmc 只有 win 后端）；
-# Linux/macOS 只跑 C/Go/Python —— 那三个是可移植的，用来给"同一道题在不同
-# 机器上是什么样"做参照（也就是"适配度"那一列）。
+# qlmc 产生 Windows PE 和 Linux ELF；macOS 尚无 Mach-O 后端。
+# 其他语言可以用于跨平台校验，具体覆盖由结果中的状态标明。
 IS_WIN = os.name == "nt"
 # v4.45：qlmc 的堆上限（MB）。None = 不传，用 qlmc 的编译期默认。
 # 由 main() 按"命令行 > Quelmara.toml"决定。
@@ -412,7 +411,9 @@ def build_all(langs, only):
 
     if "quelmara" in langs:
         q = qlmc_exe()
-        if not q:
+        if sys.platform == "darwin":
+            notes["quelmara"] = "跳过：qlmc 没有 macOS Mach-O 后端"
+        elif not q:
             notes["quelmara"] = ("跳过：build/qlmc.exe 不存在（先自举："
                                  "python tools/stage0/qlm_cli.py build "
                                  "bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe）")
@@ -465,7 +466,7 @@ def build_all(langs, only):
         tgt = "win" if IS_WIN else "native"
         if sys.platform == "darwin":
             notes["quelmara0"] = ("跳过：stage-0 的 native 后端是 ELF64，macOS 需要 "
-                                  "Mach-O（本版没有）。qlmc 也只有 PE 后端。")
+                                  "Mach-O（本版没有）。qlmc 也没有 Mach-O 后端。")
         # macOS 没有后端（见上）→ 整个循环跳过
         bench_ids = []
         if sys.platform != "darwin":
@@ -516,7 +517,10 @@ def build_all(langs, only):
                 exe = os.path.join(OUT, "go_" + b + EXE)
                 if not os.path.exists(src):
                     continue
-                r = _build_run([go_exe(), "build", "-o", exe, src], expected_output=exe,
+                timer = os.path.join(HERE, "go", "bench_clock_windows.go"
+                                     if os.environ.get("GOOS", "windows" if IS_WIN else "") == "windows"
+                                     else "bench_clock_other.go")
+                r = _build_run([go_exe(), "build", "-o", exe, src, timer], expected_output=exe,
                                    capture_output=True, text=True,
                                    cwd=os.path.join(HERE, "go"))
                 if r.returncode != 0:
@@ -565,10 +569,8 @@ def build_all(langs, only):
 
 
 # ---------------------------------------------------------------- 主流程
-# quelmara   = qlmc（stage-1 自举编译器）编出来的产物，**只有 Windows PE 后端**
-# quelmara0  = stage-0（参考编译器）编出来的产物，**win / linux / macos 都有后端**
-#   加这一列是为了拿到"同一个语言在不同平台上"的数字（也就是适配度），
-#   同时它和 quelmara 列在同一台 Windows 机器上的差就是**后端差距**。
+# quelmara = stage-1 qlmc；quelmara0 = stage-0 参考编译器。
+# 两者均可生成 Windows PE 和 Linux ELF，均没有 macOS Mach-O 后端。
 LANGS = ["quelmara", "quelmara0", "c", "go", "python",
          "cpp", "rust", "zig", "nim", "d", "csharp", "ada", "fortran"]
 
@@ -590,11 +592,10 @@ def _find(*names):
 
 
 EXTRA_LANGS = {
-    # C++：与 C 同一套 bench.h（计时宏在头文件里）
-    # C++ 复用 C 的 bench.h，所以要把 c/ 放进 include 路径
-    "cpp": (".cpp", _find("g++", "clang++"),
-            lambda cc, src, out: [cc, "-O2", "-I",
-                                  os.path.join(HERE, "c"), "-o", out, src], False),
+    # Prefer the explicitly configured C++ toolchain; CI uses zig c++ on Windows.
+    "cpp": (".cpp", lambda: os.environ.get("CXX") or _find("g++", "clang++")(),
+            lambda cc, src, out: ([cc, "c++"] if os.path.basename(cc).lower() in ("zig", "zig.exe") else [cc]) +
+                                  ["-O2", "-I", os.path.join(HERE, "c"), "-o", out, src], False),
     # Rust：bench/*.rs 里自己做了单调时钟，rustc -O
     "rust": (".rs", _find("rustc"),
              lambda cc, src, out: [cc, "-O", "-o", out, src], False),
@@ -707,6 +708,8 @@ def main():
     ap.add_argument("--only", nargs="*", default=None)
     ap.add_argument("--langs", nargs="+", choices=LANGS, default=LANGS)
     ap.add_argument("--markdown", action="store_true")
+    ap.add_argument("--require-complete", action="store_true",
+                    help="缺少任何请求的语言或基准时失败，适用于完整基准门禁")
     ap.add_argument("--mem", action="store_true", help="同时采峰值内存（慢）")
     ap.add_argument("--no-bounds-check", action="store_true",
                     help="关掉 vec 越界检查（对应 [build] bounds_check = false）")
@@ -779,9 +782,10 @@ def main():
             rec["validation"] = "cross_language_pass"
         else:
             rec["validation"] = "single_language_unverified"
-        if mismatch or failed:
+        if mismatch or failed or (missing and args.require_complete):
             fails.append(b)
-            rec["t"].clear()  # A failure invalidates comparative timing.
+            if mismatch or failed:
+                rec["t"].clear()  # A failure invalidates comparative timing.
         rows.append(rec)
 
     exit_code = report_checksums(fails, rows)

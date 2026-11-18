@@ -6,20 +6,10 @@
 # 放到干净的 runner 上噪声低一个量级，而且能拿到**多个平台**的数字 ——
 # 那才是"适配度"的真实依据。
 #
-# 两条 Quelmara 列（别混淆）：
-#   quelmara   = qlmc（stage-1 自举编译器）产物，**只有 Windows PE 后端**
-#   quelmara0  = stage-0（参考编译器）产物，win / linux / macos 三个后端都有
-# 于是：
-#   · Windows 上 quelmara vs quelmara0 = **后端差距**（同一个语言、同一台机器）
-#   · quelmara0 在各平台上 = **同一份源码在不同 CPU/OS 上的适配度**
-#   · posix 上没有 quelmara 列不是"跑不过"，是 qlmc 还没有 ELF 后端
-#
-# job：
-#   windows —— 五列全量（qlmc + stage-0 + C/Go/Python）+ 编译器轴
-#   posix   —— ubuntu(x86_64) 上跑 stage-0 + C/Go/Python；
-#              macOS(arm64) 上只有 C/Go/Python —— **quelmara 在 macOS 上没有后端**：
-#              qlmc 只有 PE，stage-0 的 native 是 ELF64（macOS 需要 Mach-O）。
-#              缺口记在 docs/07-gaps.md 的平台支持表。
+# 完整基准矩阵：Windows 和 Linux 运行 qlmc、C、C++、Go 的全部题目；
+# macOS 无 Quelmara Mach-O 后端，只运行 C、C++、Go 的全部题目。
+# --require-complete 令缺少源码、编译器或产物时明确失败，而非假绿。
+# quelmara0 是可选的 stage-0 参考编译器，不在此矩阵中。
 #
 # 结果去处：① job summary（人看，带机器信息）② artifact（机器读，保留 90 天）
 
@@ -53,7 +43,7 @@ env:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -91,11 +81,13 @@ jobs:
       - name: 自举 qlmc
         run: python tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe
 
-      - name: 语言基准（qlmc + stage-0 + C/Go/Python）
+      - name: 语言基准（qlmc + C/C++/Go，完整矩阵）
         shell: pwsh
+        env:
+          CXX: zig
         run: |
           # Tee-Object 会把 python 的退出码吞掉，显式检查一次
-          python bench/speed/run.py --langs quelmara c cpp go --reps $env:REPS --markdown --json bench.json 2>&1 | Tee-Object -FilePath bench.md
+          python bench/speed/run.py --langs quelmara c cpp go --require-complete --reps $env:REPS --markdown --json bench.json 2>&1 | Tee-Object -FilePath bench.md
           if ($LASTEXITCODE -ne 0) { Write-Error "run.py 失败（rc=$LASTEXITCODE）"; exit 1 }
 
       - name: 编译器轴（qlmc vs stage-0）
@@ -108,7 +100,7 @@ jobs:
         shell: pwsh
         run: |
           Add-Content $env:GITHUB_STEP_SUMMARY "## 语言基准 · Windows"
-          Add-Content $env:GITHUB_STEP_SUMMARY 'quelmara = qlmc（自举编译器，PE 后端）；quelmara0 = stage-0（参考编译器）。两者之差 = 后端差距。'
+          Add-Content $env:GITHUB_STEP_SUMMARY 'quelmara = qlmc（自举编译器，PE 后端）；完整矩阵要求所有选定实现成功。'
           Add-Content $env:GITHUB_STEP_SUMMARY '```'
           Get-Content bench.md -ErrorAction SilentlyContinue | Add-Content $env:GITHUB_STEP_SUMMARY
           Add-Content $env:GITHUB_STEP_SUMMARY '```'
@@ -139,7 +131,7 @@ jobs:
           - os: macos-latest
             arch: arm64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -151,33 +143,6 @@ jobs:
         with:
           go-version: stable
           cache: false
-
-      # v4.01：把对比语言装齐。**每一步都 `|| true`**，因为
-      # 某一种语言装不上不该让整条基准确链失败 —— `run.py` 找不到
-      # 编译器时会明确跳过并把原因写进结果，不会假装测过。
-      - name: 额外对比语言（rust / zig / nim / gfortran）
-        # **只在 Linux 上装**：这段脚本下的是 linux-x86_64 的预编译包，
-        # macOS（arm64）上会用错格式 —— v4.01 第一次跑就在
-        # `zigpkg/zig` 上抛 `OSError: [Errno 8] Exec format error`。
-        # macOS 的对比语言留到以后单独适配（brew 装 rust/gfortran 是可行的）。
-        if: runner.os == 'Linux'
-        continue-on-error: true
-        run: |
-          set -x
-          # Rust：官方脚本，装到 ~/.cargo
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal || true
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          # Zig：直接下预编译包（比包管理器快且版本确定）
-          ZV=0.13.0
-          curl -sSLo /tmp/zig.tar.xz "https://ziglang.org/download/${ZV}/zig-linux-x86_64-${ZV}.tar.xz" || true
-          mkdir -p "$HOME/zigpkg" && tar -xJf /tmp/zig.tar.xz -C "$HOME/zigpkg" --strip-components=1 2>/dev/null || true
-          echo "$HOME/zigpkg" >> "$GITHUB_PATH"
-          # Nim：用 choosenim（失败就算了）
-          curl -sSf https://nim-lang.org/choosenim/init.sh -o /tmp/niminit.sh && sh /tmp/niminit.sh -y || true
-          echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
-          # Fortran（Ubuntu 预装 gfortran 的概率不低，缺了再装）
-          which gfortran || (sudo apt-get update -qq && sudo apt-get install -y -qq gfortran) || true
-          true
 
       - name: 机器信息
         run: |
@@ -216,16 +181,10 @@ jobs:
           set -o pipefail
           # qlmc.exe 是 Windows PE，Linux 上要 wine 包装
           if [ "$(uname -s)" = "Linux" ]; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq --no-install-recommends wine64 || sudo apt-get install -y -qq --no-install-recommends wine
-            export PATH="/usr/bin:$PATH"
-            sudo apt-get install -y -qq --no-install-recommends wine64 wine || sudo apt-get install -y -qq --no-install-recommends wine
-            export WINE=$(command -v wine || command -v wine64 || echo "/usr/bin/wine64")
-            echo "WINE=$WINE"
-            "$WINE" --version
-            QLMC="$GITHUB_WORKSPACE/build/qlmc.exe" python bench/speed/run.py --langs quelmara c cpp go rust zig nim fortran --reps "$REPS" --markdown --json bench.json 2>&1 | tee bench.md
+            export WINE=$(command -v wine || command -v wine64)
+            QLMC="$GITHUB_WORKSPACE/build/qlmc.exe" python bench/speed/run.py --langs quelmara c cpp go --require-complete --reps "$REPS" --markdown --json bench.json 2>&1 | tee bench.md
           else
-            python bench/speed/run.py --langs quelmara c cpp go rust zig nim fortran --reps "$REPS" --markdown --json bench.json 2>&1 | tee bench.md
+            python bench/speed/run.py --langs c cpp go --require-complete --reps "$REPS" --markdown --json bench.json 2>&1 | tee bench.md
           fi
 
       - name: 写 job summary

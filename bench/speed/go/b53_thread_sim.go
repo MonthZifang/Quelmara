@@ -4,7 +4,6 @@ package main
 import (
 	"fmt"
 	"sync"
-	"time"
 )
 
 func work(start, end int64) int64 {
@@ -19,7 +18,7 @@ func main() {
 	n := int64(10000000)
 	var res [4]int64
 	var wg sync.WaitGroup
-	t0 := time.Now()
+	t0 := benchNow()
 	ranges := [4][2]int64{{0, n / 4}, {n / 4, n / 2}, {n / 2, 3 * n / 4}, {3 * n / 4, n}}
 	for k := 0; k < 4; k++ {
 		wg.Add(1)
@@ -29,7 +28,7 @@ func main() {
 		}(k)
 	}
 	wg.Wait()
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(res[0] + res[1] + res[2] + res[3])
 	fmt.Println("T")
 	fmt.Println(el)

@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func perm(arr []int64, k, n int, acc int64) int64 {
@@ -28,9 +27,9 @@ func main() {
 	for i := 0; i < 10; i++ {
 		a[i] = int64(i + 1)
 	}
-	t0 := time.Now()
+	t0 := benchNow()
 	r := perm(a, 0, 10, 0)
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(r)
 	fmt.Println("T")
 	fmt.Println(el)

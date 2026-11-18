@@ -14,6 +14,6 @@ program b86_matrix_diag
   end do
   call system_clock(t1, rate)
   print '(I0)', sum
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b86_matrix_diag

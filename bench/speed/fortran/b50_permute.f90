@@ -35,6 +35,6 @@ program b50_permute
   r = perm(ar, 0_8, 10_8, 0_8)
   call system_clock(t1, rate)
   print '(I0)', r
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b50_permute

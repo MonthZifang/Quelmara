@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func isPrime(n int64) int64 {
@@ -26,13 +25,13 @@ func isPrime(n int64) int64 {
 
 func main() {
 	var cnt int64 = 0
-	t0 := time.Now()
+	t0 := benchNow()
 	for i := int64(0); i < 100000; i++ {
 		if isPrime(i) == 1 {
 			cnt++
 		}
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(cnt)
 	fmt.Println("T")
 	fmt.Println(el)

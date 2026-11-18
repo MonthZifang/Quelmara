@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 )
 
 func main() {
@@ -14,7 +13,7 @@ func main() {
 	}
 	flags[0] = 0
 	flags[1] = 0
-	t0 := time.Now()
+	t0 := benchNow()
 	for p := int64(2); p*p <= n; p++ {
 		if flags[p] != 0 {
 			for q := p * p; q <= n; q += p {
@@ -28,7 +27,7 @@ func main() {
 			cnt++
 		}
 	}
-	el := time.Since(t0).Nanoseconds()
+	el := benchElapsed(t0)
 	fmt.Println(cnt)
 	fmt.Println("T")
 	fmt.Println(el)

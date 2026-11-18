@@ -65,6 +65,21 @@ arena  spawn  true  false
 
 > `int` / `str` / `f64` 等类型名不是关键字，是普通标识符（可被同名变量遮蔽，见 §9 陷阱）。
 
+**这张表是语言的唯一口径，两个编译器必须一致**（v4.123 收口）：
+
+- **`vec` / `map` 是上下文关键字**：词法层标 `NAME`，只有出现在类型位置
+  （`vec[T]` / `map[K]V`）时才当类型构造。所以它们**可以**当变量名。
+- stage-0（`tools/stage0/qlm.py` 的 `KEYWORDS`）与 qlmc
+  （`bootstrap/qlmc/qlmc.qma` 的 `_kw_id`）现在覆盖同一组词。子集（qlmc）
+  尚未实现 `result` / `option` / `select` / `chan` / `arena` / `rc` /
+  `impl` / `interface` / `test` 的语法，但它们仍是**保留字**——声明位置
+  会以「期望 NAME」拒绝。这条口径此前不一致：同一个 `let mut result = 1`
+  在 stage-0 报错、在 qlmc 编得过（v4.123 前
+  `bench/speed/quelmara/b57_pow_mod.qma` 就是这样，导致该基准在 stage-0
+  列永远编不出来）。
+- qlmc 另有 `exit` / `in` / `print` / `reduce` 四个**子集内建关键字**
+  （`print` 在 stage-0 里是普通函数名）。这是子集实现细节，不改变本表。
+
 ### 2.2 运算符
 
 | 类别 | 符号 |

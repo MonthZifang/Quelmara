@@ -280,7 +280,27 @@ Python 模块，进程内调用 10–350 ms/例（看种子大小），起子进
 - 不是覆盖率引导的（没有 AFL 那套 feedback loop）：变异是无向的，靠用例数量
   堆概率。
 
-### 1.5 性能回归门禁（v1.88）
+### 1.5 语言基准与性能回归门禁
+
+语言基准由 `bench/speed/run.py` 驱动。Linux 上先构建 Windows 版 qlmc，
+由 Wine 运行编译器，生成的 ELF 原生运行：
+
+```bash
+python3 tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma --target win -o build/qlmc.exe
+CC='gcc -O2' WINEDEBUG=-all python3 bench/speed/run.py --langs quelmara c cpp go \
+  --require-complete --reps 5 --output-dir build/speed-linux --markdown
+```
+
+Windows 上安装 Go 和 Zig 后运行同一组语言（设置 `CXX=zig`），macOS 没有
+Quelmara Mach-O 后端，只能比较 `c cpp go`。`--require-complete` 把缺失源码、
+工具链或产物视为失败；它不改变默认的可选语言跳过行为。每轮仍需成功退出、
+提供正数进程内计时且校验和一致；结果 JSON 包含各轮状态及命令。
+Go 基准须通过驱动构建，使平台计时辅助文件一并编译。额外语言（包括 Fortran、
+Nim）目前没有所有题目的实现，不应当标成完整跨语言矩阵。多数 Fortran 用例的
+`system_clock` 纳秒换算在长时间运行时仍可能发生整数溢出，不能将其作为可靠的
+完整基准结果；驱动器会将负耗时报为失败。
+
+性能回归门禁与语言基准独立（v1.88）：
 
 `quelmara bench` 量的是**进程墙钟**（含冷启动），只能看出"慢了半秒"这种量级；
 性能门禁用另一套夹具，量**进程内 `now_ns`**，并且按同一进程里的校准形状归一化。

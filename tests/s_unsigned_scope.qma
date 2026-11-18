@@ -1,0 +1,21 @@
+// A loop-carried nonnegative fact must not escape to a pre-loop use.
+// The branch can leave x negative; the loop itself preserves nonnegative x
+// only on the path where its initial value satisfies the induction invariant.
+module unsigned_scope
+
+fn check(cond: int, n: int) {
+    let mut x = -7
+    if cond == 1 { x = 0 }
+    print(x % 4)
+    let mut i = 0
+    while i < n {
+        x = (x + 1) % 4
+        i = i + 1
+    }
+    print(x % 4)
+}
+
+fn main() {
+    check(0, 3)
+    check(1, 3)
+}

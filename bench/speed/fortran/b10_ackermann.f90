@@ -22,6 +22,6 @@ program b10_ackermann
   call system_clock(t0, rate)
   print '(I0)', ack(2_8, 8_8)
   call system_clock(t1, rate)
-  print *, 'T'
+  print '(A)', 'T'
   print '(I0)', (t1 - t0) * 1000000000_8 / rate
 end program b10_ackermann
