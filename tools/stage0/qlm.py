@@ -5203,7 +5203,18 @@ def global_dce(fns_ast, keep=None):
     return kept
 
 
+# v4.123：C 后端**有意不做**的内存原语（docs/07-gaps.md §4.1）。
+# 列在这里是为了在**声明期**给出明确诊断，而不是让 gcc 报
+# "variable or field declared void" 那种要把人往沟里带的错误。
+_C_ABSENT_MEM_BUILTINS = {
+    "mem_alloc", "mem_free", "mem_load8", "mem_load16", "mem_load32",
+    "mem_load64", "mem_store8", "mem_store16", "mem_store32", "mem_store64",
+    "mem_copy", "mem_zero", "mem_cmp", "mem_str", "mem_ptr", "mem_chr",
+    "mem_load_acq", "mem_store_rel", "static_word", "syscall", "rdtsc",
+}
+
 BUILTIN_RETS = {"print": "void", "cores": "int", "assert": "void",
+                "now_ns": "int",   # v4.123：C 后端补单调时钟
                 "join": "int64_t", "len": "int64_t",
                 "to_float": "double", "to_f32": "float", "to_int": "int64_t"}
 
@@ -5665,10 +5676,40 @@ CORE_RUNTIME = r"""
 #include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 static int64_t qlm_cores(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return (int64_t)(n > 0 ? n : 1);
+}
+
+/* ---- 单调时钟（v4.123）----
+ *
+ * 此前 C 后端**没有** now_ns —— `bench/speed/quelmara/*.qma` 里 76 个基准
+ * 全部用 `let t0 = now_ns()` 计时，于是 `--target c` 一个基准都编不出来
+ * （`implicit declaration of function 'now_ns'`，跟着 `int64_t t0` 一起报
+ * "variable or field declared void"）。而 `bench/speed/c/bench.h` 早就有
+ * 跨平台实现（Windows `QueryPerformanceCounter` / POSIX `CLOCK_MONOTONIC`），
+ * 这里照抄同一口径：**单调、纳秒、只圈负载**。
+ *
+ * 用 `CLOCK_MONOTONIC` 而不是 `CLOCK_REALTIME`：后者会被 NTP/时区调整
+ * 拉扯，负耗时会让 bench 驱动判 FAIL（见 docs/05-toolchain.md §1.5）。
+ */
+static int64_t qlm_now_ns(void) {
+#if defined(_WIN32)
+    static LARGE_INTEGER f, c;
+    if (f.QuadPart == 0) QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (int64_t)((c.QuadPart / f.QuadPart) * 1000000000LL
+                     + ((c.QuadPart % f.QuadPart) * 1000000000LL) / f.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+#endif
 }
 
 /* 字符串：轮转缓冲池（无 GC、无 malloc 热点） */
@@ -6684,6 +6725,23 @@ class Codegen:
                 return f"((int64_t)({acode}))", "int64_t"
             if name == "cores":
                 return "qlm_cores()", "int64_t"
+            # v4.123：单调纳秒时钟。此前 C 后端没有它，76 个基准全部编不出来。
+            if name == "now_ns" and name not in self.infer.fns:
+                if e[2]:
+                    raise SyntaxError("now_ns() 不接受实参")
+                return "qlm_now_ns()", "int64_t"
+            # v4.123：内存原语在 C 链路上**明确不做**（见 docs/07-gaps.md §4.1，
+            # 理由：C 后端只承载"验证语义"的代码，不承载 syscall 级代码）。
+            # 但此前它没有诊断 —— 生成的 C 里 `mem_alloc(...)` 是个未声明的
+            # 函数，gcc 先报 `int64_t p = mem_alloc(...)` 处的
+            # "variable or field declared void"，真正的原因要翻三层才看得见。
+            # 文档承诺的是"声明期 fail-fast（有明确诊断）"，这里补上。
+            if name in _C_ABSENT_MEM_BUILTINS and name not in self.infer.fns:
+                raise SyntaxError(
+                    "C 后端不支持内存原语 " + name + "()（v4.123 边界：C 后端是"
+                    "「验证语义」用的交叉验证链路，不承载 syscall 级代码，"
+                    "见 docs/07-gaps.md §4.1）。要跑这类代码请用自研后端"
+                    "（--target native 或 win）")
             if name == "eprint" and name not in self.infer.fns:
                 if len(e[2]) != 1:
                     raise SyntaxError("eprint(x) 需要一个实参")
@@ -6758,7 +6816,7 @@ class Codegen:
                     if is_map_env(at):
                         return f"qlm_map_len({arg[1]})", "int64_t"
                     if is_vec_env(at):
-                        return f"qlm_vec_len({arg[1]})", "int64_t"
+                        return f"qlm_vec_len((QlmVec *)(intptr_t)({arg[1]}))", "int64_t"
                     if at == "const char *":
                         return f"((int64_t)strlen({arg[1]}))", "int64_t"
                 acode, atype = self.gen_expr(arg, env)
@@ -6767,7 +6825,7 @@ class Codegen:
                 if is_map_env(atype):
                     return f"qlm_map_len({acode})", "int64_t"
                 if is_vec_env(atype):
-                    return f"qlm_vec_len({acode})", "int64_t"
+                    return f"qlm_vec_len((QlmVec *)(intptr_t)({acode}))", "int64_t"
                 if atype == "const char *":
                     return f"((int64_t)strlen({acode}))", "int64_t"
                 raise SyntaxError(f"len() 目前只支持定长数组、切片、map、vec 或 str（实参类型={atype!r}）")
@@ -6890,7 +6948,7 @@ class Codegen:
             esz = self.ctype(e[1]) if e[1][0] == "named" and e[1][1] in self.structs \
                 else ("int64_t" if e[1] == ("named", "bool") else
                       ("const char *" if e[1] == ("named", "str") else self.ctype(e[1])))
-            return (f"qlm_vec_new({cap}, (int64_t)sizeof({esz}))",
+            return (f"(int64_t)(intptr_t)qlm_vec_new({cap}, (int64_t)sizeof({esz}))",
                     "vec:" + _vec_tag_str(e[1]))
         if k == "sliceof":
             ocode, otype = self.gen_expr(e[1], env)
@@ -6950,7 +7008,7 @@ class Codegen:
                 if m == "len":
                     if args:
                         raise SyntaxError("vec.len() 不接受实参")
-                    return f"qlm_vec_len({ocode})", "int64_t"
+                    return f"qlm_vec_len((QlmVec *)(intptr_t)({ocode}))", "int64_t"
                 if m == "clear":
                     if args:
                         raise SyntaxError("vec.clear() 不接受实参")
@@ -6962,9 +7020,11 @@ class Codegen:
                     if elem.startswith("agg:"):
                         tn = elem[4:]
                         return (f"({{ {tn} _vt = {acode}; "
-                                f"qlm_vec_push_n({ocode}, (const void *)&_vt); (int64_t)0; }})",
+                                f"qlm_vec_push_n((QlmVec *)(intptr_t)({ocode}), "
+                                f"(const void *)&_vt); (int64_t)0; }})",
                                 "int64_t")
-                    return f"qlm_vec_push({ocode}, (int64_t)({acode}))", "int64_t"
+                    return (f"qlm_vec_push((QlmVec *)(intptr_t)({ocode}), "
+                            f"(int64_t)({acode}))", "int64_t")
                 if m == "pop":
                     if args:
                         raise SyntaxError("vec.pop() 不接受实参")
@@ -6984,9 +7044,11 @@ class Codegen:
                     if elem.startswith("agg:"):
                         tn = elem[4:]
                         return (f"({{ {tn} _vt; "
-                                f"qlm_vec_get_n({ocode}, (int64_t)({icode}), (void *)&_vt); _vt; }})",
+                                f"qlm_vec_get_n((QlmVec *)(intptr_t)({ocode}), "
+                                f"(int64_t)({icode}), (void *)&_vt); _vt; }})",
                                 "struct:" + tn)
-                    base = f"qlm_vec_get({ocode}, (int64_t)({icode}))"
+                    base = (f"qlm_vec_get((QlmVec *)(intptr_t)({ocode}), "
+                            f"(int64_t)({icode}))")
                     if elem.startswith("mapinner:"):
                         return base, "map:" + elem[len("mapinner:"):]
                     return (f"((const char *)(intptr_t){base})", "const char *") \
@@ -6999,9 +7061,9 @@ class Codegen:
                     if elem.startswith("agg:"):
                         tn = elem[4:]
                         return (f"({{ {tn} _vt = {vcode}; "
-                                f"qlm_vec_set_n({ocode}, (int64_t)({icode}), (const void *)&_vt); "
-                                f"(int64_t)0; }})", "int64_t")
-                    return (f"qlm_vec_set({ocode}, (int64_t)({icode}), "
+                                f"qlm_vec_set_n((QlmVec *)(intptr_t)({ocode}), (int64_t)({icode}), "
+                                f"(const void *)&_vt); (int64_t)0; }})", "int64_t")
+                    return (f"qlm_vec_set((QlmVec *)(intptr_t)({ocode}), (int64_t)({icode}), "
                             f"(int64_t)({vcode}))", "int64_t")
                 raise SyntaxError(f"vec 不支持方法 {m}")
             mp = map_env_parts(otype) if is_map_env(otype) else None
@@ -7417,9 +7479,13 @@ class Codegen:
                 env[s[2]] = t
                 return f"{pad}int64_t {s[2]} = {code};"
             if is_vec_env(t):
-                # vec 句柄：QlmVec*（初始化表达式是整数句柄，强转即可）
+                # vec 句柄：**int64_t**（v4.123 修正）。`ctype()` 对 vec 的契约
+                # 就是整数字（"QlmVec* 转成的整数"），形参声明也走它；原来这里
+                # 单独声明成 `QlmVec *`，于是 `u_qsort(v, ...)` 这种"vec 实参传
+                # 给 vec 形参"就成了指针传整型 → GCC 14+ 直接报错。
+                # 统一成 int64_t，调用点再显式转回 QlmVec*（见 gen_vec_method）。
                 env[s[2]] = t
-                return f"{pad}QlmVec *{s[2]} = (QlmVec *)(intptr_t)({code});"
+                return f"{pad}int64_t {s[2]} = {code};"
             if t.startswith("struct:"):
                 t = t[7:]
             if t.startswith("enum:"):

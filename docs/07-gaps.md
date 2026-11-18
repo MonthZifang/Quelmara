@@ -95,7 +95,7 @@
 | 缺什么 | 影响 | 为什么不做 |
 |---|---|---|
 | `tcp_*` 内建 | `import std.net` 编不过 | 网络在 C 链路上没有意义（真需求走自研后端或 `qlm_uring`）；补齐等于在 C 后端重写一遍运行时 |
-| `mem_alloc`/`mem_store64`/`static_word` 等内存原语 | `std/net/reactor` 等底层模块编不过 | 同上：C 后端是"验证语义"用的，不承载 syscall 级代码 |
+| `mem_alloc`/`mem_store64`/`static_word` 等内存原语 | `std/net/reactor` 等底层模块编不过 | 同上：C 后端是"验证语义"用的，不承载 syscall 级代码。**v4.123：补了声明期明确诊断**（此前要让 gcc 报 "variable or field declared void" 才看得出原因） |
 | `interface`/`impl`、闭包字面量、插值字符串 `f"..."` | 声明期 fail-fast（有明确诊断） | ABI 与自研后端不同；复制一套只会带来两份要同步维护的语义 |
 | `Drop` 析构 | `impl T : Drop` fail-fast | C99 无析构语义，静默不跑就是语义分叉 |
 

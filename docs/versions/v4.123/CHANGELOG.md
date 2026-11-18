@@ -157,10 +157,9 @@ ubuntu-latest（GCC 15）上红。
 
 - **LICM 的 `return 0` bug**（`_licm_inv2`，见 `handoff/PERF-ROADMAP.md`）
   仍保留：直接启用会破坏自举不动点，需要值编号/支配关系级工程，不在本版范围。
-- `bench/speed/quelmara/*.qma` 里 76 个基准全部用 `now_ns()`，而 **C 后端
-  不支持 `now_ns`**（`now_ns` 只在自研后端实现）。所以 `--target c` 编不出
-  任何基准产物——这是既有缺口，与 `bench/speed/c/` 下的手写 C 版本无关
-  （矩阵里的 C 列用后者）。本版未改。
+- ~~`bench/speed/quelmara/*.qma` 里 76 个基准全部用 `now_ns()`，而 C 后端
+  不支持 `now_ns`~~ —— **已在本版 §7 收口**（73/76，剩余 3 个是内存原语的
+  既定边界）。
 
 ## 6. P2 补记：两个门禁的"假绿/假红"（第 7 条）
 
@@ -171,3 +170,66 @@ ubuntu-latest（GCC 15）上红。
 
 > 教训：这两条都不是"忘了接线"，而是**接了个永远为真的条件**——
 > 一条永不失败的门禁比没有门禁更糟，因为它消耗了"门禁是绿的"这个信任。
+
+## 7. C 后端补齐基准链路（`--target c` 从 0/76 到 73/76）
+
+上一版记录的"未做的事"里写着：`bench/speed/quelmara/*.qma` 全部用 `now_ns()`
+而 C 后端不支持它，所以 `--target c` 一个基准都编不出来。本条把它收掉。
+
+### 7.1 `now_ns` 进 C 后端
+
+`CORE_RUNTIME` 新增 `qlm_now_ns()`，口径与 `bench/speed/c/bench.h` 完全一致
+（Windows `QueryPerformanceCounter` / POSIX `CLOCK_MONOTONIC`，单调、纳秒、
+只圈负载）。用 `CLOCK_MONOTONIC` 而非 `CLOCK_REALTIME`：后者会被 NTP/时区
+调整拉扯，**负耗时会让 bench 驱动判 FAIL**（`05-toolchain.md` §1.5）。
+
+顺带把 `#include <time.h>` / `<windows.h>` 补进运行时头。
+
+### 7.2 `vec` 句柄的 C 类型统一
+
+`ctype()` 对 vec 的契约是**整数字**（"QlmVec* 转成的整数"），形参声明也走它；
+但 `gen_stmt` 的 `let` 分支单独声明成 `QlmVec *`，于是三种不匹配同时存在：
+
+- `let v = vec[int].new(n)` → `QlmVec *v`
+- `fn qsort(a: vec[int])` 形参 → `int64_t a`
+- `qlm_vec_*(QlmVec *)` 运行时形参
+
+C99 允许三者隐式互转，**GCC 14+ 把 `-Wint-conversion` 升成 error** → 9 个基准
+编不过。修法（三处，全部是"把既有隐含语义写明"）：
+
+1. `let` 的 vec 分支改回 `int64_t`（跟 `ctype` 契约一致）；
+2. `qlm_vec_new` 的返回值显式 `(int64_t)(intptr_t)` 转换；
+3. `qlm_vec_push/push_n/get/get_n/set/set_n/len` 的**调用点**显式
+   `(QlmVec *)(intptr_t)(...)`。
+
+> 第一版走反了：把运行时形参改成 `intptr_t`，结果运行时**内部**调用
+> （`qlm_vec_grow(v)` 传 `QlmVec *`）全部变成"指针传整型"，反而多出一批
+> 同类错误。**改契约要改在生成侧，不要动运行时签名。**
+
+### 7.3 内存原语补声明期诊断
+
+`mem_alloc` / `mem_store64` / `static_word` / `syscall` 等在 C 链路上是
+**文档明确不做**的（`07-gaps.md` §4.1：C 后端只承载"验证语义"的代码，
+不承载 syscall 级代码）。但此前没有诊断，生成出来的 C 报的是
+
+```
+int64_t p = mem_alloc(64);
+      ^ variable or field 'p' declared void
+implicit declaration of function 'mem_alloc'
+```
+
+—— 要翻三层才看得见真正原因。新增 `_C_ABSENT_MEM_BUILTINS`，在**声明期**
+给出「C 后端不支持内存原语 mem_alloc()（…见 docs/07-gaps.md §4.1）」，
+与文档承诺的"声明期 fail-fast（有明确诊断）"对齐。
+
+### 7.4 验证
+
+| 项 | 结果 |
+|---|---|
+| `--target c` 编 76 个基准 | **73/76 成功**（修复前 **0/76**） |
+| 剩下 3 个 | `b6_hash` / `b31_memcpy` / `b87_memcopy_big`，**全部**命中内存原语边界，**都有明确诊断**（不是无声失败） |
+| C 后端产物 vs 手写 C 参考校验和 | b7_sort / b40 / b79 / b73 / b1_int / b45 全部 **OK** |
+| `bash tests/run_tests.sh`（C 后端回归） | **PASS=15 FAIL=0** |
+
+> 这条的意义不是"多跑 73 个基准"，而是 `--target c` 终于能作为
+> **同一份源码在 gcc 上应该是什么结果**的参照——这正是它被设计出来的用途。
