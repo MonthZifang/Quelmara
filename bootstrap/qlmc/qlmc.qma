@@ -10035,44 +10035,73 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
         let ins = ir.get(i)
         let op = ins.op
         if op == OP_CONST {
-            // 只有**单定义**的临时值才能当常量源
-            if fc.vpin.get(ins.dst) == 0 && ndef.get(ins.dst) == 1 {
+            // **单定义**的值才能当常量源。
+            //
+            // v4.124：去掉 `vpin.get(dst) == 0`（"必须是临时值"）这条额外
+            // 限制。它挡掉的是最常见的形状：
+            //
+            //     let cap = 524288          -> MOV 变量, CONST 临时值
+            //     ...   key % cap           -> OP_MOD 的 b 是**变量**，不是临时值
+            //
+            // 于是 `% cap` 永远不满足"右操作数是常量"，一路落到 `idiv`
+            // （20–40 周期）。实测 b69_hash_fib（cap=524288=2^19，两次取模
+            // 都在热循环里）：qlmc 84.5ms vs gcc 22.1ms = **3.83×**，是全部
+            // 76 个基准里最差的一个；把常量直接写进表达式就降到 43ms。
+            //
+            // 安全性由 `ndef == 1` 保证：整个函数里这个 vreg 只被写一次，
+            // 所以"这一处 CONST 的值"就是它**在任何读取点的值**。变量是否
+            // 落在帧槽（vpin=1）不影响这条推理 —— 位置固定只意味着它住在
+            // 内存里，不意味着值会变。
+            if ndef.get(ins.dst) == 1 {
                 cok.set(ins.dst, 1)
                 cval.set(ins.dst, ins.imm)
             }
         } else if op == OP_MOV {
-            // 常量临时值搬进变量 → 直接 CONST 变量（聚合变量不能这么干）
-            if ins.a > 0 && fc.vpin.get(ins.a) == 0 && cok.get(ins.a) == 1 {
+            // 常量搬进变量 → 直接 CONST 变量（聚合变量不能这么干）。
+            // v4.124：源的 `vpin` 限制去掉（常量源现在也可能是单定义变量）。
+            if ins.a > 0 && cok.get(ins.a) == 1 {
                 if fc.vpin.get(ins.dst) == 1 && _ty_is_agg(fc.vty.get(ins.dst)) == 0 {
                     ir.set(i, Ir { op: OP_CONST, dst: ins.dst, a: 0, b: 0,
                                    imm: cval.get(ins.a) })
+                    // v4.124 **关键**：折完之后这个变量就是一条 CONST，
+                    // 必须同步登记为常量源，否则后面 `key % cap` 看到的
+                    // `ins.b == cap` 仍然 `cok == 0` —— 这一步之前漏了，
+                    // 于是"let 变量当除数"永远变不成 OP_DIVC（实测
+                    // b69_hash_fib 就卡在这里：cap 是 let 变量，两次取模
+                    // 都落到 idiv，3.83× 是全部基准里最差的一项）。
+                    if ndef.get(ins.dst) == 1 {
+                        cok.set(ins.dst, 1)
+                        cval.set(ins.dst, cval.get(ins.a))
+                    }
                 }
             }
         } else if op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_DIV ||
                   op == OP_MOD || op == OP_AND || op == OP_OR || op == OP_XOR ||
                   op == OP_SHL || op == OP_SAR || op == OP_SHR {
-            // 两个操作数都得是"已知常量"的临时值
-            if ins.a > 0 && ins.b > 0 && fc.vpin.get(ins.a) == 0 && fc.vpin.get(ins.b) == 0 {
+            // 两个操作数都得是"已知常量"（v4.124：不再要求是临时值）
+            if ins.a > 0 && ins.b > 0 {
                 if cok.get(ins.a) == 1 && cok.get(ins.b) == 1 {
                     if _fold_bin(op, cval.get(ins.a), cval.get(ins.b), out) == 1 {
                         let v = out.get(0)
                         ir.set(i, Ir { op: OP_CONST, dst: ins.dst, a: 0, b: 0, imm: v })
-                        if fc.vpin.get(ins.dst) == 0 && ndef.get(ins.dst) == 1 {
+                        if ndef.get(ins.dst) == 1 {
                             cok.set(ins.dst, 1)
                             cval.set(ins.dst, v)
                         }
                     }
                 }
             }
-            // 没被折掉、右操作数是常量 → 强度削减 / 压成立即数
+            // 没被折掉、右操作数是常量 → 强度削减 / 压成立即数。
+            // v4.124：这里正是 `key % cap`（cap 是变量）能变成 OP_DIVC 的地方。
             if ir.get(i).op == op && ins.a > 0 && ins.b > 0 {
-                if fc.vpin.get(ins.b) == 0 && cok.get(ins.b) == 1 {
+                if cok.get(ins.b) == 1 {
                     _opt_strength(fc, ir, i, op, ins, cval.get(ins.b), cok, cval, ndef)
                 }
             }
         } else if op == OP_CMP {
-            // 右操作数是常量 → `cmp r64, imm32`（省掉一次常量装载）
-            if ins.a > 0 && ins.b > 0 && fc.vpin.get(ins.b) == 0 && cok.get(ins.b) == 1 {
+            // 右操作数是常量 → `cmp r64, imm32`（省掉一次常量装载）。
+            // v4.124：同上去掉 `vpin` 限制（`i < N` 里的 N 常是 let 变量）。
+            if ins.a > 0 && ins.b > 0 && cok.get(ins.b) == 1 {
                 let cv = cval.get(ins.b)
                 if cv >= -2147483648 && cv <= 2147483647 {
                     ir.set(i, Ir { op: OP_CMPI, dst: ins.dst, a: ins.a,
@@ -10080,11 +10109,11 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
                 }
             }
         } else if op == OP_NEG || op == OP_BNOT || op == OP_NOT || op == OP_NZ {
-            if ins.a > 0 && fc.vpin.get(ins.a) == 0 && cok.get(ins.a) == 1 {
+            if ins.a > 0 && cok.get(ins.a) == 1 {
                 if _fold_un(op, cval.get(ins.a), out) == 1 {
                     let v = out.get(0)
                     ir.set(i, Ir { op: OP_CONST, dst: ins.dst, a: 0, b: 0, imm: v })
-                    if fc.vpin.get(ins.dst) == 0 && ndef.get(ins.dst) == 1 {
+                    if ndef.get(ins.dst) == 1 {
                         cok.set(ins.dst, 1)
                         cval.set(ins.dst, v)
                     }
@@ -10103,7 +10132,9 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     while i < n {
         let ins = ir.get(i)
         if ins.op == OP_JCMP && ins.b > 0 && ins.b < len(cok) {
-            if fc.vpin.get(ins.b) == 0 && cok.get(ins.b) == 1 && ndef.get(ins.b) == 1 {
+            // v4.124：去掉 `vpin` 限制（`i < N` 里的 N 常是 let 变量）。
+            // `cok` 现在由 `ndef == 1` 把关，安全性不变。
+            if cok.get(ins.b) == 1 && ndef.get(ins.b) == 1 {
                 let cv = cval.get(ins.b)
                 if cv >= -2147483648 && cv <= 2147483647 {
                     ir.set(i, Ir { op: OP_JCMPI, dst: ins.dst, a: ins.a, b: cv, imm: ins.imm })
