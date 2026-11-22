@@ -4,7 +4,7 @@
 > **实测数字一律不写在这里**，见 [`06-status.md`](06-status.md) —— 数字只允许
 > 出现在 `06-status.md` 与各版本 `CHANGELOG.md`（`00-convention.md` §4）。
 
-## 1. 一句话现状
+## 1. 现状
 
 `bootstrap/qlmc/qlmc.qma`（用 Quelmara 写的 stage-1 编译器）能编译的
 `std/**/*.qma` 模块数，是这条轨道唯一的硬指标。当前值、基线、剩余缺口
