@@ -33,3 +33,15 @@
 - 只处理 `imm==0xFFFF` 的 `OP_AND` 与 `imm==3` 的 `OP_SHL`，且源/目的均须在寄存器；栈槽情形与其它立即数、子操作码完全走旧路径，行为不变。
 - `movzx r32,r16` 写 32 位自动清高 32 位，与 `and r64,0xffff` 的 64 位结果在 [0,65535] 内等价；`lea r,[src*8]` 在 mod 2^64 下与 `shl r,3` 等价。
 - 本机计时波动较大（早期轮次出现 0.80–1.22 的异常比值，系统负载所致），结论以最小值为准，不代表 CI 数据。
+
+## CI 实测（run 45176054884，推送后权威口径）
+
+| 项 | 结果 |
+|---|---|
+| Windows / Ubuntu job | success（macOS job FAIL 为 `b75_fib_matrix` 的 cpp 计时 `nanoseconds must be positive` 抖动，该平台不含 Quelmara 列，与本改动无关） |
+| 全量 76 项跨语言校验和 | **76/76 一致，零 MISMATCH**（Windows + Ubuntu 两平台） |
+| 几何平均 qlm/C · Ubuntu | 1.624（b35aae2 基线 run 44320129929）→ **1.571**；b34 3.48× → 3.41× |
+| 几何平均 qlm/C · Windows | 2.023（基线 run 45082618857）→ 2.006，**但两次 runner CPU 不同**（基线 AMD EPYC 9V45 / 本轮 Intel Family 6 Model 106），绝对值不可比；同 run 内比值才有意义 |
+| 自举不动点（本机补跑） | `tests/bootstrap_test.py --strict` PASS：stage-2 可用且与 stage-1 逐字节等价，42/42 组，stage-2 == stage-3 不动点成立 |
+
+> 结论：改动语义正确、校验和零偏差、自举不动点成立。CI 的跨 run 硬件差异使单个基准的收益无法从绝对值确认，但 Ubuntu 同口径几何平均略有改善、无校验和回归。
