@@ -10331,6 +10331,92 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     }
     _opt_ndef(ir, ndef)
     _opt_divc_unsigned(fc, ndef)
+    // v4.128：div/mod 同源自除数融合 —— 让 C 式 x%10+x/10 只算一次魔数商。
+    _opt_divmod_fuse(fc, ndef)
+}
+
+/// v4.128：把同一基本块内、同一源 x 与同一除数 d 的
+///   `mr = x % d` ... `q = x / d`（x 在两者之间不被改写）
+/// 融合成一条魔数链：先把 DIV 提到 MOD 之前算出 q，再 `t=q*d; mr=x-t`，
+/// 原 DIV 改成 NOP。这样 % 与 / 只跑一次魔数序列。
+/// 正确性：C 截断除法恒满足 `x % d == x - trunc(x/d)*d`（含负数/MIN_INT，
+/// 逐值核过 -1000..1000 × 多种 d）。收益：C 编译器（gcc/zig cc）早已这样
+/// 融合（b78 反汇编只有一次 mulq），qlmc 原来两条完整魔数符号修正链。
+/// 安全性：只在同一基本块（无 LAB/跳转）、x 单定义、同 imm、
+/// qdst 在 q 之后不再被引用（除我们插的 t 计算）时动；判据全是形状，
+/// 不动点安全。一次只融一对，return 让下轮 _opt 再扫。
+fn _opt_divmod_fuse(fc: FnCtx, ndef: vec[int]) {
+    let ir = fc.ir
+    let n0 = len(ir)
+    if n0 < 4 { return }
+    let nv = len(fc.vloc)
+    let mut i = 0
+    while i < n0 {
+        let mo = ir.get(i)
+        if mo.op != OP_DIVC || mo.b != OP_MOD || mo.imm < 2 ||
+           mo.imm > 2147483647 || mo.a <= 0 || mo.a >= nv {
+            i = i + 1
+            continue
+        }
+        let x = mo.a
+        let d = mo.imm
+        let mr = mo.dst
+        // 不要用 ndef[x]==1 守卫：b78 的 x 在函数里被 MOV 和 DIV 各写一次，
+        // 但"两个 DIVC 读同一个值"只要求它们之间 x 未被改写 —— 下面的
+        // 基本块内扫描已经证明这一点，全局单定义是过度保守（会漏掉 b78）。
+        // 在 MOD 之后、控制流分叉之前，找同源 DIV（同除数）。
+        // 注意：DIV 可能就写回 x 本身（`x = x/d`），所以"找 DIV"的判断
+        // 必须放在"x 被改写"之前，否则 b78 那种形态永远匹配不到。
+        let mut j = i + 1
+        let mut qpos = -1
+        let mut qdst = 0
+        while j < len(ir) {
+            let w = ir.get(j)
+            if w.op == OP_LAB || _nn_jump(w.op) == 1 { break }   // 必须同一基本块
+            if w.op == OP_DIVC && w.b == OP_DIV && w.imm == d && w.a == x {
+                qpos = j
+                qdst = w.dst
+                break
+            }
+            if w.dst == x && _opt_writes(w.op) == 1 { break }   // x 被其它指令改写
+            j = j + 1
+        }
+        if qpos < 0 || qdst <= 0 || qdst >= nv { i = i + 1  continue }
+        // mr 在 i 与 qpos 之间若被读过，融合后它仍在 i+2 就算出，安全。
+        // 但 qdst 若在 (i, qpos) 之间被读过，提前算会改变可见值 → 跳过。
+        let mut qdst_read_early = 0
+        let mut k = i + 1
+        while k < qpos {
+            let w = ir.get(k)
+            if w.a == qdst || (w.b == qdst && w.op != OP_DIVC) { qdst_read_early = 1 }
+            k = k + 1
+        }
+        if qdst_read_early == 1 { i = i + 1  continue }
+        // 变换：qnew 是新 vreg，避免提前覆盖 x（SUB 还要用旧 x）。
+        // 三条指令必须在 i 处**连续发完**，因为 mr 的下游使用可能紧跟 i+1
+        // （b78 的 `s = s + x%10` 就在 MOD 的下一条）——不能把 SUB 推迟。
+        //   i:     DIVC qnew, x, /d      ← 唯一的魔数链
+        //   i+1:   BINI t, qnew, MUL, d
+        //   i+2:   SUB  mr, x, t         ← 原 MOD 的 dst，值 = x - q*d
+        //   i+3:   MOV  qdst, qnew       ← 原 DIV 的结果照旧给下游
+        //   原 qpos 的 DIV -> NOP
+        let qnew = _vnew(fc)
+        let t = _vnew(fc)
+        ir.set(qpos, Ir { op: OP_NOP, dst: 0, a: 0, b: 0, imm: 0 })
+        ir.set(i, Ir { op: OP_DIVC, dst: qnew, a: x, b: OP_DIV, imm: d })
+        _ir_insert(fc, i + 1, OP_BINI, t, qnew, OP_MUL, d)
+        _ir_insert(fc, i + 2, OP_SUB, mr, x, t, 0)
+        _ir_insert(fc, i + 3, OP_MOV, qdst, qnew, 0, 0)
+        // 新 vreg 的活跃区间：_vnew 记的是"追加到末尾"，必须显式钉回插入点
+        // （照 _opt_licm 的写法；否则 _rebuild_temp_ends 的条件不成立、
+        //  vstart 停在末尾，寄存器分配会认为它们从不活跃）。
+        fc.vstart.set(qnew, i)
+        fc.vend.set(qnew, i + 3)
+        fc.vstart.set(t, i + 1)
+        fc.vend.set(t, i + 2)
+        // qpos 的 DIV 已 NOP；qdst 的结果由 i+3 的 MOV 提供。
+        return   // 一次只融合一对，避免下标漂移
+    }
 }
 
 // ---------------------------------------------------------------------------
