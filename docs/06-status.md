@@ -5079,6 +5079,24 @@ b13 的 `n % 2 == 0` 改写成 `n & 1 == 0` 会**死循环**，Collatz 发散）
 从 15 分钟变成 40 分钟跑不完，改按 vreg 直访的标记表。详见
 `versions/v4.125/CHANGELOG.md`，不代表 CI 数据。
 
+### v4.126 本地验证更新（OP_BINI 发射器 peephole：movzx / lea）
+
+本机 Linux x86-64：新增 `_emit_bini_peephole`，只把源与目的都已在寄存器的
+`and r,0xffff` 发成 `movzx r32,r16`、`shl r,3` 发成 `lea r,[src*8]`；
+其它情形走旧路径，不改 IR / pass / vloc 分配。gcc+objdump 已核对两条编码。
+新旧 qlmc 编 b34 到 ELF：热循环变为 `lea 0x0(,%r14,8),%r8` +
+`movzwl %r9w,%r9d`，ELF 4846→4844 字节，运行校验和一致。
+
+全量 76 基准新旧 qlmc 各编 ELF 并运行：**76/76 校验和一致、零 MISMATCH**
+（11 项 ELF 字节变化，其余 65 项逐字节不变）。差分夹具 `s_unsigned_mod` /
+`s25_divmod` / `s15_bitops` 三例 stage-0 与新 qlmc 输出逐字节相同；
+`tests/qlmc_test.py --qlmc build/qlmc_new.exe` **PASS=134 FAIL=0**。
+
+b34 本地交替 9 轮取最小：old 101093999ns / new 101467368ns，比值
+**1.0037（+0.37%）**，另一次 7 轮最小值比值 0.9997（−0.03%）——
+本机无显著收益、无 >5% 回退，Windows CI 的真实收益待实测。详见
+`versions/v4.126/CHANGELOG.md`，不代表 CI 数据。
+
 
 > 口径（v4.65 起）：`bench/speed/` 里每个规范基准（C 为参照）在 11 种语言下各有一份
 > 同源实现，统一打印 `结果行…T<换行>纳秒`；校验和 = `T` 之前的内容。所有语言必须与 C

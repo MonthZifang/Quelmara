@@ -12239,6 +12239,60 @@ fn _emit_xmm(fc: FnCtx, ins: Ir) {
     }
 }
 
+/// OP_BINI 的发射器级 peephole（v4.126，不动 IR / 不动点安全）。
+///
+/// 只处理"源和目的都已在寄存器"的两种形态；其它情形返回 0，由调用方
+/// 走原来的 `_to_reg` + `_alu_imm` / `_shift_imm` 路径。
+/// 单独成函数是为了不给 `_emit_ir` 加局部变量（帧贴 416 槽上限，见 §4.1）。
+///
+/// - `and d, 0xffff` → `movzx d32, src16`（`0F B7 /r`，REX.W=0）：
+///   两者都把值截断到 [0,65535]；写 32 位自动清高 32 位。
+/// - `shl d, 3` → `lea d, [src*8]`（`8D /r` + SIB scale=8、base=none）：
+///   mod=00 + disp32=0 规避 RBP/R13 编码陷阱，乘 8 在 mod 2^64 下等价。
+fn _emit_bini_peephole(fc: FnCtx, ins: Ir, d: int) -> int {
+    let code = fc.code
+    let aloc = fc.vloc.get(ins.a)
+    if aloc <= 0 {
+        return 0
+    }
+    let src = aloc - 1
+    if ins.b == OP_AND && ins.imm == 0xFFFF {
+        // REX: W=0, R=dest>=8, B=src>=8；movzx r32, r/m16 = REX 0F B7 /r
+        let mut rex = 0x40
+        if d >= 8 {
+            rex = rex | 4
+        }
+        if src >= 8 {
+            rex = rex | 1
+        }
+        _b(code, rex)
+        _b(code, 0x0F)
+        _b(code, 0xB7)
+        _b(code, 0xC0 | ((d & 7) << 3) | (src & 7))
+        return 1
+    }
+    if ins.b == OP_SHL && ins.imm == 3 {
+        // REX.W=1, R=dest>=8, B 不用于 index（index 高位由 REX.X 编码，
+        // 但这里 src 是 SIB.index；REX.X = bit1）。见下方 SIB 构造。
+        let mut rex = 0x48
+        if d >= 8 {
+            rex = rex | 4
+        }
+        if src >= 8 {
+            rex = rex | 2                       // REX.X → SIB.index 高位
+        }
+        _b(code, rex)
+        _b(code, 0x8D)
+        // mod=00, reg=d, rm=100(SIB)
+        _b(code, 0x04 | ((d & 7) << 3))
+        // scale=8(11), index=src, base=101(无 base)
+        _b(code, 0xC5 | ((src & 7) << 3))
+        _w32(code, 0)
+        return 1
+    }
+    return 0
+}
+
 fn _emit_ir(fc: FnCtx, i: int) {
     let ins = fc.ir.get(i)
     let code = fc.code
@@ -12265,6 +12319,12 @@ fn _emit_ir(fc: FnCtx, i: int) {
         let mut d = RAX
         if dloc > 0 {
             d = dloc - 1
+            // v4.126：and r,0xffff → movzx / shl r,3 → lea，仅当源和目的都
+            // 在寄存器；不命中时 peephole 一条字节都不发，走下面的原路径。
+            // 实现放在独立函数里，`_emit_ir` 不新增局部变量（§4.1 帧上限）。
+            if _emit_bini_peephole(fc, ins, d) == 1 {
+                return
+            }
         }
         if sub == OP_MUL {
             // 三操作数 imul：reg=dst、rm=源，源在寄存器时一条搞定
