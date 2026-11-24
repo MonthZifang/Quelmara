@@ -3803,6 +3803,22 @@ fn _movq_r_from_x(code: vec[int], r: int, x: int) {
 ///   [-2^31, 0)       → `REX.W C7 /0 imm32` 符号扩展（7 字节）
 ///   其余             → `movabs`（10 字节）
 fn _mov_imm(code: vec[int], dst: int, v: int) {
+    // v4.129：`mov r,0`（5–10 字节、且对 r 的旧值有数据依赖）→ `xor r32,r32`
+    // （2–3 字节、零惯用法、打破假依赖）。32 位写自动清高 32 位，
+    // 所以 `xor r32d,r32d` 与"写入 64 位 0"逐位等价（含 R8–R15）。
+    // 编码：REX(0x40|B, W=0) 31 /r modrm=0xC0|(dst&7)<<3|(dst&7)。
+    if v == 0 {
+        // opcode 0x31 = XOR r/m, reg（dest=r/m, src=reg）。
+        // dst<8：无 REX，2 字节（31 C0|reg<<3|rm）。
+        // dst>=8：**必须同时置 REX.R 和 REX.B**（reg 与 r/m 都要扩展），
+        // 即 0x45，3 字节。首版只置 B（0x41）→ 编成 `xor r12d,esp`，静默错值！
+        if dst >= 8 {
+            _b(code, 0x45)
+        }
+        _b(code, 0x31)
+        _b(code, 0xC0 | ((dst & 7) << 3) | (dst & 7))
+        return
+    }
     if v >= 0 && v <= 4294967295 {
         if dst >= 8 {
             _b(code, 0x41)                     // REX.B

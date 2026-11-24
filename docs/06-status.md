@@ -5114,6 +5114,22 @@ b78 本地交替 9 轮取最小：91.08ms → **59.74ms（0.656，−34.4%）**�
 改写量到的上限 0.662 一致。CI 权威数据待推送后实测，详见
 `versions/v4.128/CHANGELOG.md`，不代表 CI 数据。
 
+### v4.129 本地验证更新（`mov r,0` → `xor r32,r32` 零惯用法）
+
+`_mov_imm(code,dst,0)` 改发 `xor r32,r32`（dst<8 两字节、dst>=8 三字节 REX.R|B）。
+32 位写自动清高 32 位，逐位等价；Qlm 比较一律显式 CMP 再 setcc/jcc，
+xor 改标志位无影响。**坑**：dst>=8 必须同时置 REX.R 与 REX.B（0x45），
+首版只置 B 把 `xor r12d,r12d` 编成 `xor r12d,esp` 静默错算，已修并核对编码。
+
+全量 76 基准新旧 qlmc 各编 ELF 并运行：**76/76 校验和一致**（一次 wine IPC 抖动
+重编后一致）。差分夹具 5/5、`tests/qlmc_test.py --qlmc build/qlmc_v4129b.exe`
+**PASS=134 FAIL=0**（首次 stage-0 侧 wine 抖动，重跑全过）、
+`tests/bootstrap_test.py --strict` **PASS**（42/42 组、stage-2==stage-3 不动点）。
+
+8 项 ELF 体积合计 −165 字节（约 −0.4%），运行时间 b34 0.999 / b1 1.000 /
+b78 1.005（min-of-7，**噪声内无可分辨收益**）。CI 权威数据待实测，详见
+`versions/v4.129/CHANGELOG.md`，不代表 CI 数据。
+
 
 > 口径（v4.65 起）：`bench/speed/` 里每个规范基准（C 为参照）在 11 种语言下各有一份
 > 同源实现，统一打印 `结果行…T<换行>纳秒`；校验和 = `T` 之前的内容。所有语言必须与 C
