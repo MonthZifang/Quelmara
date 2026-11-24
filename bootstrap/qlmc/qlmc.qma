@@ -11557,6 +11557,51 @@ fn _nn_loop_shape(ir: vec[Ir], h: int, e: int) -> int {
     return 1
 }
 
+/// v4.131：LCG 直线前缀闸 —— 取代 `_nn_loop_shape` 对"整个循环体无分支"的要求。
+///
+/// 只要求从循环头 h 到 LCG 更新的 DIVC j 之间是一段**纯运算直线前缀**：
+///   · 只扫 LCG 三连 `[p1, j]`（MUL / ADD / DIVC），要求其间是纯运算、
+///     无 LAB、无任何跳转 —— 三连原子，不被跳进或切开；
+///   · 全局确认：没有任何跳转**落进** `(p1, j]`（防止 t1/t2 的 nn/ub 标注张冠李戴）。
+///   · 循环头 h 到 p1 之间允许有条件跳转（b65/b26 的循环守卫就在那里）——
+///     它们要么跳出循环、要么跳过整段更新，v 保持原值仍在区间内，不影响不变式。
+///
+/// **为什么 sound（核心定理）**：`v` 全函数恰好写两次（入口 CONST + 这个 DIVC，
+/// `ndef[v]==2`）。入口 ∈[0,D-1] 且更新 `v↦(v*C+K)%D` 在该区间上是闭合的
+/// （`(D-1)*C+K<2^62` 保证先不溢出、C99 截断余数对非负数落在 [0,D-1]），
+/// 于是**任何执行路径上 v 都 ∈[0,D-1]** —— 与分支/跳转/跳过模式无关。
+/// 三连原子闸只保证中间量 t1/t2 的标注对得上，不是归纳成立的前提。
+fn _nn_lcg_prefix(ir: vec[Ir], h: int, e: int, j: int, p1: int, p2: int) -> int {
+    if p1 <= h || p1 >= p2 || p2 >= j || j >= e { return 0 }
+    // 三连 [p1,j] 内必须是纯运算、无 LAB、无跳转（原子执行）。
+    let mut k = p1
+    while k <= j {
+        let w = ir.get(k)
+        if w.op == OP_LAB || _nn_jump(w.op) == 1 { return 0 }
+        if w.op != OP_NOP && w.op != OP_CONST && w.op != OP_MOV &&
+           w.op != OP_ADD && w.op != OP_SUB && w.op != OP_MUL &&
+           w.op != OP_AND && w.op != OP_OR && w.op != OP_XOR &&
+           w.op != OP_SHL && w.op != OP_SHR && w.op != OP_SAR &&
+           w.op != OP_BINI && w.op != OP_DIVC && w.op != OP_CMP &&
+           w.op != OP_CMPI && w.op != OP_NEG && w.op != OP_NOT &&
+           w.op != OP_NZ && w.op != OP_BNOT && w.op != OP_TRUNC {
+            return 0
+        }
+        k = k + 1
+    }
+    // 全函数扫描：不许任何跳转落进 (p1,j]，否则 t1/t2 的 nn/ub 标注会张冠李戴。
+    k = 0
+    while k < len(ir) {
+        let w = ir.get(k)
+        if _nn_jump(w.op) == 1 {
+            let t = _lab_index(ir, w.imm)
+            if t > p1 && t <= j { return 0 }
+        }
+        k = k + 1
+    }
+    return 1
+}
+
 // Loop induction is deliberately disabled. A loop-local fact is not a function-wide
 // fact unless the optimizer proves dominance and every write/escape; the linear IR
 // analysis below does not build that proof.
@@ -11700,7 +11745,7 @@ fn _nn_lcg_induct(fc: FnCtx, ndef: vec[int], nn: vec[int], ub: vec[int], safe: v
         let jm = ir.get(i)
         if _nn_jump(jm.op) == 1 {
             let h = _lab_index(ir, jm.imm)
-            if h >= 0 && h < i && _nn_loop_shape(ir, h, i) == 1 {
+            if h >= 0 && h < i {
                 let mut j = h + 1
                 while j < i {
                     let dv = ir.get(j)
@@ -11717,7 +11762,8 @@ fn _nn_lcg_induct(fc: FnCtx, ndef: vec[int], nn: vec[int], ub: vec[int], safe: v
                                 if p1 > h && p1 < p2 {
                                     let i1 = ir.get(p1)
                                     if i1.op == OP_BINI && i1.b == OP_MUL && i1.imm > 0 &&
-                                       i1.a == vv {
+                                       i1.a == vv &&
+                                       _nn_lcg_prefix(ir, h, i, j, p1, p2) == 1 {
                                         // 入口定义：循环外最后一次写 vv。
                                         let mut ep = -1
                                         let mut k = 0

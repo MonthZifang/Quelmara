@@ -1,0 +1,109 @@
+// s_lcg_branch_sound —— v4.131 LCG 直线前缀放宽的 soundness 压力夹具。
+//
+// 关键红线：只把"入口非负且 ≤D-1 + 全程只写两次 + 归纳步不溢出"的
+// LCG 归纳变量标成非负，分支在更新之后随便走都不能破坏不变式。
+// 覆盖：负初值 / 近溢出乘数 / K=0 / 条件跳过更新 / 嵌套循环改 v / D=2。
+// 每个 case 都必须与 stage-0 逐字节一致（截断有符号语义）。
+
+fn main() {
+    // 1) 负初值 LCG：初值 -7，(D-1)*C+K=48 不溢出，但入口 <0 → 绝不标非负。
+    let mut t = -7
+    let mut acc1 = 0
+    let mut i = 0
+    while i < 200 {
+        t = (t * 3 + 1) % 16
+        acc1 = acc1 + t % 4
+        i = i + 1
+    }
+    print(acc1)
+
+    // 2) 负初值 + 循环体分支：即使有分支也不能因为放宽的 CFG 闸而误标。
+    let mut n = -100
+    let mut acc2 = 0
+    i = 0
+    while i < 100 {
+        n = (n * 5 + 3) % 32
+        let d = n % 4
+        if d == 0 { acc2 = acc2 + n }
+        if d == 1 { acc2 = acc2 - n }
+        i = i + 1
+    }
+    print(acc2)
+
+    // 3) 近溢出乘数：(D-1)*C+K > 2^62 → 归纳闸拒绝；不标非负。
+    //    用 C=2147483647、D=2147483648、K=0 让积接近但不超过 2^62，
+    //    另一组 C=1000000007、D=2^31 让 (D-1)*C = 2.147e18 < 2^62 合法（对照）。
+    let mut p = 7
+    let mut acc3 = 0
+    i = 0
+    while i < 100 {
+        p = (p * 1103515245 + 12345) % 2147483648
+        acc3 = acc3 + p % 3
+        i = i + 1
+    }
+    print(acc3)
+
+    // 4) K=0：合法 LCG，入口 5 ∈[0,D-1]，分支跳过更新路径。
+    let mut z = 5
+    let mut acc4 = 0
+    i = 0
+    while i < 100 {
+        if i % 2 == 0 {
+            z = (z * 3 + 0) % 16
+        }
+        acc4 = acc4 + z % 4
+        i = i + 1
+    }
+    print(acc4)
+
+    // 5) 分支跳过更新（条件 LCG）：v 保持原值时不变式必须持续成立。
+    let mut s = 100
+    let mut acc5 = 0
+    i = 0
+    while i < 100 {
+        if i < 50 {
+            s = (s * 7 + 11) % 256
+        }
+        acc5 = acc5 + s % 8
+        i = i + 1
+    }
+    print(acc5)
+
+    // 6) 嵌套循环改 v（ndef>2 → 归纳闸拒绝；绝不能误标）。
+    let mut q = 3
+    let mut acc6 = 0
+    i = 0
+    while i < 50 {
+        q = (q * 3 + 7) % 64
+        let mut j = 0
+        while j < 3 {
+            q = q + 1
+            j = j + 1
+        }
+        acc6 = acc6 + q % 4
+        i = i + 1
+    }
+    print(acc6)
+
+    // 7) D=2 的 LCG：%2 走 and $1，入口 1 合法。
+    let mut b = 1
+    let mut acc7 = 0
+    i = 0
+    while i < 100 {
+        b = (b * 5 + 1) % 2
+        acc7 = acc7 + b
+        i = i + 1
+    }
+    print(acc7)
+
+    // 8) 入口 > D-1（200 > 16）但入口非负：归纳前提失败，保持有符号。
+    let mut big = 200
+    let mut acc8 = 0
+    i = 0
+    while i < 100 {
+        big = (big * 3 + 1) % 16
+        acc8 = acc8 + big % 4
+        i = i + 1
+    }
+    print(acc8)
+}
