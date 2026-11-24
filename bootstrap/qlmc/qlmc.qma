@@ -11602,9 +11602,275 @@ fn _nn_lcg_prefix(ir: vec[Ir], h: int, e: int, j: int, p1: int, p2: int) -> int 
     return 1
 }
 
-// Loop induction is deliberately disabled. A loop-local fact is not a function-wide
-// fact unless the optimizer proves dominance and every write/escape; the linear IR
-// analysis below does not build that proof.
+/// v4.132：窄计数循环归纳变量非负/上界证明（普通 `while i < hi { ... i=i+step }`）。
+///
+/// 核心定理（与 stage-0 `analyze_ranges` 的循环归纳同判据）：
+///   ivar 全函数恰好写两次 —— 入口 `CONST lo`（0<=lo<hi）与循环里唯一的
+///   `ivar = ivar + step`（step>0）；守卫是 `ivar < hi` / `ivar <= hi`
+///   （jcc=0x8C/0x8E：真则进体；jcc=0x8D/0x8F：真则退出）且回边是唯一一条
+///   指向循环头标签的边；hi 为常量或循环前固定的值且循环内不改；
+///   `max_i = hi-1+step < 2^62` 且 hi<=2^62。
+/// 于是任何执行路径上 ivar 恒在 [0, max_i] —— 与循环体里别的分支无关：
+/// 不变式在入口成立，每轮 step 保序，守卫保证进体时 ivar<hi。
+///
+/// **soundness**：只认两处写（其它 vreg 多写/被取址/被内层循环改写一律拒绝），
+/// 所以可把"循环内事实"安全地提升为"全函数事实"；入口 >=0 排除负初值，
+/// step>0 排除负 step；上界 <2^62 保证后续 `i*i` 派生不溢出 int64。
+/// 标 nn=1 / ub=max_i 之后，标记循环自动把循环的 `%const` 改成无符号快路径；
+/// `_nn_propagate` 的后续调用把 i*i / 3*i 等单定义派生临时值也带上界。
+fn _nn_loop_induct(fc: FnCtx, ndef: vec[int], nn: vec[int], ub: vec[int],
+                   cv: vec[int], safe: vec[int]) {
+    let ir = fc.ir
+    let nv = len(fc.vloc)
+    let n = len(ir)
+    let LIM = 4611686018427387904
+    let mut i = 0
+    while i < n {
+        let jm = ir.get(i)
+        // 回边：JMP/JZ/JNZ/JCMPI/JCMP 指向更早的 LAB。
+        if _nn_jump(jm.op) == 1 {
+            let h = _lab_index(ir, jm.imm)
+            if h >= 0 && h < i && h + 1 < i {
+                // 守卫必须在循环头 h（只允许 NOP/LAB 前缀），且是 ivar<hi
+                // 或 ivar<=hi 的四种合法 jcc 形态。
+                let mut gi = h
+                let mut guard = ir.get(gi)
+                while gi <= h + 3 && (guard.op == OP_NOP || guard.op == OP_LAB) {
+                    gi = gi + 1
+                    if gi > h + 3 { break }
+                    guard = ir.get(gi)
+                }
+                let cc = guard.dst
+                let mut hi_val = -1
+                let mut hi_v = 0
+                if guard.op == OP_JCMPI {
+                    if guard.b < 0 || guard.b >= LIM { hi_val = -2 }
+                    else { hi_val = guard.b }
+                } else if guard.op == OP_JCMP {
+                    hi_v = guard.b
+                }
+                // 只放行严格 `<`（JL=0x8C 进体 / JGE=0x8D 退出）。
+                // `<=`（JLE/JG=0x8E/0x8F）体内最大值是 hi 而非 hi-1，
+                // 统一用 hi-1+step 会**低估**上界 → i*i 派生值溢出却仍被标 nn，
+                // 属 soundness 风险；保守拒绝，待单独按 hi+step 处理。
+                let enter_lt = (cc == 0x8C)
+                let enter_ge = (cc == 0x8D)
+                if (enter_lt || enter_ge) && (hi_val >= 0 || hi_v > 0) {
+                    let ivar = guard.a
+                    let mut sp = -1
+                    let mut step = 0
+                    let mut k = gi + 1
+                    while k < i {
+                        let w = ir.get(k)
+                        if w.dst == ivar && _opt_writes(w.op) == 1 {
+                            if w.op == OP_BINI && w.b == OP_ADD && w.imm > 0 {
+                                if sp < 0 { sp = k  step = w.imm }
+                                else { sp = -2 }
+                            } else if w.op == OP_ADD && w.a == ivar && w.b > 0 &&
+                                      w.b < nv && ndef.get(w.b) == 1 &&
+                                      ir.get(_nn_safe_def(ndef, safe, w.b)).op == OP_CONST {
+                                let si = _nn_safe_def(ndef, safe, w.b)
+                                if si >= 0 && ir.get(si).imm > 0 {
+                                    if sp < 0 { sp = k  step = ir.get(si).imm }
+                                    else { sp = -2 }
+                                } else { sp = -2 }
+                            } else { sp = -2 }
+                        }
+                        k = k + 1
+                    }
+                    if sp >= 0 && ivar > 0 && ivar < nv && ndef.get(ivar) == 2 {
+                        // hi 的解析：JCMPI 常量，或 JCMP 的 b 在循环前有唯一 CONST 定义。
+                        let mut hi = hi_val
+                        if hi < 0 && hi_v > 0 && hi_v < nv {
+                            let hd = _nn_safe_def(ndef, safe, hi_v)
+                            if hd >= 0 && hd < h && ir.get(hd).op == OP_CONST &&
+                               ir.get(hd).imm >= 0 && ir.get(hd).imm < LIM {
+                                hi = ir.get(hd).imm
+                            }
+                            // hi 在循环内不许被改写（全局单定义已覆盖：safe 只认 ndef==1）。
+                        }
+                        // 入口定义：循环外最后一次写 ivar 必须是 CONST lo。
+                        let mut ep = -1
+                        k = 0
+                        while k < h {
+                            let eu = ir.get(k)
+                            if eu.dst == ivar && _opt_writes(eu.op) == 1 { ep = k }
+                            k = k + 1
+                        }
+                        if ep >= 0 && hi > 0 && hi <= LIM {
+                            let ec = ir.get(ep)
+                            let lo = ec.imm
+                            if ec.op == OP_CONST && lo >= 0 && lo < hi {
+                                // 溢出闸：max_i = hi-1+step < 2^62。
+                                let mut ok = 1
+                                if step >= LIM { ok = 0 }
+                                else if hi - 1 >= LIM - step { ok = 0 }
+                                // 回边必须唯一：不许其它跳转落进循环头（多回边/多入口）。
+                                if ok == 1 {
+                                    k = 0
+                                    while k < n {
+                                        let jw = ir.get(k)
+                                        if k != i && _nn_jump(jw.op) == 1 {
+                                            if jw.imm == ir.get(h).imm { ok = 0 }
+                                        }
+                                        k = k + 1
+                                    }
+                                }
+                                // 入口定义不能落在任何回边区间里（防外层循环改写）。
+                                if ok == 1 {
+                                    k = 0
+                                    while k < n {
+                                        let jw = ir.get(k)
+                                        if _nn_jump(jw.op) == 1 {
+                                            let tp = _lab_index(ir, jw.imm)
+                                            if tp >= 0 && tp < k && tp <= ep && ep <= k { ok = 0 }
+                                        }
+                                        k = k + 1
+                                    }
+                                }
+                                // 不许跳转落进 (gi, sp]，否则守卫/步的局部性失效。
+                                if ok == 1 {
+                                    k = 0
+                                    while k < n {
+                                        let jw = ir.get(k)
+                                        if _nn_jump(jw.op) == 1 {
+                                            let tp = _lab_index(ir, jw.imm)
+                                            if tp > gi && tp <= sp { ok = 0 }
+                                        }
+                                        k = k + 1
+                                    }
+                                }
+                                // 被取址（地址逃逸）一律拒绝。
+                                if ok == 1 && _nn_escaped(fc, ivar) == 1 { ok = 0 }
+                                if ok == 1 {
+                                    nn.set(ivar, 1)
+                                    ub.set(ivar, hi - 1 + step)
+                                    // 让标记循环认这个"循环内被改写但已归纳证明"的变量。
+                                    safe.set(ivar, ep + 1)
+                                    // 派生值：i*i / 3*i / i+step 等单定义临时值的
+                                    // 定义被 _nn_safe 挡掉，这里单独补 nn/ub。
+                                    _nn_loop_derive_all(ir, nv, ndef, nn, ub, cv,
+                                                        safe, h, i + 1,
+                                                        ivar, hi - 1 + step)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+/// 查 v 的唯一安全定义下标（-1 = 无）。`safe` 由 `_nn_safe` 填。
+fn _nn_safe_def(ndef: vec[int], safe: vec[int], v: int) -> int {
+    if v <= 0 || v >= len(safe) { return -1 }
+    let d = safe.get(v) - 1
+    if d < 0 || v >= len(ndef) || ndef.get(v) != 1 { return -1 }
+    return d
+}
+
+/// v4.132：为已证循环归纳变量派生出的**循环内单定义临时值**补 nn/ub。
+///
+/// `_nn_safe` 会把所有落在回边区间里的定义标记为 blocked（safe=0），
+/// 于是 `_nn_propagate` 看不到循环内的 `t=ivar*ivar` / `t3=3*ivar` 等。
+/// 这里按需做一次**深度受限的递归**：只跟 ndef==1 的单定义、只认保上界的
+/// 运算（CONST/MOV/ADD/MUL/BINI(ADD|MUL)/AND/移位），乘法带 2^62 溢出闸。
+/// 归纳变量 `iv` 本身 ndef==2，作为**已证接地事实**（[0,ivb]）直接返回上界。
+/// 每个候选只在证明成功时才写 nn/ub —— 证不出就不动，保持保守。
+fn _nn_loop_derive(ir: vec[Ir], nv: int, ndef: vec[int], cv: vec[int],
+                   h: int, e: int, iv: int, ivb: int, v: int, depth: int) -> int {
+    if depth > 8 { return -1 }
+    if v == iv { return ivb }
+    if v <= 0 || v >= nv || v >= len(ndef) || ndef.get(v) != 1 { return -1 }
+    let mut dx = -1
+    let mut i = h
+    while i <= e {
+        let w = ir.get(i)
+        if w.dst == v && _opt_writes(w.op) == 1 {
+            if dx >= 0 { return -1 }
+            dx = i
+        }
+        i = i + 1
+    }
+    if dx < 0 { return -1 }
+    let d = ir.get(dx)
+    let LIM = 4611686018427387904
+    if d.op == OP_CONST {
+        if d.imm >= 0 && d.imm < LIM { return d.imm }
+        return -1
+    }
+    if d.op == OP_MOV {
+        return _nn_loop_derive(ir, nv, ndef, cv, h, e, iv, ivb, d.a, depth + 1)
+    }
+    if d.op == OP_ADD || d.op == OP_MUL {
+        let ba = _nn_loop_derive(ir, nv, ndef, cv, h, e, iv, ivb, d.a, depth + 1)
+        let bb = _nn_loop_derive(ir, nv, ndef, cv, h, e, iv, ivb, d.b, depth + 1)
+        if ba < 0 || bb < 0 { return -1 }
+        if d.op == OP_ADD {
+            if ba < LIM && bb < LIM - ba { return ba + bb }
+            return -1
+        }
+        if ba == 0 || bb == 0 { return 0 }
+        if ba <= (LIM - 1) / bb { return ba * bb }
+        return -1
+    }
+    if d.op == OP_BINI {
+        let k = d.imm
+        let ba = _nn_loop_derive(ir, nv, ndef, cv, h, e, iv, ivb, d.a, depth + 1)
+        if ba < 0 { return -1 }
+        if d.b == OP_ADD {
+            if k >= 0 && k < LIM && ba < LIM - k { return ba + k }
+            return -1
+        }
+        if d.b == OP_MUL {
+            if k < 0 || ba == 0 { return -1 }
+            if ba <= (LIM - 1) / k { return ba * k }
+            return -1
+        }
+        if d.b == OP_AND {
+            if k >= 0 && k < LIM { return k }
+            return -1
+        }
+        if d.b == OP_SAR || d.b == OP_SHR {
+            return ba >> (k & 63)
+        }
+        return -1
+    }
+    if d.op == OP_AND {
+        let mut m = -1
+        if d.a > 0 && d.a < nv && d.a < len(cv) && cv.get(d.a) >= 0 { m = cv.get(d.a) }
+        if d.b > 0 && d.b < nv && d.b < len(cv) && cv.get(d.b) >= 0 &&
+           (m < 0 || cv.get(d.b) < m) { m = cv.get(d.b) }
+        if m >= 0 && m < LIM { return m }
+        return -1
+    }
+    return -1
+}
+
+/// 在循环 [h,e] 内扫一遍，用 `_nn_loop_derive` 给单定义临时值补 nn/ub。
+fn _nn_loop_derive_all(ir: vec[Ir], nv: int, ndef: vec[int], nn: vec[int],
+                       ub: vec[int], cv: vec[int], safe: vec[int],
+                       h: int, e: int, iv: int, ivb: int) {
+    let mut i = h
+    while i <= e {
+        let ins = ir.get(i)
+        let d = ins.dst
+        if d > 0 && d < nv && d != iv && ndef.get(d) == 1 && nn.get(d) == 0 {
+            let b = _nn_loop_derive(ir, nv, ndef, cv, h, e, iv, ivb, d, 0)
+            if b >= 0 {
+                nn.set(d, 1)
+                ub.set(d, b)
+                // 标记循环要求 safe[d] 指向唯一定义；_nn_safe 把这些循环内
+                // 定义全 blocked 了，这里逐一把已证临时值重新登记。
+                safe.set(d, i + 1)
+            }
+        }
+        i = i + 1
+    }
+}
+
 
 fn _nn_propagate(fc: FnCtx, ndef: vec[int], nn: vec[int], ub: vec[int],
                  cv: vec[int], safe: vec[int]) {
@@ -11908,6 +12174,10 @@ fn _opt_divc_unsigned(fc: FnCtx, ndef: vec[int]) {
     _nn_propagate(fc, ndef, nn, ub, cv, safe)
     // v4.130：LCG 归纳（在传播之后；把循环携带的 seed 补成已证非负）。
     _nn_lcg_induct(fc, ndef, nn, ub, safe)
+    // v4.132：计数循环归纳（ivar 全函数恰好两处写），标 nn/ub 后把循环内
+    // 派生的单定义临时值（i*i / 3*i / i+step）也重新传播上界。
+    _nn_loop_induct(fc, ndef, nn, ub, cv, safe)
+    _nn_propagate(fc, ndef, nn, ub, cv, safe)
     // ---- 标记无符号 DIVC（2 的幂 → and/shr；其它 → 无符号魔数）----
     i = 0
     while i < len(ir) {

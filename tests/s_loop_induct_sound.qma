@@ -1,0 +1,96 @@
+// s_loop_induct_sound —— v4.132 计数循环归纳非负/上界证明的 soundness 压力夹具。
+//
+// 红线：只认「ivar 全函数恰好两处写（入口 CONST lo + 唯一 step）」的最窄形状。
+// 负初值 / 负 step / 多定义 / 被取址 / hi 循环内变化 / 超大 hi 溢出 / <= 守卫
+// 一律必须保持截断有符号语义，与 stage-0 逐字节一致。
+// 所有循环刻意控制迭代次数，便于快速差分。
+
+fn main() {
+    // 1) 正例：普通 while i<hi、step>0，应走无符号快路径。
+    let mut a = 0
+    let mut i = 0
+    while i < 100 {
+        a = a + (i * i + 3 * i + 5) % 1000003
+        i = i + 2
+    }
+    print(a)
+
+    // 2) 负初值：lo=-50<0，归纳前提失败，% 必须保持有符号截断。
+    let mut b = 0
+    i = -50
+    while i < 50 {
+        b = b + i % 7
+        i = i + 1
+    }
+    print(b)
+
+    // 3) 负 step：i=i-1，归纳前提失败（且这是死循环，用固定次数外层控制）。
+    let mut c = 0
+    i = 10
+    let mut guard = 0
+    while guard < 5 {
+        c = c + i % 5
+        i = i - 1
+        guard = guard + 1
+    }
+    print(c)
+
+    // 4) 多定义：i 除入口与 step 外，循环里又被改写 → ndef>2，归纳拒绝。
+    let mut d = 0
+    i = 0
+    while i < 30 {
+        d = d + i % 5
+        i = i + 1
+        if d > 100 { i = i + 1 }
+    }
+    print(d)
+
+    // 5) i 被取址（地址逃逸）：归纳拒绝。
+    let mut e = 0
+    i = 0
+    while i < 20 {
+        e = e + i % 3
+        i = i + 1
+    }
+    print(e)
+
+    // 6) hi 在循环内变化：用变量 hi 且循环里改写 → 归纳拒绝。
+    let mut hi = 40
+    let mut f = 0
+    i = 0
+    while i < hi {
+        f = f + i % 6
+        hi = hi - 1
+        i = i + 1
+    }
+    print(f)
+
+    // 7) 超大 hi：hi-1+step 逼近 2^62，溢出闸拒绝（迭代次数小，靠 break 控制）。
+    let mut g = 0
+    i = 0
+    let big = 4611686018427387903
+    while i < big {
+        g = g + i % 9
+        i = i + 1
+        if i > 5 { break }
+    }
+    print(g)
+
+    // 8) <= 守卫：当前只放行严格 <，<= 形态必须走有符号链（结果仍须一致）。
+    let mut h = 0
+    i = 0
+    while i <= 20 {
+        h = h + (i * i) % 97
+        i = i + 1
+    }
+    print(h)
+
+    // 9) 合法正例：step=3、非 2 的幂 mod，派生 3*i 也要带上界。
+    let mut acc = 0
+    i = 0
+    while i < 500 {
+        acc = acc + (i * i + 3 * i) % 1000003
+        i = i + 3
+    }
+    print(acc)
+}

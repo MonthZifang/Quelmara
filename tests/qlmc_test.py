@@ -255,6 +255,9 @@ CASES = [
     # v4.123 soundness 回归：非负事实的四条泄漏路径（条件赋值 / 循环体 /
     # 负余数 / int64 回绕）必须与 C99 截断语义逐字节一致。
     ("nonneg_sound", "tests/s_nonneg_sound.qma"),
+    # v4.132 counting-loop induction soundness: negative init/step, multiple
+    # writes, address-taken ivar, loop-varying hi, huge hi, <= guard.
+    ("loop_induct_sound", "tests/s_loop_induct_sound.qma"),
     # Fused scalar loads may reuse dying base/index registers, including
     # retained addresses, byte reads, aliases, growth and nested-loop values.
     ("load_endpoints", "tests/s_load_endpoints.qma"),

@@ -5172,6 +5172,22 @@ b18 0.994（噪声）。CI 权威数据（run 45361314099，Windows/Ubuntu succe
 C 参照本轮整体上浮 1.46×（同 CPU），只看同 run 比值。详见
 `versions/v4.131/CHANGELOG.md`。
 
+### v4.132 本地验证更新（计数循环归纳变量非负/上界证明）
+
+新增 `_nn_loop_induct`：普通 `while i<hi {... i=i+step}` 的归纳变量，在
+"入口 CONST lo≥0、全函数仅两处写、step>0、严格 `<` 守卫、hi 循环内不变、
+`hi-1+step<2^62`、无取址/多回边"全部满足时标 nn=1/ub=hi-1+step；
+`_nn_loop_derive_all` 再用深度受限纯运算递归给循环内单定义派生值（i*i 等）
+补上界。`<=` 守卫被明确拒绝（ub 会低估）。soundness 夹具 9 组 + s_unsigned_mod
+（负 LCG=496）+ s_lcg_branch_sound + s_nonneg_sound + s25_divmod 逐字节一致。
+
+全量 76 基准 **76/76 校验和一致**，`tests/qlmc_test.py --qlmc build/qlmc_v4132.exe`
+**PASS=136 FAIL=0**（新增 loop_induct_sound），`tests/bootstrap_test.py --strict`
+**PASS**（42/42 组、stage-2==stage-3 不动点）。irdump 确认 b66 第一条 `%1000003`
+变 SUB_MODU(107)；本机 min-of-7 b66 22.75→19.11ms（0.840，−16%）；
+b76/b23 未触发（取模操作数来自 vec load，非归纳派生）。**不代表 CI**，
+详见 `versions/v4.132/CHANGELOG.md`。
+
 
 > 口径（v4.65 起）：`bench/speed/` 里每个规范基准（C 为参照）在 11 种语言下各有一份
 > 同源实现，统一打印 `结果行…T<换行>纳秒`；校验和 = `T` 之前的内容。所有语言必须与 C
