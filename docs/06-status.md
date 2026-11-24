@@ -5239,4 +5239,8 @@ MOV 改 NOP，并延长 T 的活跃区间。irdump 确认 IR 31 `MOV→NOP`、36
 b2_float 0.9995、b66_integrate 0.9985（无回退）。差分夹具 5/5、全量 76 基准
 校验和 76/76 一致，`qlmc_test.py` PASS=136 FAIL=0，`bootstrap_test.py --strict`
 PASS（不动点 stage-2==stage-3）。本机 min-of-7 数字不代表 CI runner，判据与
-边界见 `versions/v4.134/CHANGELOG.md`。
+边界见 `versions/v4.134/CHANGELOG.md`。CI 权威数据（run 45431530096，
+Windows/Ubuntu success、76/76 校验和一致）：Windows（同 CPU、C 稳定）b16 两次
+均快模式 ~28ms、比值 1.00→1.01（无可分辨收益）；Ubuntu b16 从已知双峰慢模式
+126ms 回到快模式 24.6ms（5× 翻转属 runner 行为，不归因本改动）。本机 −29% 在
+CI 快模式下不复现，性能判中性，不声称比值收益。
