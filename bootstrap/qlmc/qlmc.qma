@@ -11679,6 +11679,167 @@ fn _nn_propagate(fc: FnCtx, ndef: vec[int], nn: vec[int], ub: vec[int],
     }
 }
 
+/// v4.130：窄而保守的 LCG 循环归纳非负证明。
+///
+/// 证明 `v = (v*C + K) % D` 形式的循环携带变量**全程**落在 `[0, D-1]`：
+///   ① 入口 v 非负（循环外最后一次定义是 CONST imm>=0，或 nn[] 已证）；
+///   ② 体内 v 恰好写一次，且形状就是上述 LCG（t1=BINI(v,MUL,C)、t2=BINI(t1,ADD,K)）；
+///   ③ C>0、K>=0、D>=2；
+///   ④ (D-1)*C+K < 2^62（归纳步不溢出）。
+/// 再加一道 CFG 闸：入口定义不在任何循环里，且没有跳转绕过它进入循环头之前。
+/// 任一条不满足就什么都不标 —— 负初值的 LCG（t=-7）必须继续走有符号链。
+/// 通过后写 nn[v]=1 / ub[v]=D-1，并把 safe[v] 指向入口定义：后续标记循环
+/// 才会认这个"循环内被改写但已归纳证明"的变量。
+fn _nn_lcg_induct(fc: FnCtx, ndef: vec[int], nn: vec[int], ub: vec[int], safe: vec[int]) {
+    let ir = fc.ir
+    let nv = len(fc.vloc)
+    let LIM = 4611686018427387904
+    let n = len(ir)
+    let mut i = 0
+    while i < n {
+        let jm = ir.get(i)
+        if _nn_jump(jm.op) == 1 {
+            let h = _lab_index(ir, jm.imm)
+            if h >= 0 && h < i && _nn_loop_shape(ir, h, i) == 1 {
+                let mut j = h + 1
+                while j < i {
+                    let dv = ir.get(j)
+                    if dv.op == OP_DIVC && dv.b == OP_MOD && dv.imm >= 2 &&
+                       dv.dst > 0 && dv.dst < nv && dv.a > 0 && dv.a < nv &&
+                       _loop_def1(ir, h, i, dv.dst) == j {
+                        let vv = dv.dst
+                        let p2 = _loop_def1(ir, h, i, dv.a)
+                        if p2 > h && p2 < j {
+                            let i2 = ir.get(p2)
+                            if i2.op == OP_BINI && i2.b == OP_ADD && i2.imm >= 0 &&
+                               i2.a > 0 && i2.a < nv {
+                                let p1 = _loop_def1(ir, h, i, i2.a)
+                                if p1 > h && p1 < p2 {
+                                    let i1 = ir.get(p1)
+                                    if i1.op == OP_BINI && i1.b == OP_MUL && i1.imm > 0 &&
+                                       i1.a == vv {
+                                        // 入口定义：循环外最后一次写 vv。
+                                        let mut ep = -1
+                                        let mut k = 0
+                                        while k < h {
+                                            let eu = ir.get(k)
+                                            if eu.dst == vv && _opt_writes(eu.op) == 1 { ep = k }
+                                            k = k + 1
+                                        }
+                                        let mut ok = 0
+                                        let mut ub0 = -1
+                                        // 全程只写两次：入口 + 这个 LCG。多写一律不放行。
+                                        if ep >= 0 && ndef.get(vv) == 2 {
+                                            let ec = ir.get(ep)
+                                            if ec.op == OP_CONST && ec.imm >= 0 {
+                                                ub0 = ec.imm
+                                                ok = 1
+                                            } else if nn.get(vv) == 1 && ub.get(vv) >= 0 {
+                                                // 入口必须也有上界：否则第一轮 v*C 就
+                                                // 可能 int64 回绕成负数，归纳前提崩塌。
+                                                ub0 = ub.get(vv)
+                                                ok = 1
+                                            }
+                                        }
+                                        // 入口落在 [0, D-1] ⇒ 不变式从第一轮就成立。
+                                        if ok == 1 && ub0 > dv.imm - 1 { ok = 0 }
+                                        // 入口定义不能被外层循环改写，也不能被跳过。
+                                        if ok == 1 {
+                                            let mut q = 0
+                                            while q < n {
+                                                let jw = ir.get(q)
+                                                if _nn_jump(jw.op) == 1 {
+                                                    let tp = _lab_index(ir, jw.imm)
+                                                    if tp > ep && tp < h { ok = 0 }
+                                                    if tp >= 0 && tp < q && tp <= ep && ep <= q { ok = 0 }
+                                                }
+                                                q = q + 1
+                                            }
+                                        }
+                                        // (D-1)*C+K < 2^62，用除法避免 int64 溢出。
+                                        if ok == 1 {
+                                            if i2.imm >= LIM { ok = 0 }
+                                            else if dv.imm - 1 >= (LIM - i2.imm) / i1.imm { ok = 0 }
+                                        }
+                                        if ok == 1 {
+                                            nn.set(vv, 1)
+                                            ub.set(vv, dv.imm - 1)
+                                            safe.set(vv, ep + 1)
+                                            // 顺带证明 t1=v*C / t2=t1+K 非负（归纳步
+                                            // 的溢出闸已经保证两者 < 2^62）。这样
+                                            // `%2^31` 的 LCG 更新本身也能走 and 快路径，
+                                            // 与 stage-0 的行为一致。
+                                            let bv = (dv.imm - 1) * i1.imm
+                                            if bv < LIM {
+                                                nn.set(i2.a, 1)
+                                                ub.set(i2.a, bv)
+                                                safe.set(i2.a, p1 + 1)
+                                                if bv + i2.imm < LIM {
+                                                    nn.set(dv.a, 1)
+                                                    ub.set(dv.a, bv + i2.imm)
+                                                    safe.set(dv.a, p2 + 1)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+/// 非 2 的幂的魔数是否安全（qlmc 原公式对 d<2^31 全部成立，已被 s25_divmod 钉死）。
+fn _divc_umagic_ok(d: int) -> int {
+    if d < 3 { return 0 }
+    return 1
+}
+
+/// 算 qlmc 原有的无符号魔数系数 m / s（与 _emit_divc 用同一公式）。
+fn _divc_magic(d: int, out: vec[int]) {
+    let imin = 0 - 9223372036854775807 - 1
+    let q63 = 0 - (imin / d)
+    let r63 = imin - q63 * d
+    let q64 = 2 * q63 + (2 * r63) / d
+    let r64 = 0 - q64 * d
+    let mut pw = 1
+    let mut l = 0
+    while pw < d {
+        pw = pw << 1
+        l = l + 1
+    }
+    let s = l - 1
+    out.set(0, (q64 << s) + ((r64 << s) + d - 1) / d)
+    out.set(1, s)
+}
+
+/// 非 2 的幂的 **无符号** 常数 div/mod 发射：q = (x*M) >> (64+s)，r = x - q*d。
+/// m/s 由 qlmc 原有的魔数公式算出（已被 s25_divmod 钉死），x 由调用方证明 >=0。
+/// 用 RCX 存原始 x（与既有有符号链同一块暂存），RDX 收 mul 高位；全程无符号，
+/// 不含任何 sign 修正 —— 这是 `%100` 从 13 条符号链降到几条的关键。
+fn _emit_divc_umagic(fc: FnCtx, code: vec[int], ins: Ir, m: int, s: int) {
+    let d = ins.imm
+    _to_reg(fc, RCX, ins.a)                    // rcx = x
+    _b(code, 0x48) _b(code, 0xBA) _w64(code, m) // movabs rdx, m
+    _b(code, 0x48) _b(code, 0x89) _b(code, 0xC8) // mov rax, rcx
+    _b(code, 0x48) _b(code, 0xF7) _b(code, 0xE2) // mul rdx → rdx = high(x*m)
+    if s > 0 { _shift_imm(code, 5, RDX, s) }    // shr rdx, s → q
+    if ins.b == SUB_DIVU {
+        _b(code, 0x48) _b(code, 0x89) _b(code, 0xD0) // mov rax, rdx
+    } else {
+        _b(code, 0x48) _b(code, 0x69) _b(code, 0xD2) // imul rdx, rdx, d
+        _w32(code, d)
+        _b(code, 0x48) _b(code, 0x89) _b(code, 0xC8) // mov rax, rcx
+        _b(code, 0x48) _b(code, 0x29) _b(code, 0xD0) // sub rax, rdx → r
+    }
+    _store_rax(fc, fc.vloc.get(ins.dst))
+}
+
 fn _opt_divc_unsigned(fc: FnCtx, ndef: vec[int]) {
     let ir = fc.ir
     let nv = len(fc.vloc)
@@ -11699,17 +11860,24 @@ fn _opt_divc_unsigned(fc: FnCtx, ndef: vec[int]) {
     }
     _nn_safe(fc, ndef, safe)
     _nn_propagate(fc, ndef, nn, ub, cv, safe)
-    // ---- 标记无符号 DIVC（仅 2 的幂快路径先落地；非幂无符号魔数后续版）----
+    // v4.130：LCG 归纳（在传播之后；把循环携带的 seed 补成已证非负）。
+    _nn_lcg_induct(fc, ndef, nn, ub, safe)
+    // ---- 标记无符号 DIVC（2 的幂 → and/shr；其它 → 无符号魔数）----
     i = 0
     while i < len(ir) {
         let ins = ir.get(i)
         if ins.op == OP_DIVC && ins.a > 0 && ins.a < nv &&
            safe.get(ins.a) > 0 && safe.get(ins.a) < i + 1 && nn.get(ins.a) == 1 &&
-           ins.imm >= 2 && (ins.imm & (ins.imm - 1)) == 0 {
-            if ins.b == OP_MOD {
-                ir.set(i, Ir { op: OP_DIVC, dst: ins.dst, a: ins.a, b: SUB_MODU, imm: ins.imm })
-            } else if ins.b == OP_DIV {
-                ir.set(i, Ir { op: OP_DIVC, dst: ins.dst, a: ins.a, b: SUB_DIVU, imm: ins.imm })
+           ins.imm >= 2 {
+            // 2 的幂：沿用 v4.122 的原判据（包括 imm = 2^31 的 LCG 更新）。
+            // 非 2 的幂：v4.130 新增，限 imm < 2^31（魔数公式的定义域）。
+            if (ins.imm & (ins.imm - 1)) == 0 ||
+               (ins.imm < 2147483648 && _divc_umagic_ok(ins.imm) == 1) {
+                if ins.b == OP_MOD {
+                    ir.set(i, Ir { op: OP_DIVC, dst: ins.dst, a: ins.a, b: SUB_MODU, imm: ins.imm })
+                } else if ins.b == OP_DIV {
+                    ir.set(i, Ir { op: OP_DIVC, dst: ins.dst, a: ins.a, b: SUB_DIVU, imm: ins.imm })
+                }
             }
         }
         i = i + 1
@@ -11812,6 +11980,15 @@ fn _emit_divc(fc: FnCtx, code: vec[int], ins: Ir, i: int) {
         }
         // dst ← rax（_store_rax 统一处理寄存器/栈槽）
         _store_rax(fc, fc.vloc.get(ins.dst))
+        return
+    }
+    // v4.130：非 2 的幂 + 已证非负 → 无符号魔数链（无符号修正，省一半指令）。
+    if ins.b == SUB_MODU || ins.b == SUB_DIVU {
+        let mo = vec[int].new(2)
+        mo.push(0)
+        mo.push(0)
+        _divc_magic(d, mo)
+        _emit_divc_umagic(fc, code, ins, mo.get(0), mo.get(1))
         return
     }
     let mut l = 0

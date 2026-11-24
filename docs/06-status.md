@@ -5134,6 +5134,20 @@ b78 1.005（min-of-7，**噪声内无可分辨收益**）。CI 权威数据（ru
 分别变化 0.76× / 1.54×），性能判**中性**、不声称收益。详见
 `versions/v4.129/CHANGELOG.md`。
 
+### v4.130 本地验证更新（LCG 循环归纳 → 无符号 div/mod 快路径）
+
+`_nn_lcg_induct` 在 `_nn_propagate` 之后证明 `v=(v*C+K)%D` 的循环携带变量全程
+落在 `[0,D-1]`（入口非负且 ≤D-1、体内单定义形状、C>0·K≥0·D≥2、
+`(D-1)*C+K<2^62`，外加 CFG 单入口闸），只标已证非负的 DIVC。
+
+差分夹具 3/3 逐字节一致（负 LCG 第 7 项保持 496），全量 76 基准新旧 qlmc
+编 ELF 运行 **76/76 校验和一致**，`tests/qlmc_test.py --qlmc build/qlmc_lcg.exe`
+**PASS=134 FAIL=0**，`tests/bootstrap_test.py --strict` **PASS**（42/42 组、
+stage-2==stage-3 不动点）。b83 热循环 IR 两条 `DIVC` 的 b 槽由 `OP_MOD(7)`
+变为 `SUB_MODU(107)`，反汇编从 29 条降到 19 条零符号修正；交替七轮 min：
+b83 **0.690（−31%）**，b65 0.9998 / b26 1.0036（中性，循环内含分支被保守拒绝）。
+均为主机实测，**不代表 CI**。详见 `versions/v4.130/CHANGELOG.md`。
+
 
 > 口径（v4.65 起）：`bench/speed/` 里每个规范基准（C 为参照）在 11 种语言下各有一份
 > 同源实现，统一打印 `结果行…T<换行>纳秒`；校验和 = `T` 之前的内容。所有语言必须与 C
