@@ -8479,6 +8479,112 @@ fn _opt_copy(fc: FnCtx, ir: vec[Ir], use: vec[int], ndef: vec[int]) {
     }
 }
 
+/// v4.134：f64 拷贝的多使用者转发（`MOV d=T,f64`，T 是单定义临时值）。
+///
+/// `_opt_copy` 只处理 `use[d]==1`，但 qlmc 把 `let d = <f64>` 降成
+/// `T = ...; MOV d,T` 之后，d 常被**两条分支各读一次**（如 b16_leibniz 的
+/// `s = s ± 1.0/d`）。因为 use=2，MOV 留着，d 就被分配到 GP 寄存器，
+/// 两个 FBIN 各发一条 `movq xmm,r` 把 f64 位模式搬回 XMM。
+///
+/// 本 pass 只在前述形状上把 d 的所有 **b 槽**使用换成 T，MOV 改 NOP；
+/// FBIN/FCMP 的 b 按 f64 解释（`_emit_f64` 走 `_to_xmm`/`_f64_slot`），
+/// T 若分到 XMM 就直接 `movaps`，省掉 GP 往返。
+///
+/// 安全判据（任一条不满足就跳过，绝不冒险）：
+///   ① d 至少被读一次、`ndef[d]==1`、TY_F64、非聚合。d 常常就是
+///      `let d = ...` 的变量槽（`vpin==1`），这个可以转发：只要它的
+///      **全部读取**都在下面判定的 b 槽里，且 ndef==1（函数里只写一次），
+///      那么它和临时值没有区别；
+///   ② T 也是单定义、非聚合、非变量、TY_F64；
+///   ③ d 的**所有**使用都在 b 槽、且 opcode 只允许 OP_FBIN/OP_FCMP
+///      （不碰 a 槽，不碰其它 opcode，保守起见）；
+///   ④ MOV 之后到最远那个使用点之间，**没有任何指令写 T**
+///      （`dst==T && _opt_writes`），所以 T 在两条分支上都保持定义时的值；
+///   ⑤ 转发后把 T 的活跃区间 `vend[T]` 延长到最远使用点，防止分配器在
+///      分支中途复用它的寄存器（原来 T 只活到 MOV，转发后必须活到分支末尾）。
+fn _opt_copy_f64(fc: FnCtx, ir: vec[Ir], use: vec[int], ndef: vec[int]) {
+    let n = len(ir)
+    let mut i = 0
+    while i + 1 < n {
+        let ins = ir.get(i)
+        if ins.op == OP_MOV && ins.dst > 0 && ins.a > 0 && ins.dst != ins.a {
+            let d = ins.dst
+            let t = ins.a
+            let mut ok = 0
+            let mut j = 0
+            let mut furthest = i
+            let mut nfwd = 0
+            if use.get(d) >= 1 && ndef.get(d) == 1 &&
+               fc.vty.get(d) == TY_F64 && _ty_is_agg(fc.vty.get(d)) == 0 &&
+               ndef.get(t) == 1 && fc.vpin.get(t) == 0 &&
+               fc.vty.get(t) == TY_F64 && _ty_is_agg(fc.vty.get(t)) == 0 {
+                ok = 1
+            }
+            if ok == 1 {
+                // ③ d 的每一次读取都必须是 FBIN/FCMP 的 b 槽。
+                j = 0
+                while j < n {
+                    let u = ir.get(j)
+                    if j != i {
+                        if u.a == d {
+                            ok = 0
+                        }
+                        // STORE*/MEMCPYN 把"要写的值"放在 dst 槽，`_opt_mark`
+                        // 把它算成一次读；这类使用不能转发，直接拒绝。
+                        if u.dst == d && _opt_writes(u.op) == 0 {
+                            ok = 0
+                        }
+                        if u.b == d {
+                            // MOV 之前还有读 d（循环回边 / 另一条分支），
+                            // 转发后那些点读到的是旧值，必须拒绝。
+                            if j < i {
+                                ok = 0
+                            }
+                            if u.op == OP_FBIN || u.op == OP_FCMP {
+                                if j > furthest { furthest = j }
+                                nfwd = nfwd + 1
+                            } else {
+                                ok = 0
+                            }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            if ok == 1 {
+                // ④/⑤ MOV 之后、最远使用之前不能有 T 的第二个定义。
+                j = i + 1
+                while j <= furthest {
+                    let u = ir.get(j)
+                    if u.dst == t && _opt_writes(u.op) == 1 {
+                        ok = 0
+                    }
+                    j = j + 1
+                }
+            }
+            if ok == 1 {
+                j = i + 1
+                while j <= furthest {
+                    let u = ir.get(j)
+                    if u.b == d {
+                        ir.set(j, Ir { op: u.op, dst: u.dst, a: u.a,
+                                       b: t, imm: u.imm })
+                    }
+                    j = j + 1
+                }
+                ir.set(i, Ir { op: OP_NOP, dst: 0, a: 0, b: 0, imm: 0 })
+                use.set(d, 0)
+                // T 现在被 nfwd 条指令读；不补计数会让 DCE 把它的定义删掉。
+                use.set(t, use.get(t) + nfwd)
+                if fc.vend.get(t) < furthest {
+                    fc.vend.set(t, furthest)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
 /// 强度削减 / 立即数压平：把 `dst = a <op> C`（C 是编译期已知常量）换成更省的形状。
 ///
 /// 三条原则：
@@ -10286,6 +10392,10 @@ fn _opt(fc: FnCtx, cok: vec[int], cval: vec[int], use: vec[int],
     _tri("    opt: cse ir=", len(ir))
     _opt_copy(fc, ir, use, ndef)
     _tri("    opt: copy ir=", len(ir))
+    // v4.134：use>=2 的 f64 拷贝转发（判据见 _opt_copy_f64 注释）。必须放在
+    // 融合之前，让后续 pass 看到转发后的干净形状。
+    _opt_copy_f64(fc, ir, use, ndef)
+    _tri("    opt: copyf64 ir=", len(ir))
     // 融合要用到完整的 use[]，所以放在标记之后、DCE 之前
     _opt_fuse(fc, ir, use, ndef)
     _tri("    opt: fuse ir=", len(ir))

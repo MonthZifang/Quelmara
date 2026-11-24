@@ -5225,3 +5225,18 @@ Ubuntu（同 CPU、C 参照稳定 0.986×）b70 **15.40×→6.36×（qlm 1147.7�
 | Python | 76 | 抽样一致 | ⚠️ | v4.79（参考下限；全量 75 项本地 1200s 受纯 Python 重循环拖累超时未跑完，但零 mismatch；`b15_loopsum` 病态项本地超时归 TIMEOUT） |
 | C# | 76 | 待 CI | ❌（已推送 v4.76） | v4.76（本机无 `dotnet`，仅 windows 矩阵真跑） |
 | D | 2 | 2/2 | ✅ | v4.77（子集） |
+
+### v4.134 本地验证更新（f64 复制转发，消除 XMM→GP→XMM 往返）
+
+b16_leibniz 的 `let d = to_float(...)` 降级成 `T=ITOF(...); MOV d=T`，d 被两条
+分支各读一次（use=2），既有 `_opt_copy` 不转发，d 落到 GP 寄存器，两个除法
+各发一条 `movq xmm,r` 往返。新增 `_opt_copy_f64` 在严格判据（单定义、TY_F64、
+全部使用为 FBIN/FCMP 的 b 槽、MOV 前无读、中间无写 T）下把 `b:d` 换成 `b:T`、
+MOV 改 NOP，并延长 T 的活跃区间。irdump 确认 IR 31 `MOV→NOP`、36/40 的 b 变 28；
+反汇编热循环 `movq xmm1,r14` 往返消失。
+
+本机 A/B 交替 7 轮取 min：b16_leibniz 454.97→323.51ms（0.7111，**−29%**），
+b2_float 0.9995、b66_integrate 0.9985（无回退）。差分夹具 5/5、全量 76 基准
+校验和 76/76 一致，`qlmc_test.py` PASS=136 FAIL=0，`bootstrap_test.py --strict`
+PASS（不动点 stage-2==stage-3）。本机 min-of-7 数字不代表 CI runner，判据与
+边界见 `versions/v4.134/CHANGELOG.md`。
