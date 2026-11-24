@@ -76,4 +76,20 @@ MOV  qdst, qnew       ← 原 DIV 的结果照旧给下游
 - 同源同除子的 DIV+MOD 只在 3 个基准出现（b57_pow_mod、b75_fib_matrix、
   b78_sum_digits），本轮只 b78 实际命中；b57/b75 的 DIV 与 MOD 之间隔着
   控制流，未满足同基本块判据。
-- CI 权威基准见 run <待填>；本机数字只作粗判，不代表 CI 口径。
+## CI 实测（run 45222343695，推送后权威口径）
+
+两次 run 的 Windows runner CPU 相同（Intel Family 6 Model 106），可直接对比：
+
+| 平台 | 指标 | v4.126 基线 | v4.128 | 变化 |
+|---|---|---|---|---|
+| Windows | b78 qlm/C | 3.19× | **2.05×** | qlm 18.8→12.1ms（**−35.6%**） |
+| Windows | 几何平均 qlm/C | 2.006 | 2.008 | 噪声内（整机 CPU 抖动） |
+| Ubuntu | b78 qlm/C | 3.49× | **2.05×** | qlm 18.9→6.6ms（**−65%**，C 侧也降到 3.2ms） |
+| Ubuntu | 几何平均 qlm/C | 1.571 | **1.436** | 改善 |
+| Ubuntu | >1.5× 项数 | 41 | **36** | 5 项跨过阈值 |
+| 两平台 | 全量 76 项校验和 | — | **76/76 一致，零 MISMATCH** | — |
+
+Windows / Ubuntu job 全绿；macOS job FAIL 是 `b75_fib_matrix` 的 cpp 计时
+`nanoseconds must be positive` 抖动（该平台无 Quelmara 列），与本改动无关。
+
+> 本机数字只作粗判；对外引用以上表 CI 数据为准。
