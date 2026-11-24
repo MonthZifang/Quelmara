@@ -5185,8 +5185,11 @@ C 参照本轮整体上浮 1.46×（同 CPU），只看同 run 比值。详见
 **PASS=136 FAIL=0**（新增 loop_induct_sound），`tests/bootstrap_test.py --strict`
 **PASS**（42/42 组、stage-2==stage-3 不动点）。irdump 确认 b66 第一条 `%1000003`
 变 SUB_MODU(107)；本机 min-of-7 b66 22.75→19.11ms（0.840，−16%）；
-b76/b23 未触发（取模操作数来自 vec load，非归纳派生）。**不代表 CI**，
-详见 `versions/v4.132/CHANGELOG.md`。
+b76/b23 未触发（取模操作数来自 vec load，非归纳派生）。CI 权威数据
+（run 45397379853，Windows/Ubuntu success、76/76 校验和一致）：b66 的 qlm
+绝对耗时 Ubuntu 5.03→4.21ms（−16%，与本机一致），但同 run 内 C 参照同比
+下降，qlm/C 比值 1.28→1.28 未变；C 参照中位数 0.87/0.68，几何平均波动在
+噪声内，不声称比值收益。详见 `versions/v4.132/CHANGELOG.md`。
 
 
 > 口径（v4.65 起）：`bench/speed/` 里每个规范基准（C 为参照）在 11 种语言下各有一份
