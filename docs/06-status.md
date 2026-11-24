@@ -5166,7 +5166,11 @@ ndef==2、溢出闸、CFG 闸全部保留，负初值 LCG 仍走有符号链。
 stage-2==stage-3 不动点）。irdump 确认 b65/b26 的 DIVC 变为 SUB_MODU(107)。
 
 本机 min-of-7：b26 0.663（−34%）、b65 0.759（−24%）、b83 0.691（保持）、
-b18 0.994（噪声）。**不代表 CI**，详见 `versions/v4.131/CHANGELOG.md`。
+b18 0.994（噪声）。CI 权威数据（run 45361314099，Windows/Ubuntu success、
+76/76 校验和一致）：b26 Ubuntu **1.73×→0.92×（反超 C，44.64 vs 48.44ms、
+五轮稳定）**、Windows 1.95×→1.02×；b65 Ubuntu 1.91×→1.28×、Windows 1.93×→1.22×；
+C 参照本轮整体上浮 1.46×（同 CPU），只看同 run 比值。详见
+`versions/v4.131/CHANGELOG.md`。
 
 
 > 口径（v4.65 起）：`bench/speed/` 里每个规范基准（C 为参照）在 11 种语言下各有一份
