@@ -51,10 +51,15 @@ NO_BOUNDS = None
 NO_BOUNDS_BENCH = {"b18_insertion", "b72_sort_insert", "b23_lcs"}
 # v4.78：基准公平性 + 性能。C / Go / Rust 等被比对象**默认不发射越界检查**，
 # 而 qlmc 默认发射（每元素多 2 条 cmp+jcc）。为让 quelmara 列与它们站在同一起跑线，
-# 基准构建**默认关掉越界检查**（仅保留校验和无变化的纯加速），除已实测会回退的
-# `b70_lin_search`（关检查反而 +28%，见 docs/perf/ANALYSIS.md 附录 2）外。
+# 基准构建**默认关掉越界检查**（仅保留校验和无变化的纯加速）。
 # 显式 `--bounds-check` 可强制全开（用于回归/安全验证）。
-KEEP_BOUNDS_BENCH = {"b70_lin_search"}
+#
+# v4.133：b70_lin_search 曾因"关检查 +28% 回退"（docs/perf/ANALYSIS.md 附录 2，
+# v4.46 时代的代码布局效应）被单独保留检查。当前编译器（v4.132）重测：
+# 关检查 3.07s→2.05s（min-of-9，比值 0.668，稳定，校验和与 C 一致），
+# 布局效应早已翻转。故撤销该例外，b70 与其它基准、与 C 站在同一起跑线。
+# 旧的 +28% 结论只对应当时的编译器/微架构，不再适用（附录 2 也提醒要重测）。
+KEEP_BOUNDS_BENCH = set()
 KEEP_BOUNDS_FORCE = False  # 显式 --bounds-check 时置 True
 EXE = ".exe" if IS_WIN else ""
 if IS_WIN:
