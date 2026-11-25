@@ -5254,4 +5254,7 @@ CI 快模式下不复现，性能判中性，不声称比值收益。
 `tests/bootstrap_test.py --strict` **PASS**（42/42 组、stage-2==stage-3 不动点）。
 体积 23 项变化合计 **−34 字节**；本机 min-of-7 计时 b44 0.9934 / b34 1.0002 /
 b78 1.0039 / b61 1.0050（**噪声内，无可分辨速度收益**，判体积收益）。
-详见 `versions/v4.136/CHANGELOG.md`，本机数字不代表 CI。
+CI 权威数据（run 45544891699，三 job 全绿、两平台 76/76 跨语言校验和零 mismatch）：
+Windows geo 1.992 / 42 项 >1.5×，Ubuntu geo 1.513 / 32 项 >1.5×；差异在 runner
+噪声与 CPU 差异范围内，**不声称比值收益**（本版是体积优化）。详见
+`versions/v4.136/CHANGELOG.md`。
