@@ -619,3 +619,34 @@ lower/optimize 期自己越界（`dump` 正常、`irdump` 崩 → 崩点不在�
 - 归纳的跳转闸**保持原样**。b44 的 `%3` 继续走慢链 —— 若将来要碰，必须
   先做"为什么放宽会让 qlmc 自己崩"的定向诊断（QLMC_TRACE / 单 pass 二分），
   而不是像本轮一样靠推理。
+
+---
+
+# 环境阻塞记录（2026-11-24）：qlmc 自举构建因内存耗尽无法完成
+
+## 现象
+
+本会话第 14 轮起，`python3 tools/stage0/qlm_cli.py build bootstrap/qlmc/qlmc.qma
+--target win` 连续 4 次超时（2400s / 3600s / 3000s），正常应约 **880s**。
+构建进程一直在 99% CPU 跑（不是死锁），但**内存不足导致交换抖动**，最终超时
+或被杀。
+
+## 证据（确认为环境问题，不是代码问题）
+
+1. 机器总内存 **3.2 GB**，`dsh` node 进程占 **2.3 GB RSS + 1.9 GB swap**；
+   swap 3.0 GB 已用满，`dmesg` 有 **OOM kill 记录**。
+2. **未修改的基线源码**（`git show HEAD:bootstrap/qlmc/qlmc.qma`）同样构建
+   超时、无产物 —— 与本轮任何改动无关。
+3. 改动本身已通过 **stage-0 完整 parse**（143,380 tokens，`PARSE OK`）。
+
+## 影响
+
+- 无法完成「全量 76 基准 + `bootstrap_test --strict`」验证 → **按纪律不得提交**。
+- 本轮尝试的 `cmp r,0 → test r,r`（零比较惯用法，3 字节 vs 4 字节、Jcc 语义
+  完全相同）**正确但未能验证**，已回退，未留下任何改动。
+
+## 恢复条件
+
+释放内存（重启 dsh-web / 关闭占内存的进程，让可用内存回到 ≥1.5 GB）后，
+再重跑构建即可。**验证顺序务必：先 build 成功 → 再 76 基准编译校验和 →
+再 bootstrap --strict**，最后才谈性能。
