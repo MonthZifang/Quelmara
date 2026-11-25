@@ -13374,6 +13374,28 @@ fn _emit_ir(fc: FnCtx, i: int) {
         } else {
             _mov_imm(code, RAX, 0)
         }
+        // v4.138：RET 如果紧邻函数尾声（后面只有 NOP/LAB，且其中出现尾声标签
+        // `C_EP`），就不发这条 `jmp` —— 顺序会自然落到尾声。
+        // 等价性：`jmp` 的目标标签若在"下一条将要发射的指令"处，跳过去与
+        // 顺序执行完全相同；LAB/NOP 都不发射字节（`OP_LAB` 只 _setlab）。
+        // 收益：省一条 5 字节 `jmp`，且打断一条无用的分支预测。
+        let mut k = i + 1
+        let mut falls = 0
+        let ep = fc.cells.get(C_EP)
+        while k < len(fc.ir) {
+            let w = fc.ir.get(k)
+            if w.op == OP_LAB {
+                if w.imm == ep {
+                    falls = 1
+                }
+            } else if w.op != OP_NOP {
+                break
+            }
+            k = k + 1
+        }
+        if falls == 1 {
+            return
+        }
         let p = _jmp(code)
         _addfix(fc.fixes, p, fc.cells.get(C_EP), FK_LAB)
         return

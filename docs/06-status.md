@@ -5274,3 +5274,17 @@ CI 权威数据（run 45605597732，三 job 全绿、两平台 76/76 跨语言�
 Windows geo 1.899 / 42 项 >1.5×，Ubuntu geo 1.523 / 31 项 >1.5×；差异在 runner
 噪声内，**不声称比值收益**（本版是体积优化，76/76 项 −130B）。详见
 `versions/v4.137/CHANGELOG.md`。
+
+### v4.138 本地验证更新（删除紧邻尾声的冗余 `jmp`）
+
+`OP_RET` 原本无条件发 `jmp <尾声>`。当 RET 是函数体最后一条实际指令时，
+随后就是 `OP_LAB(ep)`（`_lower_fn` 末尾发射），而 LAB/NOP 不发射字节 ——
+这条 jmp 的目标恰是下一条指令，属纯浪费。改为：向前跳过 NOP/LAB，若期间
+出现 `imm==C_EP` 的 LAB 就不发 jmp（顺序自然落入尾声）。RET 终止控制流，
+后面没有其它代码能跳进这条 jmp，安全。
+
+全量 76 基准 **76/76 校验和一致**（s26_alias 首次是 stage-0 侧 `Exec format
+error` 抖动，qlmc_test 重跑全过），`tests/qlmc_test.py --qlmc build/qlmc_v4138.exe`
+**PASS=136 FAIL=0**，`tests/bootstrap_test.py --strict` **PASS**（42/42 组、
+stage-2==stage-3 不动点）。**74/76 项受影响、删除 104 处冗余 jmp、总体积
+−520 字节**（b10 冗余 jmp 2→0）。详见 `versions/v4.138/CHANGELOG.md`。
