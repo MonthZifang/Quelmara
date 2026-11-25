@@ -4008,11 +4008,12 @@ fn _test_rr(code: vec[int], a: int, b: int) {
     _modrm(code, 3, b, a)
 }
 
+/// 与 0 比较（`cmp r64,0` 的所有既有调用点）。v4.137：改发 `test r,r`。
 fn _cmp_imm0(code: vec[int], reg: int) {
-    _rex2(code, 1, 0, reg)
-    _b(code, 0x83)
-    _modrm(code, 3, 7, reg)
-    _b(code, 0)
+    // `cmp r,0` 与 `test r,r` 对 ZF/SF/PF 同值、CF/OF 同为 0，AF 不被任何
+    // Jcc 读 → 对所有 jcc/setcc 等价；`test` 3 字节 vs `cmp` 4 字节。
+    // 与 `_cmp_imm` 的 v4.136 改动一致，统一零比较形态。
+    _test_rr(code, reg, reg)
 }
 
 // setcc al：cc 见 e=94 ne=95 l=9C ge=9D le=9E g=9F

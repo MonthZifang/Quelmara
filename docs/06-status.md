@@ -5258,3 +5258,16 @@ CI 权威数据（run 45544891699，三 job 全绿、两平台 76/76 跨语言�
 Windows geo 1.992 / 42 项 >1.5×，Ubuntu geo 1.513 / 32 项 >1.5×；差异在 runner
 噪声与 CPU 差异范围内，**不声称比值收益**（本版是体积优化）。详见
 `versions/v4.136/CHANGELOG.md`。
+
+### v4.137 本地验证更新（`_cmp_imm0` 也改发 `test r,r`）
+
+v4.136 只改了 `_cmp_imm`（CMPI/JCMPI），本版补齐另一个零比较发射点
+`_cmp_imm0`（OP_NOT / OP_NZ / OP_JZ / OP_JNZ 与 `__print_bool` 运行库），
+统一发 `test r64,r64`。等价性与 v4.136 同一论证（ZF/SF/PF 同、CF/OF 为 0、
+AF 不被 Jcc 读）。全量 76 基准 **76/76 校验和一致**（b37 一次 wine 抖动重编后
+一致），`tests/qlmc_test.py --qlmc build/qlmc_v4137.exe` **PASS=136 FAIL=0**，
+`tests/bootstrap_test.py --strict` **PASS**（42/42 组、stage-2==stage-3 不动点）。
+
+**76/76 全部 ELF 变小，合计 −130 字节**（b73 −6、b22/b28 −4、b23/b39/b42/b54/b59 −3）；
+本机 min-of-7 计时 0.9804~1.0085（**噪声内，无速度收益**，判体积收益）。
+详见 `versions/v4.137/CHANGELOG.md`，本机数字不代表 CI。
