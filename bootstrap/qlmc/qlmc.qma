@@ -4702,7 +4702,13 @@ fn _alu_imm(code: vec[int], ext: int, d: int, v: int) {
 }
 
 /// `cmp r64, imm`（/7）。只用于比较，不写寄存器。
+/// 零比较用 `test r,r`：与 `cmp r,0` 对 ZF/SF/PF 同值、CF/OF 同为 0，
+/// 对任何 Jcc/setcc 等价；3 字节 vs 4 字节，且不读立即数。（v4.136）
 fn _cmp_imm(code: vec[int], d: int, v: int) {
+    if v == 0 {
+        _test_rr(code, d, d)
+        return
+    }
     _alu_imm(code, 7, d, v)
 }
 

@@ -5244,3 +5244,14 @@ Windows/Ubuntu success、76/76 校验和一致）：Windows（同 CPU、C 稳定
 均快模式 ~28ms、比值 1.00→1.01（无可分辨收益）；Ubuntu b16 从已知双峰慢模式
 126ms 回到快模式 24.6ms（5× 翻转属 runner 行为，不归因本改动）。本机 −29% 在
 CI 快模式下不复现，性能判中性，不声称比值收益。
+
+### v4.136 本地验证更新（`cmp r,0` → `test r,r` 零比较惯用法）
+
+`_cmp_imm` 在 `v==0` 时改发 `test r64,r64`（3 字节）而非 `cmp r64,0`（4 字节）。
+两者 ZF/SF/PF 同值、CF/OF 同为 0、AF 不被任何 Jcc 读 → 对所有条件跳转/传送
+逐位等价。全量 76 基准 **76/76 校验和一致**（b36 一次 wine 抖动重编后一致），
+`tests/qlmc_test.py --qlmc build/qlmc_v4136.exe` **PASS=136 FAIL=0**，
+`tests/bootstrap_test.py --strict` **PASS**（42/42 组、stage-2==stage-3 不动点）。
+体积 23 项变化合计 **−34 字节**；本机 min-of-7 计时 b44 0.9934 / b34 1.0002 /
+b78 1.0039 / b61 1.0050（**噪声内，无可分辨速度收益**，判体积收益）。
+详见 `versions/v4.136/CHANGELOG.md`，本机数字不代表 CI。
