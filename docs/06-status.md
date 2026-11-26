@@ -5320,4 +5320,8 @@ b28/b18/b22 慢 2.4×）"。但那次是**完全放开**。本版精确放到 **
 **PASS=136 FAIL=0**，`tests/bootstrap_test.py --strict` **PASS**（42/42 组、
 stage-2==stage-3 不动点）。本机 min-of-3：**b79 0.878（−12.3%）**；
 回归验收 b28 0.9987 / b18 1.0002 / b22 0.9968 / b23 1.0003（**全部无回退**）。
-详见 `versions/v4.141/CHANGELOG.md`。
+CI 权威数据（run 45834512915，Windows/Ubuntu success、76/76 校验和零 mismatch）：
+Windows geo 1.938 / 41 项、Ubuntu geo 1.509 / 34 项。**但 b79 在 CI 呈双峰**
+（同代码形状 477ms/977ms 两档），本版与 v4.140 恰好各在一档，CI 的 b79 比值
+（2.59→3.64）全是档位切换、不可用于判定；**本版有效性以本机同机 A/B 的
+5 轮零重叠（0.878）为准**。详见 `versions/v4.141/CHANGELOG.md`。
