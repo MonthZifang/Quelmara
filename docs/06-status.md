@@ -5305,4 +5305,7 @@ use[d]==1 保证唯一消费者，等价。
 **PASS=136 FAIL=0**，`tests/bootstrap_test.py --strict` **PASS**（42/42 组、
 stage-2==stage-3 不动点）。11 项 ELF 变化合计 −54 字节；本机 min-of-5：
 **b70 0.878（−12.2%）**、**b61 0.916（−8.4%）**、b23 0.972、b4 0.982、
-b27 0.987、b54 0.985、b28 0.997（噪声内）。详见 `versions/v4.140/CHANGELOG.md`。
+b27 0.987、b54 0.985、b28 0.997（噪声内）。CI 权威数据（run 45821244374，
+三 job 全绿、两平台 76/76 校验和零 mismatch）：Ubuntu 几何平均 1.538→**1.383**、
+>1.5× 36→**33 项**；**b70 Ubuntu 7.77×→4.85×**（qlm 665→428ms）、
+b4_array **1.00× 与 C 持平**；Windows geo 1.919。详见 `versions/v4.140/CHANGELOG.md`。
