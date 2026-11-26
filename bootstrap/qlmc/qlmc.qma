@@ -8460,7 +8460,19 @@ fn _opt_copy(fc: FnCtx, ir: vec[Ir], use: vec[int], ndef: vec[int]) {
             let a = ins.a
             if fc.vpin.get(d) == 0 && use.get(d) == 1 && ndef.get(d) == 1 &&
                _ty_is_agg(fc.vty.get(d)) == 0 && _ty_is_agg(fc.vty.get(a)) == 0 {
-                let nx = ir.get(i + 1)
+                // v4.140：跳过中间的 NOP 找真正的下一个消费者。
+                // 以前只看 `i+1`：若 MOV 与消费者之间夹着 NOP（`_opt_empty_jumps`
+                // 删跳转、内联/hoist 留下的空位都会产生），匹配就永远失败，
+                // 白留一条 mov（b70 的 `MOV 89,114; NOP; LOADX a=89` 就是）。
+                let mut ni = i + 1
+                while ni < n && ir.get(ni).op == OP_NOP {
+                    ni = ni + 1
+                }
+                if ni >= n {
+                    i = i + 1
+                    continue
+                }
+                let nx = ir.get(ni)
                 let mut hit = 0
                 if nx.a == d && nx.b != d {
                     hit = 1
@@ -8476,7 +8488,7 @@ fn _opt_copy(fc: FnCtx, ir: vec[Ir], use: vec[int], ndef: vec[int]) {
                     } else {
                         nb = a
                     }
-                    ir.set(i + 1, Ir { op: nx.op, dst: nx.dst, a: na, b: nb, imm: nx.imm })
+                    ir.set(ni, Ir { op: nx.op, dst: nx.dst, a: na, b: nb, imm: nx.imm })
                     ir.set(i, Ir { op: OP_NOP, dst: 0, a: 0, b: 0, imm: 0 })
                     use.set(d, 0)
                 }

@@ -5291,3 +5291,18 @@ stage-2==stage-3 不动点）。**74/76 项受影响、删除 104 处冗余 jmp�
 两平台 76/76 跨语言校验和零 mismatch）：Windows geo 1.973 / 41 项 >1.5×，
 Ubuntu geo 1.538 / 36 项 >1.5×；差异在 runner 噪声内，不声称比值收益。
 详见 `versions/v4.138/CHANGELOG.md`。
+
+### v4.140 本地验证更新（拷贝传播跳过 NOP 找消费者）
+
+v4.139 普查漏掉的一处真实缺陷：`_opt_copy` 只检查 `i+1` 是否为 MOV 的消费者，
+**MOV 与消费者之间夹 NOP 时匹配永远失败**（`_opt_empty_jumps` 删跳转、
+`_opt_load_hoist` 插指令都会留 NOP）。b70 的 `LOADD 114; …; MOV 89,114; NOP;
+LOADX a=89` 就是，白留一条 `mov`。修复：取消费者前先跳过所有 NOP；
+其余判据（use==1、ndef==1、非聚合、vpin==0）不变 —— NOP 不读不写，
+use[d]==1 保证唯一消费者，等价。
+
+全量 76 基准 **76/76 校验和一致**，`tests/qlmc_test.py --qlmc build/qlmc_v4140.exe`
+**PASS=136 FAIL=0**，`tests/bootstrap_test.py --strict` **PASS**（42/42 组、
+stage-2==stage-3 不动点）。11 项 ELF 变化合计 −54 字节；本机 min-of-5：
+**b70 0.878（−12.2%）**、**b61 0.916（−8.4%）**、b23 0.972、b4 0.982、
+b27 0.987、b54 0.985、b28 0.997（噪声内）。详见 `versions/v4.140/CHANGELOG.md`。
