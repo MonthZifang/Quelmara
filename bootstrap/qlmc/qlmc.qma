@@ -9779,7 +9779,7 @@ fn _load_hoist_one(fc: FnCtx, ndef: vec[int], done_heads: vec[int]) -> int {
             }
             m2 = m2 + 1
         }
-        if dcnt > 3 {
+        if dcnt > 4 {   // v4.141 test: 3->4
             continue
         }
         let mut k = e - 1
